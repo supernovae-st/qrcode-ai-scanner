@@ -36,8 +36,9 @@ pub use input::{ImageInput, Limits};
 pub use ladder::{CancelToken, ScanConfig, ScanProfile, ScoreDepth};
 pub use payload::Payload;
 pub use report::{
-    AxisScore, Charset, DecodedContent, Detection, EcLevel, EngineKind, Grade, Hint, PipelineTrace,
-    Point, QrMeta, ScanReport, Score, StageTrace, StressAxis, StructuralReport, Versions,
+    AxisScore, Charset, DecodedContent, Detection, EcLevel, EngineKind, Grade, Hint,
+    Iso15415Report, IsoGrade, IsoParameter, PipelineTrace, Point, QrMeta, ScanReport, Score,
+    StageTrace, StressAxis, StructuralReport, Versions,
 };
 
 /// Reusable QR scanner — configure once, scan many. `Send + Sync`, no

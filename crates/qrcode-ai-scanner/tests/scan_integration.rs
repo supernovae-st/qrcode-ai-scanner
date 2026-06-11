@@ -431,3 +431,43 @@ fn gs1_digital_link_qr_end_to_end() {
         other => panic!("expected Gs1DigitalLink payload, got {other:?}"),
     }
 }
+
+#[test]
+fn iso15415_grade_card_on_a_clean_symbol() {
+    let bytes = generated_qr_png("https://qrcode-ai.com/iso-pin");
+    let report = Scanner::default()
+        .scan(ImageInput::encoded(&bytes))
+        .unwrap();
+    let score = report.score.expect("Full profile scores");
+    let iso = score
+        .iso15415
+        .expect("rqrr geometry present on clean codes");
+
+    // pristine black/white render: contrast + modulation + ANU are A-grade
+    assert_eq!(
+        iso.symbol_contrast.grade,
+        qrcode_ai_scanner::IsoGrade::A,
+        "{iso:?}"
+    );
+    assert_eq!(
+        iso.axial_nonuniformity.grade,
+        qrcode_ai_scanner::IsoGrade::A,
+        "{iso:?}"
+    );
+    assert!(iso.symbol_contrast.value > 0.9, "{iso:?}");
+    assert!(iso.axial_nonuniformity.value < 0.02, "{iso:?}");
+    // UEC param mirrors the synthetic UEC report
+    let uec = score.uec.expect("bitstream present");
+    let uec_param = iso.unused_error_correction.expect("mirrored");
+    assert!((uec_param.value - uec.margin).abs() < f32::EPSILON);
+    // the ISO rule: overall is never better than any parameter
+    for grade in [
+        iso.symbol_contrast.grade,
+        iso.modulation.grade,
+        iso.axial_nonuniformity.grade,
+        iso.fixed_pattern_damage.grade,
+        uec_param.grade,
+    ] {
+        assert!(iso.overall >= grade, "overall must be the worst: {iso:?}");
+    }
+}

@@ -73,6 +73,29 @@ expression: full_report()
       "grade": "a",
       "worst_block_errors": 1,
       "worst_block_capacity": 18
+    },
+    "iso15415": {
+      "symbol_contrast": {
+        "value": 0.82,
+        "grade": "a"
+      },
+      "modulation": {
+        "value": 0.46,
+        "grade": "b"
+      },
+      "axial_nonuniformity": {
+        "value": 0.03,
+        "grade": "a"
+      },
+      "fixed_pattern_damage": {
+        "value": 0.88,
+        "grade": "c"
+      },
+      "unused_error_correction": {
+        "value": 0.85,
+        "grade": "a"
+      },
+      "overall": "c"
     }
   },
   "hints": [

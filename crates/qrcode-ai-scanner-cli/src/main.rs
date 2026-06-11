@@ -99,6 +99,23 @@ fn render_pretty(report: &ScanReport) {
                 uec.margin, uec.grade, uec.worst_block_errors, uec.worst_block_capacity
             );
         }
+        if let Some(iso) = score.iso15415 {
+            println!(
+                "iso15415  overall {:?} (informed, not certified)",
+                iso.overall
+            );
+            println!(
+                "  contrast {:.2}/{:?} · modulation {:.2}/{:?} · axial {:.3}/{:?} · fixed-pattern {:.2}/{:?}",
+                iso.symbol_contrast.value,
+                iso.symbol_contrast.grade,
+                iso.modulation.value,
+                iso.modulation.grade,
+                iso.axial_nonuniformity.value,
+                iso.axial_nonuniformity.grade,
+                iso.fixed_pattern_damage.value,
+                iso.fixed_pattern_damage.grade,
+            );
+        }
     }
     for hint in &report.hints {
         println!("hint      {hint:?}");

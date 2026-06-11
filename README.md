@@ -38,6 +38,12 @@ Three things no other pure-Rust library ships together:
 3. **Synthetic UEC** — the ISO 15415 *Unused Error Correction* margin,
    computed from the engine's own sampled bitstream via RS syndromes +
    Berlekamp-Massey. The real "how close to failure is this code" number.
+4. **An ISO 15415-informed grade card** (`score.iso15415`) — Symbol
+   Contrast, Modulation, Axial Nonuniformity, Fixed Pattern Damage and UEC,
+   each `{value, grade}` in the ISO bands, with `overall` = lowest
+   parameter (the ISO rule). Honest by construction: parameters that NEED
+   verifier hardware (Grid Nonuniformity, Reflectance Margin) are reported
+   absent, never faked.
 
 Plus machine-actionable **hints** (`raise_error_correction`,
 `fix_finder_pattern`, `low_correction_margin`, …) — the feedback loop for

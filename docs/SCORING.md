@@ -83,14 +83,21 @@ ISO/IEC 15415 grades a 2D symbol on 8 parameters; the overall grade is the
 LOWEST one, reported as `grade/aperture/wavelength` (e.g. `2.8/08/660`).
 What this scanner measures maps onto that vocabulary as follows:
 
+Since v0.3 the report carries an explicit **`score.iso15415` grade card**
+(present whenever symbol geometry was measured): per-parameter
+`{value, grade}` in the ISO bands, plus `overall` = the LOWEST parameter —
+the ISO 15415 overall-grade rule.
+
 | ISO 15415 parameter | This scanner | Fidelity |
 |---|---|---|
-| Unused Error Correction | `score.uec` — same bands (A ≥62% · B ≥50 · C ≥37 · D ≥25 · F) | **algorithmically equivalent** (RS syndromes, exact `t`) |
-| Fixed Pattern Damage | `structural.finder_integrity` (3 corners) + `quiet_zone_ok` | approximation (module-space match, no clock-track subtest) |
-| Symbol Contrast / Modulation | `contrast` stress axis (survival-based) | proxy (survival under crush, not reflectance measurement) |
-| Decode | `detections` non-empty | equivalent in spirit (two engines, not THE reference decoder) |
-| Axial/Grid Nonuniformity | — (perspective axis is a stress proxy) | not measured |
-| Reflectance Margin | — | not measured |
+| Unused Error Correction | `iso15415.unused_error_correction` (= `score.uec` margin) — same bands (A ≥62% · B ≥50 · C ≥37 · D ≥25) | **algorithmically equivalent** (RS syndromes, exact `t`) |
+| Symbol Contrast | `iso15415.symbol_contrast` — `(R₉₈−R₂)/255` over module means; A ≥70% · B ≥55 · C ≥40 · D ≥20 | measured on uncalibrated luma (percentiles, not reflectance extremes) |
+| Modulation | `iso15415.modulation` — robust min of per-module `2·\|R−GT\|/SC`; A ≥0.50 · B ≥0.40 · C ≥0.30 · D ≥0.20 | simplified (no notional-UEC iteration) |
+| Axial Nonuniformity | `iso15415.axial_nonuniformity` — `\|X̄−Ȳ\|/mean` from corners; A ≤0.06 · B ≤0.08 · C ≤0.10 · D ≤0.12 | measured; photo perspective reads as ANU (ISO assumes flat capture) |
+| Fixed Pattern Damage | `iso15415.fixed_pattern_damage` — worst finder integrity, quiet-zone violation caps at D | approximation (no clock-track subtest) |
+| Decode | `detections` non-empty (grade A implicit — only decoded symbols are graded) | equivalent in spirit (two engines, not THE reference decoder) |
+| Grid Nonuniformity | — | **not measurable** from 4-corner geometry — reported absent, never faked |
+| Reflectance Margin | — | **not measurable** without calibrated reflectance — reported absent |
 
 **Certification honesty (don't oversell this):** a conformant ISO 15415
 grade requires calibrated reflectance, controlled 45° illumination at a

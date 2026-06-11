@@ -71,6 +71,32 @@ export interface UecReport {
   worst_block_capacity: number;
 }
 
+/** ISO 15415 letter grade (4=A … 0=F). */
+export type IsoGrade = "a" | "b" | "c" | "d" | "f";
+/** One measured ISO 15415 parameter: raw value + grade band. */
+export interface IsoParameter { value: number; grade: IsoGrade }
+
+/**
+ * ISO/IEC 15415-INFORMED grade card — the software-measurable subset.
+ * Standards-based diagnostics, NOT a certified verifier grade (that
+ * requires calibrated optics + ISO 15426-2 hardware conformance).
+ * Grid Nonuniformity and Reflectance Margin are deliberately absent.
+ */
+export interface Iso15415Report {
+  /** (R_high − R_low)/255 over module means. A ≥0.70 · B ≥0.55 · C ≥0.40 · D ≥0.20. */
+  symbol_contrast: IsoParameter;
+  /** Robust min of per-module 2·|R−GT|/SC. A ≥0.50 · B ≥0.40 · C ≥0.30 · D ≥0.20. */
+  modulation: IsoParameter;
+  /** |X̄−Ȳ|/mean of axis pitches. A ≤0.06 · B ≤0.08 · C ≤0.10 · D ≤0.12. */
+  axial_nonuniformity: IsoParameter;
+  /** Worst finder integrity; quiet-zone violation caps at D. */
+  fixed_pattern_damage: IsoParameter;
+  /** Synthetic UEC margin in ISO bands — null without a bitstream. */
+  unused_error_correction: IsoParameter | null;
+  /** The ISO rule: lowest measured parameter. */
+  overall: IsoGrade;
+}
+
 export interface Score {
   value: number;
   grade: Grade;
@@ -78,6 +104,8 @@ export interface Score {
   structural: StructuralReport | null;
   /** Synthetic ISO 15415 unused-error-correction margin. */
   uec: UecReport | null;
+  /** ISO 15415-informed grade card — null when no geometry was measured. */
+  iso15415: Iso15415Report | null;
 }
 
 export type Hint =

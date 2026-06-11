@@ -9,6 +9,7 @@
 //! luma; ramps stop at the first failure (the knee), the lighting set always
 //! runs in full. Same input + same depth ⇒ same score, always.
 
+pub(crate) mod iso15415;
 pub(crate) mod structural;
 pub(crate) mod uec;
 pub(crate) mod warp;
@@ -241,6 +242,7 @@ fn compose(
     axes: Vec<AxisScore>,
     structural: Option<crate::report::StructuralReport>,
     uec: Option<crate::report::UecReport>,
+    iso15415: Option<crate::report::Iso15415Report>,
     detection: &MergedDetection,
 ) -> (Score, Vec<Hint>) {
     let mut weighted = 0u32;
@@ -337,6 +339,7 @@ fn compose(
         axes,
         structural,
         uec,
+        iso15415,
     };
     (score, hints)
 }
@@ -368,7 +371,13 @@ pub(crate) fn evaluate(
         }
         _ => None,
     };
-    Ok(compose(axes, structural, uec_report, detection))
+    let iso = match (detection.corners, detection.version, &structural) {
+        (Some(corners), Some(version), Some(s)) => {
+            iso15415::compute(luma, corners, version, s, uec_report.as_ref())
+        }
+        _ => None,
+    };
+    Ok(compose(axes, structural, uec_report, iso, detection))
 }
 
 #[cfg(test)]
@@ -417,20 +426,32 @@ mod tests {
     #[test]
     fn composite_weights_are_exact() {
         let d = detection_with(Some(EcLevel::H));
-        let (score, _) = compose(axes_with(&[]), None, None, &d);
+        let (score, _) = compose(axes_with(&[]), None, None, None, &d);
         assert_eq!(score.value, 100);
 
         // resolution 4/5: (22·80 + 78·100)/100 = 95
-        let (score, _) = compose(axes_with(&[(StressAxis::Resolution, 4, 5)]), None, None, &d);
+        let (score, _) = compose(
+            axes_with(&[(StressAxis::Resolution, 4, 5)]),
+            None,
+            None,
+            None,
+            &d,
+        );
         assert_eq!(score.value, 95);
 
         // blur 0/5: (18·0 + 82·100)/100 = 82
-        let (score, hints) = compose(axes_with(&[(StressAxis::Blur, 0, 5)]), None, None, &d);
+        let (score, hints) = compose(axes_with(&[(StressAxis::Blur, 0, 5)]), None, None, None, &d);
         assert_eq!(score.value, 82);
         assert!(hints.contains(&Hint::ReduceArtTexture), "{hints:?}");
 
         // rotation 2/5: (10·40 + 90·100)/100 = 94
-        let (score, _) = compose(axes_with(&[(StressAxis::Rotation, 2, 5)]), None, None, &d);
+        let (score, _) = compose(
+            axes_with(&[(StressAxis::Rotation, 2, 5)]),
+            None,
+            None,
+            None,
+            &d,
+        );
         assert_eq!(score.value, 94);
     }
 
@@ -446,6 +467,7 @@ mod tests {
                 finder_integrity: [1.0, 1.0, 0.49],
                 quiet_zone_ok: true,
             }),
+            None,
             None,
             &d,
         );
@@ -463,6 +485,7 @@ mod tests {
                 quiet_zone_ok: true,
             }),
             None,
+            None,
             &d,
         );
         assert_eq!(score.value, 100);
@@ -476,6 +499,7 @@ mod tests {
                 quiet_zone_ok: false,
             }),
             None,
+            None,
             &d,
         );
         assert_eq!(score.value, QUIET_ZONE_CAP);
@@ -487,19 +511,43 @@ mod tests {
         let d = detection_with(Some(EcLevel::H));
 
         // contrast survival 40% fires, 60% does not
-        let (_, hints) = compose(axes_with(&[(StressAxis::Contrast, 2, 5)]), None, None, &d);
+        let (_, hints) = compose(
+            axes_with(&[(StressAxis::Contrast, 2, 5)]),
+            None,
+            None,
+            None,
+            &d,
+        );
         assert!(hints.contains(&Hint::IncreaseContrast), "{hints:?}");
-        let (_, hints) = compose(axes_with(&[(StressAxis::Contrast, 3, 5)]), None, None, &d);
+        let (_, hints) = compose(
+            axes_with(&[(StressAxis::Contrast, 3, 5)]),
+            None,
+            None,
+            None,
+            &d,
+        );
         assert!(!hints.contains(&Hint::IncreaseContrast), "{hints:?}");
 
         // resolution likewise → EnlargeModules
-        let (_, hints) = compose(axes_with(&[(StressAxis::Resolution, 2, 5)]), None, None, &d);
+        let (_, hints) = compose(
+            axes_with(&[(StressAxis::Resolution, 2, 5)]),
+            None,
+            None,
+            None,
+            &d,
+        );
         assert!(hints.contains(&Hint::EnlargeModules), "{hints:?}");
-        let (_, hints) = compose(axes_with(&[(StressAxis::Resolution, 3, 5)]), None, None, &d);
+        let (_, hints) = compose(
+            axes_with(&[(StressAxis::Resolution, 3, 5)]),
+            None,
+            None,
+            None,
+            &d,
+        );
         assert!(!hints.contains(&Hint::EnlargeModules), "{hints:?}");
 
         // blur partial survival (1/5) is NOT the texture hint (only 0/5 is)
-        let (_, hints) = compose(axes_with(&[(StressAxis::Blur, 1, 5)]), None, None, &d);
+        let (_, hints) = compose(axes_with(&[(StressAxis::Blur, 1, 5)]), None, None, None, &d);
         assert!(!hints.contains(&Hint::ReduceArtTexture), "{hints:?}");
     }
 
@@ -509,7 +557,13 @@ mod tests {
         let d = detection_with(Some(EcLevel::Q));
 
         // value 94 (rotation 2/5) + EC<H + healthy margin → no hint
-        let (_, hints) = compose(axes_with(&[(StressAxis::Rotation, 2, 5)]), None, None, &d);
+        let (_, hints) = compose(
+            axes_with(&[(StressAxis::Rotation, 2, 5)]),
+            None,
+            None,
+            None,
+            &d,
+        );
         assert!(
             !hints
                 .iter()
@@ -520,6 +574,7 @@ mod tests {
         // value < 70 → fires (blur 0/5 + perspective 0/5: 82-20=62)
         let (score, hints) = compose(
             axes_with(&[(StressAxis::Blur, 0, 5), (StressAxis::Perspective, 0, 5)]),
+            None,
             None,
             None,
             &d,
@@ -542,7 +597,7 @@ mod tests {
             worst_block_errors: 6,
             worst_block_capacity: 18,
         };
-        let (score, hints) = compose(axes_with(&[]), None, Some(thin), &d);
+        let (score, hints) = compose(axes_with(&[]), None, Some(thin), None, &d);
         assert_eq!(score.value, 100);
         assert!(
             hints
@@ -558,7 +613,7 @@ mod tests {
             worst_block_errors: 12,
             worst_block_capacity: 24,
         };
-        let (_, hints) = compose(axes_with(&[]), None, Some(limit), &d);
+        let (_, hints) = compose(axes_with(&[]), None, Some(limit), None, &d);
         assert!(
             hints.contains(&Hint::LowCorrectionMargin {
                 errors: 12,
@@ -567,7 +622,7 @@ mod tests {
             "{hints:?}"
         );
         // thin-but-nonzero margin does NOT fire the miscorrection hint
-        let (_, hints) = compose(axes_with(&[]), None, Some(thin), &d);
+        let (_, hints) = compose(axes_with(&[]), None, Some(thin), None, &d);
         assert!(
             !hints
                 .iter()
@@ -581,6 +636,7 @@ mod tests {
             axes_with(&[(StressAxis::Blur, 0, 5)]),
             None,
             Some(thin),
+            None,
             &dh,
         );
         assert!(

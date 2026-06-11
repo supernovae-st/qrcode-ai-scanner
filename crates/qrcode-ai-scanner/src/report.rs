@@ -257,6 +257,71 @@ pub struct StructuralReport {
     pub quiet_zone_ok: bool,
 }
 
+/// ISO 15415 letter grade (4=A … 0=F vocabulary, lowercase on the wire).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
+pub enum IsoGrade {
+    /// 4.0
+    A,
+    /// 3.0
+    B,
+    /// 2.0
+    C,
+    /// 1.0
+    D,
+    /// 0.0
+    F,
+}
+
+/// One measured ISO 15415 parameter: the raw value + its grade band.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
+pub struct IsoParameter {
+    /// Parameter value in its ISO unit (see each field's doc).
+    pub value: f32,
+    /// ISO band for `value`.
+    pub grade: IsoGrade,
+}
+
+/// ISO/IEC 15415-**informed** grade card — the software-measurable subset.
+///
+/// HONESTY CONTRACT: a conformant 15415 grade requires calibrated optics
+/// (45° illumination, stated wavelength, defined aperture — they are IN the
+/// grade string) and ISO 15426-2 hardware conformance. This report is
+/// standards-based DIAGNOSTICS over an arbitrary image. Grid Nonuniformity
+/// and Reflectance Margin are deliberately absent (not measurable from
+/// 4-corner geometry / uncalibrated reflectance).
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
+pub struct Iso15415Report {
+    /// Symbol Contrast — `(R_high − R_low)/255` over module means
+    /// (2nd/98th percentile, noise-robust). A ≥0.70 · B ≥0.55 · C ≥0.40 ·
+    /// D ≥0.20.
+    pub symbol_contrast: IsoParameter,
+    /// Modulation — robust minimum of per-module `2·|R − GT|/SC`
+    /// (5th percentile; simplified — no notional-UEC iteration).
+    /// A ≥0.50 · B ≥0.40 · C ≥0.30 · D ≥0.20.
+    pub modulation: IsoParameter,
+    /// Axial Nonuniformity — `|X̄ − Ȳ| / mean` of the two axis pitches from
+    /// the detected corners. A ≤0.06 · B ≤0.08 · C ≤0.10 · D ≤0.12.
+    /// Caveat: perspective in a photo reads as ANU (ISO assumes flat capture).
+    pub axial_nonuniformity: IsoParameter,
+    /// Fixed Pattern Damage approximation — worst finder integrity
+    /// (A ≥0.95 · B ≥0.90 · C ≥0.80 · D ≥0.70); a quiet-zone violation caps
+    /// the grade at D. (No clock-track subtest.)
+    pub fixed_pattern_damage: IsoParameter,
+    /// Unused Error Correction — the synthetic UEC margin, ISO bands
+    /// (A ≥0.62 · B ≥0.50 · C ≥0.37 · D ≥0.25). `None` without a bitstream.
+    pub unused_error_correction: Option<IsoParameter>,
+    /// Overall = LOWEST measured parameter (the ISO rule), Decode = A
+    /// implicit (only decoded symbols are graded).
+    pub overall: IsoGrade,
+}
+
 /// Scannability score — contract v3: survival ramps + structural caps.
 /// Validation, NOT ISO verification (no calibrated optics).
 #[derive(Debug, Clone, PartialEq)]
@@ -273,6 +338,8 @@ pub struct Score {
     pub structural: Option<StructuralReport>,
     /// Synthetic UEC margin — `None` when the raw stream was unavailable.
     pub uec: Option<UecReport>,
+    /// ISO 15415-informed grade card — `None` when no geometry was measured.
+    pub iso15415: Option<Iso15415Report>,
 }
 
 /// Machine-actionable improvement hint — the generator/agent feedback loop.
@@ -463,6 +530,29 @@ mod tests {
                     grade: UecGrade::A,
                     worst_block_errors: 1,
                     worst_block_capacity: 18,
+                }),
+                iso15415: Some(Iso15415Report {
+                    symbol_contrast: IsoParameter {
+                        value: 0.82,
+                        grade: IsoGrade::A,
+                    },
+                    modulation: IsoParameter {
+                        value: 0.46,
+                        grade: IsoGrade::B,
+                    },
+                    axial_nonuniformity: IsoParameter {
+                        value: 0.03,
+                        grade: IsoGrade::A,
+                    },
+                    fixed_pattern_damage: IsoParameter {
+                        value: 0.88,
+                        grade: IsoGrade::C,
+                    },
+                    unused_error_correction: Some(IsoParameter {
+                        value: 0.85,
+                        grade: IsoGrade::A,
+                    }),
+                    overall: IsoGrade::C,
                 }),
             }),
             hints: vec![
