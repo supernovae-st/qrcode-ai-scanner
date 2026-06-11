@@ -82,9 +82,9 @@ hand-typed.
 <!-- corpus-report:begin -->
 | category | pass | total | rate | avg ms |
 |---|---|---|---|---|
-| artistic | 1 | 1 | 100% | 351 |
-| clean | 13 | 13 | 100% | 5 |
-| degraded | 4 | 4 | 100% | 87 |
+| artistic | 1 | 1 | 100% | 416 |
+| clean | 13 | 13 | 100% | 7 |
+| degraded | 4 | 4 | 100% | 91 |
 <!-- corpus-report:end -->
 
 ## Architecture & scoring
