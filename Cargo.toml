@@ -3,47 +3,71 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.2"
-edition = "2021"
-license = "AGPL-3.0"
+version = "0.3.0-alpha.0"
+edition = "2024"
+rust-version = "1.87"
+license = "AGPL-3.0-or-later"
 repository = "https://github.com/supernovae-st/qrcode-ai-scanner"
-authors = ["Thibaut MÉLEN <thibaut@supernovae.studio>", "SuperNovae AGI <contact@supernovae.studio>"]
+authors = [
+  "Thibaut MÉLEN <thibaut@supernovae.studio>",
+  "SuperNovae <contact@supernovae.studio>",
+]
 
 [workspace.dependencies]
-# Decoders
-rxing = "0.8"
-rqrr = "0.7"
+# engines — QR-only feature set verified against the published 0.9.1 tarball:
+# `client_support` (chrono-tz/fancy-regex/uriparse payload parsing) is OFF — we own
+# payload classification; `image`/`imageproc` are OFF — we feed raw luma buffers.
+# wasm builds must add rxing `wasm_support` (chrono is an unconditional rxing dep).
+rxing = { version = "0.9.1", default-features = false, features = [
+  "decoders",
+  "multi_barcode_readers",
+  "qrcode",
+  "encoding_rs",
+] }
+rqrr = "0.10.1"
 
-# Image processing
-image = "0.25"
+# imaging — formats limited to what the product accepts
+image = { version = "0.25", default-features = false, features = [
+  "png",
+  "jpeg",
+  "webp",
+  "gif",
+] }
 
-# Parallelism
-rayon = "1.10"
-
-# Serialization
+# text / serialization
+encoding_rs = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Error handling
-thiserror = "1"
-anyhow = "1"
+# errors
+thiserror = "2"
+miette = "7"
 
-# CLI
-clap = { version = "4", features = ["derive"] }
+# time (Instant on wasm32) / parallelism (native only)
+web-time = "1.1"
+rayon = "1.10"
 
-# Testing
-pretty_assertions = "1"
+# dev / test
 qrcode = "0.14"
-criterion = { version = "0.5", features = ["html_reports"] }
+insta = { version = "1", features = ["json"] }
+proptest = "1"
+criterion = { version = "0.8", features = ["html_reports"] }
+pretty_assertions = "1"
 
-# Release optimizations
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+pedantic = { level = "warn", priority = -1 }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
-opt-level = 3
 strip = true
 
-# Fast compile for dev
+# image decoding in tests is unusable at opt-level 0
 [profile.dev]
 opt-level = 1
 

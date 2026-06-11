@@ -1,0 +1,43 @@
+[package]
+name = "qrcode-ai-scanner"
+description = "QR code decoding and scannability scoring for artistic, AI-generated, and photo-captured QR codes"
+keywords = ["qrcode", "qr", "scanner", "validation", "decoder"]
+categories = ["multimedia::images", "encoding", "computer-vision"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["engine-rxing", "engine-rqrr", "parallel", "serde"]
+# decode engines — at least one is required (compile_error! otherwise)
+engine-rxing = ["dep:rxing"]
+engine-rqrr = ["dep:rqrr"]
+# rayon parallelism — native targets only, keep OFF for wasm
+parallel = ["dep:rayon"]
+# ScanReport (de)serialization — the cross-boundary contract
+serde = ["dep:serde"]
+
+[dependencies]
+rxing = { workspace = true, optional = true }
+rqrr = { workspace = true, optional = true }
+image.workspace = true
+encoding_rs.workspace = true
+serde = { workspace = true, optional = true }
+thiserror.workspace = true
+miette.workspace = true
+web-time.workspace = true
+rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+qrcode.workspace = true
+insta.workspace = true
+proptest.workspace = true
+pretty_assertions.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
