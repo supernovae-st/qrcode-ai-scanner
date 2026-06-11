@@ -71,7 +71,11 @@ loop: `fix_finder_pattern{corner}` · `restore_quiet_zone` ·
 `increase_contrast` (contrast survival ≤40%) · `enlarge_modules`
 (resolution survival ≤40%) · `reduce_art_texture` (dies at mildest blur) ·
 `raise_error_correction{current}` (score <70 **or** UEC grade D/F, when
-EC < H).
+EC < H) · `low_correction_margin{errors,capacity}` (UEC margin exactly 0:
+the worst block consumed its entire correction budget — the miscorrection
+signature; caught live on the zxing blackbox corpus where rqrr returned
+"photography" for a "photograph" ground truth at 12/24 errors. Consumers
+should treat the decoded content as unverified).
 
 ## Calibration status
 

@@ -82,6 +82,11 @@ expression: full_report()
     },
     {
       "hint": "increase_contrast"
+    },
+    {
+      "hint": "low_correction_margin",
+      "errors": 12,
+      "capacity": 24
     }
   ],
   "trace": {

@@ -82,7 +82,13 @@ export type Hint =
   | { hint: "enlarge_modules" }
   | { hint: "fix_finder_pattern"; corner: number }
   | { hint: "restore_quiet_zone" }
-  | { hint: "reduce_art_texture" };
+  | { hint: "reduce_art_texture" }
+  /**
+   * The decode consumed the worst RS block's ENTIRE correction budget
+   * (UEC margin 0) — the classic miscorrection signature. Treat the
+   * decoded content as unverified.
+   */
+  | { hint: "low_correction_margin"; errors: number; capacity: number };
 
 export interface StageTrace { stage: string; transforms_tried: number; ms: number; detections_found: number }
 export interface PipelineTrace { stages: StageTrace[]; engine_panics: number; total_ms: number }

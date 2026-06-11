@@ -265,6 +265,62 @@ pub(crate) fn contrast_boost(img: &LumaImage, contrast: f32, brightness: f32) ->
     LumaImage::new(data, img.width(), img.height())
 }
 
+/// Separable windowed-minimum filter (grayscale erosion). Dark structures
+/// GROW by `(k-1)/2` pixels in every direction — on blob/dot pixel styles
+/// this closes the gaps between sub-module blobs so grid sampling reads
+/// solid modules instead of gap-noise. `k` is the full window side; even
+/// values are bumped to the next odd. O(w·h·k) separable: at the ladder's
+/// native-resolution call sites (≤2048, k≤19) this is a few ms and the u8
+/// min lane autovectorizes.
+pub(crate) fn min_filter(img: &LumaImage, k: u32) -> LumaImage {
+    morph_filter(img, k, u8::min)
+}
+
+/// Separable windowed-maximum filter (grayscale dilation) — the mirror of
+/// [`min_filter`] for LIGHT blob structures (light-on-dark styles).
+pub(crate) fn max_filter(img: &LumaImage, k: u32) -> LumaImage {
+    morph_filter(img, k, u8::max)
+}
+
+fn morph_filter(img: &LumaImage, k: u32, pick: fn(u8, u8) -> u8) -> LumaImage {
+    let r = ((k.max(3) | 1) / 2) as usize; // odd window, radius ≥ 1
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let (rx, ry) = (r.min(w.saturating_sub(1)), r.min(h.saturating_sub(1)));
+    if rx == 0 && ry == 0 {
+        return img.clone();
+    }
+    let src = img.data();
+    // horizontal pass: out[y][x] = pick over src[y][x-rx ..= x+rx] (clamped)
+    let mut horiz = vec![0u8; w * h];
+    for y in 0..h {
+        let row = &src[y * w..(y + 1) * w];
+        let out = &mut horiz[y * w..(y + 1) * w];
+        for (x, slot) in out.iter_mut().enumerate() {
+            let lo = x.saturating_sub(rx);
+            let hi = (x + rx).min(w - 1);
+            *slot = row[lo..=hi].iter().copied().fold(row[x], pick);
+        }
+    }
+    // vertical pass on the horizontal result
+    let mut data = vec![0u8; w * h];
+    for y in 0..h {
+        let lo = y.saturating_sub(ry);
+        let hi = (y + ry).min(h - 1);
+        for x in 0..w {
+            let mut acc = horiz[lo * w + x];
+            for row in (lo + 1)..=hi {
+                acc = pick(acc, horiz[row * w + x]);
+            }
+            data[y * w + x] = acc;
+        }
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "w/h come from the source image's u32 dimensions"
+    )]
+    LumaImage::new(data, w as u32, h as u32)
+}
+
 /// Deterministic gaussian blur (separable, via the image crate).
 /// On artistic codes a light blur averages art texture into module means.
 pub(crate) fn gaussian_blur(img: &LumaImage, sigma: f32) -> LumaImage {
@@ -296,6 +352,48 @@ mod tests {
         let img = luma(&[10, 10, 200, 200], 2, 2);
         let out = otsu_threshold(&img);
         assert_eq!(out.data(), &[0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn min_filter_grows_dark_pixel_to_exact_kernel_block() {
+        // single dark pixel at the center of a 5×5 white field
+        let mut data = vec![255u8; 25];
+        data[12] = 0;
+        let out = min_filter(&luma(&data, 5, 5), 3);
+        let mut want = [255u8; 25];
+        for y in 1..=3 {
+            for x in 1..=3 {
+                want[y * 5 + x] = 0;
+            }
+        }
+        assert_eq!(out.data(), &want[..]);
+    }
+
+    #[test]
+    fn max_filter_is_the_exact_mirror_on_inverted_input() {
+        let mut data = vec![0u8; 25];
+        data[12] = 255;
+        let out = max_filter(&luma(&data, 5, 5), 3);
+        let mut want = [0u8; 25];
+        for y in 1..=3 {
+            for x in 1..=3 {
+                want[y * 5 + x] = 255;
+            }
+        }
+        assert_eq!(out.data(), &want[..]);
+    }
+
+    #[test]
+    fn morph_filter_clamps_kernel_to_image_and_bumps_even_k() {
+        // k=4 bumps to 5 (radius 2); on a 3×3 image the radius clamps to 2…
+        // then to dim-1=2 — a corner dark pixel floods the full image.
+        let mut data = vec![255u8; 9];
+        data[0] = 7;
+        let out = min_filter(&luma(&data, 3, 3), 4);
+        assert!(out.data().iter().all(|&p| p == 7), "{:?}", out.data());
+        // k below the floor (k=1) behaves as k=3
+        let single = min_filter(&luma(&[9, 255], 2, 1), 1);
+        assert_eq!(single.data(), &[9, 9]);
     }
 
     #[test]

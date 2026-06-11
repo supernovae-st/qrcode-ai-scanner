@@ -166,41 +166,173 @@ impl ScanProfile {
 /// micro-QRs is a CPU/report amplifier, not a use case.
 const MAX_DETECTIONS: usize = 16;
 
-/// S4 boost rungs `(resize, contrast, brightness, blur)` — the v0.2 tier-3
-/// "known-good" set, empirically selected on the original 74-image artistic
-/// corpus. Small resize + multiplicative contrast (+ light blur) averages art
-/// texture into module means — the single highest-yield class on artistic
-/// codes (probe-verified on the legacy corpus, 2026-06-11).
-pub(crate) const BOOST_RUNGS: [(u32, f32, f32, f32); 12] = [
-    (400, 2.0, 1.0, 0.0),
-    (350, 2.5, 1.0, 0.5),
-    (300, 2.0, 1.1, 0.3),
-    (400, 1.8, 0.9, 0.0),
-    (250, 2.5, 1.0, 1.0),
-    (300, 3.0, 1.0, 0.8),
-    (0, 2.5, 1.0, 0.0),
-    (0, 2.0, 1.1, 0.5),
-    (500, 1.5, 1.0, 0.0),
-    (450, 2.2, 1.0, 0.3),
-    (350, 3.5, 1.2, 1.0),
-    (300, 4.0, 1.0, 1.5),
-];
+/// One S4 deep-recovery transform recipe. The SAME enumeration drives the
+/// ladder and the score probe ([`crate::score`]'s `CellProbe`) — a symbol
+/// that only decodes via rung N must measure its stress margin in that
+/// decode class (the round-2 "decodes but scores 0" regression).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Rung {
+    /// Downscale → multiplicative contrast/brightness → blur — the v0.2
+    /// tier-3 "known-good" set, empirically selected on the original
+    /// 74-image artistic corpus: contrast crushing averages art texture
+    /// into module means (probe-verified on the legacy corpus, 2026-06-11).
+    Boost {
+        resize: u32,
+        contrast: f32,
+        brightness: f32,
+        blur: f32,
+    },
+    /// Morphological close of DARK structures at native resolution, then
+    /// downscale. Blob/dot pixel styles read as gap-noise to grid sampling —
+    /// growing dark blobs merges them into solid modules. Kernel scales with
+    /// render size: `side/divisor` (odd, floor 3). Probe-calibrated on the
+    /// qrcode-ai.com template corpus (R3 blitz, 2026-06-11): k=11 and k=13
+    /// at 1024px decode the blob class, k≤9 never does.
+    MorphCloseDark {
+        /// Kernel scale: `k = side/divisor`.
+        divisor: u32,
+        /// Post-close downscale side (sampling-friendly resolution).
+        target: u32,
+    },
+    /// The mirror for LIGHT blob structures (light-on-dark styles).
+    MorphCloseLight {
+        /// Kernel scale: `k = side/divisor`.
+        divisor: u32,
+        /// Post-close downscale side.
+        target: u32,
+    },
+}
 
-/// Build one boost rung image: downscale → contrast/brightness boost → blur.
-pub(crate) fn boost_rung(luma: &LumaImage, rung: (u32, f32, f32, f32)) -> LumaImage {
-    let (resize, contrast, brightness, blur) = rung;
-    let sized = if resize > 0 {
-        transform::downscale_to(luma, resize)
-    } else {
-        luma.clone()
-    };
-    let boosted = transform::contrast_boost(&sized, contrast, brightness);
-    if blur > 0.3 {
-        transform::gaussian_blur(&boosted, blur)
-    } else {
-        boosted
+impl Rung {
+    /// Build this rung's attempt image.
+    pub(crate) fn apply(self, luma: &LumaImage) -> LumaImage {
+        match self {
+            Self::Boost {
+                resize,
+                contrast,
+                brightness,
+                blur,
+            } => {
+                let sized = if resize > 0 {
+                    transform::downscale_to(luma, resize)
+                } else {
+                    luma.clone()
+                };
+                let boosted = transform::contrast_boost(&sized, contrast, brightness);
+                if blur > 0.3 {
+                    transform::gaussian_blur(&boosted, blur)
+                } else {
+                    boosted
+                }
+            }
+            Self::MorphCloseDark { divisor, target } => {
+                let closed = transform::min_filter(luma, morph_kernel(luma, divisor));
+                transform::downscale_to(&closed, target)
+            }
+            Self::MorphCloseLight { divisor, target } => {
+                let closed = transform::max_filter(luma, morph_kernel(luma, divisor));
+                transform::downscale_to(&closed, target)
+            }
+        }
     }
 }
+
+/// Blob-gap closing kernel: gaps scale with the symbol's render size, not
+/// with module count — `side/divisor`, odd, floor 3.
+fn morph_kernel(luma: &LumaImage, divisor: u32) -> u32 {
+    (luma.width().max(luma.height()) / divisor.max(1)).max(3) | 1
+}
+
+/// S4 deep rungs, cheap-and-common first. Boosts are the highest-yield
+/// class on artistic codes; the morphological closes catch the blob/dot
+/// pixel-style class that no contrast transform recovers (two kernel
+/// scales cover the observed gap range).
+pub(crate) const DEEP_RUNGS: [Rung; 15] = [
+    Rung::Boost {
+        resize: 400,
+        contrast: 2.0,
+        brightness: 1.0,
+        blur: 0.0,
+    },
+    Rung::Boost {
+        resize: 350,
+        contrast: 2.5,
+        brightness: 1.0,
+        blur: 0.5,
+    },
+    Rung::Boost {
+        resize: 300,
+        contrast: 2.0,
+        brightness: 1.1,
+        blur: 0.3,
+    },
+    Rung::Boost {
+        resize: 400,
+        contrast: 1.8,
+        brightness: 0.9,
+        blur: 0.0,
+    },
+    Rung::Boost {
+        resize: 250,
+        contrast: 2.5,
+        brightness: 1.0,
+        blur: 1.0,
+    },
+    Rung::Boost {
+        resize: 300,
+        contrast: 3.0,
+        brightness: 1.0,
+        blur: 0.8,
+    },
+    Rung::Boost {
+        resize: 0,
+        contrast: 2.5,
+        brightness: 1.0,
+        blur: 0.0,
+    },
+    Rung::Boost {
+        resize: 0,
+        contrast: 2.0,
+        brightness: 1.1,
+        blur: 0.5,
+    },
+    Rung::Boost {
+        resize: 500,
+        contrast: 1.5,
+        brightness: 1.0,
+        blur: 0.0,
+    },
+    Rung::Boost {
+        resize: 450,
+        contrast: 2.2,
+        brightness: 1.0,
+        blur: 0.3,
+    },
+    Rung::Boost {
+        resize: 350,
+        contrast: 3.5,
+        brightness: 1.2,
+        blur: 1.0,
+    },
+    Rung::Boost {
+        resize: 300,
+        contrast: 4.0,
+        brightness: 1.0,
+        blur: 1.5,
+    },
+    Rung::MorphCloseDark {
+        divisor: 93,
+        target: 360,
+    },
+    Rung::MorphCloseDark {
+        divisor: 76,
+        target: 420,
+    },
+    Rung::MorphCloseLight {
+        divisor: 93,
+        target: 360,
+    },
+];
 
 /// One payload after cross-engine, cross-attempt merging.
 #[derive(Debug, Clone)]
@@ -348,8 +480,8 @@ impl Run<'_> {
 /// grid in fixed declared order (grid combos duplicating S3 are skipped).
 fn deep_attempts(luma: &LumaImage, longest: u32) -> Vec<Box<dyn Fn() -> LumaImage + '_>> {
     let mut attempts: Vec<Box<dyn Fn() -> LumaImage + '_>> = Vec::new();
-    for rung in BOOST_RUNGS {
-        attempts.push(Box::new(move || boost_rung(luma, rung)));
+    for rung in DEEP_RUNGS {
+        attempts.push(Box::new(move || rung.apply(luma)));
     }
     for size in [Some(512u32), Some(800), None] {
         if let Some(side) = size
@@ -567,8 +699,9 @@ mod tests {
         assert_eq!(names, vec!["direct", "enhance", "deep"]);
         // luma-only source: no channel attempts in enhance.
         assert_eq!(outcome.trace.stages[1].transforms_tried, 3);
-        // deep on a small image: 12 boost rungs + full-res stretch×{otsu,invert}.
-        assert_eq!(outcome.trace.stages[2].transforms_tried, 14);
+        // deep on a small image: 15 deep rungs (12 boost + 3 morph) +
+        // full-res stretch×{otsu,invert}.
+        assert_eq!(outcome.trace.stages[2].transforms_tried, 17);
     }
 }
 
@@ -643,8 +776,8 @@ mod probe {
         let luma = &planes.luma;
 
         // THE canonical rungs — the probe must never drift from the ladder.
-        for rung in BOOST_RUNGS {
-            let img = boost_rung(luma, rung);
+        for rung in DEEP_RUNGS {
+            let img = rung.apply(luma);
             let outcome = engine::decode_all(&img);
             if !outcome.detections.is_empty() {
                 let engines: Vec<_> = outcome.detections.iter().map(|d| d.engine).collect();
@@ -652,6 +785,37 @@ mod probe {
             }
         }
         println!("v02 probe done");
+    }
+
+    #[test]
+    #[ignore = "dev diagnostic, not a contract"]
+    fn probe_monkey_morph_variants() {
+        let path = format!(
+            "{}/../../fixtures/artistic/blob-style-monkey-logo.webp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let bytes = std::fs::read(path).unwrap();
+        let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
+        let luma = &planes.luma;
+        println!("luma {}x{}", luma.width(), luma.height());
+        for k in [5u32, 7, 9, 11, 13] {
+            for target in [256u32, 290, 320, 360, 420, 512] {
+                let closed = transform::min_filter(luma, k);
+                let img = transform::downscale_to(&closed, target);
+                let outcome = engine::decode_all(&img);
+                if !outcome.detections.is_empty() {
+                    println!(
+                        "HIT k={k} target={target} engines={:?}",
+                        outcome
+                            .detections
+                            .iter()
+                            .map(|d| d.engine)
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+        println!("probe done");
     }
 }
 

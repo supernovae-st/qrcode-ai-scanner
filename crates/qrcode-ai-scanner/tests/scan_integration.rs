@@ -350,3 +350,22 @@ fn artistic_image_that_decodes_must_not_score_zero() {
         score.axes
     );
 }
+
+#[test]
+fn blob_style_template_decodes_and_scores() {
+    // qrcode-ai.com production template: blob pixel style + center logo.
+    // Only a morphological close (dark-dilate) + downscale decodes it —
+    // the rung must exist in BOTH the ladder and the score probe (a decode
+    // that scores 0/100 is the round-2 regression class).
+    let bytes = fixture("artistic/blob-style-monkey-logo.webp");
+    let report = Scanner::default()
+        .scan(ImageInput::encoded(&bytes))
+        .unwrap();
+    assert_eq!(report.detections.len(), 1, "trace: {:?}", report.trace);
+    assert_eq!(
+        report.detections[0].content.text,
+        "https://qrc-ai.com/Uo54C"
+    );
+    let score = report.score.expect("Full profile scores");
+    assert!(score.value > 0, "decodable symbol must not score 0");
+}

@@ -48,3 +48,6 @@ crates/qrcode-ai-scanner-node/native.d.ts
 crates/qrcode-ai-scanner-wasm/pkg/
 fuzz/target/
 fuzz/corpus/
+corpus-external/
+img-qr/
+mutants.out/

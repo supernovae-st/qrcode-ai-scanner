@@ -116,3 +116,11 @@ path = "fixtures/degraded/gen_v5_q_lowcontrast.png"
 category = "degraded"
 expected = "https://qrcode-ai.com/c/v5q"
 source = "xtask gen-fixtures — contrast crushed to 25%"
+
+# ---- qrcode-ai.com production templates (R3 real-world blitz · 2026-06-11) ----
+
+[[entry]]
+path = "fixtures/artistic/blob-style-monkey-logo.webp"
+category = "artistic"
+expected = "https://qrc-ai.com/Uo54C"
+source = "qrcode-ai.com custom template funny-monkey-blue — blob pixel style + center logo (morph-close rung)"

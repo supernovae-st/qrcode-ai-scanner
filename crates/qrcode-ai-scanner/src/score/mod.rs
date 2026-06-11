@@ -56,13 +56,13 @@ fn detections_match(found: &[engine::RawDetection], expected_text: &str) -> bool
 /// fail even unstressed), conflating "fragile" with "undecodable".
 #[derive(Clone, Copy)]
 struct CellProbe {
-    /// The boost rung the baseline needed, if any.
-    rung: Option<(u32, f32, f32, f32)>,
+    /// The deep rung the baseline needed, if any.
+    rung: Option<crate::ladder::Rung>,
 }
 
 impl CellProbe {
     /// Calibrate on the unstressed base: direct → otsu → first decoding
-    /// boost rung. `None` = the base does not decode at stress scale at
+    /// deep rung. `None` = the base does not decode at stress scale at
     /// all (score legitimately reads zero margin).
     fn calibrate(base: &LumaImage, expected_text: &str) -> Option<Self> {
         if detections_match(&engine::decode_all(base).detections, expected_text) {
@@ -72,8 +72,8 @@ impl CellProbe {
         if detections_match(&engine::decode_all(&binarized).detections, expected_text) {
             return Some(Self { rung: None });
         }
-        for rung in crate::ladder::BOOST_RUNGS {
-            let boosted = crate::ladder::boost_rung(base, rung);
+        for rung in crate::ladder::DEEP_RUNGS {
+            let boosted = rung.apply(base);
             if detections_match(&engine::decode_all(&boosted).detections, expected_text) {
                 return Some(Self { rung: Some(rung) });
             }
@@ -88,7 +88,7 @@ impl CellProbe {
 /// original Shift-JIS bytes (the exact divergence the ladder merge handles;
 /// raw-keyed cells silently failed every rxing-only kanji survival).
 ///
-/// Probe = direct + otsu + the baseline's boost rung when it needed one —
+/// Probe = direct + otsu + the baseline's deep rung when it needed one —
 /// the margin is measured RELATIVE to the symbol's own decode class, never
 /// with the full ladder's recovery power (that asymmetry is the point).
 fn cell_passes(img: &LumaImage, expected_text: &str, probe: CellProbe) -> bool {
@@ -101,7 +101,7 @@ fn cell_passes(img: &LumaImage, expected_text: &str, probe: CellProbe) -> bool {
     }
     match probe.rung {
         Some(rung) => {
-            let boosted = crate::ladder::boost_rung(img, rung);
+            let boosted = rung.apply(img);
             detections_match(&engine::decode_all(&boosted).detections, expected_text)
         }
         None => false,
@@ -316,6 +316,19 @@ fn compose(
         && (value < 70 || thin_margin)
     {
         hints.push(Hint::RaiseErrorCorrection { current });
+    }
+    // Margin ZERO is qualitatively different from thin: the worst block
+    // consumed its entire correction budget, which is exactly the signature
+    // of a Reed-Solomon miscorrection (caught live on the zxing blackbox
+    // corpus: rqrr returned "photography" for a "photograph" ground truth
+    // at 12/24 errors — this hint is the machine-readable distrust signal).
+    if let Some(u) = &uec
+        && u.margin <= 0.0
+    {
+        hints.push(Hint::LowCorrectionMargin {
+            errors: u.worst_block_errors,
+            capacity: u.worst_block_capacity,
+        });
     }
 
     let score = Score {
@@ -534,6 +547,30 @@ mod tests {
             hints
                 .iter()
                 .any(|h| matches!(h, Hint::RaiseErrorCorrection { .. })),
+            "{hints:?}"
+        );
+
+        // margin exactly ZERO → miscorrection-risk hint, with the block stats
+        let limit = UecReport {
+            margin: 0.0,
+            grade: UecGrade::F,
+            worst_block_errors: 12,
+            worst_block_capacity: 24,
+        };
+        let (_, hints) = compose(axes_with(&[]), None, Some(limit), &d);
+        assert!(
+            hints.contains(&Hint::LowCorrectionMargin {
+                errors: 12,
+                capacity: 24
+            }),
+            "{hints:?}"
+        );
+        // thin-but-nonzero margin does NOT fire the miscorrection hint
+        let (_, hints) = compose(axes_with(&[]), None, Some(thin), &d);
+        assert!(
+            !hints
+                .iter()
+                .any(|h| matches!(h, Hint::LowCorrectionMargin { .. })),
             "{hints:?}"
         );
 

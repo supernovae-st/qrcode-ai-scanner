@@ -36,8 +36,11 @@ ImageInput (Encoded | Rgba8 | Luma8)
        S1 pyramid    ≤512px downscale attempt first (cheapest, often best)
        S2 direct     full-resolution luma
        S3 enhance    otsu · invert · contrast stretch · R/G/B channels
-       S4 deep       12 boost rungs (v0.2 empirical known-good: resize ×
-                     multiplicative contrast × light blur) + binarization grid
+       S4 deep       15 deep rungs: 12 boosts (v0.2 empirical known-good:
+                     resize × multiplicative contrast × light blur) + 3
+                     morphological closes (blob/dot pixel styles — gaps
+                     between sub-module blobs read as noise until closed)
+                     + binarization grid
   → merge            cross-engine, keyed by raw payload bytes → engines consensus
   → score            contract v3 (see SCORING.md) — Full/Fast profiles only
   → ScanReport       versioned serde contract (snake_case · raw as base64)

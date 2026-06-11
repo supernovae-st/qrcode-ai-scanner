@@ -299,6 +299,16 @@ pub enum Hint {
     RestoreQuietZone,
     /// Artistic texture overwhelms module structure.
     ReduceArtTexture,
+    /// The decode sits AT the Reed-Solomon correction limit (UEC margin 0):
+    /// one more error would have been an undetectable miscorrection — and
+    /// the decode itself may already BE one. Treat the content as
+    /// unverified; confirm out-of-band before acting on it.
+    LowCorrectionMargin {
+        /// Errors corrected in the worst RS block.
+        errors: u8,
+        /// EC codeword capacity of that block.
+        capacity: u8,
+    },
 }
 
 /// Per-stage pipeline trace entry.
@@ -460,6 +470,10 @@ mod tests {
                     current: EcLevel::Q,
                 },
                 Hint::IncreaseContrast,
+                Hint::LowCorrectionMargin {
+                    errors: 12,
+                    capacity: 24,
+                },
             ],
             trace: PipelineTrace {
                 stages: vec![StageTrace {
