@@ -23,6 +23,7 @@ qrcode-ai-scanner = { path = "../qrcode-ai-scanner", default-features = false, f
 ] }
 wasm-bindgen = "0.2"
 serde-wasm-bindgen = "0.6"
+serde.workspace = true
 
 # rxing is pulled transitively; on wasm32 its chrono needs wasmbind
 [target.'cfg(target_arch = "wasm32")'.dependencies]

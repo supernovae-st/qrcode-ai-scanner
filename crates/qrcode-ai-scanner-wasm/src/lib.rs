@@ -6,6 +6,7 @@
 //! `raw` as base64) — identical shape to the server/CLI surfaces.
 
 use qrcode_ai_scanner::{ImageInput, ScanProfile, Scanner};
+use serde::Serialize as _;
 use wasm_bindgen::prelude::*;
 
 fn profile_from(name: Option<String>) -> Result<ScanProfile, JsError> {
@@ -24,7 +25,11 @@ fn run_scan(input: ImageInput<'_>, profile: Option<String>) -> Result<JsValue, J
     let report = scanner
         .scan(input)
         .map_err(|e| JsError::new(&format!("{} ({})", e, e.code())))?;
-    serde_wasm_bindgen::to_value(&report).map_err(|e| JsError::new(&e.to_string()))
+    // None → null (not undefined): one contract across wasm/napi/CLI surfaces
+    let serializer = serde_wasm_bindgen::Serializer::new().serialize_missing_as_null(true);
+    report
+        .serialize(&serializer)
+        .map_err(|e| JsError::new(&e.to_string()))
 }
 
 /// Scan encoded image bytes (PNG/JPEG/WebP/GIF). Profile: full | fast | frame.
