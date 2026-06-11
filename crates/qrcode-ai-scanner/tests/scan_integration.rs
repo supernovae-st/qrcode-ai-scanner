@@ -471,3 +471,12 @@ fn iso15415_grade_card_on_a_clean_symbol() {
         assert!(iso.overall >= grade, "overall must be the worst: {iso:?}");
     }
 }
+
+#[test]
+fn scanner_is_send_sync_and_report_is_send() {
+    // compile-time pins for the documented threading contract
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Scanner>();
+    assert_send_sync::<qrcode_ai_scanner::ScanReport>();
+    assert_send_sync::<CancelToken>();
+}

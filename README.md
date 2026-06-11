@@ -131,10 +131,10 @@ miss; the hint is the mechanism that keeps it from being a *silent* one.
 
 | Crate / package | Status |
 |---|---|
-| [`qrcode-ai-scanner`](crates/qrcode-ai-scanner) (core lib) | v0.3 alpha |
-| [`qrcode-ai-scanner-cli`](crates/qrcode-ai-scanner-cli) (`qrscan`) | v0.3 alpha |
-| `qrcode-ai-scanner-node` (napi, async) | phase B |
-| `qrcode-ai-scanner-wasm` (browser, SIMD128) | phase C |
+| [`qrcode-ai-scanner`](crates/qrcode-ai-scanner) (core lib) | v0.3 — release-ready |
+| [`qrcode-ai-scanner-cli`](crates/qrcode-ai-scanner-cli) (`qrscan`) | v0.3 — release-ready |
+| [`qrcode-ai-scanner-node`](crates/qrcode-ai-scanner-node) (`@supernovae-st/qrcode-ai-scanner`, napi async) | v0.3 — release-ready |
+| [`qrcode-ai-scanner-wasm`](crates/qrcode-ai-scanner-wasm) (`@supernovae-st/qrcode-ai-scanner-wasm`, SIMD128) | v0.3 — release-ready |
 
 ## License
 

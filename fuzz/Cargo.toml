@@ -20,3 +20,10 @@ bench = false
 
 # standalone — never a member of the parent workspace (cargo-fuzz layout)
 [workspace]
+
+[[bin]]
+name = "fuzz_classify_text"
+path = "fuzz_targets/fuzz_classify_text.rs"
+test = false
+doc = false
+bench = false

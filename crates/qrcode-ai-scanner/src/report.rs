@@ -103,10 +103,6 @@ pub struct QrMeta {
     pub mask: Option<u8>,
     /// Modules per side (`version * 4 + 17`), derived from `version`.
     pub modules: Option<u8>,
-    /// Symbol was mirrored — `None` = not measured (no engine reports it today).
-    pub mirrored: Option<bool>,
-    /// Symbol was light-on-dark — `None` = not measured.
-    pub inverted: Option<bool>,
 }
 
 /// One decoded QR symbol.
@@ -450,7 +446,10 @@ impl Versions {
 pub struct ScanReport {
     /// Decoded symbols (empty = nothing found; multi-QR future-proof).
     pub detections: Vec<Detection>,
-    /// Scannability score — `None` in the `Frame` profile.
+    /// Scannability score of the PRIMARY detection (the first-discovered
+    /// symbol — for single-QR inputs, THE symbol). `None` in the `Frame`
+    /// profile. Per-detection scoring for multi-QR scenes is a future
+    /// additive extension.
     pub score: Option<Score>,
     /// Machine-actionable improvement hints.
     pub hints: Vec<Hint>,
@@ -501,8 +500,6 @@ mod tests {
                     ec_level: Some(EcLevel::Q),
                     mask: Some(3),
                     modules: Some(37),
-                    mirrored: None,
-                    inverted: None,
                 },
                 engines: vec![EngineKind::Rxing, EngineKind::Rqrr],
             }],

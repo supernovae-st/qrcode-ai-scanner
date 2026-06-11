@@ -301,6 +301,36 @@ fn parse_crypto(scheme: &str, rest: &str) -> Option<Payload> {
     })
 }
 
+/// The classic generator mistake — GS1 element-string DATA in a plain QR
+/// (no FNC1 mode header). Commercial verifiers flag exactly this ("FNC1
+/// missing"); silently classing it `Text` would hide the one finding the
+/// producer needs. Conservative guards against false positives on ordinary
+/// numeric text: the WHOLE payload must parse issue-free against the
+/// validated AI subset, AND carry either a check-digit-valid GTIN (AI 01)
+/// or at least two element strings.
+fn sniff_gs1_without_fnc1(text: &str) -> Option<Payload> {
+    if !text.bytes().next().is_some_and(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let parsed = crate::gs1::parse_element_string(text);
+    if !parsed.issues.is_empty() || parsed.elements.is_empty() {
+        return None;
+    }
+    if parsed.gtin.is_none() && parsed.elements.len() < 2 {
+        return None;
+    }
+    Some(Payload::Gs1 {
+        conformant: false,
+        elements: parsed.elements,
+        gtin: parsed.gtin,
+        issues: vec![
+            "FNC1-in-first-position mode header missing — valid GS1 element syntax in a \
+             non-GS1 carrier (ISO 18004 §7.4.9; regenerate with GS1 mode enabled)"
+                .to_owned(),
+        ],
+    })
+}
+
 /// Classify the data of an FNC1-in-first-position symbol (`]Q3`/`]Q4`):
 /// per ISO 18004 §7.4.9 that flag MEANS "GS1 formatted data" — the element
 /// string is the only legal reading, so problems surface as issues rather
@@ -369,7 +399,7 @@ pub(crate) fn classify(text: &str) -> Payload {
             raw: text.to_owned(),
         })
     } else {
-        None
+        sniff_gs1_without_fnc1(text)
     };
     parsed.unwrap_or(Payload::Text)
 }
@@ -624,10 +654,52 @@ mod tests {
         assert!(json.contains(r#""kind":"gs1_digital_link""#), "{json}");
     }
 
+    #[test]
+    fn gs1_without_fnc1_is_sniffed_as_non_conformant() {
+        // valid GTIN element, plain text carrier → the verifier finding
+        let p = classify("0109506000134352");
+        match p {
+            Payload::Gs1 {
+                conformant,
+                gtin,
+                issues,
+                ..
+            } => {
+                assert!(!conformant);
+                assert_eq!(gtin.as_deref(), Some("09506000134352"));
+                assert!(issues.iter().any(|i| i.contains("FNC1")), "{issues:?}");
+            }
+            other => panic!("expected sniffed Gs1, got {other:?}"),
+        }
+        // multi-element without GTIN also qualifies (≥2 clean elements)
+        assert!(matches!(
+            classify("11261201\u{1d}10LOT9"),
+            Payload::Gs1 { .. }
+        ));
+    }
+
+    #[test]
+    fn gs1_sniff_rejects_lookalike_numeric_text() {
+        // unknown leading AI (06) → ordinary text
+        assert_eq!(classify("0612345678"), Payload::Text);
+        // bad check digit → parse issue → NOT sniffed (conservative)
+        assert_eq!(classify("0109506000134353"), Payload::Text);
+        // single non-GTIN element → not enough evidence
+        assert_eq!(classify("10ABC123"), Payload::Text);
+        // empty / non-digit starts skip the sniff entirely
+        assert_eq!(classify(""), Payload::Text);
+        assert_eq!(classify("hello 01"), Payload::Text);
+    }
+
     proptest::proptest! {
         #[test]
         fn classify_never_panics(s in ".*") {
             let _ = classify(&s);
+        }
+
+        #[test]
+        fn classify_fnc1_never_panics(s in ".*") {
+            let _ = classify_fnc1(&s);
         }
     }
 }

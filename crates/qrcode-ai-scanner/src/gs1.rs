@@ -169,14 +169,26 @@ fn validate(ai: &str, value: &str, shape: Shape, issues: &mut Vec<String>) {
     }
 }
 
+/// Split at most `max_bytes` off the head WITHOUT crossing a char boundary
+/// (FNC1 payloads are attacker-controlled UTF-8 — byte-index slicing
+/// panicked on multi-byte content pre-fix; this is the one safe primitive
+/// every byte-budget split in this module goes through).
+fn split_head(s: &str, max_bytes: usize) -> (&str, &str) {
+    let mut cut = max_bytes.min(s.len());
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    s.split_at(cut)
+}
+
 /// Longest known AI at the head of `s` (4 → 3 → 2 digits).
 fn known_ai_at(s: &str) -> Option<&str> {
     for len in [4usize, 3, 2] {
-        if s.len() >= len
-            && s[..len].bytes().all(|b| b.is_ascii_digit())
-            && shape_of(&s[..len]).is_some()
+        if let Some(head) = s.get(..len)
+            && head.bytes().all(|b| b.is_ascii_digit())
+            && shape_of(head).is_some()
         {
-            return Some(&s[..len]);
+            return Some(head);
         }
     }
     None
@@ -216,9 +228,11 @@ pub(crate) fn parse_element_string(data: &str) -> Gs1Data {
             .map(|(_, total)| *total);
         let value = match predefined {
             Some(total) => {
-                let take = (total - ai.len()).min(rest.len());
-                let v = &rest[..take];
-                rest = &rest[take..];
+                // boundary-safe split: a multi-byte char inside the value
+                // zone shortens the cut — the value then fails shape
+                // validation (CSET 82 / digits are ASCII-only), never panics
+                let (v, tail) = split_head(rest, total - ai.len());
+                rest = tail;
                 if v.len() + ai.len() < total {
                     out.issues.push(format!(
                         "AI {ai}: truncated — predefined length is {total} incl. AI (GenSpecs 7.8.4)"
@@ -468,6 +482,41 @@ mod tests {
             "resync after GS must recover the next element: {:?}",
             parsed.elements
         );
+    }
+
+    #[test]
+    fn element_string_multibyte_utf8_never_panics() {
+        // attacker-controlled FNC1 payloads can carry arbitrary UTF-8 —
+        // byte-index slicing must never cross a char boundary (live DoS
+        // class: "01é" panicked at known_ai_at's s[..3] pre-fix)
+        for hostile in [
+            "01é",
+            "é0109506000134352",
+            "0109506000134352é10ABC\u{1d}é",
+            "010950600013435é",
+            "10\u{e9}\u{1d}21x",
+            "🦋",
+            "9é",
+        ] {
+            let parsed = parse_element_string(hostile);
+            // non-conformant is fine; panicking is the bug
+            assert!(
+                !parsed.issues.is_empty() || !parsed.elements.is_empty(),
+                "{hostile}"
+            );
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn element_string_parser_never_panics(s in ".*") {
+            let _ = parse_element_string(&s);
+        }
+
+        #[test]
+        fn digital_link_parser_never_panics(s in ".*") {
+            let _ = parse_digital_link(&s);
+        }
     }
 
     #[test]

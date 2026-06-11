@@ -41,6 +41,19 @@ pub use report::{
     StageTrace, StressAxis, StructuralReport, Versions,
 };
 
+/// Fuzz-only entry points — cargo-fuzz builds the whole graph with
+/// `--cfg fuzzing`; this surface does not exist in normal builds.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzzing {
+    /// Drive both text classifiers (plain + FNC1) — they parse
+    /// attacker-controlled decoded QR content and must never panic.
+    pub fn classify_text(text: &str) {
+        let _ = crate::payload::classify(text);
+        let _ = crate::payload::classify_fnc1(text);
+    }
+}
+
 /// Reusable QR scanner — configure once, scan many. `Send + Sync`, no
 /// interior state: share one instance across threads freely.
 #[derive(Debug, Clone)]
@@ -190,8 +203,6 @@ fn build_report(outcome: ladder::LadderOutcome, scored: Option<(Score, Vec<Hint>
                     ec_level: m.ec,
                     mask: m.mask,
                     modules: m.version.and_then(QrMeta::modules_per_side),
-                    mirrored: None,
-                    inverted: None,
                 },
                 engines: m.engines,
             }

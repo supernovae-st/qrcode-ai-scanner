@@ -50,8 +50,6 @@ export interface QrMeta {
   ec_level: EcLevel | null;
   mask: number | null;
   modules: number | null;
-  mirrored: boolean | null;
-  inverted: boolean | null;
 }
 
 export interface Detection {

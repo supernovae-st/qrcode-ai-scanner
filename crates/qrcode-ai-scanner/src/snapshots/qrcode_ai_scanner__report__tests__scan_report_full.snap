@@ -35,9 +35,7 @@ expression: full_report()
         "version": 5,
         "ec_level": "q",
         "mask": 3,
-        "modules": 37,
-        "mirrored": null,
-        "inverted": null
+        "modules": 37
       },
       "engines": [
         "rxing",

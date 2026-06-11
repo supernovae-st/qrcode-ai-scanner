@@ -60,6 +60,8 @@ pretty_assertions = "1"
 
 [workspace.lints.rust]
 missing_docs = "warn"
+# cargo-fuzz builds the graph with --cfg fuzzing (fuzz-only pub surface)
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
