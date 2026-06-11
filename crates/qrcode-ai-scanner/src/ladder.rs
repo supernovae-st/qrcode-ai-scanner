@@ -238,9 +238,10 @@ impl Rung {
 }
 
 /// Blob-gap closing kernel: gaps scale with the symbol's render size, not
-/// with module count — `side/divisor`, odd, floor 3.
+/// with module count — `side/divisor` (the min/max filters normalize to an
+/// odd window ≥ 3 themselves; ONE normalization site, in `transform`).
 fn morph_kernel(luma: &LumaImage, divisor: u32) -> u32 {
-    (luma.width().max(luma.height()) / divisor.max(1)).max(3) | 1
+    luma.width().max(luma.height()) / divisor.max(1)
 }
 
 /// S4 deep rungs, cheap-and-common first. Boosts are the highest-yield
@@ -702,6 +703,57 @@ mod tests {
         // deep on a small image: 15 deep rungs (12 boost + 3 morph) +
         // full-res stretch×{otsu,invert}.
         assert_eq!(outcome.trace.stages[2].transforms_tried, 17);
+    }
+
+    #[test]
+    fn profile_wire_names_round_trip() {
+        // THE cross-language name mapping — bindings and CLI all parse
+        // through here (drift in any arm breaks a published flag).
+        assert_eq!(ScanProfile::from_name("full"), Some(ScanProfile::Full));
+        assert_eq!(ScanProfile::from_name("fast"), Some(ScanProfile::Fast));
+        assert_eq!(ScanProfile::from_name("frame"), Some(ScanProfile::Frame));
+        assert_eq!(ScanProfile::from_name("FULL"), None);
+        assert_eq!(ScanProfile::from_name(""), None);
+    }
+
+    #[test]
+    fn boost_rung_resize_zero_keeps_native_resolution() {
+        // resize: 0 means "work at native res" — NOT a 0-px downscale.
+        let img = LumaImage::new(vec![128u8; 64 * 32], 64, 32);
+        let rung = Rung::Boost {
+            resize: 0,
+            contrast: 2.5,
+            brightness: 1.0,
+            blur: 0.0,
+        };
+        let out = rung.apply(&img);
+        assert_eq!((out.width(), out.height()), (64, 32));
+    }
+
+    #[test]
+    fn morph_rungs_close_gaps_and_hit_their_target_size() {
+        // checkerboard of 2px dark dots with 2px gaps — a close with a
+        // big-enough kernel turns the dark quadrant solid black.
+        let side = 840u32;
+        let mut data = vec![255u8; (side * side) as usize];
+        for y in 0..side {
+            for x in 0..side {
+                if (x / 2 + y / 2) % 2 == 0 {
+                    data[(y * side + x) as usize] = 0;
+                }
+            }
+        }
+        let img = LumaImage::new(data, side, side);
+        let rung = Rung::MorphCloseDark {
+            divisor: 93, // k = 840/93 = 9 ≥ gap span
+            target: 360,
+        };
+        let out = rung.apply(&img);
+        assert_eq!((out.width(), out.height()), (360, 360));
+        assert!(
+            out.data().iter().all(|&p| p == 0),
+            "close must merge the dot grid into solid dark"
+        );
     }
 }
 

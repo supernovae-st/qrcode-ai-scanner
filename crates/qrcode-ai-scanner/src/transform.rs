@@ -384,6 +384,17 @@ mod tests {
     }
 
     #[test]
+    fn morph_filter_runs_the_vertical_pass_on_single_column_images() {
+        // 1×3 column: rx = 0 but ry = 1 — the vertical pass must still run
+        // (the early-return fires only when BOTH radii collapse).
+        let out = min_filter(&luma(&[200, 5, 200], 1, 3), 3);
+        assert_eq!(out.data(), &[5, 5, 5]);
+        // true no-op case: 1×1
+        let out = min_filter(&luma(&[42], 1, 1), 9);
+        assert_eq!(out.data(), &[42]);
+    }
+
+    #[test]
     fn morph_filter_clamps_kernel_to_image_and_bumps_even_k() {
         // k=4 bumps to 5 (radius 2); on a 3×3 image the radius clamps to 2…
         // then to dim-1=2 — a corner dark pixel floods the full image.
