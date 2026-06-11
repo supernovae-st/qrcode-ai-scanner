@@ -5,7 +5,7 @@
 use qrcode_ai_scanner::{CancelToken, Grade, ImageInput, Payload, ScanProfile, Scanner};
 
 fn fixture(rel: &str) -> Vec<u8> {
-    let path = format!("{}/../../test-images/{rel}", env!("CARGO_MANIFEST_DIR"));
+    let path = format!("{}/../../fixtures/{rel}", env!("CARGO_MANIFEST_DIR"));
     std::fs::read(&path).unwrap_or_else(|e| panic!("missing fixture {path}: {e}"))
 }
 

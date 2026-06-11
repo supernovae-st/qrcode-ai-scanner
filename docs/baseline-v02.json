@@ -1,0 +1,95 @@
+{
+  "results": [
+    {
+      "category": "clean",
+      "decoded": true,
+      "path": "fixtures/clean/OK_68ms_100_4e875a2c.png"
+    },
+    {
+      "category": "artistic",
+      "decoded": true,
+      "path": "fixtures/artistic/OK_1069ms_85_8b6a54b3.png"
+    },
+    {
+      "category": "degraded",
+      "decoded": false,
+      "path": "fixtures/degraded/FAIL_1491ms_0_584c998c.png"
+    },
+    {
+      "category": "clean",
+      "decoded": true,
+      "path": "fixtures/clean/gen_v2_l.png"
+    },
+    {
+      "category": "clean",
+      "decoded": true,
+      "path": "fixtures/clean/gen_v2_m.png"
+    },
+    {
+      "category": "clean",
+      "decoded": true,
+      "path": "fixtures/clean/gen_v2_q.png"
+    },
+    {
+      "category": "clean",
+      "decoded": true,
+      "path": "fixtures/clean/gen_v2_h.png"
+    },
+    {
+      "category": "clean",
+      "decoded": true,
+      "path": "fixtures/clean/gen_v5_l.png"
+    },
+    {
+      "category": "clean",
+      "decoded": true,
+      "path": "fixtures/clean/gen_v5_m.png"
+    },
+    {
+      "category": "clean",
+      "decoded": true,
+      "path": "fixtures/clean/gen_v5_q.png"
+    },
+    {
+      "category": "clean",
+      "decoded": true,
+      "path": "fixtures/clean/gen_v5_h.png"
+    },
+    {
+      "category": "clean",
+      "decoded": true,
+      "path": "fixtures/clean/gen_v10_l.png"
+    },
+    {
+      "category": "clean",
+      "decoded": true,
+      "path": "fixtures/clean/gen_v10_m.png"
+    },
+    {
+      "category": "clean",
+      "decoded": true,
+      "path": "fixtures/clean/gen_v10_q.png"
+    },
+    {
+      "category": "clean",
+      "decoded": true,
+      "path": "fixtures/clean/gen_v10_h.png"
+    },
+    {
+      "category": "degraded",
+      "decoded": true,
+      "path": "fixtures/degraded/gen_v5_q_blur2.png"
+    },
+    {
+      "category": "degraded",
+      "decoded": true,
+      "path": "fixtures/degraded/gen_v5_q_tiny.png"
+    },
+    {
+      "category": "degraded",
+      "decoded": true,
+      "path": "fixtures/degraded/gen_v5_q_lowcontrast.png"
+    }
+  ],
+  "tool": "/tmp/v02cli/bin/qrcode-ai"
+}

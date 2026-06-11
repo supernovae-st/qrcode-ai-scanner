@@ -491,7 +491,7 @@ mod probe {
     #[ignore = "dev diagnostic, not a contract"]
     fn probe_artistic_transform_space() {
         let path = format!(
-            "{}/../../test-images/artistic/OK_1069ms_85_8b6a54b3.png",
+            "{}/../../fixtures/artistic/OK_1069ms_85_8b6a54b3.png",
             env!("CARGO_MANIFEST_DIR")
         );
         let bytes = std::fs::read(path).unwrap();
@@ -540,7 +540,7 @@ mod probe {
     #[ignore = "dev diagnostic, not a contract"]
     fn probe_artistic_v02_known_good_combos() {
         let path = format!(
-            "{}/../../test-images/artistic/OK_1069ms_85_8b6a54b3.png",
+            "{}/../../fixtures/artistic/OK_1069ms_85_8b6a54b3.png",
             env!("CARGO_MANIFEST_DIR")
         );
         let bytes = std::fs::read(path).unwrap();

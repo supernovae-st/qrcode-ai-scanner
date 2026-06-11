@@ -1,0 +1,118 @@
+# Corpus manifest — ground truth for every fixture.
+# `expected` absent = negative sample (must NOT decode).
+# Categories: clean · artistic · degraded.
+# Derived numbers (success rates) are NEVER hand-typed: `cargo run -p xtask --
+# corpus-report --write` regenerates the README managed block from this file.
+
+# ---- legacy v0.2 images (the original reference trio) ----
+
+[[entry]]
+path = "fixtures/clean/OK_68ms_100_4e875a2c.png"
+category = "clean"
+expected = "https://qrc-ai.com/76xMa"
+source = "v0.2 reference image"
+
+[[entry]]
+path = "fixtures/artistic/OK_1069ms_85_8b6a54b3.png"
+category = "artistic"
+expected = "https://qrc-ai.com/K1Ng2"
+source = "v0.2 reference image — AI-generated artistic QR"
+
+[[entry]]
+path = "fixtures/degraded/FAIL_1491ms_0_584c998c.png"
+category = "degraded"
+source = "v0.2 reference image — failed in v0.2 too (negative sample)"
+
+# ---- generated clean matrix (xtask gen-fixtures · deterministic) ----
+
+[[entry]]
+path = "fixtures/clean/gen_v2_l.png"
+category = "clean"
+expected = "qrc.ai/v2l"
+source = "xtask gen-fixtures"
+
+[[entry]]
+path = "fixtures/clean/gen_v2_m.png"
+category = "clean"
+expected = "qrc.ai/v2m"
+source = "xtask gen-fixtures"
+
+[[entry]]
+path = "fixtures/clean/gen_v2_q.png"
+category = "clean"
+expected = "qrc.ai/v2q"
+source = "xtask gen-fixtures"
+
+[[entry]]
+path = "fixtures/clean/gen_v2_h.png"
+category = "clean"
+expected = "qrc.ai/v2h"
+source = "xtask gen-fixtures"
+
+[[entry]]
+path = "fixtures/clean/gen_v5_l.png"
+category = "clean"
+expected = "https://qrcode-ai.com/c/v5l"
+source = "xtask gen-fixtures"
+
+[[entry]]
+path = "fixtures/clean/gen_v5_m.png"
+category = "clean"
+expected = "https://qrcode-ai.com/c/v5m"
+source = "xtask gen-fixtures"
+
+[[entry]]
+path = "fixtures/clean/gen_v5_q.png"
+category = "clean"
+expected = "https://qrcode-ai.com/c/v5q"
+source = "xtask gen-fixtures"
+
+[[entry]]
+path = "fixtures/clean/gen_v5_h.png"
+category = "clean"
+expected = "https://qrcode-ai.com/c/v5h"
+source = "xtask gen-fixtures"
+
+[[entry]]
+path = "fixtures/clean/gen_v10_l.png"
+category = "clean"
+expected = "https://qrcode-ai.com/c/v10l"
+source = "xtask gen-fixtures"
+
+[[entry]]
+path = "fixtures/clean/gen_v10_m.png"
+category = "clean"
+expected = "https://qrcode-ai.com/c/v10m"
+source = "xtask gen-fixtures"
+
+[[entry]]
+path = "fixtures/clean/gen_v10_q.png"
+category = "clean"
+expected = "https://qrcode-ai.com/c/v10q"
+source = "xtask gen-fixtures"
+
+[[entry]]
+path = "fixtures/clean/gen_v10_h.png"
+category = "clean"
+expected = "https://qrcode-ai.com/c/v10h"
+source = "xtask gen-fixtures"
+
+# ---- generated degraded variants (deterministic transforms of v5-q) ----
+
+[[entry]]
+path = "fixtures/degraded/gen_v5_q_blur2.png"
+category = "degraded"
+expected = "https://qrcode-ai.com/c/v5q"
+source = "xtask gen-fixtures — gaussian blur σ=2"
+
+[[entry]]
+path = "fixtures/degraded/gen_v5_q_tiny.png"
+category = "degraded"
+expected = "https://qrcode-ai.com/c/v5q"
+source = "xtask gen-fixtures — 6x downscale (~1.3px/module)"
+
+[[entry]]
+path = "fixtures/degraded/gen_v5_q_lowcontrast.png"
+category = "degraded"
+expected = "https://qrcode-ai.com/c/v5q"
+source = "xtask gen-fixtures — contrast crushed to 25%"

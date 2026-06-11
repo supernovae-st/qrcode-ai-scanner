@@ -34,6 +34,7 @@ web-time.workspace = true
 rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
+criterion.workspace = true
 qrcode.workspace = true
 insta.workspace = true
 proptest.workspace = true
@@ -42,3 +43,7 @@ serde_json.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "decode"
+harness = false

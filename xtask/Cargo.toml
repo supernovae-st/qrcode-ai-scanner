@@ -1,0 +1,21 @@
+[package]
+name = "xtask"
+description = "Repo automation — fixture generation · corpus report · v0.2 baseline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+qrcode-ai-scanner = { path = "../crates/qrcode-ai-scanner", features = ["serde"] }
+qrcode.workspace = true
+image.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+toml = "1"
+
+[lints]
+workspace = true

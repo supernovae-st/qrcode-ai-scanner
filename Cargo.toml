@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = ["crates/*", "xtask"]
 
 [workspace.package]
 version = "0.3.0-alpha.0"
@@ -47,6 +47,9 @@ miette = "7"
 # time (Instant on wasm32) / parallelism (native only)
 web-time = "1.1"
 rayon = "1.10"
+
+# cli
+clap = { version = "4", features = ["derive"] }
 
 # dev / test
 qrcode = "0.14"

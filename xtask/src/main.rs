@@ -1,0 +1,231 @@
+//! Repo automation. Commands:
+//!
+//! - `gen-fixtures` — deterministic clean matrix + degraded variants (run
+//!   once, outputs committed; re-running must be byte-identical).
+//! - `corpus-report` — run the scanner over `corpus.toml`, print per-category
+//!   results, and rewrite the README managed block (derived numbers are
+//!   never hand-typed).
+//! - `baseline` — run the corpus through a v0.2 CLI binary (`--bin <path>`)
+//!   and write `docs/baseline-v02.json` (the Phase A exit-gate comparator).
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)] // automation tool: fail loud, bounded pixel math
+
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+
+use qrcode_ai_scanner::{ImageInput, ScanProfile, Scanner};
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct Corpus {
+    entry: Vec<Entry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Entry {
+    path: String,
+    category: String,
+    /// Ground-truth text. Absent = expected NOT to decode (negative sample).
+    expected: Option<String>,
+    #[allow(dead_code)]
+    source: Option<String>,
+}
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+
+fn main() {
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        Some("gen-fixtures") => gen_fixtures(),
+        Some("corpus-report") => corpus_report(args.next().as_deref() == Some("--write")),
+        Some("baseline") => {
+            let bin = args
+                .nth(1)
+                .expect("usage: xtask baseline --bin <path-to-v02-cli>");
+            baseline(&bin);
+        }
+        _ => {
+            eprintln!("usage: xtask <gen-fixtures | corpus-report [--write] | baseline --bin <p>>");
+            std::process::exit(2);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- fixtures
+
+fn save_luma(img: &image::GrayImage, path: &Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    image::DynamicImage::ImageLuma8(img.clone())
+        .save(path)
+        .unwrap();
+    println!("wrote {}", path.display());
+}
+
+fn gen_fixtures() {
+    let root = repo_root();
+    // clean matrix — versions × EC, deterministic content per cell
+    for version in [2i16, 5, 10] {
+        for (ec, ec_name) in [
+            (qrcode::EcLevel::L, "l"),
+            (qrcode::EcLevel::M, "m"),
+            (qrcode::EcLevel::Q, "q"),
+            (qrcode::EcLevel::H, "h"),
+        ] {
+            // sized to fit the smallest (H) capacity of each version
+            let content = if version == 2 {
+                format!("qrc.ai/v{version}{ec_name}")
+            } else {
+                format!("https://qrcode-ai.com/c/v{version}{ec_name}")
+            };
+            let code = qrcode::QrCode::with_version(
+                content.as_bytes(),
+                qrcode::Version::Normal(version),
+                ec,
+            )
+            .unwrap();
+            let img = code
+                .render::<image::Luma<u8>>()
+                .module_dimensions(8, 8)
+                .build();
+            save_luma(
+                &img,
+                &root.join(format!("fixtures/clean/gen_v{version}_{ec_name}.png")),
+            );
+        }
+    }
+    // degraded variants of the v5-q cell — deterministic transforms
+    let base_path = root.join("fixtures/clean/gen_v5_q.png");
+    let base = image::open(&base_path).unwrap().to_luma8();
+    let blurred = image::imageops::blur(&base, 2.0);
+    save_luma(&blurred, &root.join("fixtures/degraded/gen_v5_q_blur2.png"));
+    let small = image::imageops::resize(
+        &base,
+        base.width() / 6,
+        base.height() / 6,
+        image::imageops::FilterType::Triangle,
+    );
+    save_luma(&small, &root.join("fixtures/degraded/gen_v5_q_tiny.png"));
+    let low: image::GrayImage = image::ImageBuffer::from_fn(base.width(), base.height(), |x, y| {
+        let px = f32::from(base.get_pixel(x, y)[0]);
+        image::Luma([(128.0 + (px - 128.0) * 0.25) as u8])
+    });
+    save_luma(
+        &low,
+        &root.join("fixtures/degraded/gen_v5_q_lowcontrast.png"),
+    );
+}
+
+// ------------------------------------------------------------------ report
+
+#[derive(Debug, Default)]
+struct CategoryStats {
+    total: u32,
+    decoded_ok: u32,
+    wrong_or_missed: u32,
+    total_ms: f64,
+}
+
+fn run_corpus() -> BTreeMap<String, CategoryStats> {
+    let root = repo_root();
+    let manifest: Corpus =
+        toml::from_str(&std::fs::read_to_string(root.join("corpus.toml")).unwrap()).unwrap();
+    let scanner = Scanner::builder().profile(ScanProfile::Full).build();
+
+    let mut stats: BTreeMap<String, CategoryStats> = BTreeMap::new();
+    for entry in &manifest.entry {
+        let bytes =
+            std::fs::read(root.join(&entry.path)).unwrap_or_else(|e| panic!("{}: {e}", entry.path));
+        let report = scanner.scan(ImageInput::encoded(&bytes)).unwrap();
+        let stat = stats.entry(entry.category.clone()).or_default();
+        stat.total += 1;
+        stat.total_ms += report.trace.total_ms;
+        let got = report.detections.first().map(|d| d.content.text.as_str());
+        match (&entry.expected, got) {
+            (Some(expected), Some(text)) if text == expected => stat.decoded_ok += 1,
+            (None, None) => stat.decoded_ok += 1, // negative sample stayed negative
+            _ => {
+                stat.wrong_or_missed += 1;
+                println!(
+                    "MISS {} — expected {:?}, got {:?}",
+                    entry.path, entry.expected, got
+                );
+            }
+        }
+    }
+    stats
+}
+
+fn corpus_report(write_readme: bool) {
+    let stats = run_corpus();
+    let mut table =
+        String::from("| category | pass | total | rate | avg ms |\n|---|---|---|---|---|\n");
+    for (category, s) in &stats {
+        let rate = f64::from(s.decoded_ok) * 100.0 / f64::from(s.total);
+        let avg = s.total_ms / f64::from(s.total);
+        writeln!(
+            table,
+            "| {category} | {} | {} | {rate:.0}% | {avg:.0} |",
+            s.decoded_ok, s.total
+        )
+        .unwrap();
+    }
+    println!("\n{table}");
+
+    if write_readme {
+        let readme_path = repo_root().join("README.md");
+        let readme = std::fs::read_to_string(&readme_path).unwrap();
+        let (start, end) = ("<!-- corpus-report:begin -->", "<!-- corpus-report:end -->");
+        let begin = readme.find(start).expect("README managed block start");
+        let stop = readme.find(end).expect("README managed block end");
+        let mut updated = readme[..begin + start.len()].to_owned();
+        updated.push('\n');
+        updated.push_str(&table);
+        updated.push_str(&readme[stop..]);
+        std::fs::write(&readme_path, updated).unwrap();
+        println!("README corpus block updated");
+    }
+
+    let failed: u32 = stats.values().map(|s| s.wrong_or_missed).sum();
+    if failed > 0 {
+        std::process::exit(1);
+    }
+}
+
+// ---------------------------------------------------------------- baseline
+
+fn baseline(bin: &str) {
+    let root = repo_root();
+    let manifest: Corpus =
+        toml::from_str(&std::fs::read_to_string(root.join("corpus.toml")).unwrap()).unwrap();
+    let mut results = Vec::new();
+    for entry in &manifest.entry {
+        let out = std::process::Command::new(bin)
+            .arg("-d") // decode-only: success-rate comparison, not scoring
+            .arg("-j")
+            .arg(root.join(&entry.path))
+            .output()
+            .expect("run v0.2 cli");
+        let decoded = out.status.success();
+        results.push(serde_json::json!({
+            "path": entry.path,
+            "category": entry.category,
+            "decoded": decoded,
+        }));
+    }
+    let payload = serde_json::to_string_pretty(&serde_json::json!({
+        "tool": bin,
+        "results": results,
+    }))
+    .unwrap();
+    let out_path = root.join("docs/baseline-v02.json");
+    std::fs::write(&out_path, payload).unwrap();
+    println!("baseline written to {}", out_path.display());
+}
