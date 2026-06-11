@@ -349,6 +349,9 @@ pub(crate) struct MergedDetection {
     pub version: Option<u8>,
     pub ec: Option<EcLevel>,
     pub mask: Option<u8>,
+    /// FNC1-in-first-position (GS1) — true if ANY contributing engine saw
+    /// the FNC1 mode header (only rxing can; rqrr rejects FNC1 symbols).
+    pub fnc1: bool,
     pub engines: Vec<EngineKind>,
 }
 
@@ -420,6 +423,7 @@ impl Run<'_> {
                         existing.mask = existing.mask.or(detection.mask);
                     }
                     existing.corners = existing.corners.or(detection.corners);
+                    existing.fnc1 |= detection.fnc1;
                     if !existing.engines.contains(&detection.engine) {
                         existing.engines.push(detection.engine);
                     }
@@ -434,6 +438,7 @@ impl Run<'_> {
                     version: detection.version,
                     ec: detection.ec,
                     mask: detection.mask,
+                    fnc1: detection.fnc1,
                     engines: vec![detection.engine],
                 }),
             }

@@ -11,6 +11,9 @@ export type Grade = "excellent" | "good" | "acceptable" | "fair" | "poor";
 export type UecGrade = "a" | "b" | "c" | "d" | "f";
 export type StressAxis = "resolution" | "blur" | "contrast" | "perspective" | "rotation" | "lighting";
 
+/** One GS1 `(AI, value)` element string. */
+export interface Gs1Element { ai: string; value: string }
+
 export type Payload =
   | { kind: "url"; url: string }
   | { kind: "wifi"; ssid: string; security: string; password: string | null; hidden: boolean }
@@ -18,6 +21,17 @@ export type Payload =
   | { kind: "sms"; number: string; body: string | null }
   | { kind: "tel"; number: string }
   | { kind: "geo"; lat: number; lon: number }
+  /**
+   * GS1 element string (FNC1-in-first-position QR, symbology ]Q3/]Q4).
+   * `conformant` = validator-clean against the GenSpecs subset; every
+   * issue string names its violated criterion.
+   */
+  | { kind: "gs1"; elements: Gs1Element[]; gtin: string | null; conformant: boolean; issues: string[] }
+  /**
+   * GS1 Digital Link URI (DL URI Syntax 1.6 — the Sunrise-2027 retail
+   * form). Still an openable URL.
+   */
+  | { kind: "gs1_digital_link"; url: string; elements: Gs1Element[]; gtin: string | null; conformant: boolean; issues: string[] }
   | { kind: "me_card"; name: string | null; tel: string | null; email: string | null; url: string | null }
   | { kind: "crypto"; scheme: string; address: string; amount: string | null }
   | { kind: "v_card"; raw: string }

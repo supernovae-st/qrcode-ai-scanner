@@ -77,6 +77,38 @@ signature; caught live on the zxing blackbox corpus where rqrr returned
 "photography" for a "photograph" ground truth at 12/24 errors. Consumers
 should treat the decoded content as unverified).
 
+## ISO/IEC 15415 mapping — and what we honestly claim
+
+ISO/IEC 15415 grades a 2D symbol on 8 parameters; the overall grade is the
+LOWEST one, reported as `grade/aperture/wavelength` (e.g. `2.8/08/660`).
+What this scanner measures maps onto that vocabulary as follows:
+
+| ISO 15415 parameter | This scanner | Fidelity |
+|---|---|---|
+| Unused Error Correction | `score.uec` — same bands (A ≥62% · B ≥50 · C ≥37 · D ≥25 · F) | **algorithmically equivalent** (RS syndromes, exact `t`) |
+| Fixed Pattern Damage | `structural.finder_integrity` (3 corners) + `quiet_zone_ok` | approximation (module-space match, no clock-track subtest) |
+| Symbol Contrast / Modulation | `contrast` stress axis (survival-based) | proxy (survival under crush, not reflectance measurement) |
+| Decode | `detections` non-empty | equivalent in spirit (two engines, not THE reference decoder) |
+| Axial/Grid Nonuniformity | — (perspective axis is a stress proxy) | not measured |
+| Reflectance Margin | — | not measured |
+
+**Certification honesty (don't oversell this):** a conformant ISO 15415
+grade requires calibrated reflectance, controlled 45° illumination at a
+stated wavelength, a defined synthetic aperture, and hardware conformance
+per ISO/IEC 15426-2 — properties of a verifier device, impossible for
+software grading arbitrary images (the grade string itself encodes
+aperture + wavelength). This scanner's output is **ISO-informed
+diagnostics** for process feedback — the same positioning Cognex calls
+"standards-based grading" — never a certified verification grade. If a
+customer needs a 15415 certificate (e.g. retail compliance audits), they
+need a hardware verifier; this scanner tells them *what to fix first*.
+
+GS1 conformance is different: it is a **syntax** property (element-string
+grammar, AI formats, check digits, Digital Link path order) and IS fully
+checkable in software — that's the `payload.conformant` + `issues` verdict
+(see `gs1.rs`; criteria cited per issue: GenSpecs §7.2.7, §3.4, §7.8.4,
+DL URI Syntax §4.4/§4.5).
+
 ## Calibration status
 
 Weights and ramp intensities are v3 engineering constants, corpus-informed

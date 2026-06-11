@@ -108,6 +108,28 @@ becomes margin-truthful.
 | future UX | — | hints → "improve your QR" guidance |
 | determinism | not guaranteed | bit-for-bit |
 
+## Data contract (R4 update, 2026-06-11)
+
+The wasm package now ships **full TypeScript types**: `scan_image`/
+`scan_frame` return a typed `ScanReport` (was `any`), re-exported from
+`report-types.d.ts` — the SAME canonical file the node package re-exports
+(`bindings/report-types.d.ts` in the scanner repo, synced at build time).
+Body.vue gets autocomplete + compile-time safety on every field for free.
+
+Two payload kinds matter for the product roadmap beyond the basic swap:
+
+- `payload.kind === "gs1_digital_link"` — the QR carries a GS1 Digital
+  Link URI (the Sunrise-2027 retail form). `conformant: boolean` +
+  `issues: string[]` (each naming the violated GS1 criterion) enable a
+  "retail-ready ✓ / issues found" badge in the verify UI — a feature no
+  competitor generator surfaces today.
+- `payload.kind === "gs1"` — FNC1 element-string QR (B2B/logistics form),
+  same conformance verdict shape.
+
+And one hint with UX value: `low_correction_margin` means the decode sat
+AT the Reed-Solomon limit — the verify UI should treat it as "decodes,
+but content unverified — regenerate" rather than a pass.
+
 ## Open items
 
 1. Bundle size — MEASURED (binaryen 130, -O3 + simd128): dual-engine

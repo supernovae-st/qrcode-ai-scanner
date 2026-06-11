@@ -22,6 +22,7 @@ compile_error!(
 
 mod engine;
 mod error;
+mod gs1;
 mod input;
 mod ladder;
 mod payload;
@@ -30,6 +31,7 @@ mod score;
 mod transform;
 
 pub use error::{Result, ScanError};
+pub use gs1::Gs1Element;
 pub use input::{ImageInput, Limits};
 pub use ladder::{CancelToken, ScanConfig, ScanProfile, ScoreDepth};
 pub use payload::Payload;
@@ -167,7 +169,13 @@ fn build_report(outcome: ladder::LadderOutcome, scored: Option<(Score, Vec<Hint>
         .merged
         .into_iter()
         .map(|m| {
-            let payload = payload::classify(&m.text);
+            // FNC1-first symbols ARE GS1 data (ISO 18004 §7.4.9) — the
+            // element-string reading is the only legal one
+            let payload = if m.fnc1 {
+                payload::classify_fnc1(&m.text)
+            } else {
+                payload::classify(&m.text)
+            };
             Detection {
                 content: DecodedContent {
                     text: m.text,

@@ -40,6 +40,10 @@ pub(crate) struct RawDetection {
     pub ec: Option<EcLevel>,
     /// Mask pattern 0-7 when measured.
     pub mask: Option<u8>,
+    /// FNC1-in-first-position symbol (GS1 formatted data — symbology
+    /// `]Q3`/`]Q4`). Only rxing surfaces this; rqrr cannot decode FNC1
+    /// symbols at all (its mode dispatch rejects indicators 0x5/0x9).
+    pub fnc1: bool,
     /// Producing engine.
     pub engine: EngineKind,
 }

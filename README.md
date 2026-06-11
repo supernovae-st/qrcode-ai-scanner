@@ -40,8 +40,18 @@ Three things no other pure-Rust library ships together:
    Berlekamp-Massey. The real "how close to failure is this code" number.
 
 Plus machine-actionable **hints** (`raise_error_correction`,
-`fix_finder_pattern`, `reduce_art_texture`, …) — the feedback loop for
+`fix_finder_pattern`, `low_correction_margin`, …) — the feedback loop for
 generators and AI agents: *generate → scan → act on hints → regenerate*.
+
+And **GS1 awareness** (Sunrise 2027-ready): FNC1-in-first-position symbols
+(`]Q3`/`]Q4`) come back as a parsed `gs1` payload (AI element strings, GTIN,
+check-digit + format validation), and GS1 **Digital Link** URIs are
+recognized and validated (path order, GTIN-14, qualifier formats) as
+`gs1_digital_link` — with a `conformant` verdict and per-criterion `issues`.
+Scoring is **ISO-15415-informed** (the UEC margin uses the ISO bands and
+exact RS error counts) — see [docs/SCORING.md](docs/SCORING.md) for the
+parameter mapping and the honest line between software diagnostics and
+certified hardware verification.
 
 ## Quick start
 
@@ -82,10 +92,28 @@ hand-typed.
 <!-- corpus-report:begin -->
 | category | pass | total | rate | avg ms |
 |---|---|---|---|---|
-| artistic | 2 | 2 | 100% | 422 |
-| clean | 13 | 13 | 100% | 5 |
-| degraded | 4 | 4 | 100% | 112 |
+| artistic | 2 | 2 | 100% | 628 |
+| clean | 13 | 13 | 100% | 9 |
+| degraded | 4 | 4 | 100% | 175 |
 <!-- corpus-report:end -->
+
+### Measured accuracy — external corpora (2026-06-11, v0.3.0)
+
+Hand-run against public ground truth and production data; reproduce with
+`scripts/zxing-blackbox.py` and `scripts/batch-scan.py` (corpora are not
+vendored — the scripts document the sources).
+
+| corpus | result | note |
+|---|---|---|
+| zxing blackbox qrcode-1…6 (179 images, ground truth) | **170/179 exact-text match @ 0°** | beats the zxing reference pass thresholds (153) on **all six suites** |
+| qrcode-ai.com production templates (15 single-symbol styles) | **15/15 decoded** | includes the blob-pixel style no contrast/threshold transform recovers |
+| qrcode-ai.com artistic gallery (single-symbol) | 17/27 | the 10 misses are multi-QR 3D-perspective marketing collages — out of scope |
+
+One of the 9 zxing misses is rqrr returning a Reed-Solomon
+**miscorrection** ("photography" vs ground-truth "photograph") — which the
+synthetic UEC flags at margin 0 and surfaces as the
+`low_correction_margin` hint. The decode-rate number above counts it as a
+miss; the hint is the mechanism that keeps it from being a *silent* one.
 
 ## Architecture & scoring
 

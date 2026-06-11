@@ -54,6 +54,8 @@ pub(super) fn decode(luma: &LumaImage) -> Vec<RawDetection> {
             version: u8::try_from(meta.version.0).ok(),
             ec: map_ec(meta.ecc_level),
             mask: u8::try_from(meta.mask).ok(),
+            // rqrr cannot decode FNC1 symbols (mode dispatch rejects 0x5/0x9)
+            fnc1: false,
             engine: EngineKind::Rqrr,
         });
     }

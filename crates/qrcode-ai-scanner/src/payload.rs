@@ -55,7 +55,35 @@ pub enum Payload {
         /// Longitude in degrees, validated to [-180, 180].
         lon: f64,
     },
-    /// Contact card (`MECARD:` — the flat DoCoMo format).
+    /// GS1 element string (FNC1-in-first-position QR — symbology `]Q3`/`]Q4`).
+    /// `conformant` = every element parsed AND validated against the `GenSpecs`
+    /// subset; each issue names its violated criterion.
+    Gs1 {
+        /// Parsed `(AI, value)` element strings, in symbol order.
+        elements: Vec<crate::gs1::Gs1Element>,
+        /// AI 01 value when present (GTIN-14, as written — check it via
+        /// `conformant`/`issues` before trusting).
+        gtin: Option<String>,
+        /// Validator-clean per the `GenSpecs` subset.
+        conformant: bool,
+        /// Human-readable violations, each citing its criterion.
+        issues: Vec<String>,
+    },
+    /// GS1 Digital Link URI (DL URI Syntax 1.6 — the Sunrise-2027 retail
+    /// form). Still an openable URL: `url` is the full original string.
+    Gs1DigitalLink {
+        /// The full original URL.
+        url: String,
+        /// Path + query `(AI, value)` pairs, primary key first.
+        elements: Vec<crate::gs1::Gs1Element>,
+        /// AI 01 path value when the primary key is a GTIN.
+        gtin: Option<String>,
+        /// Validator-clean per DL URI Syntax 1.6 + the `GenSpecs` subset.
+        conformant: bool,
+        /// Human-readable violations, each citing its criterion.
+        issues: Vec<String>,
+    },
+    /// Contact card (`MECARD:` — the flat `DoCoMo` format).
     MeCard {
         /// `N:` name as written.
         name: Option<String>,
@@ -273,9 +301,32 @@ fn parse_crypto(scheme: &str, rest: &str) -> Option<Payload> {
     })
 }
 
+/// Classify the data of an FNC1-in-first-position symbol (`]Q3`/`]Q4`):
+/// per ISO 18004 §7.4.9 that flag MEANS "GS1 formatted data" — the element
+/// string is the only legal reading, so problems surface as issues rather
+/// than falling back to another kind.
+pub(crate) fn classify_fnc1(text: &str) -> Payload {
+    let parsed = crate::gs1::parse_element_string(text);
+    Payload::Gs1 {
+        conformant: parsed.issues.is_empty(),
+        elements: parsed.elements,
+        gtin: parsed.gtin,
+        issues: parsed.issues,
+    }
+}
+
 /// Classify decoded QR text into a typed payload. Total: never fails.
 pub(crate) fn classify(text: &str) -> Payload {
     if strip_prefix_ci(text, "http://").is_some() || strip_prefix_ci(text, "https://").is_some() {
+        if let Some(parsed) = crate::gs1::parse_digital_link(text) {
+            return Payload::Gs1DigitalLink {
+                url: text.to_owned(),
+                conformant: parsed.issues.is_empty(),
+                elements: parsed.elements,
+                gtin: parsed.gtin,
+                issues: parsed.issues,
+            };
+        }
         return Payload::Url {
             url: text.to_owned(),
         };
@@ -480,7 +531,9 @@ mod tests {
 
     #[test]
     fn mecard_parses_the_flat_fields() {
-        let p = classify("MECARD:N:Doe,John;TEL:+13035551212;EMAIL:john@qrcode-ai.com;URL:https://qrcode-ai.com;;");
+        let p = classify(
+            "MECARD:N:Doe,John;TEL:+13035551212;EMAIL:john@qrcode-ai.com;URL:https://qrcode-ai.com;;",
+        );
         assert_eq!(
             p,
             Payload::MeCard {
@@ -515,7 +568,8 @@ mod tests {
 
     #[test]
     fn bitcoin_bip21_with_amount_and_bare() {
-        let p = classify("bitcoin:bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq?amount=0.01&label=Tip");
+        let p =
+            classify("bitcoin:bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq?amount=0.01&label=Tip");
         assert_eq!(
             p,
             Payload::Crypto {
@@ -561,6 +615,13 @@ mod tests {
         let crypto = classify("bitcoin:addr1");
         let json = serde_json::to_string(&crypto).unwrap();
         assert!(json.contains(r#""kind":"crypto""#), "{json}");
+        let gs1 = classify_fnc1("0109506000134352");
+        let json = serde_json::to_string(&gs1).unwrap();
+        assert!(json.contains(r#""kind":"gs1""#), "{json}");
+        assert!(json.contains(r#""conformant":true"#), "{json}");
+        let dl = classify("https://id.gs1.org/01/09506000134352");
+        let json = serde_json::to_string(&dl).unwrap();
+        assert!(json.contains(r#""kind":"gs1_digital_link""#), "{json}");
     }
 
     proptest::proptest! {

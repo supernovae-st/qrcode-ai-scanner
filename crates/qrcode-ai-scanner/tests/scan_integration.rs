@@ -369,3 +369,65 @@ fn blob_style_template_decodes_and_scores() {
     let score = report.score.expect("Full profile scores");
     assert!(score.value > 0, "decodable symbol must not score 0");
 }
+
+#[test]
+fn gs1_fnc1_qr_end_to_end_yields_conformant_gs1_payload() {
+    // a real FNC1-in-first-position symbol: (01) GTIN + (10) batch + (17) expiry
+    let mut bits = qrcode::bits::Bits::new(qrcode::Version::Normal(3));
+    bits.push_fnc1_first_position().unwrap();
+    bits.push_byte_data(b"010950600013435210ABC123\x1d17261231")
+        .unwrap();
+    bits.push_terminator(qrcode::EcLevel::M).unwrap();
+    let code = qrcode::QrCode::with_bits(bits, qrcode::EcLevel::M).unwrap();
+    let img = code
+        .render::<image::Luma<u8>>()
+        .module_dimensions(6, 6)
+        .build();
+    let mut buf = Vec::new();
+    image::DynamicImage::ImageLuma8(img)
+        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .unwrap();
+
+    let report = Scanner::default().scan(ImageInput::encoded(&buf)).unwrap();
+    assert_eq!(report.detections.len(), 1, "trace: {:?}", report.trace);
+    let d = &report.detections[0];
+    match &d.payload {
+        Payload::Gs1 {
+            elements,
+            gtin,
+            conformant,
+            issues,
+        } => {
+            assert!(conformant, "issues: {issues:?}");
+            assert_eq!(gtin.as_deref(), Some("09506000134352"));
+            let ais: Vec<&str> = elements.iter().map(|e| e.ai.as_str()).collect();
+            assert_eq!(ais, vec!["01", "10", "17"]);
+            assert_eq!(elements[1].value, "ABC123");
+        }
+        other => panic!("expected Gs1 payload, got {other:?}"),
+    }
+}
+
+#[test]
+fn gs1_digital_link_qr_end_to_end() {
+    // Sunrise-2027 retail form: plain QR carrying a Digital Link URI
+    let bytes = generated_qr_png("https://id.gs1.org/01/09506000134352/10/LOT1?17=271231");
+    let report = Scanner::default()
+        .scan(ImageInput::encoded(&bytes))
+        .unwrap();
+    assert_eq!(report.detections.len(), 1);
+    match &report.detections[0].payload {
+        Payload::Gs1DigitalLink {
+            url,
+            gtin,
+            conformant,
+            issues,
+            ..
+        } => {
+            assert!(conformant, "issues: {issues:?}");
+            assert!(url.starts_with("https://id.gs1.org/01/"));
+            assert_eq!(gtin.as_deref(), Some("09506000134352"));
+        }
+        other => panic!("expected Gs1DigitalLink payload, got {other:?}"),
+    }
+}

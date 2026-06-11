@@ -55,6 +55,14 @@ pub(super) fn decode(luma: &LumaImage) -> Vec<RawDetection> {
                 Some(MetaValue::ErrorCorrectionLevel(level)) => parse_ec(level),
                 _ => None,
             };
+            // "]Q3" (FNC1 first) / "]Q4" (FNC1 first + ECI) = GS1 symbol
+            // per ISO/IEC 15424 — the QR reader sets this on every decode.
+            let fnc1 = match metadata.get(&MetaKey::SYMBOLOGY_IDENTIFIER) {
+                Some(MetaValue::SymbologyIdentifier(id)) => {
+                    matches!(id.as_str(), "]Q3" | "]Q4")
+                }
+                _ => false,
+            };
 
             RawDetection {
                 raw,
@@ -63,6 +71,7 @@ pub(super) fn decode(luma: &LumaImage) -> Vec<RawDetection> {
                 version: None,
                 ec,
                 mask: None,
+                fnc1,
                 engine: EngineKind::Rxing,
             }
         })

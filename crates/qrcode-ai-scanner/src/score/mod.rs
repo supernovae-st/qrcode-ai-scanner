@@ -390,6 +390,7 @@ mod tests {
             version: Some(2),
             ec,
             mask: Some(0),
+            fnc1: false,
             engines: vec![crate::report::EngineKind::Rqrr],
         }
     }
