@@ -87,10 +87,8 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
       - run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
-      - run: RUSTFLAGS="-C target-feature=+simd128" wasm-pack build --target web --release --out-name qrcode-ai-scanner --scope supernovae-st
-        working-directory: crates/qrcode-ai-scanner-wasm
-      - run: node ../../scripts/patch-wasm-pkg.mjs
-        working-directory: crates/qrcode-ai-scanner-wasm
+      - run: sudo apt-get update && sudo apt-get install -y binaryen
+      - run: ./scripts/build-wasm.sh
       - run: npm publish --access public
         working-directory: crates/qrcode-ai-scanner-wasm/pkg
         env:

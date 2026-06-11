@@ -34,8 +34,11 @@ rxing = { version = "0.9.1", default-features = false, features = [
   "wasm_support",
 ] }
 
+# wasm-pack's cached wasm-opt predates the Rust ≥1.87 default wasm features
+# (reference-types/bulk-memory/…) and exits 1 — optimization runs manually
+# with a current binaryen in scripts/build-wasm.sh / CI instead.
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O3", "--enable-simd"]
+wasm-opt = false
 
 # Binding crate: keep the safety lints, drop pure-lib pedantry (FFI macro
 # expansions and by-value Buffer signatures fight the pedantic group).

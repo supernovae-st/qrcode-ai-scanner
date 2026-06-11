@@ -110,9 +110,14 @@ becomes margin-truthful.
 
 ## Open items
 
-1. Bundle size: wechat wasm ≈1 MB class; ours measured at publish time —
-   if the dual-engine build crosses ~500 KB gz, ship the rqrr-only feature
-   variant for the editor (decision on real numbers).
+1. Bundle size — MEASURED (binaryen 130, -O3 + simd128): dual-engine
+   1.23 MB raw · **590 KB gz** (size-profile -Oz alternative: 535 KB gz —
+   rejected, decode speed wins for the verify path). Over the design's
+   500 KB aspiration but at parity with the incumbent class
+   (qr-scanner-wechat ≈1 MB; zxing-wasm reader 1.04 MB raw) and the editor
+   chunk is already lazy/async. The rqrr-only variant (~50% smaller) stays
+   the documented escape hatch if page-weight ever becomes the constraint —
+   at the cost of exactly the artistic-decode robustness the product sells.
 2. The `scanner` branch carries 78 commits of SEO work — the swap PR should
    target `scanner` with ONLY the scanner files (package.json, Body.vue,
    types/scan.ts) to keep review surface tiny.
