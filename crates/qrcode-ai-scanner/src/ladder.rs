@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use web_time::Instant;
 
-use crate::engine::{self, EngineOptions, RawDetection};
+use crate::engine::{self, EngineOptions, MaskedStream, RawDetection};
 use crate::error::{Result, ScanError};
 use crate::input::LumaImage;
 use crate::report::{EcLevel, EngineKind, PipelineTrace, Point, StageTrace};
@@ -185,6 +185,7 @@ fn boost_rung(luma: &LumaImage, rung: (u32, f32, f32, f32)) -> LumaImage {
 #[derive(Debug, Clone)]
 pub(crate) struct MergedDetection {
     pub raw: Vec<u8>,
+    pub masked_stream: Option<MaskedStream>,
     pub corners: Option<[Point; 4]>,
     pub version: Option<u8>,
     pub ec: Option<EcLevel>,
@@ -230,6 +231,9 @@ impl Run<'_> {
                 .find(|existing| existing.raw == detection.raw)
             {
                 Some(existing) => {
+                    if existing.masked_stream.is_none() {
+                        existing.masked_stream = detection.masked_stream;
+                    }
                     existing.corners = existing.corners.or(detection.corners);
                     existing.version = existing.version.or(detection.version);
                     existing.ec = existing.ec.or(detection.ec);
@@ -240,6 +244,7 @@ impl Run<'_> {
                 }
                 None => self.merged.push(MergedDetection {
                     raw: detection.raw,
+                    masked_stream: detection.masked_stream,
                     corners: detection.corners,
                     version: detection.version,
                     ec: detection.ec,

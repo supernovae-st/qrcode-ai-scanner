@@ -4,7 +4,7 @@
 //! silently discards ECI (verified in rqrr 0.10.1 source) — charset is OUR
 //! job, once, in `engine::charset`.
 
-use super::RawDetection;
+use super::{MaskedStream, RawDetection};
 use crate::input::LumaImage;
 use crate::report::{EcLevel, EngineKind, Point};
 
@@ -38,12 +38,18 @@ pub(super) fn decode(luma: &LumaImage) -> Vec<RawDetection> {
         let Ok(meta) = grid.decode_to(&mut raw) else {
             continue;
         };
+        // raw sampled bitstream (still masked) — the synthetic-UEC input
+        let masked_stream = grid.get_raw_data().ok().map(|(_, raw_data)| MaskedStream {
+            bits: raw_data.data[..raw_data.len.div_ceil(8)].to_vec(),
+            bit_len: raw_data.len,
+        });
         let corners = grid.bounds.map(|p| Point {
             x: p.x as f32,
             y: p.y as f32,
         });
         found.push(RawDetection {
             raw,
+            masked_stream,
             corners: Some(corners),
             version: u8::try_from(meta.version.0).ok(),
             ec: map_ec(meta.ecc_level),

@@ -30,11 +30,23 @@ impl Default for EngineOptions {
     }
 }
 
+/// Still-masked codeword bitstream as the engine sampled it (rqrr only) —
+/// feeds the synthetic UEC.
+#[derive(Debug, Clone)]
+pub(crate) struct MaskedStream {
+    /// Packed bits, MSB-first per byte.
+    pub bits: Vec<u8>,
+    /// Stream length in bits.
+    pub bit_len: usize,
+}
+
 /// What an engine actually measured — no stubs, `None` means "not provided".
 #[derive(Debug, Clone)]
 pub(crate) struct RawDetection {
     /// Decoded payload bytes (charset-independent truth).
     pub raw: Vec<u8>,
+    /// Raw sampled bitstream when the engine exposes it (rqrr).
+    pub masked_stream: Option<MaskedStream>,
     /// Symbol corners when the engine provides true bounds (rqrr).
     pub corners: Option<[Point; 4]>,
     /// Symbol version 1-40 when measured.

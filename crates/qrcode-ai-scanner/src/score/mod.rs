@@ -10,6 +10,7 @@
 //! runs in full. Same input + same depth ⇒ same score, always.
 
 pub(crate) mod structural;
+pub(crate) mod uec;
 pub(crate) mod warp;
 
 use crate::engine::{self, EngineOptions};
@@ -173,6 +174,7 @@ fn run_axes(
 fn compose(
     axes: Vec<AxisScore>,
     structural: Option<crate::report::StructuralReport>,
+    uec: Option<crate::report::UecReport>,
     detection: &MergedDetection,
 ) -> (Score, Vec<Hint>) {
     let mut weighted = 0u32;
@@ -235,9 +237,17 @@ fn compose(
         // dies at the mildest blur — art texture is eating the margin
         hints.push(Hint::ReduceArtTexture);
     }
+    // UEC drives the EC hint with priority: a thin real margin is the
+    // strongest possible "raise EC" signal even when stress survival is OK.
+    let thin_margin = uec.is_some_and(|u| {
+        matches!(
+            u.grade,
+            crate::report::UecGrade::D | crate::report::UecGrade::F
+        )
+    });
     if let Some(current) = detection.ec
         && current < EcLevel::H
-        && value < 70
+        && (value < 70 || thin_margin)
     {
         hints.push(Hint::RaiseErrorCorrection { current });
     }
@@ -247,6 +257,7 @@ fn compose(
         grade: Grade::from_value(value),
         axes,
         structural,
+        uec,
     };
     (score, hints)
 }
@@ -264,5 +275,16 @@ pub(crate) fn evaluate(
         (Some(corners), Some(version)) => structural::check(luma, corners, version),
         _ => None,
     };
-    Ok(compose(axes, structural, detection))
+    let uec_report = match (
+        &detection.masked_stream,
+        detection.version,
+        detection.ec,
+        detection.mask,
+    ) {
+        (Some(stream), Some(version), Some(ec), Some(mask)) => {
+            uec::compute(&stream.bits, stream.bit_len, version, ec, mask)
+        }
+        _ => None,
+    };
+    Ok(compose(axes, structural, uec_report, detection))
 }

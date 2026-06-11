@@ -67,6 +67,12 @@ expression: full_report()
         0.88
       ],
       "quiet_zone_ok": true
+    },
+    "uec": {
+      "margin": 0.85,
+      "grade": "a",
+      "worst_block_errors": 1,
+      "worst_block_capacity": 18
     }
   },
   "hints": [

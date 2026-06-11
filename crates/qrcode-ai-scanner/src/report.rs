@@ -193,6 +193,58 @@ pub struct AxisScore {
     pub total: u8,
 }
 
+/// ISO 15415 UEC grade bands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
+pub enum UecGrade {
+    /// margin ≥ 0.62
+    A,
+    /// margin ≥ 0.50
+    B,
+    /// margin ≥ 0.37
+    C,
+    /// margin ≥ 0.25
+    D,
+    /// margin < 0.25
+    F,
+}
+
+impl UecGrade {
+    /// ISO band for a margin value.
+    #[must_use]
+    pub fn from_margin(margin: f32) -> Self {
+        if margin >= 0.62 {
+            Self::A
+        } else if margin >= 0.50 {
+            Self::B
+        } else if margin >= 0.37 {
+            Self::C
+        } else if margin >= 0.25 {
+            Self::D
+        } else {
+            Self::F
+        }
+    }
+}
+
+/// Synthetic Unused Error Correction — the real robustness margin
+/// (`1 − 2t/d`, worst RS block). Validation-grade, not ISO verification.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
+pub struct UecReport {
+    /// Remaining correction margin, 0.0-1.0 (1.0 = pristine).
+    pub margin: f32,
+    /// ISO band for `margin`.
+    pub grade: UecGrade,
+    /// Errors corrected in the worst RS block.
+    pub worst_block_errors: u8,
+    /// EC codewords (capacity `d`) of that block.
+    pub worst_block_capacity: u8,
+}
+
 /// Structural checks — computed when symbol geometry was measured.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -219,6 +271,8 @@ pub struct Score {
     pub axes: Vec<AxisScore>,
     /// Structural checks — `None` when no geometry was measured.
     pub structural: Option<StructuralReport>,
+    /// Synthetic UEC margin — `None` when the raw stream was unavailable.
+    pub uec: Option<UecReport>,
 }
 
 /// Machine-actionable improvement hint — the generator/agent feedback loop.
@@ -384,6 +438,12 @@ mod tests {
                 structural: Some(StructuralReport {
                     finder_integrity: [1.0, 0.96, 0.88],
                     quiet_zone_ok: true,
+                }),
+                uec: Some(UecReport {
+                    margin: 0.85,
+                    grade: UecGrade::A,
+                    worst_block_errors: 1,
+                    worst_block_capacity: 18,
                 }),
             }),
             hints: vec![

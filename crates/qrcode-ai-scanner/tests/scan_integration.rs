@@ -1,6 +1,6 @@
 //! End-to-end Scanner tests — legacy corpus images + the public contract.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
 
 use qrcode_ai_scanner::{CancelToken, Grade, ImageInput, Payload, ScanProfile, Scanner};
 
@@ -271,4 +271,16 @@ fn score_is_deterministic() {
     let a = scanner.scan(ImageInput::encoded(&bytes)).unwrap().score;
     let b = scanner.scan(ImageInput::encoded(&bytes)).unwrap().score;
     assert_eq!(a, b);
+}
+
+#[test]
+fn uec_margin_ships_in_the_report() {
+    let bytes = generated_qr_png("uec e2e pin");
+    let report = Scanner::default()
+        .scan(ImageInput::encoded(&bytes))
+        .unwrap();
+    let score = report.score.expect("Full profile scores");
+    let uec = score.uec.expect("rqrr stream → synthetic UEC");
+    assert_eq!(uec.margin, 1.0, "pristine generated code: {uec:?}");
+    assert_eq!(uec.worst_block_errors, 0);
 }
