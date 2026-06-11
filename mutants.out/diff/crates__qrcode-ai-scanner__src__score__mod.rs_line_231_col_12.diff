@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/mod.rs
++++ delete ! in compose
+@@ -223,17 +223,17 @@
+             && integrity < FINDER_INTEGRITY_FLOOR
+         {
+             value = value.min(FINDER_DAMAGE_CAP);
+             #[expect(clippy::cast_possible_truncation, reason = "corner in 0..3")]
+             hints.push(Hint::FixFinderPattern {
+                 corner: corner as u8,
+             });
+         }
+-        if !s.quiet_zone_ok {
++        if  /* ~ changed by cargo-mutants ~ */s.quiet_zone_ok {
+             value = value.min(QUIET_ZONE_CAP);
+             hints.push(Hint::RestoreQuietZone);
+         }
+     }
+ 
+     // ---- axis-derived hints (stable order) ----
+     let fraction = |axis: StressAxis| -> Option<(u8, u8)> {
+         axes.iter()

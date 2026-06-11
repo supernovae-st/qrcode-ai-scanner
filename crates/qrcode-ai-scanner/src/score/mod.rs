@@ -44,27 +44,68 @@ const FINDER_INTEGRITY_FLOOR: f32 = 0.5;
 const FINDER_DAMAGE_CAP: u8 = 40;
 const QUIET_ZONE_CAP: u8 = 60;
 
+fn detections_match(found: &[engine::RawDetection], expected_text: &str) -> bool {
+    found
+        .iter()
+        .any(|d| engine::charset::resolve(&d.raw).0 == expected_text)
+}
+
+/// The decode class a symbol's UNSTRESSED baseline needs — stress cells
+/// probe the same class. An artistic symbol that only decodes through a
+/// boost rung would otherwise read margin-zero on every cell (direct+otsu
+/// fail even unstressed), conflating "fragile" with "undecodable".
+#[derive(Clone, Copy)]
+struct CellProbe {
+    /// The boost rung the baseline needed, if any.
+    rung: Option<(u32, f32, f32, f32)>,
+}
+
+impl CellProbe {
+    /// Calibrate on the unstressed base: direct → otsu → first decoding
+    /// boost rung. `None` = the base does not decode at stress scale at
+    /// all (score legitimately reads zero margin).
+    fn calibrate(base: &LumaImage, expected_text: &str) -> Option<Self> {
+        if detections_match(&engine::decode_all(base).detections, expected_text) {
+            return Some(Self { rung: None });
+        }
+        let binarized = transform::otsu_threshold(base);
+        if detections_match(&engine::decode_all(&binarized).detections, expected_text) {
+            return Some(Self { rung: None });
+        }
+        for rung in crate::ladder::BOOST_RUNGS {
+            let boosted = crate::ladder::boost_rung(base, rung);
+            if detections_match(&engine::decode_all(&boosted).detections, expected_text) {
+                return Some(Self { rung: Some(rung) });
+            }
+        }
+        None
+    }
+}
+
 /// One stress cell: did the (transformed) image still decode to the same
 /// SYMBOL? Identity is the charset-RESOLVED text, not raw bytes — for
 /// kanji-mode symbols rxing re-encodes text as UTF-8 while rqrr keeps the
 /// original Shift-JIS bytes (the exact divergence the ladder merge handles;
 /// raw-keyed cells silently failed every rxing-only kanji survival).
-fn cell_passes(img: &LumaImage, expected_text: &str) -> bool {
-    // Fast subset: direct + otsu — the score measures the MARGIN, not the
-    // full ladder's recovery power (that asymmetry is the point: a code
-    // that needs the deep ladder after mild stress has no margin).
-    let matches = |found: &[engine::RawDetection]| {
-        found
-            .iter()
-            .any(|d| engine::charset::resolve(&d.raw).0 == expected_text)
-    };
-    let outcome = engine::decode_all(img);
-    if matches(&outcome.detections) {
+///
+/// Probe = direct + otsu + the baseline's boost rung when it needed one —
+/// the margin is measured RELATIVE to the symbol's own decode class, never
+/// with the full ladder's recovery power (that asymmetry is the point).
+fn cell_passes(img: &LumaImage, expected_text: &str, probe: CellProbe) -> bool {
+    if detections_match(&engine::decode_all(img).detections, expected_text) {
         return true;
     }
     let binarized = transform::otsu_threshold(img);
-    let outcome = engine::decode_all(&binarized);
-    matches(&outcome.detections)
+    if detections_match(&engine::decode_all(&binarized).detections, expected_text) {
+        return true;
+    }
+    match probe.rung {
+        Some(rung) => {
+            let boosted = crate::ladder::boost_rung(img, rung);
+            detections_match(&engine::decode_all(&boosted).detections, expected_text)
+        }
+        None => false,
+    }
 }
 
 /// Ramp cell indices at a given depth (Reduced takes the 2nd and 4th
@@ -86,6 +127,7 @@ fn run_ramp(
     expected_text: &str,
     cancel: &CancelToken,
     deadline: Option<Instant>,
+    probe: CellProbe,
     indices: &[usize],
     build: impl Fn(&LumaImage, usize) -> LumaImage,
 ) -> Result<(u8, u8)> {
@@ -98,7 +140,7 @@ fn run_ramp(
             break;
         }
         let cell = build(base, i);
-        if cell_passes(&cell, expected_text) {
+        if cell_passes(&cell, expected_text, probe) {
             passed += 1;
         } else {
             break; // knee — ordered intensities, later cells only get harder
@@ -114,6 +156,7 @@ fn run_axes(
     depth: ScoreDepth,
     cancel: &CancelToken,
     deadline: Option<Instant>,
+    probe: CellProbe,
 ) -> Result<Vec<AxisScore>> {
     // ---- ordered ramps (intensity grows with the index) ----
     let resolution_sides: [u32; 5] = [358, 256, 179, 128, 90];
@@ -142,7 +185,8 @@ fn run_axes(
         }),
     ];
     for (axis, build) in ramps {
-        let (passed, total) = run_ramp(base, expected_text, cancel, deadline, indices, build)?;
+        let (passed, total) =
+            run_ramp(base, expected_text, cancel, deadline, probe, indices, build)?;
         axes.push(AxisScore {
             axis,
             passed,
@@ -180,7 +224,7 @@ fn run_axes(
         if deadline.is_some_and(|d| Instant::now() >= d) {
             break;
         }
-        if cell_passes(&lighting_cells[i](base), expected_text) {
+        if cell_passes(&lighting_cells[i](base), expected_text, probe) {
             lighting_passed += 1;
         }
     }
@@ -293,7 +337,9 @@ pub(crate) fn evaluate(
     deadline: Option<Instant>,
 ) -> Result<(Score, Vec<Hint>)> {
     let base = transform::downscale_to(luma, STRESS_BASE_SIDE);
-    let axes = run_axes(&base, &detection.text, depth, cancel, deadline)?;
+    // calibrate the cell probe on the unstressed base (its decode class)
+    let probe = CellProbe::calibrate(&base, &detection.text).unwrap_or(CellProbe { rung: None });
+    let axes = run_axes(&base, &detection.text, depth, cancel, deadline, probe)?;
     let structural = match (detection.corners, detection.version) {
         (Some(corners), Some(version)) => structural::check(luma, corners, version),
         _ => None,

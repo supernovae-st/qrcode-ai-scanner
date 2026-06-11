@@ -331,3 +331,22 @@ fn corners_are_in_original_image_coordinates_even_when_decoded_downscaled() {
         );
     }
 }
+
+#[test]
+fn artistic_image_that_decodes_must_not_score_zero() {
+    // The legacy artistic image decodes ONLY via the boost rungs. Stress
+    // cells probing direct+otsu alone fail even UNSTRESSED → score 0 for a
+    // decodable symbol (margin of nothing measured). Cells must probe the
+    // decode class that the baseline itself needs.
+    let bytes = fixture("artistic/OK_1069ms_85_8b6a54b3.png");
+    let report = Scanner::default()
+        .scan(ImageInput::encoded(&bytes))
+        .unwrap();
+    assert_eq!(report.detections.len(), 1);
+    let score = report.score.expect("Full profile scores");
+    assert!(
+        score.value > 0,
+        "decodable artistic symbol scored zero margin: {:?}",
+        score.axes
+    );
+}

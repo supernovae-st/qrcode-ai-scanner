@@ -171,7 +171,7 @@ const MAX_DETECTIONS: usize = 16;
 /// corpus. Small resize + multiplicative contrast (+ light blur) averages art
 /// texture into module means — the single highest-yield class on artistic
 /// codes (probe-verified on the legacy corpus, 2026-06-11).
-const BOOST_RUNGS: [(u32, f32, f32, f32); 12] = [
+pub(crate) const BOOST_RUNGS: [(u32, f32, f32, f32); 12] = [
     (400, 2.0, 1.0, 0.0),
     (350, 2.5, 1.0, 0.5),
     (300, 2.0, 1.1, 0.3),
@@ -187,7 +187,7 @@ const BOOST_RUNGS: [(u32, f32, f32, f32); 12] = [
 ];
 
 /// Build one boost rung image: downscale → contrast/brightness boost → blur.
-fn boost_rung(luma: &LumaImage, rung: (u32, f32, f32, f32)) -> LumaImage {
+pub(crate) fn boost_rung(luma: &LumaImage, rung: (u32, f32, f32, f32)) -> LumaImage {
     let (resize, contrast, brightness, blur) = rung;
     let sized = if resize > 0 {
         transform::downscale_to(luma, resize)

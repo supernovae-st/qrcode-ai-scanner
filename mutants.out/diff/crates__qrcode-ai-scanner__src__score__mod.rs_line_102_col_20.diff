@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/mod.rs
++++ replace += with -= in run_ramp
+@@ -94,17 +94,17 @@
+         if cancel.is_cancelled() {
+             return Err(crate::error::ScanError::Cancelled);
+         }
+         if deadline.is_some_and(|d| Instant::now() >= d) {
+             break;
+         }
+         let cell = build(base, i);
+         if cell_passes(&cell, expected_text) {
+-            passed += 1;
++            passed -= /* ~ changed by cargo-mutants ~ */ 1;
+         } else {
+             break; // knee — ordered intensities, later cells only get harder
+         }
+     }
+     Ok((passed, u8::try_from(indices.len()).unwrap_or(u8::MAX)))
+ }
+ 
+ /// Run the five ordered ramps + the lighting set at the given depth.

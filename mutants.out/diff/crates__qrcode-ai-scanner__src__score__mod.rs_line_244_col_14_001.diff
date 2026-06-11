@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/mod.rs
++++ replace > with < in compose
+@@ -236,17 +236,17 @@
+ 
+     // ---- axis-derived hints (stable order) ----
+     let fraction = |axis: StressAxis| -> Option<(u8, u8)> {
+         axes.iter()
+             .find(|a| a.axis == axis)
+             .map(|a| (a.passed, a.total))
+     };
+     if let Some((p, t)) = fraction(StressAxis::Contrast)
+-        && t > 0
++        && t < /* ~ changed by cargo-mutants ~ */ 0
+         && u32::from(p) * 100 / u32::from(t) <= 40
+     {
+         hints.push(Hint::IncreaseContrast);
+     }
+     if let Some((p, t)) = fraction(StressAxis::Resolution)
+         && t > 0
+         && u32::from(p) * 100 / u32::from(t) <= 40
+     {

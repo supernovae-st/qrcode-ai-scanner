@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/mod.rs
++++ replace += with *= in run_axes
+@@ -176,17 +176,17 @@
+     for &i in lighting_picks {
+         if cancel.is_cancelled() {
+             return Err(crate::error::ScanError::Cancelled);
+         }
+         if deadline.is_some_and(|d| Instant::now() >= d) {
+             break;
+         }
+         if cell_passes(&lighting_cells[i](base), expected_text) {
+-            lighting_passed += 1;
++            lighting_passed *= /* ~ changed by cargo-mutants ~ */ 1;
+         }
+     }
+     axes.push(AxisScore {
+         axis: StressAxis::Lighting,
+         passed: lighting_passed,
+         total: u8::try_from(lighting_picks.len()).unwrap_or(u8::MAX),
+     });
+     Ok(axes)

@@ -1,5 +1,5 @@
 --- crates/qrcode-ai-scanner/src/score/mod.rs
-+++ replace && with || in compose
++++ replace > with >= in compose
 @@ -242,17 +242,17 @@
      };
      if let Some((p, t)) = fraction(StressAxis::Contrast)
@@ -10,7 +10,7 @@
      }
      if let Some((p, t)) = fraction(StressAxis::Resolution)
 -        && t > 0
-+        || /* ~ changed by cargo-mutants ~ */ t > 0
++        && t >= /* ~ changed by cargo-mutants ~ */ 0
          && u32::from(p) * 100 / u32::from(t) <= 40
      {
          hints.push(Hint::EnlargeModules);

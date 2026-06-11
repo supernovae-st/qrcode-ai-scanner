@@ -1,0 +1,32 @@
+--- crates/qrcode-ai-scanner/src/score/mod.rs
++++ replace cell_passes -> bool with false
+@@ -48,28 +48,17 @@
+ /// SYMBOL? Identity is the charset-RESOLVED text, not raw bytes — for
+ /// kanji-mode symbols rxing re-encodes text as UTF-8 while rqrr keeps the
+ /// original Shift-JIS bytes (the exact divergence the ladder merge handles;
+ /// raw-keyed cells silently failed every rxing-only kanji survival).
+ fn cell_passes(img: &LumaImage, expected_text: &str) -> bool {
+     // Fast subset: direct + otsu — the score measures the MARGIN, not the
+     // full ladder's recovery power (that asymmetry is the point: a code
+     // that needs the deep ladder after mild stress has no margin).
+-    let matches = |found: &[engine::RawDetection]| {
+-        found
+-            .iter()
+-            .any(|d| engine::charset::resolve(&d.raw).0 == expected_text)
+-    };
+-    let outcome = engine::decode_all(img);
+-    if matches(&outcome.detections) {
+-        return true;
+-    }
+-    let binarized = transform::otsu_threshold(img);
+-    let outcome = engine::decode_all(&binarized);
+-    matches(&outcome.detections)
++    false /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Ramp cell indices at a given depth (Reduced takes the 2nd and 4th
+ /// intensities of each five-step ramp).
+ fn depth_indices(depth: ScoreDepth) -> &'static [usize] {
+     match depth {
+         ScoreDepth::Off => &[],
+         ScoreDepth::Reduced => &[1, 3],
