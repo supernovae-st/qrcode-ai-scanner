@@ -130,6 +130,27 @@ And one hint with UX value: `low_correction_margin` means the decode sat
 AT the Reed-Solomon limit — the verify UI should treat it as "decodes,
 but content unverified — regenerate" rather than a pass.
 
+## EXECUTED (R7 · 2026-06-12)
+
+The swap is implemented and waiting as **draft PR #11**
+(https://github.com/supernovae-studio/qrcode-ai_landing/pull/11 · base
+`scanner` · branch `feat/qrcode-ai-scanner-wasm`). Five files: Body.vue
+(onVerify rewrite — lazy init · toBlob → scan_image full/1500ms ·
+score→ScanStatus), types/scan.ts (ScanConfig + presets die), nuxt.config.ts
+(optimizeDeps.exclude), package.json (dep swap), hero comment.
+`npx nuxi typecheck` clean on the branch (worktree, local pkg symlink).
+
+Deviations from the plan above, all deliberate:
+- **full profile, not fast** — the blob-pixel template class (an editor
+  OUTPUT) only decodes in the deep stage; fast would read NO on valid
+  product output. Bounded via the new `budget_ms` wasm param (1500ms).
+- **native canvas resolution, not the 250-300px prep** — the old resize
+  destroyed the blob structure the morph rungs are calibrated for; the
+  scanner caps engine input internally (max_engine_side).
+- **uqr stays** for generation; only verify changed.
+
+Un-drafts when `@supernovae-st/qrcode-ai-scanner-wasm@0.3.0` is on npm.
+
 ## Open items
 
 1. Bundle size — MEASURED (binaryen 130, -O3 + simd128): dual-engine
