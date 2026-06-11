@@ -152,7 +152,11 @@ impl ScanProfile {
         }
     }
 
-    pub(crate) fn config(self) -> ScanConfig {
+    /// The profile's [`ScanConfig`] — the embedder hook for adjusting a
+    /// preset (e.g. tightening `budget_ms` for a UI-thread scan) before
+    /// wrapping it back in [`ScanProfile::Custom`].
+    #[must_use]
+    pub fn config(self) -> ScanConfig {
         match self {
             Self::Full => ScanConfig::full(),
             Self::Fast => ScanConfig::fast(),

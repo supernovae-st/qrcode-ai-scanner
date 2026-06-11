@@ -29,14 +29,24 @@ fn limits_from(max_dimension: Option<u32>, max_pixels: Option<i64>) -> Limits {
     limits
 }
 
-fn profile_from(name: Option<&str>) -> Result<ScanProfile> {
-    match name {
-        None => Ok(ScanProfile::Full),
+fn profile_from(name: Option<&str>, budget_ms: Option<u32>) -> Result<ScanProfile> {
+    let profile = match name {
+        None => ScanProfile::Full,
         Some(name) => ScanProfile::from_name(name).ok_or_else(|| {
             Error::from_reason(format!(
                 "unknown profile `{name}` — expected full | fast | frame"
             ))
-        }),
+        })?,
+    };
+    // budgetMs overrides the preset's wall-clock budget (0 = unbounded) —
+    // server embedders bound tail latency without giving up the deep ladder.
+    match budget_ms {
+        None => Ok(profile),
+        Some(ms) => {
+            let mut config = profile.config();
+            config.budget_ms = (ms > 0).then_some(u64::from(ms));
+            Ok(ScanProfile::Custom(config))
+        }
     }
 }
 
@@ -91,10 +101,11 @@ pub fn scan(
     signal: Option<AbortSignal>,
     max_dimension: Option<u32>,
     max_pixels: Option<i64>,
+    budget_ms: Option<u32>,
 ) -> Result<AsyncTask<ScanTask>> {
     let task = ScanTask {
         bytes: image.to_vec(),
-        profile: profile_from(profile.as_deref())?,
+        profile: profile_from(profile.as_deref(), budget_ms)?,
         limits: limits_from(max_dimension, max_pixels),
     };
     Ok(AsyncTask::with_optional_signal(task, signal))
@@ -107,9 +118,10 @@ pub fn scan_sync(
     profile: Option<String>,
     max_dimension: Option<u32>,
     max_pixels: Option<i64>,
+    budget_ms: Option<u32>,
 ) -> Result<String> {
     let scanner = Scanner::builder()
-        .profile(profile_from(profile.as_deref())?)
+        .profile(profile_from(profile.as_deref(), budget_ms)?)
         .limits(limits_from(max_dimension, max_pixels))
         .build();
     let report = scanner

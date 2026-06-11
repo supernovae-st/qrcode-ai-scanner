@@ -25,4 +25,13 @@ const controller = new AbortController();
 controller.abort();
 await assert.rejects(() => scan(clean, { signal: controller.signal }), /Abort/i);
 
+// budgetMs override: a degraded image under a 1ms budget returns FAST and
+// empty (the full ladder would otherwise grind it) — pins the wire position
+const degraded = readFileSync(new URL("../../fixtures/degraded/FAIL_1491ms_0_584c998c.png", import.meta.url));
+const t0 = performance.now();
+const tight = scanSync(degraded, { profile: "full", budgetMs: 1 });
+const elapsed = performance.now() - t0;
+assert.equal(tight.detections.length, 0);
+assert.ok(elapsed < 1500, `1ms budget must cut early, took ${elapsed}ms`);
+
 console.log(`node binding OK — native ${version()}`);

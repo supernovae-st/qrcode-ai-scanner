@@ -19,6 +19,11 @@ export interface ScanOptions {
   maxDimension?: number;
   /** Max accepted total pixels (default 64_000_000; servers: e.g. 16_000_000). */
   maxPixels?: number;
+  /**
+   * Override the profile's wall-clock budget in ms (0 = unbounded) —
+   * bound tail latency without giving up the deep ladder.
+   */
+  budgetMs?: number;
 }
 
 /** Async scan on the libuv pool — never blocks the event loop. */

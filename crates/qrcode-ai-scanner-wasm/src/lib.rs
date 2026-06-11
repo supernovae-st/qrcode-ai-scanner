@@ -5,19 +5,36 @@
 //! Both return the full `ScanReport` contract as a JS object (snake_case,
 //! `raw` as base64) — identical shape to the server/CLI surfaces.
 
-use qrcode_ai_scanner::{ImageInput, Limits, ScanProfile, Scanner};
+use qrcode_ai_scanner::{ImageInput, Limits, ScanConfig, ScanProfile, Scanner};
 use serde::Serialize as _;
 use wasm_bindgen::prelude::*;
 
-fn profile_from(name: Option<String>) -> Result<ScanProfile, JsError> {
-    match name.as_deref() {
-        None => Ok(ScanProfile::Full),
+fn config_from(name: Option<String>, budget_ms: Option<f64>) -> Result<ScanProfile, JsError> {
+    let profile = match name.as_deref() {
+        None => ScanProfile::Full,
         Some(name) => ScanProfile::from_name(name).ok_or_else(|| {
             JsError::new(&format!(
                 "unknown profile `{name}` — expected full | fast | frame"
             ))
-        }),
+        })?,
+    };
+    // wasm runs the scan ON the caller's thread (browser main thread unless
+    // the embedder uses a worker) — budget control is how a verify-while-
+    // typing UI keeps the worst case bounded without giving up the deep
+    // ladder. 0/negative = unbounded.
+    let Some(ms) = budget_ms else {
+        return Ok(profile);
+    };
+    let mut config: ScanConfig = profile.config();
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "JS number → milliseconds; non-positive means unbounded"
+    )]
+    {
+        config.budget_ms = (ms > 0.0).then_some(ms as u64);
     }
+    Ok(ScanProfile::Custom(config))
 }
 
 fn limits_from(max_dimension: Option<u32>, max_pixels: Option<f64>) -> Limits {
@@ -38,12 +55,12 @@ fn limits_from(max_dimension: Option<u32>, max_pixels: Option<f64>) -> Limits {
 
 fn run_scan(
     input: ImageInput<'_>,
-    profile: Option<String>,
+    profile: ScanProfile,
     max_dimension: Option<u32>,
     max_pixels: Option<f64>,
 ) -> Result<JsValue, JsError> {
     let scanner = Scanner::builder()
-        .profile(profile_from(profile)?)
+        .profile(profile)
         .limits(limits_from(max_dimension, max_pixels))
         .build();
     let report = scanner
@@ -56,17 +73,20 @@ fn run_scan(
         .map_err(|e| JsError::new(&e.to_string()))
 }
 
-/// Scan encoded image bytes (PNG/JPEG/WebP/GIF). Profile: full | fast | frame.
+/// Scan encoded image bytes (PNG/JPEG/WebP/GIF). Profile: full | fast |
+/// frame. `budget_ms` overrides the profile's wall-clock budget (the scan
+/// runs synchronously on the calling thread — bound it in UI contexts).
 #[wasm_bindgen]
 pub fn scan_image(
     bytes: &[u8],
     profile: Option<String>,
     max_dimension: Option<u32>,
     max_pixels: Option<f64>,
+    budget_ms: Option<f64>,
 ) -> Result<JsValue, JsError> {
     run_scan(
         ImageInput::encoded(bytes),
-        profile,
+        config_from(profile, budget_ms)?,
         max_dimension,
         max_pixels,
     )
@@ -74,26 +94,20 @@ pub fn scan_image(
 
 /// Scan a raw RGBA8 frame (`ImageData.data`, width, height). Defaults to the
 /// `frame` profile (decode-only, tight budget) — pass another to override.
+/// `budget_ms` overrides the profile's wall-clock budget.
 #[wasm_bindgen]
 pub fn scan_frame(
     data: &[u8],
     width: u32,
     height: u32,
     profile: Option<String>,
+    budget_ms: Option<f64>,
 ) -> Result<JsValue, JsError> {
-    match profile {
-        Some(_) => run_scan(ImageInput::rgba8(data, width, height), profile, None, None),
-        None => {
-            let scanner = Scanner::builder().profile(ScanProfile::Frame).build();
-            let report = scanner
-                .scan(ImageInput::rgba8(data, width, height))
-                .map_err(|e| JsError::new(&format!("{} ({})", e, e.code())))?;
-            let serializer = serde_wasm_bindgen::Serializer::new().serialize_missing_as_null(true);
-            report
-                .serialize(&serializer)
-                .map_err(|e| JsError::new(&e.to_string()))
-        }
-    }
+    let profile = match profile {
+        Some(_) => config_from(profile, budget_ms)?,
+        None => config_from(Some("frame".to_owned()), budget_ms)?,
+    };
+    run_scan(ImageInput::rgba8(data, width, height), profile, None, None)
 }
 
 /// Crate version (the `versions.scanner` of every report).

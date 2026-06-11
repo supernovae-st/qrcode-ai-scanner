@@ -13,13 +13,20 @@ async function scan(image, options = {}) {
     options.signal,
     options.maxDimension,
     options.maxPixels,
+    options.budgetMs,
   );
   return JSON.parse(json);
 }
 
 function scanSync(image, options = {}) {
   return JSON.parse(
-    native.scanSyncJson(image, options.profile, options.maxDimension, options.maxPixels),
+    native.scanSyncJson(
+      image,
+      options.profile,
+      options.maxDimension,
+      options.maxPixels,
+      options.budgetMs,
+    ),
   );
 }
 
