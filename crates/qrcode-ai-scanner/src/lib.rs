@@ -19,5 +19,7 @@ compile_error!(
 );
 
 mod error;
+mod input;
 
 pub use error::{Result, ScanError};
+pub use input::{ImageInput, Limits};
