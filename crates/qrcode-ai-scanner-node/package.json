@@ -1,0 +1,52 @@
+{
+  "name": "@supernovae-st/qrcode-ai-scanner",
+  "version": "0.3.0",
+  "description": "QR decoding + scannability scoring for artistic and AI-generated QR codes — async native bindings (Rust)",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/supernovae-st/qrcode-ai-scanner"
+  },
+  "keywords": [
+    "qrcode",
+    "qr",
+    "scanner",
+    "validation",
+    "rust",
+    "napi",
+    "artistic-qr",
+    "ai-qr"
+  ],
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "native.js",
+    "native.d.ts"
+  ],
+  "napi": {
+    "binaryName": "qrcode-ai-scanner",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "engines": {
+    "node": ">= 18"
+  },
+  "scripts": {
+    "build": "napi build --platform --release --js native.js --dts native.d.ts",
+    "build:debug": "napi build --platform --js native.js --dts native.d.ts",
+    "prepublishOnly": "napi prepublish -t npm",
+    "test": "node test.mjs"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.7.1"
+  }
+}

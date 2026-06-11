@@ -16,7 +16,7 @@ name = "qrscan"
 path = "src/main.rs"
 
 [dependencies]
-qrcode-ai-scanner = { version = "0.3.0-alpha.0", path = "../qrcode-ai-scanner", features = ["serde"] }
+qrcode-ai-scanner = { version = "0.3.0", path = "../qrcode-ai-scanner", features = ["serde"] }
 clap = { workspace = true }
 serde_json.workspace = true
 

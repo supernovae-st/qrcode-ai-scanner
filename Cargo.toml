@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*", "xtask"]
 
 [workspace.package]
-version = "0.3.0-alpha.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.87"
 license = "AGPL-3.0-or-later"
@@ -53,7 +53,7 @@ clap = { version = "4", features = ["derive"] }
 
 # dev / test
 qrcode = "0.14"
-insta = { version = "1", features = ["json"] }
+insta = { version = "1", features = ["json", "redactions"] }
 proptest = "1"
 criterion = { version = "0.8", features = ["html_reports"] }
 pretty_assertions = "1"

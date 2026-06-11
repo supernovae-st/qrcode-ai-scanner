@@ -36,4 +36,4 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
-      - run: cargo +nightly fuzz run fuzz_scan_encoded fixtures -- -max_total_time=900
+      - run: cargo +nightly fuzz run fuzz_scan_encoded fuzz/corpus fixtures -- -max_total_time=900

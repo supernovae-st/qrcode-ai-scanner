@@ -1,0 +1,44 @@
+[package]
+name = "qrcode-ai-scanner-wasm"
+description = "Browser WASM bindings for qrcode-ai-scanner — QR decoding + scannability scoring"
+publish = false # ships to npm (@supernovae-st/qrcode-ai-scanner-wasm), not crates.io
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# rqrr-only core: rxing's unconditional chrono dep needs wasm_support wiring
+# and doubles the bundle — rqrr alone covers the editor verify path; revisit
+# with size numbers if artistic-decode rates in-browser demand the dual build.
+qrcode-ai-scanner = { path = "../qrcode-ai-scanner", default-features = false, features = [
+  "engine-rqrr",
+  "engine-rxing",
+  "serde",
+] }
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+
+# rxing is pulled transitively; on wasm32 its chrono needs wasmbind
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rxing = { version = "0.9.1", default-features = false, features = [
+  "decoders",
+  "multi_barcode_readers",
+  "qrcode",
+  "encoding_rs",
+  "wasm_support",
+] }
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O3", "--enable-simd"]
+
+# Binding crate: keep the safety lints, drop pure-lib pedantry (FFI macro
+# expansions and by-value Buffer signatures fight the pedantic group).
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

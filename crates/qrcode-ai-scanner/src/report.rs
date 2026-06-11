@@ -508,13 +508,17 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn schema_snapshot_full() {
-        insta::assert_json_snapshot!("scan_report_full", full_report());
+        insta::assert_json_snapshot!("scan_report_full", full_report(), {
+            ".versions.scanner" => "[crate-version]"
+        });
     }
 
     #[cfg(feature = "serde")]
     #[test]
     fn schema_snapshot_empty() {
-        insta::assert_json_snapshot!("scan_report_empty", ScanReport::empty());
+        insta::assert_json_snapshot!("scan_report_empty", ScanReport::empty(), {
+            ".versions.scanner" => "[crate-version]"
+        });
     }
 
     #[cfg(feature = "serde")]

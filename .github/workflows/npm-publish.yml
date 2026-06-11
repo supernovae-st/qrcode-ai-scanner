@@ -1,0 +1,97 @@
+name: npm-publish
+
+# Builds the napi platform matrix + the wasm package and publishes both npm
+# packages. Trigger: release tag vX.Y.Z. Requires the NPM_TOKEN repo secret.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-native:
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - { host: macos-latest, target: aarch64-apple-darwin }
+          - { host: macos-latest, target: x86_64-apple-darwin }
+          - { host: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { host: ubuntu-latest, target: aarch64-unknown-linux-gnu }
+          - { host: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { host: ubuntu-latest, target: aarch64-unknown-linux-musl }
+          - { host: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.settings.host }}
+    defaults:
+      run:
+        working-directory: crates/qrcode-ai-scanner-node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: Swatinem/rust-cache@v2
+      - run: pnpm install --frozen-lockfile=false
+      - run: pnpm exec napi build --platform --release --target ${{ matrix.settings.target }} --js native.js --dts native.d.ts --use-napi-cross
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binding-${{ matrix.settings.target }}
+          path: crates/qrcode-ai-scanner-node/*.node
+          if-no-files-found: error
+
+  publish-native:
+    needs: build-native
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/qrcode-ai-scanner-node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile=false
+      - uses: actions/download-artifact@v4
+        with:
+          path: crates/qrcode-ai-scanner-node/artifacts
+      - run: pnpm exec napi artifacts
+      - run: pnpm exec napi prepublish -t npm --no-gh-release
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+      - run: RUSTFLAGS="-C target-feature=+simd128" wasm-pack build --target web --release --out-name qrcode-ai-scanner --scope supernovae-st
+        working-directory: crates/qrcode-ai-scanner-wasm
+      - run: node ../../scripts/patch-wasm-pkg.mjs
+        working-directory: crates/qrcode-ai-scanner-wasm
+      - run: npm publish --access public
+        working-directory: crates/qrcode-ai-scanner-wasm/pkg
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

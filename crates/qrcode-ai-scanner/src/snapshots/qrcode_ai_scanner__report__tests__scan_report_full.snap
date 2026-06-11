@@ -97,7 +97,7 @@ expression: full_report()
     "total_ms": 12.5
   },
   "versions": {
-    "scanner": "0.3.0-alpha.0",
+    "scanner": "[crate-version]",
     "pipeline": 1,
     "score_contract": 3
   }

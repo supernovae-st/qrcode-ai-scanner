@@ -1,0 +1,28 @@
+[package]
+name = "qrcode-ai-scanner-node"
+description = "Node.js bindings for qrcode-ai-scanner — async QR decoding + scannability scoring"
+publish = false # ships to npm (@supernovae-st/qrcode-ai-scanner), not crates.io
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+qrcode-ai-scanner = { path = "../qrcode-ai-scanner", features = ["serde"] }
+napi = { version = "3", default-features = false, features = ["napi8", "serde-json"] }
+napi-derive = "3"
+serde_json.workspace = true
+
+[build-dependencies]
+napi-build = "2"
+
+# Binding crate: keep the safety lints, drop pure-lib pedantry (FFI macro
+# expansions and by-value Buffer signatures fight the pedantic group).
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

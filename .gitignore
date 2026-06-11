@@ -39,3 +39,12 @@ secrets*
 # Claude Code
 .claude/
 CLAUDE.md
+
+# binding build artifacts
+crates/qrcode-ai-scanner-node/node_modules/
+crates/qrcode-ai-scanner-node/*.node
+crates/qrcode-ai-scanner-node/native.js
+crates/qrcode-ai-scanner-node/native.d.ts
+crates/qrcode-ai-scanner-wasm/pkg/
+fuzz/target/
+fuzz/corpus/

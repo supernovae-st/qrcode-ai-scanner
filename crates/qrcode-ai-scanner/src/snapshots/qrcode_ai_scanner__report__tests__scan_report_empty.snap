@@ -12,7 +12,7 @@ expression: "ScanReport::empty()"
     "total_ms": 0.0
   },
   "versions": {
-    "scanner": "0.3.0-alpha.0",
+    "scanner": "[crate-version]",
     "pipeline": 1,
     "score_contract": 3
   }

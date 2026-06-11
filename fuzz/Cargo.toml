@@ -17,3 +17,6 @@ path = "fuzz_targets/fuzz_scan_encoded.rs"
 test = false
 doc = false
 bench = false
+
+# standalone — never a member of the parent workspace (cargo-fuzz layout)
+[workspace]
