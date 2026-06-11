@@ -224,6 +224,9 @@ pub(crate) fn decode_to_luma(input: &ImageInput<'_>, limits: &Limits) -> Result<
 
 #[cfg(test)]
 mod tests {
+    // Tests assert via unwrap by design — the workspace deny targets src paths.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
     use crate::ScanError;
 
