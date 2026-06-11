@@ -20,6 +20,10 @@ fn map_ec(level: u16) -> Option<EcLevel> {
     }
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "corner coordinates are bounded by Limits::max_dimension (10k) — exact in f32 (2^24)"
+)]
 pub(super) fn decode(luma: &LumaImage) -> Vec<RawDetection> {
     let width = luma.width() as usize;
     let data = luma.data();

@@ -73,7 +73,7 @@ fn run_isolated<T>(f: impl FnOnce() -> T) -> Option<T> {
 }
 
 /// One decode pass: every enabled engine over the same luma image.
-pub(crate) fn decode_all(luma: &LumaImage, opts: &EngineOptions) -> EngineOutcome {
+pub(crate) fn decode_all(luma: &LumaImage, opts: EngineOptions) -> EngineOutcome {
     let mut outcome = EngineOutcome::default();
 
     #[cfg(feature = "engine-rxing")]
@@ -93,7 +93,7 @@ pub(crate) fn decode_all(luma: &LumaImage, opts: &EngineOptions) -> EngineOutcom
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_precision_loss)]
 
     use super::*;
     use crate::input::LumaImage;
@@ -133,7 +133,7 @@ mod tests {
     fn rxing_decodes_utf8_qr_with_text_and_ec() {
         let payload = "héllo → 🦋";
         let (luma, _) = qr_luma(payload.as_bytes(), qrcode::EcLevel::Q, 4);
-        let outcome = decode_all(&luma, &EngineOptions::default());
+        let outcome = decode_all(&luma, EngineOptions::default());
         let d = outcome
             .detections
             .iter()
@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn rqrr_provides_geometry_version_ec_mask() {
         let (luma, version) = qr_luma(b"https://qrcode-ai.com/scan", qrcode::EcLevel::Q, 4);
-        let outcome = decode_all(&luma, &EngineOptions::default());
+        let outcome = decode_all(&luma, EngineOptions::default());
         let d = outcome
             .detections
             .iter()
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn rqrr_ec_mapping_pinned_on_l_too() {
         let (luma, _) = qr_luma(b"ec level L pin", qrcode::EcLevel::L, 4);
-        let outcome = decode_all(&luma, &EngineOptions::default());
+        let outcome = decode_all(&luma, EngineOptions::default());
         let d = outcome
             .detections
             .iter()
@@ -187,7 +187,7 @@ mod tests {
     fn engines_agree_on_raw_payload_bytes() {
         let payload = "parity check 1234";
         let (luma, _) = qr_luma(payload.as_bytes(), qrcode::EcLevel::M, 4);
-        let outcome = decode_all(&luma, &EngineOptions::default());
+        let outcome = decode_all(&luma, EngineOptions::default());
         let rxing_raw = outcome
             .detections
             .iter()
@@ -209,7 +209,7 @@ mod tests {
     fn latin1_byte_mode_payload_resolves_via_raw_path() {
         // "Éé" in windows-1252 — invalid UTF-8, the rqrr decode() trap case.
         let (luma, _) = qr_luma(&[0xC9, 0xE9], qrcode::EcLevel::M, 4);
-        let outcome = decode_all(&luma, &EngineOptions::default());
+        let outcome = decode_all(&luma, EngineOptions::default());
         let d = outcome
             .detections
             .iter()
