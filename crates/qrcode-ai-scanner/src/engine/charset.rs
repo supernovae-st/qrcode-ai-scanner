@@ -1,0 +1,20 @@
+//! Charset resolution for raw decoded bytes — done ONCE here, never per-engine.
+//!
+//! Order: strict UTF-8 → Shift-JIS (error-free decode) → windows-1252 (never
+//! fails). Known heuristic limit: short pure half-width-katakana-range byte
+//! sequences are inherently ambiguous between Shift-JIS and Latin-1.
+
+use crate::report::Charset;
+
+/// Resolve raw payload bytes into text + the charset that produced it.
+pub(crate) fn resolve(raw: &[u8]) -> (String, Charset) {
+    if let Ok(s) = std::str::from_utf8(raw) {
+        return (s.to_owned(), Charset::Utf8);
+    }
+    let (text, _, had_errors) = encoding_rs::SHIFT_JIS.decode(raw);
+    if !had_errors {
+        return (text.into_owned(), Charset::ShiftJis);
+    }
+    let (text, _, _) = encoding_rs::WINDOWS_1252.decode(raw);
+    (text.into_owned(), Charset::Latin1)
+}

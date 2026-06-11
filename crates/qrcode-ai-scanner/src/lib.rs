@@ -18,6 +18,7 @@ compile_error!(
     "qrcode-ai-scanner requires at least one engine feature: `engine-rxing` or `engine-rqrr`"
 );
 
+mod engine;
 mod error;
 mod input;
 mod payload;
