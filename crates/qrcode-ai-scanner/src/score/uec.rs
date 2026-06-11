@@ -647,6 +647,48 @@ mod tests {
         assert!(compute(&[0u8; 4000], 32_000, 41, EcLevel::L, 0).is_none());
     }
 
+    /// Hand-computed ISO 18004 mask-formula truth table — the pristine
+    /// matrix only exercises whichever masks the generator picked; mutation
+    /// testing showed masks 1 and 6 had no kill coverage.
+    #[test]
+    fn mask_formulas_truth_table() {
+        // (mask, y, x, expected)
+        let table: [(u8, usize, usize, bool); 24] = [
+            (0, 0, 0, true),
+            (0, 0, 1, false),
+            (0, 1, 2, false),
+            (0, 2, 2, true),
+            (1, 0, 5, true),
+            (1, 1, 5, false),
+            (1, 2, 0, true),
+            (2, 0, 0, true),
+            (2, 0, 1, false),
+            (2, 0, 3, true),
+            (3, 0, 0, true),
+            (3, 1, 2, true),
+            (3, 2, 2, false),
+            (4, 0, 0, true),
+            (4, 2, 0, false),
+            (4, 2, 3, true),
+            (5, 0, 4, true),
+            (5, 1, 1, false),
+            (5, 2, 3, true),
+            (6, 1, 1, true),
+            (6, 1, 5, false),
+            (6, 2, 3, true),
+            (7, 0, 1, false),
+            (7, 1, 5, true),
+        ];
+        for (mask, y, x, expected) in table {
+            assert_eq!(
+                mask_bit(mask, y, x),
+                expected,
+                "mask {mask} at (y={y}, x={x})"
+            );
+        }
+        assert!(!mask_bit(8, 0, 0), "unknown mask is never set");
+    }
+
     #[test]
     fn grade_bands_pinned() {
         assert_eq!(UecGrade::from_margin(1.0), UecGrade::A);

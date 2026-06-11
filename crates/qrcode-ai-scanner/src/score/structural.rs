@@ -250,6 +250,44 @@ mod tests {
         );
     }
 
+    /// The probe ring is EXACTLY 2 modules past each edge — ink in the ring
+    /// trips, ink one module beyond it must NOT (pins the probe coordinates
+    /// against off-by-N mutations).
+    #[test]
+    fn quiet_zone_probe_ring_geometry() {
+        let (luma, corners, version) = decoded_clean();
+        let modules = f32::from(version) * 4.0 + 17.0;
+        let module_px = (corners[1].x - corners[0].x) / (modules + 1.0);
+        let w = luma.width();
+
+        let paint_bottom_band = |from_module: f32, to_module: f32| -> LumaImage {
+            let mut data = luma.data().to_vec();
+            let y0 = (corners[0].y + from_module * module_px).max(0.0) as u32;
+            let y1 = ((corners[0].y + to_module * module_px) as u32).min(luma.height());
+            let x0 = corners[0].x as u32;
+            let x1 = (corners[1].x as u32).min(w);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    data[(y * w + x) as usize] = 0;
+                }
+            }
+            LumaImage::new(data, w, luma.height())
+        };
+
+        // band over the probe ring (modules .. modules+2) → must trip
+        let inked_ring = paint_bottom_band(modules, modules + 2.0);
+        let report = check(&inked_ring, corners, version).unwrap();
+        assert!(!report.quiet_zone_ok, "ink IN the 2-module ring must trip");
+
+        // band beyond the ring (modules+2.5 .. modules+3.5) → must NOT trip
+        let inked_far = paint_bottom_band(modules + 2.5, modules + 3.5);
+        let report = check(&inked_far, corners, version).unwrap();
+        assert!(
+            report.quiet_zone_ok,
+            "ink BEYOND the probe ring must not trip (probe coordinates drifted)"
+        );
+    }
+
     #[test]
     fn ink_in_the_margin_breaks_quiet_zone() {
         let (luma, corners, version) = decoded_clean();

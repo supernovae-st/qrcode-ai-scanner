@@ -321,6 +321,199 @@ mod tests {
     use crate::ladder::{self, ScanConfig};
     use crate::transform::normalize;
 
+    fn detection_with(ec: Option<EcLevel>) -> MergedDetection {
+        MergedDetection {
+            raw: b"x".to_vec(),
+            text: "x".into(),
+            charset: crate::report::Charset::Utf8,
+            masked_stream: None,
+            corners: None,
+            version: Some(2),
+            ec,
+            mask: Some(0),
+            engines: vec![crate::report::EngineKind::Rqrr],
+        }
+    }
+
+    fn axes_with(overrides: &[(StressAxis, u8, u8)]) -> Vec<AxisScore> {
+        let mut axes: Vec<AxisScore> = WEIGHTS
+            .iter()
+            .map(|&(axis, _)| AxisScore {
+                axis,
+                passed: 5,
+                total: 5,
+            })
+            .collect();
+        for &(axis, passed, total) in overrides {
+            let slot = axes.iter_mut().find(|a| a.axis == axis).unwrap();
+            slot.passed = passed;
+            slot.total = total;
+        }
+        axes
+    }
+
+    /// The composite is a PUBLISHED contract — pin its arithmetic exactly
+    /// (mutation testing showed the weighted math was never value-pinned).
+    #[test]
+    fn composite_weights_are_exact() {
+        let d = detection_with(Some(EcLevel::H));
+        let (score, _) = compose(axes_with(&[]), None, None, &d);
+        assert_eq!(score.value, 100);
+
+        // resolution 4/5: (22·80 + 78·100)/100 = 95
+        let (score, _) = compose(axes_with(&[(StressAxis::Resolution, 4, 5)]), None, None, &d);
+        assert_eq!(score.value, 95);
+
+        // blur 0/5: (18·0 + 82·100)/100 = 82
+        let (score, hints) = compose(axes_with(&[(StressAxis::Blur, 0, 5)]), None, None, &d);
+        assert_eq!(score.value, 82);
+        assert!(hints.contains(&Hint::ReduceArtTexture), "{hints:?}");
+
+        // rotation 2/5: (10·40 + 90·100)/100 = 94
+        let (score, _) = compose(axes_with(&[(StressAxis::Rotation, 2, 5)]), None, None, &d);
+        assert_eq!(score.value, 94);
+    }
+
+    #[test]
+    fn structural_caps_are_exact_with_boundaries() {
+        use crate::report::StructuralReport;
+        let d = detection_with(Some(EcLevel::H));
+
+        // worst finder 0.49 < 0.5 floor → capped at 40 + the corner named
+        let (score, hints) = compose(
+            axes_with(&[]),
+            Some(StructuralReport {
+                finder_integrity: [1.0, 1.0, 0.49],
+                quiet_zone_ok: true,
+            }),
+            None,
+            &d,
+        );
+        assert_eq!(score.value, FINDER_DAMAGE_CAP);
+        assert!(
+            hints.contains(&Hint::FixFinderPattern { corner: 2 }),
+            "{hints:?}"
+        );
+
+        // exactly at the floor → NO cap
+        let (score, hints) = compose(
+            axes_with(&[]),
+            Some(StructuralReport {
+                finder_integrity: [1.0, 1.0, 0.5],
+                quiet_zone_ok: true,
+            }),
+            None,
+            &d,
+        );
+        assert_eq!(score.value, 100);
+        assert!(hints.is_empty(), "{hints:?}");
+
+        // quiet zone violated → capped at 60
+        let (score, hints) = compose(
+            axes_with(&[]),
+            Some(StructuralReport {
+                finder_integrity: [1.0, 1.0, 1.0],
+                quiet_zone_ok: false,
+            }),
+            None,
+            &d,
+        );
+        assert_eq!(score.value, QUIET_ZONE_CAP);
+        assert!(hints.contains(&Hint::RestoreQuietZone));
+    }
+
+    #[test]
+    fn hint_thresholds_fire_exactly_at_the_published_boundaries() {
+        let d = detection_with(Some(EcLevel::H));
+
+        // contrast survival 40% fires, 60% does not
+        let (_, hints) = compose(axes_with(&[(StressAxis::Contrast, 2, 5)]), None, None, &d);
+        assert!(hints.contains(&Hint::IncreaseContrast), "{hints:?}");
+        let (_, hints) = compose(axes_with(&[(StressAxis::Contrast, 3, 5)]), None, None, &d);
+        assert!(!hints.contains(&Hint::IncreaseContrast), "{hints:?}");
+
+        // resolution likewise → EnlargeModules
+        let (_, hints) = compose(axes_with(&[(StressAxis::Resolution, 2, 5)]), None, None, &d);
+        assert!(hints.contains(&Hint::EnlargeModules), "{hints:?}");
+        let (_, hints) = compose(axes_with(&[(StressAxis::Resolution, 3, 5)]), None, None, &d);
+        assert!(!hints.contains(&Hint::EnlargeModules), "{hints:?}");
+
+        // blur partial survival (1/5) is NOT the texture hint (only 0/5 is)
+        let (_, hints) = compose(axes_with(&[(StressAxis::Blur, 1, 5)]), None, None, &d);
+        assert!(!hints.contains(&Hint::ReduceArtTexture), "{hints:?}");
+    }
+
+    #[test]
+    fn raise_ec_hint_value_and_uec_paths() {
+        use crate::report::{UecGrade, UecReport};
+        let d = detection_with(Some(EcLevel::Q));
+
+        // value 94 (rotation 2/5) + EC<H + healthy margin → no hint
+        let (_, hints) = compose(axes_with(&[(StressAxis::Rotation, 2, 5)]), None, None, &d);
+        assert!(
+            !hints
+                .iter()
+                .any(|h| matches!(h, Hint::RaiseErrorCorrection { .. })),
+            "{hints:?}"
+        );
+
+        // value < 70 → fires (blur 0/5 + perspective 0/5: 82-20=62)
+        let (score, hints) = compose(
+            axes_with(&[(StressAxis::Blur, 0, 5), (StressAxis::Perspective, 0, 5)]),
+            None,
+            None,
+            &d,
+        );
+        assert!(score.value < 70, "{}", score.value);
+        assert!(
+            hints.iter().any(|h| matches!(
+                h,
+                Hint::RaiseErrorCorrection {
+                    current: EcLevel::Q
+                }
+            )),
+            "{hints:?}"
+        );
+
+        // thin UEC margin (grade D) fires even at value 100
+        let thin = UecReport {
+            margin: 0.30,
+            grade: UecGrade::D,
+            worst_block_errors: 6,
+            worst_block_capacity: 18,
+        };
+        let (score, hints) = compose(axes_with(&[]), None, Some(thin), &d);
+        assert_eq!(score.value, 100);
+        assert!(
+            hints
+                .iter()
+                .any(|h| matches!(h, Hint::RaiseErrorCorrection { .. })),
+            "{hints:?}"
+        );
+
+        // EC already H → never fires
+        let dh = detection_with(Some(EcLevel::H));
+        let (_, hints) = compose(
+            axes_with(&[(StressAxis::Blur, 0, 5)]),
+            None,
+            Some(thin),
+            &dh,
+        );
+        assert!(
+            !hints
+                .iter()
+                .any(|h| matches!(h, Hint::RaiseErrorCorrection { .. })),
+            "{hints:?}"
+        );
+    }
+
+    #[test]
+    fn depth_index_sets_pinned() {
+        assert_eq!(depth_indices(ScoreDepth::Off), &[] as &[usize]);
+        assert_eq!(depth_indices(ScoreDepth::Reduced), &[1, 3]);
+        assert_eq!(depth_indices(ScoreDepth::Full), &[0, 1, 2, 3, 4]);
+    }
+
     /// Kanji-mode regression for the SCORING path (the ladder-side fix has
     /// its own test): stress cells must match by resolved text — raw-keyed
     /// cells silently failed every rxing-only survival on kanji symbols.
