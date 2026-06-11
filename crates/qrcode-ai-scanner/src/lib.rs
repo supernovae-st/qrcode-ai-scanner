@@ -20,6 +20,13 @@ compile_error!(
 
 mod error;
 mod input;
+mod payload;
+mod report;
 
 pub use error::{Result, ScanError};
 pub use input::{ImageInput, Limits};
+pub use payload::Payload;
+pub use report::{
+    Charset, DecodedContent, Detection, EcLevel, EngineKind, Grade, Hint, PipelineTrace, Point,
+    QrMeta, ScanReport, Score, StageTrace, Versions,
+};

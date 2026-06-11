@@ -1,0 +1,19 @@
+---
+source: crates/qrcode-ai-scanner/src/report.rs
+expression: "ScanReport::empty()"
+---
+{
+  "detections": [],
+  "score": null,
+  "hints": [],
+  "trace": {
+    "stages": [],
+    "engine_panics": 0,
+    "total_ms": 0.0
+  },
+  "versions": {
+    "scanner": "0.3.0-alpha.0",
+    "pipeline": 1,
+    "score_contract": 3
+  }
+}

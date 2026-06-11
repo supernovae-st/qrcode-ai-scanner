@@ -19,7 +19,7 @@ engine-rqrr = ["dep:rqrr"]
 # rayon parallelism — native targets only, keep OFF for wasm
 parallel = ["dep:rayon"]
 # ScanReport (de)serialization — the cross-boundary contract
-serde = ["dep:serde"]
+serde = ["dep:serde", "dep:base64"]
 
 [dependencies]
 rxing = { workspace = true, optional = true }
@@ -27,6 +27,7 @@ rqrr = { workspace = true, optional = true }
 image.workspace = true
 encoding_rs.workspace = true
 serde = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
 thiserror.workspace = true
 miette.workspace = true
 web-time.workspace = true

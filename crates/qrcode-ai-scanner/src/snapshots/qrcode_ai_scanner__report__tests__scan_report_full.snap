@@ -1,0 +1,75 @@
+---
+source: crates/qrcode-ai-scanner/src/report.rs
+expression: full_report()
+---
+{
+  "detections": [
+    {
+      "content": {
+        "text": "https://qrcode-ai.com",
+        "raw": "aHR0cHM6Ly9xcmNvZGUtYWkuY29t",
+        "charset": "utf8"
+      },
+      "payload": {
+        "kind": "text"
+      },
+      "corners": [
+        {
+          "x": 10.0,
+          "y": 10.0
+        },
+        {
+          "x": 90.0,
+          "y": 10.5
+        },
+        {
+          "x": 90.5,
+          "y": 90.0
+        },
+        {
+          "x": 10.0,
+          "y": 89.5
+        }
+      ],
+      "meta": {
+        "version": 5,
+        "ec_level": "q",
+        "mask": 3,
+        "modules": 37,
+        "mirrored": false,
+        "inverted": false
+      },
+      "engine": "rxing"
+    }
+  ],
+  "score": {
+    "value": 87,
+    "grade": "excellent"
+  },
+  "hints": [
+    {
+      "hint": "raise_error_correction",
+      "current": "q"
+    },
+    {
+      "hint": "increase_contrast"
+    }
+  ],
+  "trace": {
+    "stages": [
+      {
+        "stage": "direct",
+        "transforms_tried": 1,
+        "ms": 12.5,
+        "detections_found": 1
+      }
+    ],
+    "engine_panics": 0,
+    "total_ms": 12.5
+  },
+  "versions": {
+    "scanner": "0.3.0-alpha.0",
+    "pipeline": 1,
+    "score_contract": 3
+  }
+}
