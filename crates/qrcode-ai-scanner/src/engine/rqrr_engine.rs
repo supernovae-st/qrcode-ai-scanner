@@ -44,7 +44,6 @@ pub(super) fn decode(luma: &LumaImage) -> Vec<RawDetection> {
         });
         found.push(RawDetection {
             raw,
-            text_hint: None,
             corners: Some(corners),
             version: u8::try_from(meta.version.0).ok(),
             ec: map_ec(meta.ecc_level),

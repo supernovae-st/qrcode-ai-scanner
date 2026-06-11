@@ -56,7 +56,6 @@ pub(super) fn decode(luma: &LumaImage, opts: EngineOptions) -> Vec<RawDetection>
 
             RawDetection {
                 raw,
-                text_hint: Some(text),
                 corners: None,
                 version: None,
                 ec,

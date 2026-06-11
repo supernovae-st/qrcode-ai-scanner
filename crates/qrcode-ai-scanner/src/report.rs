@@ -95,18 +95,18 @@ pub struct DecodedContent {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct QrMeta {
-    /// Symbol version, 1-40.
-    pub version: u8,
-    /// Error-correction level.
-    pub ec_level: EcLevel,
-    /// Mask pattern 0-7 when the engine reports it.
+    /// Symbol version, 1-40, when an engine measured it (rqrr path).
+    pub version: Option<u8>,
+    /// Error-correction level when measured.
+    pub ec_level: Option<EcLevel>,
+    /// Mask pattern 0-7 when measured.
     pub mask: Option<u8>,
-    /// Modules per side (`version * 4 + 17`).
-    pub modules: u8,
-    /// Symbol was mirrored.
-    pub mirrored: bool,
-    /// Symbol was light-on-dark.
-    pub inverted: bool,
+    /// Modules per side (`version * 4 + 17`), derived from `version`.
+    pub modules: Option<u8>,
+    /// Symbol was mirrored — `None` = not measured (no engine reports it today).
+    pub mirrored: Option<bool>,
+    /// Symbol was light-on-dark — `None` = not measured.
+    pub inverted: Option<bool>,
 }
 
 /// One decoded QR symbol.
@@ -123,8 +123,8 @@ pub struct Detection {
     pub corners: Option<[Point; 4]>,
     /// Symbol metadata.
     pub meta: QrMeta,
-    /// Engine that produced this detection.
-    pub engine: EngineKind,
+    /// Engines that confirmed this payload (consensus surface for scoring).
+    pub engines: Vec<EngineKind>,
 }
 
 /// Score grade bands — the published interpretation table.
@@ -306,14 +306,14 @@ mod tests {
                     Point { x: 10.0, y: 89.5 },
                 ]),
                 meta: QrMeta {
-                    version: 5,
-                    ec_level: EcLevel::Q,
+                    version: Some(5),
+                    ec_level: Some(EcLevel::Q),
                     mask: Some(3),
-                    modules: 37,
-                    mirrored: false,
-                    inverted: false,
+                    modules: Some(37),
+                    mirrored: None,
+                    inverted: None,
                 },
-                engine: EngineKind::Rxing,
+                engines: vec![EngineKind::Rxing, EngineKind::Rqrr],
             }],
             score: Some(Score {
                 value: 87,

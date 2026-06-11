@@ -200,13 +200,6 @@ fn parse_geo(rest: &str) -> Option<Payload> {
 }
 
 /// Classify decoded QR text into a typed payload. Total: never fails.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "classifier lands before its consumer (ladder, task A7)"
-    )
-)]
 pub(crate) fn classify(text: &str) -> Payload {
     if strip_prefix_ci(text, "http://").is_some() || strip_prefix_ci(text, "https://").is_some() {
         return Payload::Url {

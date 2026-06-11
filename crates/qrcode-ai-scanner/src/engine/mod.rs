@@ -4,15 +4,6 @@
 //! decide charset (raw bytes are the truth, resolution happens once here in
 //! `charset`), and only report what they actually measured — no stubs.
 
-// Self-expiring: the ladder (task A7) consumes this module from the lib path.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "engine layer lands before its consumer (ladder, task A7)"
-    )
-)]
-
 pub(crate) mod charset;
 #[cfg(feature = "engine-rqrr")]
 mod rqrr_engine;
@@ -44,8 +35,6 @@ impl Default for EngineOptions {
 pub(crate) struct RawDetection {
     /// Decoded payload bytes (charset-independent truth).
     pub raw: Vec<u8>,
-    /// Engine-decoded text when the engine resolves charset itself (rxing).
-    pub text_hint: Option<String>,
     /// Symbol corners when the engine provides true bounds (rqrr).
     pub corners: Option<[Point; 4]>,
     /// Symbol version 1-40 when measured.
@@ -73,6 +62,10 @@ fn run_isolated<T>(f: impl FnOnce() -> T) -> Option<T> {
 }
 
 /// One decode pass: every enabled engine over the same luma image.
+#[cfg_attr(
+    not(feature = "engine-rxing"),
+    expect(unused_variables, reason = "opts feeds the rxing hint surface only")
+)]
 pub(crate) fn decode_all(luma: &LumaImage, opts: EngineOptions) -> EngineOutcome {
     let mut outcome = EngineOutcome::default();
 
@@ -139,7 +132,8 @@ mod tests {
             .iter()
             .find(|d| d.engine == EngineKind::Rxing)
             .expect("rxing must decode a clean generated QR");
-        assert_eq!(d.text_hint.as_deref(), Some(payload));
+        let (text, _) = charset::resolve(&d.raw);
+        assert_eq!(text, payload);
         assert_eq!(d.raw, payload.as_bytes());
         assert_eq!(d.ec, Some(EcLevel::Q));
         assert_eq!(outcome.panics, 0);

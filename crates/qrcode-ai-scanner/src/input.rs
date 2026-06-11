@@ -5,17 +5,6 @@
 //! EXIF orientation is NOT applied in v0.3.0-alpha (open item — decoders are
 //! rotation-tolerant; only corner coordinates are affected).
 
-// Self-expiring: rustc flags this attribute as unfulfilled once the engine
-// layer (A5+) consumes everything here — at which point it MUST be deleted.
-// Scoped to non-test builds: the test target already uses every item.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "normalization layer lands before its consumers (engine layer, task A5)"
-    )
-)]
-
 use crate::error::{Result, ScanError};
 
 /// Borrowed image input for a scan.
@@ -122,7 +111,7 @@ impl LumaImage {
 }
 
 /// Validate dimensions against limits. Zero dimensions are invalid input.
-fn validate_dims(width: u32, height: u32, limits: &Limits) -> Result<u64> {
+pub(crate) fn validate_dims(width: u32, height: u32, limits: &Limits) -> Result<u64> {
     if width == 0 || height == 0 {
         return Err(ScanError::InvalidImage {
             details: format!("zero dimension: {width}x{height}"),
@@ -147,7 +136,7 @@ fn validate_dims(width: u32, height: u32, limits: &Limits) -> Result<u64> {
 }
 
 /// Check a raw buffer length against the expected byte count.
-fn validate_buffer(got: usize, expected: u64) -> Result<usize> {
+pub(crate) fn validate_buffer(got: usize, expected: u64) -> Result<usize> {
     let expected_usize = usize::try_from(expected).map_err(|_| ScanError::PixelOverflow {
         width: 0,
         height: 0,
@@ -163,63 +152,10 @@ fn validate_buffer(got: usize, expected: u64) -> Result<usize> {
 }
 
 /// BT.601 integer luma: `y = (299r + 587g + 114b + 500) / 1000`.
-fn bt601(r: u8, g: u8, b: u8) -> u8 {
+pub(crate) fn bt601(r: u8, g: u8, b: u8) -> u8 {
     let y = (299 * u32::from(r) + 587 * u32::from(g) + 114 * u32::from(b) + 500) / 1000;
     // 0..=255 by construction: max = (299+587+114)*255/1000 = 255
     u8::try_from(y).unwrap_or(u8::MAX)
-}
-
-/// Validate an [`ImageInput`] and normalize it into the internal luma buffer.
-pub(crate) fn decode_to_luma(input: &ImageInput<'_>, limits: &Limits) -> Result<LumaImage> {
-    match *input {
-        ImageInput::Luma8 {
-            data,
-            width,
-            height,
-        } => {
-            let pixels = validate_dims(width, height, limits)?;
-            validate_buffer(data.len(), pixels)?;
-            Ok(LumaImage::new(data.to_vec(), width, height))
-        }
-        ImageInput::Rgba8 {
-            data,
-            width,
-            height,
-        } => {
-            let pixels = validate_dims(width, height, limits)?;
-            validate_buffer(data.len(), pixels * 4)?;
-            let luma: Vec<u8> = data
-                .chunks_exact(4)
-                .map(|px| bt601(px[0], px[1], px[2]))
-                .collect();
-            Ok(LumaImage::new(luma, width, height))
-        }
-        ImageInput::Encoded(bytes) => {
-            // Header-only dimension probe BEFORE full decode (decompression-bomb guard).
-            let (width, height) = image::ImageReader::new(std::io::Cursor::new(bytes))
-                .with_guessed_format()
-                .map_err(|e| ScanError::InvalidImage {
-                    details: e.to_string(),
-                })?
-                .into_dimensions()
-                .map_err(|e| ScanError::InvalidImage {
-                    details: e.to_string(),
-                })?;
-            validate_dims(width, height, limits)?;
-            let img = image::ImageReader::new(std::io::Cursor::new(bytes))
-                .with_guessed_format()
-                .map_err(|e| ScanError::InvalidImage {
-                    details: e.to_string(),
-                })?
-                .decode()
-                .map_err(|e| ScanError::InvalidImage {
-                    details: e.to_string(),
-                })?;
-            let luma = img.into_luma8();
-            let (w, h) = (luma.width(), luma.height());
-            Ok(LumaImage::new(luma.into_raw(), w, h))
-        }
-    }
 }
 
 #[cfg(test)]
@@ -229,6 +165,12 @@ mod tests {
 
     use super::*;
     use crate::ScanError;
+
+    /// The historical seam: input validation is exercised through the
+    /// crate's single decode point (`transform::normalize`).
+    fn decode_to_luma(input: &ImageInput<'_>, limits: &Limits) -> crate::Result<LumaImage> {
+        crate::transform::normalize(input, limits).map(|planes| planes.luma)
+    }
 
     fn png_bytes(width: u32, height: u32) -> Vec<u8> {
         let img = image::DynamicImage::ImageLuma8(image::ImageBuffer::new(width, height));

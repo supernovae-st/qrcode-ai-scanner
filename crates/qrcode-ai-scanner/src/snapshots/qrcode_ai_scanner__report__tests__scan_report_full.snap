@@ -36,10 +36,13 @@ expression: full_report()
         "ec_level": "q",
         "mask": 3,
         "modules": 37,
-        "mirrored": false,
-        "inverted": false
+        "mirrored": null,
+        "inverted": null
       },
-      "engine": "rxing"
+      "engines": [
+        "rxing",
+        "rqrr"
+      ]
     }
   ],
   "score": {
