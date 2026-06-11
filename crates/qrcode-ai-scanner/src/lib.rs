@@ -149,13 +149,12 @@ fn build_report(outcome: ladder::LadderOutcome, scored: Option<(Score, Vec<Hint>
         .merged
         .into_iter()
         .map(|m| {
-            let (text, charset) = engine::charset::resolve(&m.raw);
-            let payload = payload::classify(&text);
+            let payload = payload::classify(&m.text);
             Detection {
                 content: DecodedContent {
-                    text,
+                    text: m.text,
                     raw: m.raw,
-                    charset,
+                    charset: m.charset,
                 },
                 payload,
                 corners: m.corners,

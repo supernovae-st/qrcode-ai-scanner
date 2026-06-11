@@ -185,6 +185,11 @@ fn boost_rung(luma: &LumaImage, rung: (u32, f32, f32, f32)) -> LumaImage {
 #[derive(Debug, Clone)]
 pub(crate) struct MergedDetection {
     pub raw: Vec<u8>,
+    /// Charset-resolved text — the merge key (engines may disagree on raw
+    /// byte representation for kanji-mode: rxing re-encodes text as UTF-8,
+    /// rqrr preserves the original Shift-JIS bytes).
+    pub text: String,
+    pub charset: crate::report::Charset,
     pub masked_stream: Option<MaskedStream>,
     pub corners: Option<[Point; 4]>,
     pub version: Option<u8>,
@@ -220,19 +225,31 @@ impl Run<'_> {
             .is_some_and(|deadline| Instant::now() >= deadline)
     }
 
-    /// Merge one engine pass into the accumulated detections, keyed by raw
-    /// payload bytes (linear scan: N is tiny, order stays deterministic).
+    /// Merge one engine pass into the accumulated detections, keyed by the
+    /// charset-RESOLVED text (linear scan: N is tiny, order deterministic).
+    ///
+    /// Raw bytes are NOT the key: for kanji-mode symbols rxing re-encodes
+    /// the decoded text as UTF-8 while rqrr preserves the original Shift-JIS
+    /// bytes — same symbol, different raw. When a detection carrying the
+    /// engine-sampled bitstream (rqrr) joins a merge, its raw REPLACES the
+    /// text-derived one: original bytes are the truth.
     fn absorb(&mut self, found: Vec<RawDetection>) -> u32 {
         let count = u32::try_from(found.len()).unwrap_or(u32::MAX);
         for detection in found {
+            let (text, charset) = engine::charset::resolve(&detection.raw);
             match self
                 .merged
                 .iter_mut()
-                .find(|existing| existing.raw == detection.raw)
+                .find(|existing| existing.text == text)
             {
                 Some(existing) => {
-                    if existing.masked_stream.is_none() {
-                        existing.masked_stream = detection.masked_stream;
+                    if existing.masked_stream.is_none()
+                        && let Some(stream) = detection.masked_stream
+                    {
+                        // bitstream source (rqrr) — its raw is the original bytes
+                        existing.masked_stream = Some(stream);
+                        existing.raw = detection.raw;
+                        existing.charset = charset;
                     }
                     existing.corners = existing.corners.or(detection.corners);
                     existing.version = existing.version.or(detection.version);
@@ -244,6 +261,8 @@ impl Run<'_> {
                 }
                 None => self.merged.push(MergedDetection {
                     raw: detection.raw,
+                    text,
+                    charset,
                     masked_stream: detection.masked_stream,
                     corners: detection.corners,
                     version: detection.version,
@@ -583,5 +602,53 @@ mod probe {
             }
         }
         println!("v02 probe done");
+    }
+}
+
+#[cfg(test)]
+mod kanji_merge_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use crate::input::{ImageInput, Limits};
+    use crate::transform::normalize;
+
+    /// Kanji-MODE divergence: rqrr returns the original Shift-JIS bytes,
+    /// rxing (no `BYTE_SEGMENTS` for kanji segments) returns UTF-8 of the
+    /// decoded text. Same symbol MUST merge into one detection, raw = the
+    /// original SJIS bytes (rqrr is the byte-truth engine).
+    #[test]
+    fn kanji_mode_merges_across_engines_with_sjis_raw() {
+        // こんにちは in Shift-JIS — the qrcode crate's optimizer emits
+        // kanji-mode segments for SJIS pairs.
+        let sjis: &[u8] = &[0x82, 0xB1, 0x82, 0xF1, 0x82, 0xC9, 0x82, 0xBF, 0x82, 0xCD];
+        let code = qrcode::QrCode::with_error_correction_level(sjis, qrcode::EcLevel::Q).unwrap();
+        let img = code
+            .render::<image::Luma<u8>>()
+            .module_dimensions(6, 6)
+            .build();
+        let mut png = Vec::new();
+        image::DynamicImage::ImageLuma8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+
+        let planes = normalize(&ImageInput::encoded(&png), &Limits::default()).unwrap();
+        let outcome = run(&planes, &ScanConfig::full(), &CancelToken::new()).unwrap();
+
+        assert_eq!(
+            outcome.merged.len(),
+            1,
+            "one symbol must merge to ONE detection — got {:?}",
+            outcome
+                .merged
+                .iter()
+                .map(|m| (&m.engines, &m.raw))
+                .collect::<Vec<_>>()
+        );
+        let d = &outcome.merged[0];
+        assert_eq!(d.raw, sjis, "raw must be the ORIGINAL bytes (rqrr truth)");
+        let (text, charset) = crate::engine::charset::resolve(&d.raw);
+        assert_eq!(text, "こんにちは");
+        assert_eq!(charset, crate::report::Charset::ShiftJis);
     }
 }
