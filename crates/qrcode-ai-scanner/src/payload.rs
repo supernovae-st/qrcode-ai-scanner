@@ -55,6 +55,27 @@ pub enum Payload {
         /// Longitude in degrees, validated to [-180, 180].
         lon: f64,
     },
+    /// Contact card (`MECARD:` — the flat DoCoMo format).
+    MeCard {
+        /// `N:` name as written.
+        name: Option<String>,
+        /// First `TEL:` value.
+        tel: Option<String>,
+        /// First `EMAIL:` value.
+        email: Option<String>,
+        /// First `URL:` value.
+        url: Option<String>,
+    },
+    /// Cryptocurrency payment URI (`bitcoin:` BIP-21 · `ethereum:` ERC-681).
+    Crypto {
+        /// URI scheme, lowercased (`bitcoin` · `ethereum`).
+        scheme: String,
+        /// Payment address (ERC-681 `@chain_id` suffix stripped).
+        address: String,
+        /// BIP-21 `amount` query value when present (display units, kept as
+        /// written — ERC-681 `value` is wei notation and is NOT mapped here).
+        amount: Option<String>,
+    },
     /// Contact card (`BEGIN:VCARD`) — raw, no deep parse.
     VCard {
         /// Full original vCard text.
@@ -199,6 +220,59 @@ fn parse_geo(rest: &str) -> Option<Payload> {
     .then_some(Payload::Geo { lat, lon })
 }
 
+fn parse_mecard(rest: &str) -> Option<Payload> {
+    let mut name = None;
+    let mut tel = None;
+    let mut email = None;
+    let mut url = None;
+    // MECARD shares the WIFI escape family (\; \: \\) and `;` field split.
+    for (key, value) in wifi_fields(rest) {
+        if value.is_empty() {
+            continue;
+        }
+        let slot = match key.to_ascii_uppercase().as_str() {
+            "N" => &mut name,
+            "TEL" => &mut tel,
+            "EMAIL" => &mut email,
+            "URL" => &mut url,
+            _ => continue,
+        };
+        slot.get_or_insert(value);
+    }
+    (name.is_some() || tel.is_some() || email.is_some() || url.is_some()).then_some(
+        Payload::MeCard {
+            name,
+            tel,
+            email,
+            url,
+        },
+    )
+}
+
+fn parse_crypto(scheme: &str, rest: &str) -> Option<Payload> {
+    let (addr_part, query) = match rest.split_once('?') {
+        Some((a, q)) => (a, Some(q)),
+        None => (rest, None),
+    };
+    // ERC-681 suffixes the address with `@chain_id`; the address itself
+    // never contains `@`.
+    let address = addr_part.split('@').next().unwrap_or(addr_part);
+    if address.is_empty() {
+        return None;
+    }
+    let amount = query.and_then(|q| {
+        q.split('&').find_map(|kv| {
+            let (k, v) = kv.split_once('=')?;
+            (k == "amount" && !v.is_empty()).then(|| v.to_owned())
+        })
+    });
+    Some(Payload::Crypto {
+        scheme: scheme.to_owned(),
+        address: address.to_owned(),
+        amount,
+    })
+}
+
 /// Classify decoded QR text into a typed payload. Total: never fails.
 pub(crate) fn classify(text: &str) -> Payload {
     if strip_prefix_ci(text, "http://").is_some() || strip_prefix_ci(text, "https://").is_some() {
@@ -229,6 +303,12 @@ pub(crate) fn classify(text: &str) -> Payload {
         })
     } else if let Some(rest) = strip_prefix_ci(text, "geo:") {
         parse_geo(rest)
+    } else if let Some(rest) = strip_prefix_ci(text, "MECARD:") {
+        parse_mecard(rest)
+    } else if let Some(rest) = strip_prefix_ci(text, "bitcoin:") {
+        parse_crypto("bitcoin", rest)
+    } else if let Some(rest) = strip_prefix_ci(text, "ethereum:") {
+        parse_crypto("ethereum", rest)
     } else if strip_prefix_ci(text, "BEGIN:VCARD").is_some() {
         Some(Payload::VCard {
             raw: text.to_owned(),
@@ -396,6 +476,91 @@ mod tests {
     fn plain_text_is_the_fallback() {
         assert_eq!(classify("just some words"), Payload::Text);
         assert_eq!(classify(""), Payload::Text);
+    }
+
+    #[test]
+    fn mecard_parses_the_flat_fields() {
+        let p = classify("MECARD:N:Doe,John;TEL:+13035551212;EMAIL:john@qrcode-ai.com;URL:https://qrcode-ai.com;;");
+        assert_eq!(
+            p,
+            Payload::MeCard {
+                name: Some("Doe,John".into()),
+                tel: Some("+13035551212".into()),
+                email: Some("john@qrcode-ai.com".into()),
+                url: Some("https://qrcode-ai.com".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn mecard_with_escaped_semicolon_and_partial_fields() {
+        // the MECARD escape family is the WIFI one: \; \: \\
+        let p = classify(r"MECARD:N:Acme\; Inc;TEL:555;;");
+        assert_eq!(
+            p,
+            Payload::MeCard {
+                name: Some("Acme; Inc".into()),
+                tel: Some("555".into()),
+                email: None,
+                url: None,
+            }
+        );
+    }
+
+    #[test]
+    fn mecard_without_any_known_field_is_text() {
+        assert_eq!(classify("MECARD:;;"), Payload::Text);
+        assert_eq!(classify("MECARD:X:y;;"), Payload::Text);
+    }
+
+    #[test]
+    fn bitcoin_bip21_with_amount_and_bare() {
+        let p = classify("bitcoin:bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq?amount=0.01&label=Tip");
+        assert_eq!(
+            p,
+            Payload::Crypto {
+                scheme: "bitcoin".into(),
+                address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq".into(),
+                amount: Some("0.01".into()),
+            }
+        );
+        assert_eq!(
+            classify("BITCOIN:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"),
+            Payload::Crypto {
+                scheme: "bitcoin".into(),
+                address: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa".into(),
+                amount: None,
+            }
+        );
+    }
+
+    #[test]
+    fn ethereum_erc681_strips_chain_id_keeps_address() {
+        let p = classify("ethereum:0x32Be343B94f860124dC4fEe278FDCBD38C102D88@1?value=2.014e18");
+        assert_eq!(
+            p,
+            Payload::Crypto {
+                scheme: "ethereum".into(),
+                address: "0x32Be343B94f860124dC4fEe278FDCBD38C102D88".into(),
+                amount: None, // ERC-681 `value` is wei-exponent notation, NOT a display amount
+            }
+        );
+    }
+
+    #[test]
+    fn crypto_empty_address_is_text() {
+        assert_eq!(classify("bitcoin:"), Payload::Text);
+        assert_eq!(classify("bitcoin:?amount=1"), Payload::Text);
+    }
+
+    #[test]
+    fn mecard_and_crypto_wire_names_are_snake_case() {
+        let mecard = classify("MECARD:N:Ada;;");
+        let json = serde_json::to_string(&mecard).unwrap();
+        assert!(json.contains(r#""kind":"me_card""#), "{json}");
+        let crypto = classify("bitcoin:addr1");
+        let json = serde_json::to_string(&crypto).unwrap();
+        assert!(json.contains(r#""kind":"crypto""#), "{json}");
     }
 
     proptest::proptest! {

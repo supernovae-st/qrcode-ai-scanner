@@ -1,7 +1,7 @@
 {
   "name": "@supernovae-st/qrcode-ai-scanner",
   "version": "0.3.0",
-  "description": "QR decoding + scannability scoring for artistic and AI-generated QR codes — async native bindings (Rust)",
+  "description": "QR decoding + scannability scoring for artistic and AI-generated QR codes \u2014 async native bindings (Rust)",
   "main": "index.js",
   "types": "index.d.ts",
   "license": "AGPL-3.0-or-later",
@@ -23,7 +23,8 @@
     "index.js",
     "index.d.ts",
     "native.js",
-    "native.d.ts"
+    "native.d.ts",
+    "report-types.d.ts"
   ],
   "napi": {
     "binaryName": "qrcode-ai-scanner",

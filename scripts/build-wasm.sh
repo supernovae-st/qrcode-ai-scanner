@@ -15,6 +15,7 @@ wasm-opt pkg/qrcode-ai-scanner_bg.wasm \
 mv pkg/qrcode-ai-scanner_bg.wasm.opt pkg/qrcode-ai-scanner_bg.wasm
 
 node ../../scripts/patch-wasm-pkg.mjs
+(cd ../.. && node scripts/sync-report-types.mjs)
 
 raw=$(wc -c < pkg/qrcode-ai-scanner_bg.wasm)
 gz=$(gzip -9 -c pkg/qrcode-ai-scanner_bg.wasm | wc -c)
