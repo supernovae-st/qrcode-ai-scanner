@@ -50,4 +50,4 @@ fuzz/target/
 fuzz/corpus/
 corpus-external/
 img-qr/
-mutants.out/
+mutants.out*/
