@@ -1,6 +1,11 @@
 //! End-to-end Scanner tests — legacy corpus images + the public contract.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::float_cmp,
+    clippy::cast_precision_loss
+)]
 
 use qrcode_ai_scanner::{CancelToken, Grade, ImageInput, Payload, ScanProfile, Scanner};
 
@@ -283,4 +288,46 @@ fn uec_margin_ships_in_the_report() {
     let uec = score.uec.expect("rqrr stream → synthetic UEC");
     assert_eq!(uec.margin, 1.0, "pristine generated code: {uec:?}");
     assert_eq!(uec.worst_block_errors, 0);
+}
+
+// ---- security/correctness round 2 ----
+
+#[test]
+fn corners_are_in_original_image_coordinates_even_when_decoded_downscaled() {
+    // 1400px image: S1 pyramid (512) decodes it — corners MUST come back
+    // in 1400-space, not 512-space.
+    let code = qrcode::QrCode::with_error_correction_level(
+        "corner space pin".as_bytes(),
+        qrcode::EcLevel::Q,
+    )
+    .unwrap();
+    let small = code
+        .render::<image::Luma<u8>>()
+        .module_dimensions(8, 8)
+        .build();
+    // paste the QR centered on a large white canvas
+    let mut big = image::GrayImage::from_pixel(1400, 1400, image::Luma([255u8]));
+    let (off_x, off_y) = (500u32, 450u32);
+    image::imageops::overlay(&mut big, &small, i64::from(off_x), i64::from(off_y));
+    let mut png = Vec::new();
+    image::DynamicImage::ImageLuma8(big)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+
+    let report = Scanner::default().scan(ImageInput::encoded(&png)).unwrap();
+    assert_eq!(report.detections.len(), 1, "trace: {:?}", report.trace);
+    let corners = report.detections[0].corners.expect("rqrr corners");
+    let (qr_w, qr_h) = (small.width() as f32, small.height() as f32);
+    for p in corners {
+        assert!(
+            p.x >= off_x as f32 - qr_w * 0.2 && p.x <= off_x as f32 + qr_w * 1.2,
+            "corner x {} outside the symbol's original-space region (offset {off_x}, size {qr_w}) — corners are in downscaled space",
+            p.x
+        );
+        assert!(
+            p.y >= off_y as f32 - qr_h * 0.2 && p.y <= off_y as f32 + qr_h * 1.2,
+            "corner y {} outside original-space region",
+            p.y
+        );
+    }
 }

@@ -7,12 +7,20 @@ async function scan(image, options = {}) {
   if (options.signal?.aborted) {
     throw new DOMException("scan aborted before start", "AbortError");
   }
-  const json = await native.scanJson(image, options.profile, options.signal);
+  const json = await native.scanJson(
+    image,
+    options.profile,
+    options.signal,
+    options.maxDimension,
+    options.maxPixels,
+  );
   return JSON.parse(json);
 }
 
 function scanSync(image, options = {}) {
-  return JSON.parse(native.scanSyncJson(image, options.profile));
+  return JSON.parse(
+    native.scanSyncJson(image, options.profile, options.maxDimension, options.maxPixels),
+  );
 }
 
 module.exports = { scan, scanSync, version: native.version };

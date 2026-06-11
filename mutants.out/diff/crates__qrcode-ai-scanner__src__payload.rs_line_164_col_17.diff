@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/payload.rs
++++ delete match arm "BODY" in parse_matmsg
+@@ -156,17 +156,17 @@
+     let mut to = None;
+     let mut subject = None;
+     let mut body = None;
+     for segment in rest.split(';') {
+         if let Some((key, value)) = segment.split_once(':') {
+             match key.to_ascii_uppercase().as_str() {
+                 "TO" => to = Some(value.to_owned()),
+                 "SUB" => subject = Some(value.to_owned()),
+-                "BODY" => body = Some(value.to_owned()),
++                 /* ~ changed by cargo-mutants ~ */
+                 _ => {}
+             }
+         }
+     }
+     Some(Payload::Email {
+         to: to?,
+         subject,
+         body,

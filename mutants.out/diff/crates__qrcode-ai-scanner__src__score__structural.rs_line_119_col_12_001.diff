@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/structural.rs
++++ replace += with *= in quiet_zone_ok
+@@ -111,17 +111,17 @@
+         let mut mx = 0;
+         while mx < modules {
+             if let Some(v) = sampler.module(mx, my) {
+                 interior_sum += u32::from(v);
+                 interior_n += 1;
+             }
+             mx += step;
+         }
+-        my += step;
++        my *= /* ~ changed by cargo-mutants ~ */ step;
+     }
+     if interior_n == 0 {
+         return false;
+     }
+     let interior_mean = interior_sum / interior_n;
+ 
+     // probe a 2-module ring outside each edge
+     let mut light = 0u32;

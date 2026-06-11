@@ -1,0 +1,31 @@
+--- crates/qrcode-ai-scanner/src/payload.rs
++++ replace parse_sms -> Option<Payload> with None
+@@ -169,27 +169,17 @@
+     Some(Payload::Email {
+         to: to?,
+         subject,
+         body,
+     })
+ }
+ 
+ fn parse_sms(rest: &str) -> Option<Payload> {
+-    let (number, body) = match rest.split_once('?') {
+-        Some((number, query)) => (number, query_param(query, "body").map(str::to_owned)),
+-        None => (rest, None),
+-    };
+-    if number.is_empty() {
+-        return None;
+-    }
+-    Some(Payload::Sms {
+-        number: number.to_owned(),
+-        body,
+-    })
++    None /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn parse_geo(rest: &str) -> Option<Payload> {
+     let coords = rest.split(['?', ';']).next()?;
+     let mut parts = coords.split(',');
+     let lat: f64 = parts.next()?.parse().ok()?;
+     let lon: f64 = parts.next()?.parse().ok()?;
+     (lat.is_finite()

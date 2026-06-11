@@ -1,0 +1,332 @@
+crates/qrcode-ai-scanner/src/payload.rs:74:5: replace strip_prefix_ci -> Option<&'a str> with None
+crates/qrcode-ai-scanner/src/payload.rs:74:5: replace strip_prefix_ci -> Option<&'a str> with Some("xyzzy")
+crates/qrcode-ai-scanner/src/payload.rs:81:5: replace wifi_fields -> Vec<(String, String)> with vec![]
+crates/qrcode-ai-scanner/src/payload.rs:81:5: replace wifi_fields -> Vec<(String, String)> with vec![(String::new(), String::new())]
+crates/qrcode-ai-scanner/src/payload.rs:81:5: replace wifi_fields -> Vec<(String, String)> with vec![(String::new(), "xyzzy".into())]
+crates/qrcode-ai-scanner/src/payload.rs:81:5: replace wifi_fields -> Vec<(String, String)> with vec![("xyzzy".into(), String::new())]
+crates/qrcode-ai-scanner/src/payload.rs:81:5: replace wifi_fields -> Vec<(String, String)> with vec![("xyzzy".into(), "xyzzy".into())]
+crates/qrcode-ai-scanner/src/payload.rs:107:5: replace parse_wifi -> Option<Payload> with None
+crates/qrcode-ai-scanner/src/payload.rs:113:13: delete match arm "S" in parse_wifi
+crates/qrcode-ai-scanner/src/payload.rs:114:13: delete match arm "T" in parse_wifi
+crates/qrcode-ai-scanner/src/payload.rs:115:13: delete match arm "P" in parse_wifi
+crates/qrcode-ai-scanner/src/payload.rs:116:13: delete match arm "H" in parse_wifi
+crates/qrcode-ai-scanner/src/payload.rs:130:5: replace query_param -> Option<&'a str> with None
+crates/qrcode-ai-scanner/src/payload.rs:74:5: replace strip_prefix_ci -> Option<&'a str> with Some("")
+crates/qrcode-ai-scanner/src/payload.rs:130:5: replace query_param -> Option<&'a str> with Some("")
+crates/qrcode-ai-scanner/src/payload.rs:130:5: replace query_param -> Option<&'a str> with Some("xyzzy")
+crates/qrcode-ai-scanner/src/payload.rs:137:5: replace parse_mailto -> Option<Payload> with None
+crates/qrcode-ai-scanner/src/payload.rs:156:5: replace parse_matmsg -> Option<Payload> with None
+crates/qrcode-ai-scanner/src/payload.rs:162:17: delete match arm "TO" in parse_matmsg
+crates/qrcode-ai-scanner/src/payload.rs:163:17: delete match arm "SUB" in parse_matmsg
+crates/qrcode-ai-scanner/src/payload.rs:164:17: delete match arm "BODY" in parse_matmsg
+crates/qrcode-ai-scanner/src/payload.rs:177:5: replace parse_sms -> Option<Payload> with None
+crates/qrcode-ai-scanner/src/payload.rs:191:5: replace parse_geo -> Option<Payload> with None
+crates/qrcode-ai-scanner/src/payload.rs:198:9: replace && with || in parse_geo
+crates/qrcode-ai-scanner/src/payload.rs:197:9: replace && with || in parse_geo
+crates/qrcode-ai-scanner/src/payload.rs:196:9: replace && with || in parse_geo
+crates/qrcode-ai-scanner/src/payload.rs:197:13: delete - in parse_geo
+crates/qrcode-ai-scanner/src/payload.rs:198:13: delete - in parse_geo
+crates/qrcode-ai-scanner/src/payload.rs:204:51: replace || with && in classify
+crates/qrcode-ai-scanner/src/payload.rs:220:10: delete ! in classify
+crates/qrcode-ai-scanner/src/payload.rs:227:10: delete ! in classify
+crates/qrcode-ai-scanner/src/score/mod.rs:50:5: replace cell_passes -> bool with true
+crates/qrcode-ai-scanner/src/score/mod.rs:50:5: replace cell_passes -> bool with false
+crates/qrcode-ai-scanner/src/score/mod.rs:51:48: replace == with != in cell_passes
+crates/qrcode-ai-scanner/src/score/mod.rs:62:5: replace depth_indices -> &'static[usize] with Vec::leak(Vec::new())
+crates/qrcode-ai-scanner/src/score/mod.rs:62:5: replace depth_indices -> &'static[usize] with Vec::leak(vec![0])
+crates/qrcode-ai-scanner/src/score/mod.rs:62:5: replace depth_indices -> &'static[usize] with Vec::leak(vec![1])
+crates/qrcode-ai-scanner/src/score/mod.rs:64:9: delete match arm ScoreDepth::Reduced in depth_indices
+crates/qrcode-ai-scanner/src/score/mod.rs:77:5: replace run_ramp -> Result<(u8, u8)> with Ok((0, 0))
+crates/qrcode-ai-scanner/src/score/mod.rs:77:5: replace run_ramp -> Result<(u8, u8)> with Ok((0, 1))
+crates/qrcode-ai-scanner/src/score/mod.rs:77:5: replace run_ramp -> Result<(u8, u8)> with Ok((1, 0))
+crates/qrcode-ai-scanner/src/score/mod.rs:77:5: replace run_ramp -> Result<(u8, u8)> with Ok((1, 1))
+crates/qrcode-ai-scanner/src/score/mod.rs:84:20: replace += with -= in run_ramp
+crates/qrcode-ai-scanner/src/score/mod.rs:84:20: replace += with *= in run_ramp
+crates/qrcode-ai-scanner/src/score/mod.rs:100:5: replace run_axes -> Result<Vec<AxisScore>> with Ok(vec![])
+crates/qrcode-ai-scanner/src/score/mod.rs:140:29: replace * with + in run_axes
+crates/qrcode-ai-scanner/src/score/mod.rs:141:30: replace * with + in run_axes
+crates/qrcode-ai-scanner/src/score/mod.rs:141:30: replace * with / in run_axes
+crates/qrcode-ai-scanner/src/score/mod.rs:142:48: replace * with / in run_axes
+crates/qrcode-ai-scanner/src/score/mod.rs:152:9: delete match arm ScoreDepth::Off in run_axes
+crates/qrcode-ai-scanner/src/score/mod.rs:153:9: delete match arm ScoreDepth::Reduced in run_axes
+crates/qrcode-ai-scanner/src/score/mod.rs:162:29: replace += with -= in run_axes
+crates/qrcode-ai-scanner/src/score/mod.rs:184:37: replace == with != in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:186:24: replace > with == in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:186:24: replace > with < in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:187:22: replace += with -= in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:187:22: replace += with *= in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:187:64: replace / with % in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:187:58: replace * with + in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:187:58: replace * with / in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:187:32: replace * with + in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:187:32: replace * with / in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:190:44: replace / with % in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:201:26: replace < with == in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:201:26: replace < with > in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:201:26: replace < with <= in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:209:12: delete ! in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:218:30: replace == with != in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:222:14: replace > with < in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:223:46: replace <= with > in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:223:31: replace / with % in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:223:25: replace * with + in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:228:14: replace > with == in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:228:14: replace > with >= in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:229:31: replace / with % in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:229:25: replace * with + in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:234:14: replace > with == in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:234:14: replace > with >= in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:249:20: replace < with > in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:250:24: replace || with && in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:250:19: replace < with == in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:250:19: replace < with <= in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:275:9: delete match arm (Some(corners), Some(version)) in evaluate
+crates/qrcode-ai-scanner/src/score/mod.rs:284:9: delete match arm (Some(stream), Some(version), Some(ec), Some(mask)) in evaluate
+crates/qrcode-ai-scanner/src/engine/charset.rs:15:8: delete ! in resolve
+crates/qrcode-ai-scanner/src/score/structural.rs:18:13: replace < with ==
+crates/qrcode-ai-scanner/src/score/structural.rs:18:13: replace < with >
+crates/qrcode-ai-scanner/src/score/structural.rs:20:17: replace < with ==
+crates/qrcode-ai-scanner/src/score/structural.rs:20:17: replace < with >
+crates/qrcode-ai-scanner/src/score/structural.rs:21:41: replace || with &&
+crates/qrcode-ai-scanner/src/score/structural.rs:21:51: replace || with &&
+crates/qrcode-ai-scanner/src/score/structural.rs:21:31: replace || with &&
+crates/qrcode-ai-scanner/src/score/structural.rs:21:26: replace == with !=
+crates/qrcode-ai-scanner/src/score/structural.rs:21:36: replace == with !=
+crates/qrcode-ai-scanner/src/score/structural.rs:21:46: replace == with !=
+crates/qrcode-ai-scanner/src/score/structural.rs:21:56: replace == with !=
+crates/qrcode-ai-scanner/src/score/structural.rs:22:51: replace && with ||
+crates/qrcode-ai-scanner/src/score/structural.rs:22:41: replace && with ||
+crates/qrcode-ai-scanner/src/score/structural.rs:22:31: replace && with ||
+crates/qrcode-ai-scanner/src/score/structural.rs:22:26: replace >= with <
+crates/qrcode-ai-scanner/src/score/structural.rs:22:36: replace <= with >
+crates/qrcode-ai-scanner/src/score/structural.rs:22:46: replace >= with <
+crates/qrcode-ai-scanner/src/score/structural.rs:22:56: replace <= with >
+crates/qrcode-ai-scanner/src/score/structural.rs:23:34: replace || with &&
+crates/qrcode-ai-scanner/src/score/structural.rs:57:9: replace GridSampler<'a>::module -> Option<u8> with None
+crates/qrcode-ai-scanner/src/score/structural.rs:57:9: replace GridSampler<'a>::module -> Option<u8> with Some(0)
+crates/qrcode-ai-scanner/src/score/structural.rs:57:9: replace GridSampler<'a>::module -> Option<u8> with Some(1)
+crates/qrcode-ai-scanner/src/score/structural.rs:57:41: replace + with - in GridSampler<'a>::module
+crates/qrcode-ai-scanner/src/score/structural.rs:57:41: replace + with * in GridSampler<'a>::module
+crates/qrcode-ai-scanner/src/score/structural.rs:58:43: replace / with % in GridSampler<'a>::module
+crates/qrcode-ai-scanner/src/score/structural.rs:58:43: replace / with * in GridSampler<'a>::module
+crates/qrcode-ai-scanner/src/score/structural.rs:58:36: replace + with - in GridSampler<'a>::module
+crates/qrcode-ai-scanner/src/score/structural.rs:58:36: replace + with * in GridSampler<'a>::module
+crates/qrcode-ai-scanner/src/score/structural.rs:58:70: replace / with % in GridSampler<'a>::module
+crates/qrcode-ai-scanner/src/score/structural.rs:58:70: replace / with * in GridSampler<'a>::module
+crates/qrcode-ai-scanner/src/score/structural.rs:58:63: replace + with - in GridSampler<'a>::module
+crates/qrcode-ai-scanner/src/score/structural.rs:58:63: replace + with * in GridSampler<'a>::module
+crates/qrcode-ai-scanner/src/score/structural.rs:68:5: replace finder_score -> f32 with 0.0
+crates/qrcode-ai-scanner/src/score/structural.rs:68:5: replace finder_score -> f32 with 1.0
+crates/qrcode-ai-scanner/src/score/structural.rs:68:5: replace finder_score -> f32 with -1.0
+crates/qrcode-ai-scanner/src/score/structural.rs:78:34: replace + with - in finder_score
+crates/qrcode-ai-scanner/src/score/structural.rs:78:34: replace + with * in finder_score
+crates/qrcode-ai-scanner/src/score/structural.rs:78:56: replace + with - in finder_score
+crates/qrcode-ai-scanner/src/score/structural.rs:78:56: replace + with * in finder_score
+crates/qrcode-ai-scanner/src/score/structural.rs:81:17: replace += with -= in finder_score
+crates/qrcode-ai-scanner/src/score/structural.rs:81:17: replace += with *= in finder_score
+crates/qrcode-ai-scanner/src/score/structural.rs:84:25: replace / with * in finder_score
+crates/qrcode-ai-scanner/src/score/structural.rs:88:50: replace < with == in finder_score
+crates/qrcode-ai-scanner/src/score/structural.rs:88:50: replace < with > in finder_score
+crates/qrcode-ai-scanner/src/score/structural.rs:88:50: replace < with <= in finder_score
+crates/qrcode-ai-scanner/src/score/structural.rs:89:30: replace == with != in finder_score
+crates/qrcode-ai-scanner/src/score/structural.rs:90:26: replace += with -= in finder_score
+crates/qrcode-ai-scanner/src/score/structural.rs:90:26: replace += with *= in finder_score
+crates/qrcode-ai-scanner/src/score/structural.rs:96:25: replace / with % in finder_score
+crates/qrcode-ai-scanner/src/score/structural.rs:96:25: replace / with * in finder_score
+crates/qrcode-ai-scanner/src/score/structural.rs:106:5: replace quiet_zone_ok -> bool with true
+crates/qrcode-ai-scanner/src/score/structural.rs:106:5: replace quiet_zone_ok -> bool with false
+crates/qrcode-ai-scanner/src/score/structural.rs:108:25: replace / with % in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:110:14: replace < with == in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:110:14: replace < with > in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:110:14: replace < with <= in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:112:18: replace < with == in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:112:18: replace < with > in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:114:30: replace += with -= in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:115:28: replace += with -= in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:115:28: replace += with *= in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:117:16: replace += with -= in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:119:12: replace += with -= in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:119:12: replace += with *= in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:121:19: replace == with != in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:124:38: replace / with * in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:129:20: delete - in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:133:33: replace - with / in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:133:29: replace - with / in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:135:30: replace - with / in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:135:26: replace - with / in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:138:27: replace += with *= in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:138:27: replace += with -= in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:139:37: replace > with == in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:139:37: replace > with < in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:140:31: replace += with -= in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:140:31: replace += with *= in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:146:15: replace && with || in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:146:11: replace > with == in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:146:11: replace > with < in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:146:11: replace > with >= in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:146:30: replace >= with < in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:146:24: replace * with + in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:146:24: replace * with / in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:146:39: replace * with + in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:146:39: replace * with / in quiet_zone_ok
+crates/qrcode-ai-scanner/src/score/structural.rs:151:42: replace + with - in check
+crates/qrcode-ai-scanner/src/score/structural.rs:151:5: replace check -> Option<StructuralReport> with None
+crates/qrcode-ai-scanner/src/score/structural.rs:151:42: replace + with * in check
+crates/qrcode-ai-scanner/src/score/structural.rs:151:38: replace * with / in check
+crates/qrcode-ai-scanner/src/score/structural.rs:151:38: replace * with + in check
+crates/qrcode-ai-scanner/src/score/structural.rs:158:34: replace - with + in check
+crates/qrcode-ai-scanner/src/score/structural.rs:158:34: replace - with / in check
+crates/qrcode-ai-scanner/src/score/structural.rs:159:37: replace - with + in check
+crates/qrcode-ai-scanner/src/score/structural.rs:159:37: replace - with / in check
+crates/qrcode-ai-scanner/src/score/uec.rs:115:5: replace format_bits_index -> usize with 0
+crates/qrcode-ai-scanner/src/score/uec.rs:115:5: replace format_bits_index -> usize with 1
+crates/qrcode-ai-scanner/src/score/uec.rs:125:5: replace reserved_cell -> bool with true
+crates/qrcode-ai-scanner/src/score/uec.rs:125:5: replace reserved_cell -> bool with false
+crates/qrcode-ai-scanner/src/score/uec.rs:126:28: replace + with - in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:126:28: replace + with * in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:126:24: replace * with + in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:126:24: replace * with / in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:129:14: replace && with || in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:129:10: replace < with == in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:129:10: replace < with > in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:129:10: replace < with <= in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:129:24: replace || with && in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:129:20: replace < with == in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:129:20: replace < with > in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:129:20: replace < with <= in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:129:33: replace >= with < in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:129:29: replace + with - in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:129:29: replace + with * in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:132:14: replace && with || in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:132:10: replace < with == in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:132:10: replace < with > in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:132:10: replace < with <= in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:132:23: replace >= with < in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:132:19: replace + with - in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:132:19: replace + with * in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:136:15: replace || with && in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:136:10: replace == with != in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:136:20: replace == with != in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:140:21: replace && with || in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:140:16: replace >= with < in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:140:51: replace || with && in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:140:32: replace && with || in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:140:28: replace < with == in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:140:28: replace < with > in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:140:28: replace < with <= in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:140:42: replace >= with < in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:140:37: replace + with - in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:140:37: replace + with * in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:140:70: replace && with || in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:140:62: replace >= with < in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:140:57: replace + with - in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:140:57: replace + with * in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:140:75: replace < with == in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:140:75: replace < with > in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:147:61: replace != with == in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:140:75: replace < with <= in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:149:32: replace < with == in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:149:32: replace < with > in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:149:32: replace < with <= in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:152:32: replace < with == in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:152:32: replace < with > in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:152:32: replace < with <= in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:157:31: replace match guard x == len && y == len with true in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:157:31: replace match guard x == len && y == len with false in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:158:31: replace match guard 0 < x && x < len with true in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:158:31: replace match guard 0 < x && x < len with false in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:159:31: replace match guard 0 < y && y < len with true in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:159:31: replace match guard 0 < y && y < len with false in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:157:40: replace && with || in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:157:33: replace == with != in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:157:45: replace == with != in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:158:37: replace && with || in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:158:33: replace < with == in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:158:33: replace < with > in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:158:33: replace < with <= in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:158:42: replace < with == in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:158:42: replace < with > in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:158:42: replace < with <= in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:159:37: replace && with || in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:159:33: replace < with == in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:159:33: replace < with > in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:159:33: replace < with <= in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:159:42: replace < with == in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:159:42: replace < with > in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:159:42: replace < with <= in reserved_cell
+crates/qrcode-ai-scanner/src/score/uec.rs:166:5: replace mask_bit -> bool with true
+crates/qrcode-ai-scanner/src/score/uec.rs:166:5: replace mask_bit -> bool with false
+crates/qrcode-ai-scanner/src/score/uec.rs:167:9: delete match arm 0 in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:169:9: delete match arm 2 in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:170:9: delete match arm 3 in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:171:9: delete match arm 4 in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:172:9: delete match arm 5 in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:174:9: delete match arm 7 in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:167:17: replace + with * in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:167:17: replace + with - in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:170:17: replace + with - in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:170:17: replace + with * in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:171:23: replace + with - in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:171:23: replace + with * in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:171:18: replace / with % in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:171:18: replace / with * in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:171:28: replace / with % in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:171:28: replace / with * in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:172:40: replace == with != in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:172:26: replace + with - in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:172:26: replace + with * in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:172:22: replace % with / in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:172:22: replace % with + in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:172:17: replace * with + in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:172:17: replace * with / in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:172:36: replace % with / in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:172:36: replace % with + in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:172:31: replace * with + in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:172:31: replace * with / in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:173:27: replace + with - in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:173:23: replace % with / in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:173:18: replace * with + in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:173:18: replace * with / in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:173:37: replace % with / in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:173:32: replace * with + in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:174:27: replace + with - in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:173:32: replace * with / in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:174:27: replace + with * in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:174:23: replace % with / in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:174:23: replace % with + in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:174:18: replace * with + in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:174:18: replace * with / in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:174:37: replace % with / in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:174:37: replace % with + in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:174:32: replace + with - in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:174:32: replace + with * in mask_bit
+crates/qrcode-ai-scanner/src/score/uec.rs:183:5: replace zigzag_positions -> Vec<(usize, usize)> with vec![]
+crates/qrcode-ai-scanner/src/score/uec.rs:183:5: replace zigzag_positions -> Vec<(usize, usize)> with vec![(0, 0)]
+crates/qrcode-ai-scanner/src/score/uec.rs:183:5: replace zigzag_positions -> Vec<(usize, usize)> with vec![(0, 1)]
+crates/qrcode-ai-scanner/src/score/uec.rs:183:5: replace zigzag_positions -> Vec<(usize, usize)> with vec![(1, 0)]
+crates/qrcode-ai-scanner/src/score/uec.rs:183:5: replace zigzag_positions -> Vec<(usize, usize)> with vec![(1, 1)]
+crates/qrcode-ai-scanner/src/score/uec.rs:183:28: replace + with - in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:183:28: replace + with * in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:183:24: replace * with + in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:183:24: replace * with / in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:185:22: replace - with + in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:185:22: replace - with / in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:186:22: replace - with + in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:186:22: replace - with / in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:188:13: replace > with == in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:188:13: replace > with < in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:188:13: replace > with >= in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:189:14: replace == with != in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:190:15: replace -= with += in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:190:15: replace -= with /= in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:192:12: delete ! in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:195:12: delete ! in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:195:41: replace - with + in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:195:41: replace - with / in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:196:34: replace - with + in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:196:34: replace - with / in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:203:28: replace match guard yy == size - 1 with true in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:203:31: replace == with != in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:203:39: replace - with + in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:203:39: replace - with / in zigzag_positions
+crates/qrcode-ai-scanner/src/score/uec.rs:205:23: replace - with + in zigzag_positions

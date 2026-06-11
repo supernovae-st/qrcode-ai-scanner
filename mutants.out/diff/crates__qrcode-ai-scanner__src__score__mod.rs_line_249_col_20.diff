@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/mod.rs
++++ replace < with == in compose
+@@ -241,17 +241,17 @@
+     // strongest possible "raise EC" signal even when stress survival is OK.
+     let thin_margin = uec.is_some_and(|u| {
+         matches!(
+             u.grade,
+             crate::report::UecGrade::D | crate::report::UecGrade::F
+         )
+     });
+     if let Some(current) = detection.ec
+-        && current < EcLevel::H
++        && current == /* ~ changed by cargo-mutants ~ */ EcLevel::H
+         && (value < 70 || thin_margin)
+     {
+         hints.push(Hint::RaiseErrorCorrection { current });
+     }
+ 
+     let score = Score {
+         value,
+         grade: Grade::from_value(value),

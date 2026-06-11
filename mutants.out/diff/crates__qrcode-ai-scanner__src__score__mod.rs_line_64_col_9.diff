@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/mod.rs
++++ delete match arm ScoreDepth::Reduced in depth_indices
+@@ -56,17 +56,17 @@
+     outcome.detections.iter().any(|d| d.raw == expected_raw)
+ }
+ 
+ /// Ramp cell indices at a given depth (Reduced takes the 2nd and 4th
+ /// intensities of each five-step ramp).
+ fn depth_indices(depth: ScoreDepth) -> &'static [usize] {
+     match depth {
+         ScoreDepth::Off => &[],
+-        ScoreDepth::Reduced => &[1, 3],
++         /* ~ changed by cargo-mutants ~ */
+         _ => &[0, 1, 2, 3, 4],
+     }
+ }
+ 
+ /// Run one ordered ramp with early-stop at the first failure (the knee).
+ fn run_ramp(
+     base: &LumaImage,
+     expected: &[u8],

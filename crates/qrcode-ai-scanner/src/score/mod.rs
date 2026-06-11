@@ -13,7 +13,9 @@ pub(crate) mod structural;
 pub(crate) mod uec;
 pub(crate) mod warp;
 
-use crate::engine::{self, EngineOptions};
+use web_time::Instant;
+
+use crate::engine::{self};
 use crate::error::Result;
 use crate::input::LumaImage;
 use crate::ladder::{CancelToken, MergedDetection, ScoreDepth};
@@ -42,18 +44,27 @@ const FINDER_INTEGRITY_FLOOR: f32 = 0.5;
 const FINDER_DAMAGE_CAP: u8 = 40;
 const QUIET_ZONE_CAP: u8 = 60;
 
-/// One stress cell: did the (transformed) image still decode to `expected`?
-fn cell_passes(img: &LumaImage, expected_raw: &[u8]) -> bool {
+/// One stress cell: did the (transformed) image still decode to the same
+/// SYMBOL? Identity is the charset-RESOLVED text, not raw bytes — for
+/// kanji-mode symbols rxing re-encodes text as UTF-8 while rqrr keeps the
+/// original Shift-JIS bytes (the exact divergence the ladder merge handles;
+/// raw-keyed cells silently failed every rxing-only kanji survival).
+fn cell_passes(img: &LumaImage, expected_text: &str) -> bool {
     // Fast subset: direct + otsu — the score measures the MARGIN, not the
     // full ladder's recovery power (that asymmetry is the point: a code
     // that needs the deep ladder after mild stress has no margin).
-    let outcome = engine::decode_all(img, EngineOptions::default());
-    if outcome.detections.iter().any(|d| d.raw == expected_raw) {
+    let matches = |found: &[engine::RawDetection]| {
+        found
+            .iter()
+            .any(|d| engine::charset::resolve(&d.raw).0 == expected_text)
+    };
+    let outcome = engine::decode_all(img);
+    if matches(&outcome.detections) {
         return true;
     }
     let binarized = transform::otsu_threshold(img);
-    let outcome = engine::decode_all(&binarized, EngineOptions::default());
-    outcome.detections.iter().any(|d| d.raw == expected_raw)
+    let outcome = engine::decode_all(&binarized);
+    matches(&outcome.detections)
 }
 
 /// Ramp cell indices at a given depth (Reduced takes the 2nd and 4th
@@ -62,15 +73,19 @@ fn depth_indices(depth: ScoreDepth) -> &'static [usize] {
     match depth {
         ScoreDepth::Off => &[],
         ScoreDepth::Reduced => &[1, 3],
-        _ => &[0, 1, 2, 3, 4],
+        ScoreDepth::Full => &[0, 1, 2, 3, 4],
     }
 }
 
 /// Run one ordered ramp with early-stop at the first failure (the knee).
+/// The shared scan deadline stops further cells (run-out reads as the knee:
+/// budget cuts are wall-clock — determinism holds modulo budget, as
+/// documented on the crate contract).
 fn run_ramp(
     base: &LumaImage,
-    expected: &[u8],
+    expected_text: &str,
     cancel: &CancelToken,
+    deadline: Option<Instant>,
     indices: &[usize],
     build: impl Fn(&LumaImage, usize) -> LumaImage,
 ) -> Result<(u8, u8)> {
@@ -79,8 +94,11 @@ fn run_ramp(
         if cancel.is_cancelled() {
             return Err(crate::error::ScanError::Cancelled);
         }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            break;
+        }
         let cell = build(base, i);
-        if cell_passes(&cell, expected) {
+        if cell_passes(&cell, expected_text) {
             passed += 1;
         } else {
             break; // knee — ordered intensities, later cells only get harder
@@ -92,9 +110,10 @@ fn run_ramp(
 /// Run the five ordered ramps + the lighting set at the given depth.
 fn run_axes(
     base: &LumaImage,
-    expected: &[u8],
+    expected_text: &str,
     depth: ScoreDepth,
     cancel: &CancelToken,
+    deadline: Option<Instant>,
 ) -> Result<Vec<AxisScore>> {
     // ---- ordered ramps (intensity grows with the index) ----
     let resolution_sides: [u32; 5] = [358, 256, 179, 128, 90];
@@ -123,7 +142,7 @@ fn run_axes(
         }),
     ];
     for (axis, build) in ramps {
-        let (passed, total) = run_ramp(base, expected, cancel, indices, build)?;
+        let (passed, total) = run_ramp(base, expected_text, cancel, deadline, indices, build)?;
         axes.push(AxisScore {
             axis,
             passed,
@@ -151,14 +170,17 @@ fn run_axes(
     let lighting_picks: &[usize] = match depth {
         ScoreDepth::Off => &[],
         ScoreDepth::Reduced => &[1, 2],
-        _ => &[0, 1, 2, 3, 4],
+        ScoreDepth::Full => &[0, 1, 2, 3, 4],
     };
     let mut lighting_passed = 0u8;
     for &i in lighting_picks {
         if cancel.is_cancelled() {
             return Err(crate::error::ScanError::Cancelled);
         }
-        if cell_passes(&lighting_cells[i](base), expected) {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            break;
+        }
+        if cell_passes(&lighting_cells[i](base), expected_text) {
             lighting_passed += 1;
         }
     }
@@ -268,9 +290,10 @@ pub(crate) fn evaluate(
     detection: &MergedDetection,
     depth: ScoreDepth,
     cancel: &CancelToken,
+    deadline: Option<Instant>,
 ) -> Result<(Score, Vec<Hint>)> {
     let base = transform::downscale_to(luma, STRESS_BASE_SIDE);
-    let axes = run_axes(&base, &detection.raw, depth, cancel)?;
+    let axes = run_axes(&base, &detection.text, depth, cancel, deadline)?;
     let structural = match (detection.corners, detection.version) {
         (Some(corners), Some(version)) => structural::check(luma, corners, version),
         _ => None,
@@ -287,4 +310,53 @@ pub(crate) fn evaluate(
         _ => None,
     };
     Ok(compose(axes, structural, uec_report, detection))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use crate::input::{ImageInput, Limits};
+    use crate::ladder::{self, ScanConfig};
+    use crate::transform::normalize;
+
+    /// Kanji-mode regression for the SCORING path (the ladder-side fix has
+    /// its own test): stress cells must match by resolved text — raw-keyed
+    /// cells silently failed every rxing-only survival on kanji symbols.
+    #[test]
+    fn kanji_symbol_scores_with_text_keyed_cells() {
+        let sjis: &[u8] = &[0x82, 0xB1, 0x82, 0xF1, 0x82, 0xC9, 0x82, 0xBF, 0x82, 0xCD];
+        let code = qrcode::QrCode::with_error_correction_level(sjis, qrcode::EcLevel::Q).unwrap();
+        let img = code
+            .render::<image::Luma<u8>>()
+            .module_dimensions(8, 8)
+            .build();
+        let mut png = Vec::new();
+        image::DynamicImage::ImageLuma8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let planes = normalize(&ImageInput::encoded(&png), &Limits::default()).unwrap();
+        let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
+        let detection = &outcome.merged[0];
+        assert_eq!(detection.text, "こんにちは");
+
+        let (score, _) = evaluate(
+            &planes.luma,
+            detection,
+            ScoreDepth::Full,
+            &CancelToken::new(),
+            None,
+        )
+        .unwrap();
+        // a pristine 8px/module symbol survives the early cells of every
+        // axis — raw-keyed matching scored this ZERO on rxing-only cells
+        let total_passed: u32 = score.axes.iter().map(|a| u32::from(a.passed)).sum();
+        assert!(
+            total_passed >= 12,
+            "kanji symbol must survive stress cells: {:?}",
+            score.axes
+        );
+        assert!(score.value >= 50, "score {}", score.value);
+    }
 }

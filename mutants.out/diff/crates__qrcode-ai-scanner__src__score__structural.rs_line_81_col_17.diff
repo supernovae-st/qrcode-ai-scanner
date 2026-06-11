@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/structural.rs
++++ replace += with -= in finder_score
+@@ -73,17 +73,17 @@
+                 clippy::cast_possible_truncation,
+                 clippy::cast_possible_wrap,
+                 reason = "dx/dy ∈ 0..7"
+             )]
+             let value = sampler
+                 .module(origin_x + dx as i32, origin_y + dy as i32)
+                 .unwrap_or(255);
+             *cell = value;
+-            sum += u32::from(value);
++            sum -= /* ~ changed by cargo-mutants ~ */ u32::from(value);
+         }
+     }
+     let threshold = sum / 49;
+     let mut matching = 0u32;
+     for (dy, row) in region.iter().enumerate() {
+         for (dx, &value) in row.iter().enumerate() {
+             let observed_dark = u32::from(value) < threshold;
+             if observed_dark == FINDER[dy][dx] {

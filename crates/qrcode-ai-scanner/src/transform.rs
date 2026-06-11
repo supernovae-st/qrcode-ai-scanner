@@ -93,15 +93,21 @@ pub(crate) fn normalize(input: &ImageInput<'_>, limits: &Limits) -> Result<Sourc
                         details: e.to_string(),
                     })?;
             validate_dims(width, height, limits)?;
-            let img = image::ImageReader::new(std::io::Cursor::new(bytes))
+            let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
                 .with_guessed_format()
                 .map_err(|e| ScanError::InvalidImage {
                     details: e.to_string(),
-                })?
-                .decode()
-                .map_err(|e| ScanError::InvalidImage {
-                    details: e.to_string(),
                 })?;
+            // second wall behind the dimension probe: the decoder itself
+            // refuses allocations past our pixel budget (malformed headers)
+            let mut decode_limits = image::Limits::default();
+            decode_limits.max_image_width = Some(limits.max_dimension);
+            decode_limits.max_image_height = Some(limits.max_dimension);
+            decode_limits.max_alloc = Some(limits.max_pixels.saturating_mul(8));
+            reader.limits(decode_limits);
+            let img = reader.decode().map_err(|e| ScanError::InvalidImage {
+                details: e.to_string(),
+            })?;
             let rgb = img.color().has_color().then(|| img.to_rgb8().into_raw());
             let luma = img.into_luma8();
             let (w, h) = (luma.width(), luma.height());

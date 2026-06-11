@@ -50,1073 +50,80 @@ struct VersionDb {
 /// (quirc heritage · Apache-2.0/MIT) — NOT hand-typed. Index = version,
 /// entry 0 is a zero sentinel. Pinned empirically by the clean-matrix test
 /// (any row error scrambles the RS syndromes of that version).
+/// Compact row constructor — the 41-row table at one line per version
+/// (the exploded struct form tripled the file size past the 1500-LOC cap).
+const fn v(total: usize, apat: [usize; 7], ecc: [(usize, usize, usize); 4]) -> VersionDb {
+    VersionDb {
+        total,
+        apat,
+        ecc: [
+            Rs {
+                bs: ecc[0].0,
+                dw: ecc[0].1,
+                ns: ecc[0].2,
+            },
+            Rs {
+                bs: ecc[1].0,
+                dw: ecc[1].1,
+                ns: ecc[1].2,
+            },
+            Rs {
+                bs: ecc[2].0,
+                dw: ecc[2].1,
+                ns: ecc[2].2,
+            },
+            Rs {
+                bs: ecc[3].0,
+                dw: ecc[3].1,
+                ns: ecc[3].2,
+            },
+        ],
+    }
+}
+
+#[rustfmt::skip]
 const VERSIONS: [VersionDb; 41] = [
-    VersionDb {
-        total: 0,
-        apat: [0, 0, 0, 0, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 0,
-                dw: 0,
-                ns: 0,
-            },
-            Rs {
-                bs: 0,
-                dw: 0,
-                ns: 0,
-            },
-            Rs {
-                bs: 0,
-                dw: 0,
-                ns: 0,
-            },
-            Rs {
-                bs: 0,
-                dw: 0,
-                ns: 0,
-            },
-        ],
-    },
-    VersionDb {
-        total: 26,
-        apat: [0, 0, 0, 0, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 26,
-                dw: 16,
-                ns: 1,
-            },
-            Rs {
-                bs: 26,
-                dw: 19,
-                ns: 1,
-            },
-            Rs {
-                bs: 26,
-                dw: 9,
-                ns: 1,
-            },
-            Rs {
-                bs: 26,
-                dw: 13,
-                ns: 1,
-            },
-        ],
-    },
-    VersionDb {
-        total: 44,
-        apat: [6, 18, 0, 0, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 44,
-                dw: 28,
-                ns: 1,
-            },
-            Rs {
-                bs: 44,
-                dw: 34,
-                ns: 1,
-            },
-            Rs {
-                bs: 44,
-                dw: 16,
-                ns: 1,
-            },
-            Rs {
-                bs: 44,
-                dw: 22,
-                ns: 1,
-            },
-        ],
-    },
-    VersionDb {
-        total: 70,
-        apat: [6, 22, 0, 0, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 70,
-                dw: 44,
-                ns: 1,
-            },
-            Rs {
-                bs: 70,
-                dw: 55,
-                ns: 1,
-            },
-            Rs {
-                bs: 35,
-                dw: 13,
-                ns: 2,
-            },
-            Rs {
-                bs: 35,
-                dw: 17,
-                ns: 2,
-            },
-        ],
-    },
-    VersionDb {
-        total: 100,
-        apat: [6, 26, 0, 0, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 50,
-                dw: 32,
-                ns: 2,
-            },
-            Rs {
-                bs: 100,
-                dw: 80,
-                ns: 1,
-            },
-            Rs {
-                bs: 25,
-                dw: 9,
-                ns: 4,
-            },
-            Rs {
-                bs: 50,
-                dw: 24,
-                ns: 2,
-            },
-        ],
-    },
-    VersionDb {
-        total: 134,
-        apat: [6, 30, 0, 0, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 67,
-                dw: 43,
-                ns: 2,
-            },
-            Rs {
-                bs: 134,
-                dw: 108,
-                ns: 1,
-            },
-            Rs {
-                bs: 33,
-                dw: 11,
-                ns: 2,
-            },
-            Rs {
-                bs: 33,
-                dw: 15,
-                ns: 2,
-            },
-        ],
-    },
-    VersionDb {
-        total: 172,
-        apat: [6, 34, 0, 0, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 43,
-                dw: 27,
-                ns: 4,
-            },
-            Rs {
-                bs: 86,
-                dw: 68,
-                ns: 2,
-            },
-            Rs {
-                bs: 43,
-                dw: 15,
-                ns: 4,
-            },
-            Rs {
-                bs: 43,
-                dw: 19,
-                ns: 4,
-            },
-        ],
-    },
-    VersionDb {
-        total: 196,
-        apat: [6, 22, 38, 0, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 49,
-                dw: 31,
-                ns: 4,
-            },
-            Rs {
-                bs: 98,
-                dw: 78,
-                ns: 2,
-            },
-            Rs {
-                bs: 39,
-                dw: 13,
-                ns: 4,
-            },
-            Rs {
-                bs: 32,
-                dw: 14,
-                ns: 2,
-            },
-        ],
-    },
-    VersionDb {
-        total: 242,
-        apat: [6, 24, 42, 0, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 60,
-                dw: 38,
-                ns: 2,
-            },
-            Rs {
-                bs: 121,
-                dw: 97,
-                ns: 2,
-            },
-            Rs {
-                bs: 40,
-                dw: 14,
-                ns: 4,
-            },
-            Rs {
-                bs: 40,
-                dw: 18,
-                ns: 4,
-            },
-        ],
-    },
-    VersionDb {
-        total: 292,
-        apat: [6, 26, 46, 0, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 58,
-                dw: 36,
-                ns: 3,
-            },
-            Rs {
-                bs: 146,
-                dw: 116,
-                ns: 2,
-            },
-            Rs {
-                bs: 36,
-                dw: 12,
-                ns: 4,
-            },
-            Rs {
-                bs: 36,
-                dw: 16,
-                ns: 4,
-            },
-        ],
-    },
-    VersionDb {
-        total: 346,
-        apat: [6, 28, 50, 0, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 69,
-                dw: 43,
-                ns: 4,
-            },
-            Rs {
-                bs: 86,
-                dw: 68,
-                ns: 2,
-            },
-            Rs {
-                bs: 43,
-                dw: 15,
-                ns: 6,
-            },
-            Rs {
-                bs: 43,
-                dw: 19,
-                ns: 6,
-            },
-        ],
-    },
-    VersionDb {
-        total: 404,
-        apat: [6, 30, 54, 0, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 80,
-                dw: 50,
-                ns: 1,
-            },
-            Rs {
-                bs: 101,
-                dw: 81,
-                ns: 4,
-            },
-            Rs {
-                bs: 36,
-                dw: 12,
-                ns: 3,
-            },
-            Rs {
-                bs: 50,
-                dw: 22,
-                ns: 4,
-            },
-        ],
-    },
-    VersionDb {
-        total: 466,
-        apat: [6, 32, 58, 0, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 58,
-                dw: 36,
-                ns: 6,
-            },
-            Rs {
-                bs: 116,
-                dw: 92,
-                ns: 2,
-            },
-            Rs {
-                bs: 42,
-                dw: 14,
-                ns: 7,
-            },
-            Rs {
-                bs: 46,
-                dw: 20,
-                ns: 4,
-            },
-        ],
-    },
-    VersionDb {
-        total: 532,
-        apat: [6, 34, 62, 0, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 59,
-                dw: 37,
-                ns: 8,
-            },
-            Rs {
-                bs: 133,
-                dw: 107,
-                ns: 4,
-            },
-            Rs {
-                bs: 33,
-                dw: 11,
-                ns: 12,
-            },
-            Rs {
-                bs: 44,
-                dw: 20,
-                ns: 8,
-            },
-        ],
-    },
-    VersionDb {
-        total: 581,
-        apat: [6, 26, 46, 66, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 64,
-                dw: 40,
-                ns: 4,
-            },
-            Rs {
-                bs: 145,
-                dw: 115,
-                ns: 3,
-            },
-            Rs {
-                bs: 36,
-                dw: 12,
-                ns: 11,
-            },
-            Rs {
-                bs: 36,
-                dw: 16,
-                ns: 11,
-            },
-        ],
-    },
-    VersionDb {
-        total: 655,
-        apat: [6, 26, 48, 70, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 65,
-                dw: 41,
-                ns: 5,
-            },
-            Rs {
-                bs: 109,
-                dw: 87,
-                ns: 5,
-            },
-            Rs {
-                bs: 36,
-                dw: 12,
-                ns: 11,
-            },
-            Rs {
-                bs: 54,
-                dw: 24,
-                ns: 5,
-            },
-        ],
-    },
-    VersionDb {
-        total: 733,
-        apat: [6, 26, 50, 74, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 73,
-                dw: 45,
-                ns: 7,
-            },
-            Rs {
-                bs: 122,
-                dw: 98,
-                ns: 5,
-            },
-            Rs {
-                bs: 45,
-                dw: 15,
-                ns: 3,
-            },
-            Rs {
-                bs: 43,
-                dw: 19,
-                ns: 15,
-            },
-        ],
-    },
-    VersionDb {
-        total: 815,
-        apat: [6, 30, 54, 78, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 74,
-                dw: 46,
-                ns: 10,
-            },
-            Rs {
-                bs: 135,
-                dw: 107,
-                ns: 1,
-            },
-            Rs {
-                bs: 42,
-                dw: 14,
-                ns: 2,
-            },
-            Rs {
-                bs: 50,
-                dw: 22,
-                ns: 1,
-            },
-        ],
-    },
-    VersionDb {
-        total: 901,
-        apat: [6, 30, 56, 82, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 69,
-                dw: 43,
-                ns: 9,
-            },
-            Rs {
-                bs: 150,
-                dw: 120,
-                ns: 5,
-            },
-            Rs {
-                bs: 42,
-                dw: 14,
-                ns: 2,
-            },
-            Rs {
-                bs: 50,
-                dw: 22,
-                ns: 17,
-            },
-        ],
-    },
-    VersionDb {
-        total: 991,
-        apat: [6, 30, 58, 86, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 70,
-                dw: 44,
-                ns: 3,
-            },
-            Rs {
-                bs: 141,
-                dw: 113,
-                ns: 3,
-            },
-            Rs {
-                bs: 39,
-                dw: 13,
-                ns: 9,
-            },
-            Rs {
-                bs: 47,
-                dw: 21,
-                ns: 17,
-            },
-        ],
-    },
-    VersionDb {
-        total: 1085,
-        apat: [6, 34, 62, 90, 0, 0, 0],
-        ecc: [
-            Rs {
-                bs: 67,
-                dw: 41,
-                ns: 3,
-            },
-            Rs {
-                bs: 135,
-                dw: 107,
-                ns: 3,
-            },
-            Rs {
-                bs: 43,
-                dw: 15,
-                ns: 15,
-            },
-            Rs {
-                bs: 54,
-                dw: 24,
-                ns: 15,
-            },
-        ],
-    },
-    VersionDb {
-        total: 1156,
-        apat: [6, 28, 50, 72, 92, 0, 0],
-        ecc: [
-            Rs {
-                bs: 68,
-                dw: 42,
-                ns: 17,
-            },
-            Rs {
-                bs: 144,
-                dw: 116,
-                ns: 4,
-            },
-            Rs {
-                bs: 46,
-                dw: 16,
-                ns: 19,
-            },
-            Rs {
-                bs: 50,
-                dw: 22,
-                ns: 17,
-            },
-        ],
-    },
-    VersionDb {
-        total: 1258,
-        apat: [6, 26, 50, 74, 98, 0, 0],
-        ecc: [
-            Rs {
-                bs: 74,
-                dw: 46,
-                ns: 17,
-            },
-            Rs {
-                bs: 139,
-                dw: 111,
-                ns: 2,
-            },
-            Rs {
-                bs: 37,
-                dw: 13,
-                ns: 34,
-            },
-            Rs {
-                bs: 54,
-                dw: 24,
-                ns: 7,
-            },
-        ],
-    },
-    VersionDb {
-        total: 1364,
-        apat: [6, 30, 54, 78, 102, 0, 0],
-        ecc: [
-            Rs {
-                bs: 75,
-                dw: 47,
-                ns: 4,
-            },
-            Rs {
-                bs: 151,
-                dw: 121,
-                ns: 4,
-            },
-            Rs {
-                bs: 45,
-                dw: 15,
-                ns: 16,
-            },
-            Rs {
-                bs: 54,
-                dw: 24,
-                ns: 11,
-            },
-        ],
-    },
-    VersionDb {
-        total: 1474,
-        apat: [6, 28, 54, 80, 106, 0, 0],
-        ecc: [
-            Rs {
-                bs: 73,
-                dw: 45,
-                ns: 6,
-            },
-            Rs {
-                bs: 147,
-                dw: 117,
-                ns: 6,
-            },
-            Rs {
-                bs: 46,
-                dw: 16,
-                ns: 30,
-            },
-            Rs {
-                bs: 54,
-                dw: 24,
-                ns: 11,
-            },
-        ],
-    },
-    VersionDb {
-        total: 1588,
-        apat: [6, 32, 58, 84, 110, 0, 0],
-        ecc: [
-            Rs {
-                bs: 75,
-                dw: 47,
-                ns: 8,
-            },
-            Rs {
-                bs: 132,
-                dw: 106,
-                ns: 8,
-            },
-            Rs {
-                bs: 45,
-                dw: 15,
-                ns: 22,
-            },
-            Rs {
-                bs: 54,
-                dw: 24,
-                ns: 7,
-            },
-        ],
-    },
-    VersionDb {
-        total: 1706,
-        apat: [6, 30, 58, 86, 114, 0, 0],
-        ecc: [
-            Rs {
-                bs: 74,
-                dw: 46,
-                ns: 19,
-            },
-            Rs {
-                bs: 142,
-                dw: 114,
-                ns: 10,
-            },
-            Rs {
-                bs: 46,
-                dw: 16,
-                ns: 33,
-            },
-            Rs {
-                bs: 50,
-                dw: 22,
-                ns: 28,
-            },
-        ],
-    },
-    VersionDb {
-        total: 1828,
-        apat: [6, 34, 62, 90, 118, 0, 0],
-        ecc: [
-            Rs {
-                bs: 73,
-                dw: 45,
-                ns: 22,
-            },
-            Rs {
-                bs: 152,
-                dw: 122,
-                ns: 8,
-            },
-            Rs {
-                bs: 45,
-                dw: 15,
-                ns: 12,
-            },
-            Rs {
-                bs: 53,
-                dw: 23,
-                ns: 8,
-            },
-        ],
-    },
-    VersionDb {
-        total: 1921,
-        apat: [6, 26, 50, 74, 98, 122, 0],
-        ecc: [
-            Rs {
-                bs: 73,
-                dw: 45,
-                ns: 3,
-            },
-            Rs {
-                bs: 147,
-                dw: 117,
-                ns: 3,
-            },
-            Rs {
-                bs: 45,
-                dw: 15,
-                ns: 11,
-            },
-            Rs {
-                bs: 54,
-                dw: 24,
-                ns: 4,
-            },
-        ],
-    },
-    VersionDb {
-        total: 2051,
-        apat: [6, 30, 54, 78, 102, 126, 0],
-        ecc: [
-            Rs {
-                bs: 73,
-                dw: 45,
-                ns: 21,
-            },
-            Rs {
-                bs: 146,
-                dw: 116,
-                ns: 7,
-            },
-            Rs {
-                bs: 45,
-                dw: 15,
-                ns: 19,
-            },
-            Rs {
-                bs: 53,
-                dw: 23,
-                ns: 1,
-            },
-        ],
-    },
-    VersionDb {
-        total: 2185,
-        apat: [6, 26, 52, 78, 104, 130, 0],
-        ecc: [
-            Rs {
-                bs: 75,
-                dw: 47,
-                ns: 19,
-            },
-            Rs {
-                bs: 145,
-                dw: 115,
-                ns: 5,
-            },
-            Rs {
-                bs: 45,
-                dw: 15,
-                ns: 23,
-            },
-            Rs {
-                bs: 54,
-                dw: 24,
-                ns: 15,
-            },
-        ],
-    },
-    VersionDb {
-        total: 2323,
-        apat: [6, 30, 56, 82, 108, 134, 0],
-        ecc: [
-            Rs {
-                bs: 74,
-                dw: 46,
-                ns: 2,
-            },
-            Rs {
-                bs: 145,
-                dw: 115,
-                ns: 13,
-            },
-            Rs {
-                bs: 45,
-                dw: 15,
-                ns: 23,
-            },
-            Rs {
-                bs: 54,
-                dw: 24,
-                ns: 42,
-            },
-        ],
-    },
-    VersionDb {
-        total: 2465,
-        apat: [6, 34, 60, 86, 112, 138, 0],
-        ecc: [
-            Rs {
-                bs: 74,
-                dw: 46,
-                ns: 10,
-            },
-            Rs {
-                bs: 145,
-                dw: 115,
-                ns: 17,
-            },
-            Rs {
-                bs: 45,
-                dw: 15,
-                ns: 19,
-            },
-            Rs {
-                bs: 54,
-                dw: 24,
-                ns: 10,
-            },
-        ],
-    },
-    VersionDb {
-        total: 2611,
-        apat: [6, 30, 58, 86, 114, 142, 0],
-        ecc: [
-            Rs {
-                bs: 74,
-                dw: 46,
-                ns: 14,
-            },
-            Rs {
-                bs: 145,
-                dw: 115,
-                ns: 17,
-            },
-            Rs {
-                bs: 45,
-                dw: 15,
-                ns: 11,
-            },
-            Rs {
-                bs: 54,
-                dw: 24,
-                ns: 29,
-            },
-        ],
-    },
-    VersionDb {
-        total: 2761,
-        apat: [6, 34, 62, 90, 118, 146, 0],
-        ecc: [
-            Rs {
-                bs: 74,
-                dw: 46,
-                ns: 14,
-            },
-            Rs {
-                bs: 145,
-                dw: 115,
-                ns: 13,
-            },
-            Rs {
-                bs: 46,
-                dw: 16,
-                ns: 59,
-            },
-            Rs {
-                bs: 54,
-                dw: 24,
-                ns: 44,
-            },
-        ],
-    },
-    VersionDb {
-        total: 2876,
-        apat: [6, 30, 54, 78, 102, 126, 150],
-        ecc: [
-            Rs {
-                bs: 75,
-                dw: 47,
-                ns: 12,
-            },
-            Rs {
-                bs: 151,
-                dw: 121,
-                ns: 12,
-            },
-            Rs {
-                bs: 45,
-                dw: 15,
-                ns: 22,
-            },
-            Rs {
-                bs: 54,
-                dw: 24,
-                ns: 39,
-            },
-        ],
-    },
-    VersionDb {
-        total: 3034,
-        apat: [6, 24, 50, 76, 102, 128, 154],
-        ecc: [
-            Rs {
-                bs: 75,
-                dw: 47,
-                ns: 6,
-            },
-            Rs {
-                bs: 151,
-                dw: 121,
-                ns: 6,
-            },
-            Rs {
-                bs: 45,
-                dw: 15,
-                ns: 2,
-            },
-            Rs {
-                bs: 54,
-                dw: 24,
-                ns: 46,
-            },
-        ],
-    },
-    VersionDb {
-        total: 3196,
-        apat: [6, 28, 54, 80, 106, 132, 158],
-        ecc: [
-            Rs {
-                bs: 74,
-                dw: 46,
-                ns: 29,
-            },
-            Rs {
-                bs: 152,
-                dw: 122,
-                ns: 17,
-            },
-            Rs {
-                bs: 45,
-                dw: 15,
-                ns: 24,
-            },
-            Rs {
-                bs: 54,
-                dw: 24,
-                ns: 49,
-            },
-        ],
-    },
-    VersionDb {
-        total: 3362,
-        apat: [6, 32, 58, 84, 110, 136, 162],
-        ecc: [
-            Rs {
-                bs: 74,
-                dw: 46,
-                ns: 13,
-            },
-            Rs {
-                bs: 152,
-                dw: 122,
-                ns: 4,
-            },
-            Rs {
-                bs: 45,
-                dw: 15,
-                ns: 42,
-            },
-            Rs {
-                bs: 54,
-                dw: 24,
-                ns: 48,
-            },
-        ],
-    },
-    VersionDb {
-        total: 3532,
-        apat: [6, 26, 54, 82, 110, 138, 166],
-        ecc: [
-            Rs {
-                bs: 75,
-                dw: 47,
-                ns: 40,
-            },
-            Rs {
-                bs: 147,
-                dw: 117,
-                ns: 20,
-            },
-            Rs {
-                bs: 45,
-                dw: 15,
-                ns: 10,
-            },
-            Rs {
-                bs: 54,
-                dw: 24,
-                ns: 43,
-            },
-        ],
-    },
-    VersionDb {
-        total: 3706,
-        apat: [6, 30, 58, 86, 114, 142, 170],
-        ecc: [
-            Rs {
-                bs: 75,
-                dw: 47,
-                ns: 18,
-            },
-            Rs {
-                bs: 148,
-                dw: 118,
-                ns: 19,
-            },
-            Rs {
-                bs: 45,
-                dw: 15,
-                ns: 20,
-            },
-            Rs {
-                bs: 54,
-                dw: 24,
-                ns: 34,
-            },
-        ],
-    },
+    v(0, [0,0,0,0,0,0,0], [(0,0,0),(0,0,0),(0,0,0),(0,0,0)]),
+    v(26, [0,0,0,0,0,0,0], [(26,16,1),(26,19,1),(26,9,1),(26,13,1)]),
+    v(44, [6,18,0,0,0,0,0], [(44,28,1),(44,34,1),(44,16,1),(44,22,1)]),
+    v(70, [6,22,0,0,0,0,0], [(70,44,1),(70,55,1),(35,13,2),(35,17,2)]),
+    v(100, [6,26,0,0,0,0,0], [(50,32,2),(100,80,1),(25,9,4),(50,24,2)]),
+    v(134, [6,30,0,0,0,0,0], [(67,43,2),(134,108,1),(33,11,2),(33,15,2)]),
+    v(172, [6,34,0,0,0,0,0], [(43,27,4),(86,68,2),(43,15,4),(43,19,4)]),
+    v(196, [6,22,38,0,0,0,0], [(49,31,4),(98,78,2),(39,13,4),(32,14,2)]),
+    v(242, [6,24,42,0,0,0,0], [(60,38,2),(121,97,2),(40,14,4),(40,18,4)]),
+    v(292, [6,26,46,0,0,0,0], [(58,36,3),(146,116,2),(36,12,4),(36,16,4)]),
+    v(346, [6,28,50,0,0,0,0], [(69,43,4),(86,68,2),(43,15,6),(43,19,6)]),
+    v(404, [6,30,54,0,0,0,0], [(80,50,1),(101,81,4),(36,12,3),(50,22,4)]),
+    v(466, [6,32,58,0,0,0,0], [(58,36,6),(116,92,2),(42,14,7),(46,20,4)]),
+    v(532, [6,34,62,0,0,0,0], [(59,37,8),(133,107,4),(33,11,12),(44,20,8)]),
+    v(581, [6,26,46,66,0,0,0], [(64,40,4),(145,115,3),(36,12,11),(36,16,11)]),
+    v(655, [6,26,48,70,0,0,0], [(65,41,5),(109,87,5),(36,12,11),(54,24,5)]),
+    v(733, [6,26,50,74,0,0,0], [(73,45,7),(122,98,5),(45,15,3),(43,19,15)]),
+    v(815, [6,30,54,78,0,0,0], [(74,46,10),(135,107,1),(42,14,2),(50,22,1)]),
+    v(901, [6,30,56,82,0,0,0], [(69,43,9),(150,120,5),(42,14,2),(50,22,17)]),
+    v(991, [6,30,58,86,0,0,0], [(70,44,3),(141,113,3),(39,13,9),(47,21,17)]),
+    v(1085, [6,34,62,90,0,0,0], [(67,41,3),(135,107,3),(43,15,15),(54,24,15)]),
+    v(1156, [6,28,50,72,92,0,0], [(68,42,17),(144,116,4),(46,16,19),(50,22,17)]),
+    v(1258, [6,26,50,74,98,0,0], [(74,46,17),(139,111,2),(37,13,34),(54,24,7)]),
+    v(1364, [6,30,54,78,102,0,0], [(75,47,4),(151,121,4),(45,15,16),(54,24,11)]),
+    v(1474, [6,28,54,80,106,0,0], [(73,45,6),(147,117,6),(46,16,30),(54,24,11)]),
+    v(1588, [6,32,58,84,110,0,0], [(75,47,8),(132,106,8),(45,15,22),(54,24,7)]),
+    v(1706, [6,30,58,86,114,0,0], [(74,46,19),(142,114,10),(46,16,33),(50,22,28)]),
+    v(1828, [6,34,62,90,118,0,0], [(73,45,22),(152,122,8),(45,15,12),(53,23,8)]),
+    v(1921, [6,26,50,74,98,122,0], [(73,45,3),(147,117,3),(45,15,11),(54,24,4)]),
+    v(2051, [6,30,54,78,102,126,0], [(73,45,21),(146,116,7),(45,15,19),(53,23,1)]),
+    v(2185, [6,26,52,78,104,130,0], [(75,47,19),(145,115,5),(45,15,23),(54,24,15)]),
+    v(2323, [6,30,56,82,108,134,0], [(74,46,2),(145,115,13),(45,15,23),(54,24,42)]),
+    v(2465, [6,34,60,86,112,138,0], [(74,46,10),(145,115,17),(45,15,19),(54,24,10)]),
+    v(2611, [6,30,58,86,114,142,0], [(74,46,14),(145,115,17),(45,15,11),(54,24,29)]),
+    v(2761, [6,34,62,90,118,146,0], [(74,46,14),(145,115,13),(46,16,59),(54,24,44)]),
+    v(2876, [6,30,54,78,102,126,150], [(75,47,12),(151,121,12),(45,15,22),(54,24,39)]),
+    v(3034, [6,24,50,76,102,128,154], [(75,47,6),(151,121,6),(45,15,2),(54,24,46)]),
+    v(3196, [6,28,54,80,106,132,158], [(74,46,29),(152,122,17),(45,15,24),(54,24,49)]),
+    v(3362, [6,32,58,84,110,136,162], [(74,46,13),(152,122,4),(45,15,42),(54,24,48)]),
+    v(3532, [6,26,54,82,110,138,166], [(75,47,40),(147,117,20),(45,15,10),(54,24,43)]),
+    v(3706, [6,30,58,86,114,142,170], [(75,47,18),(148,118,19),(45,15,20),(54,24,34)]),
 ];
 
 /// Format-bits index for the table lookup (M=0 · L=1 · H=2 · Q=3).
@@ -1488,7 +495,7 @@ mod tests {
 
     fn uec_of(png: &[u8]) -> UecReport {
         let planes = normalize(&ImageInput::encoded(png), &Limits::default()).unwrap();
-        let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new()).unwrap();
+        let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
         let d = &outcome.merged[0];
         let stream = d.masked_stream.as_ref().expect("rqrr stream captured");
         compute(
@@ -1531,7 +538,7 @@ mod tests {
         // codeword of one block corrupts → t = 1 on that block.
         let png = qr_png("flip one module", qrcode::EcLevel::Q, Some(2));
         let planes = normalize(&ImageInput::encoded(&png), &Limits::default()).unwrap();
-        let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new()).unwrap();
+        let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
         let d = &outcome.merged[0];
         let version = usize::from(d.version.unwrap());
 
@@ -1556,7 +563,7 @@ mod tests {
         let flipped = crate::input::LumaImage::new(data, w, planes.luma.height());
 
         // re-scan the damaged image through rqrr only
-        let damaged = crate::engine::decode_all(&flipped, crate::engine::EngineOptions::default());
+        let damaged = crate::engine::decode_all(&flipped);
         let dd = damaged
             .detections
             .iter()
@@ -1588,7 +595,7 @@ mod tests {
         // is still t=1.
         let png = qr_png("cw0", qrcode::EcLevel::Q, Some(2));
         let planes = normalize(&ImageInput::encoded(&png), &Limits::default()).unwrap();
-        let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new()).unwrap();
+        let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
         let d = &outcome.merged[0];
         let version = usize::from(d.version.unwrap());
         let positions = zigzag_positions(version);
@@ -1614,7 +621,7 @@ mod tests {
             }
         }
         let flipped = crate::input::LumaImage::new(data, w, planes.luma.height());
-        let damaged = crate::engine::decode_all(&flipped, crate::engine::EngineOptions::default());
+        let damaged = crate::engine::decode_all(&flipped);
         let dd = damaged
             .detections
             .iter()

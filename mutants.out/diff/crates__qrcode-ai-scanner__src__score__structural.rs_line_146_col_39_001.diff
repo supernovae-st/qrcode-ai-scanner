@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/structural.rs
++++ replace * with / in quiet_zone_ok
+@@ -138,17 +138,17 @@
+                     total += 1;
+                     if u32::from(v) > interior_mean {
+                         light += 1;
+                     }
+                 }
+             }
+         }
+     }
+-    total > 0 && light * 100 >= total * 80
++    total > 0 && light * 100 >= total / /* ~ changed by cargo-mutants ~ */ 80
+ }
+ 
+ /// Run the structural checks. `None` when geometry is unusable.
+ pub(crate) fn check(img: &LumaImage, corners: [Point; 4], version: u8) -> Option<StructuralReport> {
+     let modules = u32::from(version) * 4 + 17;
+     let sampler = GridSampler::new(img, corners, modules)?;
+     #[expect(clippy::cast_possible_wrap, reason = "modules ≤ 177")]
+     let n = modules as i32;

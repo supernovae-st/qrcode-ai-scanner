@@ -49,10 +49,25 @@ struct Cli {
     score_only: bool,
 }
 
+/// Decoded QR text is ATTACKER-CONTROLLED — strip terminal control bytes
+/// (ANSI/OSC escape injection) before echoing. JSON output is safe (serde
+/// escapes); only this human path needs it.
+fn sanitize_terminal(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() && c != '\t' {
+                char::REPLACEMENT_CHARACTER
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 fn render_pretty(report: &ScanReport) {
     match report.detections.first() {
         Some(d) => {
-            println!("content   {}", d.content.text);
+            println!("content   {}", sanitize_terminal(&d.content.text));
             println!("payload   {:?}", d.payload);
             if let (Some(v), Some(m)) = (d.meta.version, d.meta.modules) {
                 println!("symbol    v{v} · {m}x{m} modules");
@@ -112,7 +127,13 @@ fn main() -> ExitCode {
     };
 
     if cli.score_only {
-        println!("{}", report.score.as_ref().map_or(0, |s| s.value));
+        let Some(score) = &report.score else {
+            // Frame profile / no detection: 0 would be indistinguishable
+            // from a true zero score — refuse instead of papering.
+            eprintln!("error: no score in this profile/outcome (use --profile full|fast)");
+            return ExitCode::from(2);
+        };
+        println!("{}", score.value);
     } else if cli.pretty {
         render_pretty(&report);
     } else {

@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/payload.rs
++++ delete ! in classify
+@@ -219,17 +219,17 @@
+         };
+         (!number.is_empty()).then(|| Payload::Sms {
+             number: number.to_owned(),
+             body,
+         })
+     } else if let Some(rest) = strip_prefix_ci(text, "sms:") {
+         parse_sms(rest)
+     } else if let Some(rest) = strip_prefix_ci(text, "tel:") {
+-        (!rest.is_empty()).then(|| Payload::Tel {
++        ( /* ~ changed by cargo-mutants ~ */rest.is_empty()).then(|| Payload::Tel {
+             number: rest.to_owned(),
+         })
+     } else if let Some(rest) = strip_prefix_ci(text, "geo:") {
+         parse_geo(rest)
+     } else if strip_prefix_ci(text, "BEGIN:VCARD").is_some() {
+         Some(Payload::VCard {
+             raw: text.to_owned(),
+         })

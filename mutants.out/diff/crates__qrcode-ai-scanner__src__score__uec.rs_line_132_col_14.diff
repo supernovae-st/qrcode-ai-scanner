@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/uec.rs
++++ replace && with || in reserved_cell
+@@ -124,17 +124,17 @@
+ fn reserved_cell(version: usize, i: usize, j: usize) -> bool {
+     let ver = &VERSIONS[version];
+     let size = version * 4 + 17;
+ 
+     // finder + format: top-left · bottom-left · top-right
+     if j < 9 && (i < 9 || i + 8 >= size) {
+         return true;
+     }
+-    if i < 9 && j + 8 >= size {
++    if i < 9 || /* ~ changed by cargo-mutants ~ */ j + 8 >= size {
+         return true;
+     }
+     // timing patterns
+     if i == 6 || j == 6 {
+         return true;
+     }
+     // version info (v7+)
+     if version >= 7 && ((i < 6 && j + 11 >= size) || (i + 11 >= size && j < 6)) {

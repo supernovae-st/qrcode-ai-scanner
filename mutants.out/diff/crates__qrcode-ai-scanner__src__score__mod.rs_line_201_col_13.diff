@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/mod.rs
++++ replace && with || in compose
+@@ -193,17 +193,17 @@
+     if let Some(s) = &structural {
+         let weakest = s
+             .finder_integrity
+             .iter()
+             .enumerate()
+             .min_by(|a, b| a.1.total_cmp(b.1))
+             .map(|(i, v)| (i, *v));
+         if let Some((corner, integrity)) = weakest
+-            && integrity < FINDER_INTEGRITY_FLOOR
++            || /* ~ changed by cargo-mutants ~ */ integrity < FINDER_INTEGRITY_FLOOR
+         {
+             value = value.min(FINDER_DAMAGE_CAP);
+             #[expect(clippy::cast_possible_truncation, reason = "corner in 0..3")]
+             hints.push(Hint::FixFinderPattern {
+                 corner: corner as u8,
+             });
+         }
+         if !s.quiet_zone_ok {

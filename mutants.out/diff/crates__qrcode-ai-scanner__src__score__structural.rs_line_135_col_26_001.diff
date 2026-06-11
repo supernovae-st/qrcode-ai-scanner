@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/structural.rs
++++ replace - with / in quiet_zone_ok
+@@ -127,17 +127,17 @@
+     let mut light = 0u32;
+     let mut total = 0u32;
+     for offset in [-2i32, -1] {
+         for m in -2..=(modules + 1) {
+             for (mx, my) in [
+                 (m, offset),               // top
+                 (m, modules - 1 - offset), // bottom (offset mirrored out)
+                 (offset, m),               // left
+-                (modules - 1 - offset, m), // right
++                (modules / /* ~ changed by cargo-mutants ~ */ 1 - offset, m), // right
+             ] {
+                 if let Some(v) = sampler.module(mx, my) {
+                     total += 1;
+                     if u32::from(v) > interior_mean {
+                         light += 1;
+                     }
+                 }
+             }

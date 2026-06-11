@@ -1,0 +1,36 @@
+--- crates/qrcode-ai-scanner/src/payload.rs
++++ replace parse_mailto -> Option<Payload> with None
+@@ -129,32 +129,17 @@
+ fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+     query.split('&').find_map(|pair| {
+         let (key, value) = pair.split_once('=')?;
+         key.eq_ignore_ascii_case(name).then_some(value)
+     })
+ }
+ 
+ fn parse_mailto(rest: &str) -> Option<Payload> {
+-    let (to, query) = match rest.split_once('?') {
+-        Some((to, query)) => (to, Some(query)),
+-        None => (rest, None),
+-    };
+-    if to.is_empty() {
+-        return None;
+-    }
+-    Some(Payload::Email {
+-        to: to.to_owned(),
+-        subject: query
+-            .and_then(|q| query_param(q, "subject"))
+-            .map(str::to_owned),
+-        body: query
+-            .and_then(|q| query_param(q, "body"))
+-            .map(str::to_owned),
+-    })
++    None /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn parse_matmsg(rest: &str) -> Option<Payload> {
+     let mut to = None;
+     let mut subject = None;
+     let mut body = None;
+     for segment in rest.split(';') {
+         if let Some((key, value)) = segment.split_once(':') {

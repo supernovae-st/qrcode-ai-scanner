@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/uec.rs
++++ replace > with >= in zigzag_positions
+@@ -180,17 +180,17 @@
+ /// rqrr `read_data`'s zigzag exactly (down-up column pairs from the
+ /// bottom-right, column 6 skipped).
+ fn zigzag_positions(version: usize) -> Vec<(usize, usize)> {
+     let size = version * 4 + 17;
+     let mut positions = Vec::with_capacity(VERSIONS[version].total * 8);
+     let mut y = size - 1;
+     let mut x = size - 1;
+     let mut neg_dir = true;
+-    while x > 0 {
++    while x >= /* ~ changed by cargo-mutants ~ */ 0 {
+         if x == 6 {
+             x -= 1;
+         }
+         if !reserved_cell(version, y, x) {
+             positions.push((y, x));
+         }
+         if !reserved_cell(version, y, x - 1) {
+             positions.push((y, x - 1));

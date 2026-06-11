@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/mod.rs
++++ delete match arm ScoreDepth::Reduced in run_axes
+@@ -145,17 +145,17 @@
+         &|b| warp::shadow_gradient(b, 0.4),
+         &|b| warp::shadow_gradient(b, 0.7),
+         &|b| warp::glare_blob(b, cx, cy, radius),
+         &|b| warp::exposure(b, 60),
+         &|b| warp::exposure(b, -60),
+     ];
+     let lighting_picks: &[usize] = match depth {
+         ScoreDepth::Off => &[],
+-        ScoreDepth::Reduced => &[1, 2],
++         /* ~ changed by cargo-mutants ~ */
+         _ => &[0, 1, 2, 3, 4],
+     };
+     let mut lighting_passed = 0u8;
+     for &i in lighting_picks {
+         if cancel.is_cancelled() {
+             return Err(crate::error::ScanError::Cancelled);
+         }
+         if cell_passes(&lighting_cells[i](base), expected) {

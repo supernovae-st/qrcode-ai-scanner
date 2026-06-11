@@ -1,0 +1,60 @@
+--- crates/qrcode-ai-scanner/src/payload.rs
++++ replace classify -> Payload with Default::default()
+@@ -196,56 +196,17 @@
+         && lon.is_finite()
+         && (-90.0..=90.0).contains(&lat)
+         && (-180.0..=180.0).contains(&lon))
+     .then_some(Payload::Geo { lat, lon })
+ }
+ 
+ /// Classify decoded QR text into a typed payload. Total: never fails.
+ pub(crate) fn classify(text: &str) -> Payload {
+-    if strip_prefix_ci(text, "http://").is_some() || strip_prefix_ci(text, "https://").is_some() {
+-        return Payload::Url {
+-            url: text.to_owned(),
+-        };
+-    }
+-    let parsed = if let Some(rest) = strip_prefix_ci(text, "WIFI:") {
+-        parse_wifi(rest)
+-    } else if let Some(rest) = strip_prefix_ci(text, "mailto:") {
+-        parse_mailto(rest)
+-    } else if let Some(rest) = strip_prefix_ci(text, "MATMSG:") {
+-        parse_matmsg(rest)
+-    } else if let Some(rest) = strip_prefix_ci(text, "SMSTO:") {
+-        let (number, body) = match rest.split_once(':') {
+-            Some((number, body)) => (number, Some(body.to_owned())),
+-            None => (rest, None),
+-        };
+-        (!number.is_empty()).then(|| Payload::Sms {
+-            number: number.to_owned(),
+-            body,
+-        })
+-    } else if let Some(rest) = strip_prefix_ci(text, "sms:") {
+-        parse_sms(rest)
+-    } else if let Some(rest) = strip_prefix_ci(text, "tel:") {
+-        (!rest.is_empty()).then(|| Payload::Tel {
+-            number: rest.to_owned(),
+-        })
+-    } else if let Some(rest) = strip_prefix_ci(text, "geo:") {
+-        parse_geo(rest)
+-    } else if strip_prefix_ci(text, "BEGIN:VCARD").is_some() {
+-        Some(Payload::VCard {
+-            raw: text.to_owned(),
+-        })
+-    } else if strip_prefix_ci(text, "BEGIN:VEVENT").is_some() {
+-        Some(Payload::VEvent {
+-            raw: text.to_owned(),
+-        })
+-    } else {
+-        None
+-    };
+-    parsed.unwrap_or(Payload::Text)
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     #![allow(clippy::unwrap_used, clippy::expect_used)]
+ 
+     use super::*;
+ 

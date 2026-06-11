@@ -1,0 +1,34 @@
+--- crates/qrcode-ai-scanner/src/score/structural.rs
++++ replace check -> Option<StructuralReport> with Some(Default::default())
+@@ -143,30 +143,17 @@
+             }
+         }
+     }
+     total > 0 && light * 100 >= total * 80
+ }
+ 
+ /// Run the structural checks. `None` when geometry is unusable.
+ pub(crate) fn check(img: &LumaImage, corners: [Point; 4], version: u8) -> Option<StructuralReport> {
+-    let modules = u32::from(version) * 4 + 17;
+-    let sampler = GridSampler::new(img, corners, modules)?;
+-    #[expect(clippy::cast_possible_wrap, reason = "modules ≤ 177")]
+-    let n = modules as i32;
+-
+-    let finder_integrity = [
+-        finder_score(&sampler, 0, 0),     // top-left
+-        finder_score(&sampler, n - 7, 0), // top-right
+-        finder_score(&sampler, 0, n - 7), // bottom-left
+-    ];
+-    Some(StructuralReport {
+-        finder_integrity,
+-        quiet_zone_ok: quiet_zone_ok(&sampler, n),
+-    })
++    Some(Default::default()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[cfg(test)]
+ pub(super) mod tests_support {
+     #![allow(clippy::unwrap_used, clippy::expect_used)]
+ 
+     use super::*;
+     use crate::input::{ImageInput, Limits};

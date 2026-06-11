@@ -9,7 +9,7 @@
 use rxing::RXingResultMetadataType as MetaKey;
 use rxing::RXingResultMetadataValue as MetaValue;
 
-use super::{EngineOptions, RawDetection};
+use super::RawDetection;
 use crate::input::LumaImage;
 use crate::report::{EcLevel, EngineKind};
 
@@ -23,9 +23,11 @@ fn parse_ec(s: &str) -> Option<EcLevel> {
     }
 }
 
-pub(super) fn decode(luma: &LumaImage, opts: EngineOptions) -> Vec<RawDetection> {
+pub(super) fn decode(luma: &LumaImage) -> Vec<RawDetection> {
+    // TryHarder defaults on in the helper; inverted symbols are real in the
+    // artistic corpus — always on (a config knob nobody turns is debt).
     let mut hints = rxing::DecodeHints {
-        AlsoInverted: Some(opts.also_inverted),
+        AlsoInverted: Some(true),
         ..Default::default()
     };
 

@@ -1,0 +1,1 @@
+crates/qrcode-ai-scanner/src/score/structural.rs:117:16: replace += with *= in quiet_zone_ok

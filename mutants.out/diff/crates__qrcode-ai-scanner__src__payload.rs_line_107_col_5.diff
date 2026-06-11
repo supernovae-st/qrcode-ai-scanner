@@ -1,0 +1,39 @@
+--- crates/qrcode-ai-scanner/src/payload.rs
++++ replace parse_wifi -> Option<Payload> with None
+@@ -99,35 +99,17 @@
+             }
+             Some(c) => segment.push(c),
+         }
+     }
+     fields
+ }
+ 
+ fn parse_wifi(rest: &str) -> Option<Payload> {
+-    let mut ssid = None;
+-    let mut security = None;
+-    let mut password = None;
+-    let mut hidden = false;
+-    for (key, value) in wifi_fields(rest) {
+-        match key.to_ascii_uppercase().as_str() {
+-            "S" => ssid = Some(value),
+-            "T" => security = Some(value),
+-            "P" => password = Some(value),
+-            "H" => hidden = value.eq_ignore_ascii_case("true"),
+-            _ => {}
+-        }
+-    }
+-    Some(Payload::Wifi {
+-        ssid: ssid?,
+-        security: security.unwrap_or_else(|| "nopass".to_owned()),
+-        password,
+-        hidden,
+-    })
++    None /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Extract a query parameter value as written (no percent-decoding).
+ fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+     query.split('&').find_map(|pair| {
+         let (key, value) = pair.split_once('=')?;
+         key.eq_ignore_ascii_case(name).then_some(value)
+     })

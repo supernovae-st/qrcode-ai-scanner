@@ -187,7 +187,7 @@ pub(super) mod tests_support {
             .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
             .unwrap();
         let planes = normalize(&ImageInput::encoded(&buf), &Limits::default()).unwrap();
-        let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new()).unwrap();
+        let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
         let detection = &outcome.merged[0];
         (
             planes.luma.clone(),

@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/uec.rs
++++ replace / with % in mask_bit
+@@ -163,17 +163,17 @@
+ 
+ /// Mask predicate — mirrors rqrr `mask_bit` (the 8 ISO formulas).
+ fn mask_bit(mask: u8, y: usize, x: usize) -> bool {
+     match mask {
+         0 => (y + x).is_multiple_of(2),
+         1 => y.is_multiple_of(2),
+         2 => x.is_multiple_of(3),
+         3 => (y + x).is_multiple_of(3),
+-        4 => ((y / 2) + (x / 3)).is_multiple_of(2),
++        4 => ((y / 2) + (x % /* ~ changed by cargo-mutants ~ */ 3)).is_multiple_of(2),
+         5 => (y * x) % 2 + (y * x) % 3 == 0,
+         6 => ((y * x) % 2 + (y * x) % 3).is_multiple_of(2),
+         7 => ((y * x) % 3 + (y + x) % 2).is_multiple_of(2),
+         _ => false,
+     }
+ }
+ 
+ /// Module position of every emitted data bit, in stream order — replays

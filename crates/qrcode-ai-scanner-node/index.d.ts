@@ -6,6 +6,13 @@ export interface ScanOptions {
   profile?: ScanProfile;
   /** Cancels a QUEUED task; a running scan stops at the next decode attempt. */
   signal?: AbortSignal;
+  /**
+   * Max accepted width/height in px (default 10000). Server deployments
+   * handling untrusted uploads SHOULD lower this (e.g. 4096).
+   */
+  maxDimension?: number;
+  /** Max accepted total pixels (default 64_000_000; servers: e.g. 16_000_000). */
+  maxPixels?: number;
 }
 
 export interface Point { x: number; y: number }

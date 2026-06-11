@@ -1,0 +1,26 @@
+--- crates/qrcode-ai-scanner/src/score/uec.rs
++++ replace format_bits_index -> usize with 1
+@@ -107,22 +107,17 @@
+     v(3196, [6,28,54,80,106,132,158], [(74,46,29),(152,122,17),(45,15,24),(54,24,49)]),
+     v(3362, [6,32,58,84,110,136,162], [(74,46,13),(152,122,4),(45,15,42),(54,24,48)]),
+     v(3532, [6,26,54,82,110,138,166], [(75,47,40),(147,117,20),(45,15,10),(54,24,43)]),
+     v(3706, [6,30,58,86,114,142,170], [(75,47,18),(148,118,19),(45,15,20),(54,24,34)]),
+ ];
+ 
+ /// Format-bits index for the table lookup (M=0 · L=1 · H=2 · Q=3).
+ fn format_bits_index(ec: EcLevel) -> usize {
+-    match ec {
+-        EcLevel::M => 0,
+-        EcLevel::L => 1,
+-        EcLevel::H => 2,
+-        EcLevel::Q => 3,
+-    }
++    1 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Function-pattern map — mirrors rqrr `reserved_cell` exactly.
+ fn reserved_cell(version: usize, i: usize, j: usize) -> bool {
+     let ver = &VERSIONS[version];
+     let size = version * 4 + 17;
+ 
+     // finder + format: top-left · bottom-left · top-right

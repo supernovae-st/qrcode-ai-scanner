@@ -306,7 +306,7 @@ pub enum Hint {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct StageTrace {
-    /// Stage name (stable identifiers: `normalize`, `pyramid`, `direct`, …).
+    /// Stage name (stable identifiers: `pyramid` · `direct` · `enhance` · `deep`).
     pub stage: String,
     /// Number of transform attempts executed in this stage.
     pub transforms_tried: u32,
@@ -340,6 +340,15 @@ pub struct Versions {
     pub pipeline: u8,
     /// Score contract version.
     pub score_contract: u8,
+}
+
+impl QrMeta {
+    /// Modules per side for a QR version (`v*4 + 17`), `None` past v40 —
+    /// the ONE place this formula lives.
+    #[must_use]
+    pub fn modules_per_side(version: u8) -> Option<u8> {
+        (1..=40).contains(&version).then(|| version * 4 + 17)
+    }
 }
 
 impl Versions {

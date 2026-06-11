@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/uec.rs
++++ replace < with <= in reserved_cell
+@@ -141,17 +141,17 @@
+         return true;
+     }
+     // alignment patterns
+     let mut ai = None;
+     let mut aj = None;
+     let mut len = 0;
+     for (a, &pattern) in ver.apat.iter().take_while(|&&p| p != 0).enumerate() {
+         len = a;
+-        if pattern.abs_diff(i) < 3 {
++        if pattern.abs_diff(i) <= /* ~ changed by cargo-mutants ~ */ 3 {
+             ai = Some(a);
+         }
+         if pattern.abs_diff(j) < 3 {
+             aj = Some(a);
+         }
+     }
+     match (ai, aj) {
+         (Some(x), Some(y)) if x == len && y == len => true,

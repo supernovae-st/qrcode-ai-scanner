@@ -8,7 +8,9 @@
 //! - **No QR found is `Ok`** with empty detections — `Err` is reserved for real
 //!   faults (corrupt image, invalid buffer, cancellation).
 //! - **Deterministic**: same bytes + same config + same versions ⇒ the same
-//!   report, bit for bit. No RNG anywhere in the pipeline.
+//!   attempt sequence, bit for bit — no RNG anywhere. With a wall-clock
+//!   budget configured, where the run CUTS is machine-dependent; set
+//!   `budget_ms: None` for strictly bit-identical reports.
 //! - **Sync by design**: async belongs to the bindings (napi/wasm), never here.
 //! - **Engine-isolated**: third-party decoder panics are caught at the engine
 //!   boundary and recorded in the trace; the ladder continues.
@@ -71,11 +73,27 @@ impl Scanner {
         cancel: &CancelToken,
     ) -> Result<ScanReport> {
         let planes = transform::normalize(&input, &self.limits)?;
-        let outcome = ladder::run(&planes, &self.config, cancel)?;
+        // ONE wall-clock budget for the whole scan — decode ladder AND
+        // scoring share it (attempt/cell-granular: an in-flight engine call
+        // is not interruptible, which is why engine inputs are size-capped).
+        let deadline = self
+            .config
+            .budget_ms
+            .map(|ms| web_time::Instant::now() + std::time::Duration::from_millis(ms));
+        let outcome = ladder::run(&planes, &self.config, cancel, deadline)?;
         // Score the primary (first) detection when the profile asks for it.
+        // The scoring stage shares the engine panic posture: a panic in the
+        // math path degrades to "no score", never a crash (native unwind;
+        // on wasm panics trap regardless — documented limitation).
         let scored = match (outcome.merged.first(), self.config.score_depth) {
             (Some(detection), depth @ (ScoreDepth::Reduced | ScoreDepth::Full)) => {
-                Some(score::evaluate(&planes.luma, detection, depth, cancel)?)
+                let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    score::evaluate(&planes.luma, detection, depth, cancel, deadline)
+                }));
+                match attempt {
+                    Ok(result) => Some(result?),
+                    Err(_) => None,
+                }
             }
             _ => None,
         };
@@ -162,7 +180,7 @@ fn build_report(outcome: ladder::LadderOutcome, scored: Option<(Score, Vec<Hint>
                     version: m.version,
                     ec_level: m.ec,
                     mask: m.mask,
-                    modules: m.version.map(|v| v * 4 + 17),
+                    modules: m.version.and_then(QrMeta::modules_per_side),
                     mirrored: None,
                     inverted: None,
                 },

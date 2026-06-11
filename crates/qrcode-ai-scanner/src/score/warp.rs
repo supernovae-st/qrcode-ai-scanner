@@ -2,7 +2,7 @@
 //! perspective/rotation warps, local lighting defects.
 //!
 //! All deterministic f32 math. The same homography type serves the stress
-//! axes (A8) and the UEC module-grid sampling (A9).
+//! axes and the structural module-grid sampling.
 
 use crate::input::LumaImage;
 

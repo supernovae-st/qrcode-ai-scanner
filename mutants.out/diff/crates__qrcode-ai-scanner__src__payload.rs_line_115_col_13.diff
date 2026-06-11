@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/payload.rs
++++ delete match arm "P" in parse_wifi
+@@ -107,17 +107,17 @@
+     let mut ssid = None;
+     let mut security = None;
+     let mut password = None;
+     let mut hidden = false;
+     for (key, value) in wifi_fields(rest) {
+         match key.to_ascii_uppercase().as_str() {
+             "S" => ssid = Some(value),
+             "T" => security = Some(value),
+-            "P" => password = Some(value),
++             /* ~ changed by cargo-mutants ~ */
+             "H" => hidden = value.eq_ignore_ascii_case("true"),
+             _ => {}
+         }
+     }
+     Some(Payload::Wifi {
+         ssid: ssid?,
+         security: security.unwrap_or_else(|| "nopass".to_owned()),
+         password,

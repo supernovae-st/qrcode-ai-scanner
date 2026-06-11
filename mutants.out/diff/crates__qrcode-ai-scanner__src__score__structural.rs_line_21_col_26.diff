@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/structural.rs
++++ replace == with !=
+@@ -13,17 +13,17 @@
+ 
+ /// The canonical 7×7 finder pattern (true = dark module).
+ const FINDER: [[bool; 7]; 7] = {
+     let mut pattern = [[false; 7]; 7];
+     let mut y = 0;
+     while y < 7 {
+         let mut x = 0;
+         while x < 7 {
+-            let ring = y == 0 || y == 6 || x == 0 || x == 6;
++            let ring = y != /* ~ changed by cargo-mutants ~ */ 0 || y == 6 || x == 0 || x == 6;
+             let core = y >= 2 && y <= 4 && x >= 2 && x <= 4;
+             pattern[y][x] = ring || core;
+             x += 1;
+         }
+         y += 1;
+     }
+     pattern
+ };

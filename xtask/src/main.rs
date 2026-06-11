@@ -33,8 +33,6 @@ struct Entry {
     category: String,
     /// Ground-truth text. Absent = expected NOT to decode (negative sample).
     expected: Option<String>,
-    #[allow(dead_code)]
-    source: Option<String>,
 }
 
 fn repo_root() -> PathBuf {

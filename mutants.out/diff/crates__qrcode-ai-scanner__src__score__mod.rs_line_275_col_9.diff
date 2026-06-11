@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/mod.rs
++++ delete match arm (Some(corners), Some(version)) in evaluate
+@@ -267,17 +267,17 @@
+     luma: &LumaImage,
+     detection: &MergedDetection,
+     depth: ScoreDepth,
+     cancel: &CancelToken,
+ ) -> Result<(Score, Vec<Hint>)> {
+     let base = transform::downscale_to(luma, STRESS_BASE_SIDE);
+     let axes = run_axes(&base, &detection.raw, depth, cancel)?;
+     let structural = match (detection.corners, detection.version) {
+-        (Some(corners), Some(version)) => structural::check(luma, corners, version),
++         /* ~ changed by cargo-mutants ~ */
+         _ => None,
+     };
+     let uec_report = match (
+         &detection.masked_stream,
+         detection.version,
+         detection.ec,
+         detection.mask,
+     ) {

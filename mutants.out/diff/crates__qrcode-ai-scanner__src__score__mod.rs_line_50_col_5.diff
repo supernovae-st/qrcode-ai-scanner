@@ -1,0 +1,27 @@
+--- crates/qrcode-ai-scanner/src/score/mod.rs
++++ replace cell_passes -> bool with true
+@@ -42,23 +42,17 @@
+ const FINDER_DAMAGE_CAP: u8 = 40;
+ const QUIET_ZONE_CAP: u8 = 60;
+ 
+ /// One stress cell: did the (transformed) image still decode to `expected`?
+ fn cell_passes(img: &LumaImage, expected_raw: &[u8]) -> bool {
+     // Fast subset: direct + otsu — the score measures the MARGIN, not the
+     // full ladder's recovery power (that asymmetry is the point: a code
+     // that needs the deep ladder after mild stress has no margin).
+-    let outcome = engine::decode_all(img, EngineOptions::default());
+-    if outcome.detections.iter().any(|d| d.raw == expected_raw) {
+-        return true;
+-    }
+-    let binarized = transform::otsu_threshold(img);
+-    let outcome = engine::decode_all(&binarized, EngineOptions::default());
+-    outcome.detections.iter().any(|d| d.raw == expected_raw)
++    true /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Ramp cell indices at a given depth (Reduced takes the 2nd and 4th
+ /// intensities of each five-step ramp).
+ fn depth_indices(depth: ScoreDepth) -> &'static [usize] {
+     match depth {
+         ScoreDepth::Off => &[],
+         ScoreDepth::Reduced => &[1, 3],

@@ -1,0 +1,24 @@
+--- crates/qrcode-ai-scanner/src/payload.rs
++++ replace query_param -> Option<&'a str> with Some("")
+@@ -122,20 +122,17 @@
+         security: security.unwrap_or_else(|| "nopass".to_owned()),
+         password,
+         hidden,
+     })
+ }
+ 
+ /// Extract a query parameter value as written (no percent-decoding).
+ fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+-    query.split('&').find_map(|pair| {
+-        let (key, value) = pair.split_once('=')?;
+-        key.eq_ignore_ascii_case(name).then_some(value)
+-    })
++    Some("") /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn parse_mailto(rest: &str) -> Option<Payload> {
+     let (to, query) = match rest.split_once('?') {
+         Some((to, query)) => (to, Some(query)),
+         None => (rest, None),
+     };
+     if to.is_empty() {

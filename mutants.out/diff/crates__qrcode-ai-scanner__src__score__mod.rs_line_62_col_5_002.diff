@@ -1,0 +1,25 @@
+--- crates/qrcode-ai-scanner/src/score/mod.rs
++++ replace depth_indices -> &'static[usize] with Vec::leak(vec![1])
+@@ -54,21 +54,17 @@
+     let binarized = transform::otsu_threshold(img);
+     let outcome = engine::decode_all(&binarized, EngineOptions::default());
+     outcome.detections.iter().any(|d| d.raw == expected_raw)
+ }
+ 
+ /// Ramp cell indices at a given depth (Reduced takes the 2nd and 4th
+ /// intensities of each five-step ramp).
+ fn depth_indices(depth: ScoreDepth) -> &'static [usize] {
+-    match depth {
+-        ScoreDepth::Off => &[],
+-        ScoreDepth::Reduced => &[1, 3],
+-        _ => &[0, 1, 2, 3, 4],
+-    }
++    Vec::leak(vec![1]) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Run one ordered ramp with early-stop at the first failure (the knee).
+ fn run_ramp(
+     base: &LumaImage,
+     expected: &[u8],
+     cancel: &CancelToken,
+     indices: &[usize],

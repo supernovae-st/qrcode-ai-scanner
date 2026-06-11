@@ -1,0 +1,51 @@
+--- crates/qrcode-ai-scanner/src/score/uec.rs
++++ replace zigzag_positions -> Vec<(usize, usize)> with vec![(1, 0)]
+@@ -175,47 +175,17 @@
+         _ => false,
+     }
+ }
+ 
+ /// Module position of every emitted data bit, in stream order — replays
+ /// rqrr `read_data`'s zigzag exactly (down-up column pairs from the
+ /// bottom-right, column 6 skipped).
+ fn zigzag_positions(version: usize) -> Vec<(usize, usize)> {
+-    let size = version * 4 + 17;
+-    let mut positions = Vec::with_capacity(VERSIONS[version].total * 8);
+-    let mut y = size - 1;
+-    let mut x = size - 1;
+-    let mut neg_dir = true;
+-    while x > 0 {
+-        if x == 6 {
+-            x -= 1;
+-        }
+-        if !reserved_cell(version, y, x) {
+-            positions.push((y, x));
+-        }
+-        if !reserved_cell(version, y, x - 1) {
+-            positions.push((y, x - 1));
+-        }
+-        let (new_y, new_neg_dir) = match (y, neg_dir) {
+-            (0, true) => {
+-                x = x.saturating_sub(2);
+-                (0, false)
+-            }
+-            (yy, false) if yy == size - 1 => {
+-                x = x.saturating_sub(2);
+-                (size - 1, true)
+-            }
+-            (yy, true) => (yy - 1, true),
+-            (yy, false) => (yy + 1, false),
+-        };
+-        y = new_y;
+-        neg_dir = new_neg_dir;
+-    }
+-    positions
++    vec![(1, 0)] /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Unmask the still-masked stream into interleaved codeword bytes.
+ /// Returns `None` when the stream is shorter than the version's capacity.
+ fn unmask_to_codewords(masked: &[u8], bit_len: usize, version: usize, mask: u8) -> Option<Vec<u8>> {
+     let total = VERSIONS[version].total;
+     if bit_len < total * 8 {
+         return None;

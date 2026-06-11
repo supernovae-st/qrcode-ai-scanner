@@ -1,0 +1,30 @@
+crates/qrcode-ai-scanner/src/payload.rs:107:5: replace parse_wifi -> Option<Payload> with Some(Default::default())
+crates/qrcode-ai-scanner/src/payload.rs:137:5: replace parse_mailto -> Option<Payload> with Some(Default::default())
+crates/qrcode-ai-scanner/src/payload.rs:156:5: replace parse_matmsg -> Option<Payload> with Some(Default::default())
+crates/qrcode-ai-scanner/src/payload.rs:177:5: replace parse_sms -> Option<Payload> with Some(Default::default())
+crates/qrcode-ai-scanner/src/payload.rs:191:5: replace parse_geo -> Option<Payload> with Some(Default::default())
+crates/qrcode-ai-scanner/src/payload.rs:204:5: replace classify -> Payload with Default::default()
+crates/qrcode-ai-scanner/src/score/mod.rs:100:5: replace run_axes -> Result<Vec<AxisScore>> with Ok(vec![Default::default()])
+crates/qrcode-ai-scanner/src/score/mod.rs:180:5: replace compose -> (Score, Vec<Hint>) with (Default::default(), vec![])
+crates/qrcode-ai-scanner/src/score/mod.rs:180:5: replace compose -> (Score, Vec<Hint>) with (Default::default(), vec![Default::default()])
+crates/qrcode-ai-scanner/src/score/mod.rs:201:13: replace && with || in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:223:9: replace && with || in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:222:9: replace && with || in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:229:9: replace && with || in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:228:9: replace && with || in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:235:9: replace && with || in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:234:9: replace && with || in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:250:9: replace && with || in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:249:9: replace && with || in compose
+crates/qrcode-ai-scanner/src/score/mod.rs:272:5: replace evaluate -> Result<(Score, Vec<Hint>)> with Ok((Default::default(), vec![]))
+crates/qrcode-ai-scanner/src/score/mod.rs:272:5: replace evaluate -> Result<(Score, Vec<Hint>)> with Ok((Default::default(), vec![Default::default()]))
+crates/qrcode-ai-scanner/src/engine/charset.rs:11:5: replace resolve -> (String, Charset) with (String::new(), Default::default())
+crates/qrcode-ai-scanner/src/engine/charset.rs:11:5: replace resolve -> (String, Charset) with ("xyzzy".into(), Default::default())
+crates/qrcode-ai-scanner/src/score/structural.rs:18:13: replace < with <=
+crates/qrcode-ai-scanner/src/score/structural.rs:20:17: replace < with <=
+crates/qrcode-ai-scanner/src/score/structural.rs:24:15: replace += with -=
+crates/qrcode-ai-scanner/src/score/structural.rs:26:11: replace += with -=
+crates/qrcode-ai-scanner/src/score/structural.rs:24:15: replace += with *=
+crates/qrcode-ai-scanner/src/score/structural.rs:26:11: replace += with *=
+crates/qrcode-ai-scanner/src/score/structural.rs:151:5: replace check -> Option<StructuralReport> with Some(Default::default())
+crates/qrcode-ai-scanner/src/score/uec.rs:56:5: replace v -> VersionDb with Default::default()

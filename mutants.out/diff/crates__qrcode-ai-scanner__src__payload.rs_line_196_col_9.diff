@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/payload.rs
++++ replace && with || in parse_geo
+@@ -188,17 +188,17 @@
+ }
+ 
+ fn parse_geo(rest: &str) -> Option<Payload> {
+     let coords = rest.split(['?', ';']).next()?;
+     let mut parts = coords.split(',');
+     let lat: f64 = parts.next()?.parse().ok()?;
+     let lon: f64 = parts.next()?.parse().ok()?;
+     (lat.is_finite()
+-        && lon.is_finite()
++        || /* ~ changed by cargo-mutants ~ */ lon.is_finite()
+         && (-90.0..=90.0).contains(&lat)
+         && (-180.0..=180.0).contains(&lon))
+     .then_some(Payload::Geo { lat, lon })
+ }
+ 
+ /// Classify decoded QR text into a typed payload. Total: never fails.
+ pub(crate) fn classify(text: &str) -> Payload {
+     if strip_prefix_ci(text, "http://").is_some() || strip_prefix_ci(text, "https://").is_some() {

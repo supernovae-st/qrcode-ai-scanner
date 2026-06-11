@@ -1,0 +1,21 @@
+--- crates/qrcode-ai-scanner/src/score/structural.rs
++++ replace += with -= in quiet_zone_ok
+@@ -107,17 +107,17 @@
+     let mut interior_n = 0u32;
+     let step = (modules / 8).max(1);
+     let mut my = 0;
+     while my < modules {
+         let mut mx = 0;
+         while mx < modules {
+             if let Some(v) = sampler.module(mx, my) {
+                 interior_sum += u32::from(v);
+-                interior_n += 1;
++                interior_n -= /* ~ changed by cargo-mutants ~ */ 1;
+             }
+             mx += step;
+         }
+         my += step;
+     }
+     if interior_n == 0 {
+         return false;
+     }
