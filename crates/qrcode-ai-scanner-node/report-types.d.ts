@@ -50,6 +50,11 @@ export interface QrMeta {
   ec_level: EcLevel | null;
   mask: number | null;
   modules: number | null;
+  /**
+   * Symbol is photometrically inverted (light-on-dark), measured from the
+   * geometry source's decode path; null when no geometry was measured.
+   */
+  inverted: boolean | null;
 }
 
 export interface Detection {

@@ -480,3 +480,63 @@ fn scanner_is_send_sync_and_report_is_send() {
     assert_send_sync::<qrcode_ai_scanner::ScanReport>();
     assert_send_sync::<CancelToken>();
 }
+
+#[test]
+fn inverted_symbol_structural_checks_read_true_polarity() {
+    // light-on-dark symbol: invert a clean render at the IMAGE level
+    let code =
+        qrcode::QrCode::with_error_correction_level("inverted pin", qrcode::EcLevel::Q).unwrap();
+    let img = code
+        .render::<image::Luma<u8>>()
+        .module_dimensions(6, 6)
+        .build();
+    let inverted = image::ImageBuffer::from_fn(img.width(), img.height(), |x, y| {
+        image::Luma([255 - img.get_pixel(x, y).0[0]])
+    });
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageLuma8(inverted)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+
+    // skip S1/S2 (rxing AlsoInverted would win there with no geometry):
+    // force the S3 path where rqrr decodes on the INVERT attempt and
+    // becomes the geometry source.
+    let mut config = qrcode_ai_scanner::ScanConfig::full();
+    config.pyramid = false;
+    config.direct = false;
+    let scanner = Scanner::builder()
+        .profile(ScanProfile::Custom(config))
+        .build();
+    let report = scanner.scan(ImageInput::encoded(&bytes)).unwrap();
+
+    assert_eq!(report.detections.len(), 1, "trace: {:?}", report.trace);
+    let d = &report.detections[0];
+    assert_eq!(d.content.text, "inverted pin");
+    assert_eq!(d.meta.inverted, Some(true), "measured polarity");
+    assert!(d.corners.is_some(), "rqrr geometry present");
+
+    let score = report.score.as_ref().expect("Full depth scores");
+    let structural = score.structural.expect("geometry → structural checks");
+    // pre-fix: polarity-blind sampling read finder integrity ≈ 0.33 and
+    // capped a CLEAN symbol at 40 with bogus finder/quiet-zone hints
+    for integrity in structural.finder_integrity {
+        assert!(integrity > 0.85, "clean finders: {structural:?}");
+    }
+    assert!(structural.quiet_zone_ok, "{structural:?}");
+    assert!(
+        !report
+            .hints
+            .iter()
+            .any(|h| matches!(h, qrcode_ai_scanner::Hint::FixFinderPattern { .. })),
+        "no bogus finder hint: {:?}",
+        report.hints
+    );
+    let iso = score.iso15415.expect("geometry → grade card");
+    assert!(
+        iso.fixed_pattern_damage.grade < qrcode_ai_scanner::IsoGrade::C,
+        "FPD must not read damaged: {iso:?}"
+    );
+}

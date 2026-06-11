@@ -30,6 +30,12 @@ pub(crate) struct SourcePlanes {
 }
 
 impl SourcePlanes {
+    /// Whether the source carried color (channel planes available) —
+    /// presence check only, no extraction.
+    pub(crate) fn has_color(&self) -> bool {
+        self.rgb.is_some()
+    }
+
     /// Materialize one color channel as a luma plane. `None` for grayscale sources.
     pub(crate) fn channel(&self, channel: Channel) -> Option<LumaImage> {
         let rgb = self.rgb.as_ref()?;

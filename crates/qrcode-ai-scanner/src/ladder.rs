@@ -352,6 +352,10 @@ pub(crate) struct MergedDetection {
     /// FNC1-in-first-position (GS1) — true if ANY contributing engine saw
     /// the FNC1 mode header (only rxing can; rqrr rejects FNC1 symbols).
     pub fnc1: bool,
+    /// The GEOMETRY SOURCE's attempt photometrically inverted the symbol
+    /// (light-on-dark original). Meaningful only when `corners` is `Some`;
+    /// adopted together with the corners.
+    pub photometric_inverted: bool,
     pub engines: Vec<EngineKind>,
 }
 
@@ -393,7 +397,7 @@ impl Run<'_> {
     /// bytes — same symbol, different raw. When a detection carrying the
     /// engine-sampled bitstream (rqrr) joins a merge, its raw REPLACES the
     /// text-derived one: original bytes are the truth.
-    fn absorb(&mut self, found: Vec<RawDetection>) -> u32 {
+    fn absorb(&mut self, found: Vec<RawDetection>, attempt_inverts: bool) -> u32 {
         let count = u32::try_from(found.len()).unwrap_or(u32::MAX);
         for detection in found {
             let (text, charset) = engine::charset::resolve(&detection.raw);
@@ -422,6 +426,11 @@ impl Run<'_> {
                         existing.ec = existing.ec.or(detection.ec);
                         existing.mask = existing.mask.or(detection.mask);
                     }
+                    // the photometry flag describes the GEOMETRY source —
+                    // it travels with newly-adopted corners only
+                    if existing.corners.is_none() && detection.corners.is_some() {
+                        existing.photometric_inverted = attempt_inverts;
+                    }
                     existing.corners = existing.corners.or(detection.corners);
                     existing.fnc1 |= detection.fnc1;
                     if !existing.engines.contains(&detection.engine) {
@@ -434,6 +443,7 @@ impl Run<'_> {
                     text,
                     charset,
                     masked_stream: detection.masked_stream,
+                    photometric_inverted: attempt_inverts && detection.corners.is_some(),
                     corners: detection.corners,
                     version: detection.version,
                     ec: detection.ec,
@@ -451,25 +461,25 @@ impl Run<'_> {
     fn stage(
         &mut self,
         name: &str,
-        attempts: Vec<Box<dyn Fn() -> LumaImage + '_>>,
+        attempts: Vec<Attempt<'_>>,
         stages: &mut Vec<StageTrace>,
     ) -> Result<bool> {
         let started = Instant::now();
         let mut tried = 0u32;
         let mut found_total = 0u32;
         let mut stop = false;
-        for build in attempts {
+        for attempt in attempts {
             self.check_cancel()?;
             if self.out_of_budget() {
                 stop = true;
                 break;
             }
-            let img = build();
+            let img = (attempt.build)();
             let outcome = engine::decode_all(&img);
             self.panics = self.panics.saturating_add(outcome.panics);
             let rescaled =
                 rescale_corners(outcome.detections, (img.width(), img.height()), self.orig);
-            found_total += self.absorb(rescaled);
+            found_total += self.absorb(rescaled, attempt.inverts);
             tried += 1;
         }
         stages.push(StageTrace {
@@ -482,12 +492,44 @@ impl Run<'_> {
     }
 }
 
-/// S4 attempt list: 12 boost rungs, then the size × contrast × binarization
-/// grid in fixed declared order (grid combos duplicating S3 are skipped).
-fn deep_attempts(luma: &LumaImage, longest: u32) -> Vec<Box<dyn Fn() -> LumaImage + '_>> {
-    let mut attempts: Vec<Box<dyn Fn() -> LumaImage + '_>> = Vec::new();
+/// One lazily-built decode attempt: the transform closure plus whether its
+/// chain photometrically INVERTS the symbol. The flag travels with adopted
+/// geometry — structural/ISO sampling on the ORIGINAL luma must flip its
+/// dark-test for grids that were measured on an inverted attempt (otherwise
+/// a clean light-on-dark symbol reads finder integrity ≈ 0.33 and earns
+/// bogus caps + hints — the review-found polarity lie).
+struct Attempt<'a> {
+    inverts: bool,
+    build: Box<dyn Fn() -> LumaImage + 'a>,
+}
+
+impl<'a> Attempt<'a> {
+    /// A polarity-preserving attempt (the common case).
+    fn plain(build: impl Fn() -> LumaImage + 'a) -> Self {
+        Self {
+            inverts: false,
+            build: Box::new(build),
+        }
+    }
+
+    /// An attempt whose chain flips dark/light.
+    fn inverting(build: impl Fn() -> LumaImage + 'a) -> Self {
+        Self {
+            inverts: true,
+            build: Box::new(build),
+        }
+    }
+}
+
+/// S4 attempt list: the deep rungs (boosts + morphological closes), then
+/// the size × contrast × binarization grid in fixed declared order (grid
+/// combos duplicating S3 are skipped).
+fn deep_attempts(luma: &LumaImage, longest: u32) -> Vec<Attempt<'_>> {
+    type Op = fn(&LumaImage) -> LumaImage;
+    let mut attempts: Vec<Attempt<'_>> = Vec::new();
     for rung in DEEP_RUNGS {
-        attempts.push(Box::new(move || rung.apply(luma)));
+        // no deep rung flips polarity (boosts/morph-closes preserve it)
+        attempts.push(Attempt::plain(move || rung.apply(luma)));
     }
     for size in [Some(512u32), Some(800), None] {
         if let Some(side) = size
@@ -499,8 +541,11 @@ fn deep_attempts(luma: &LumaImage, longest: u32) -> Vec<Box<dyn Fn() -> LumaImag
             if size.is_none() && !stretch {
                 continue; // duplicates S3 otsu/invert at full res
             }
-            for op in [transform::otsu_threshold, transform::invert] {
-                attempts.push(Box::new(move || {
+            for (op, inverts) in [
+                (transform::otsu_threshold as Op, false),
+                (transform::invert as Op, true),
+            ] {
+                let build = move || {
                     let scaled = match size {
                         Some(side) => transform::downscale_to(luma, side),
                         None => luma.clone(),
@@ -511,7 +556,11 @@ fn deep_attempts(luma: &LumaImage, longest: u32) -> Vec<Box<dyn Fn() -> LumaImag
                         scaled
                     };
                     op(&based)
-                }));
+                };
+                attempts.push(Attempt {
+                    inverts,
+                    build: Box::new(build),
+                });
             }
         }
     }
@@ -576,7 +625,7 @@ pub(crate) fn run(
             let side = config.pyramid_side;
             let stop = run.stage(
                 "pyramid",
-                vec![Box::new(move || transform::downscale_to(luma, side))],
+                vec![Attempt::plain(move || transform::downscale_to(luma, side))],
                 &mut stages,
             )?;
             if stop || !run.merged.is_empty() {
@@ -586,7 +635,7 @@ pub(crate) fn run(
 
         // S2 — direct full resolution.
         if config.direct && !run.out_of_budget() {
-            let stop = run.stage("direct", vec![Box::new(|| luma.clone())], &mut stages)?;
+            let stop = run.stage("direct", vec![Attempt::plain(|| luma.clone())], &mut stages)?;
             if stop || !run.merged.is_empty() {
                 break 'ladder;
             }
@@ -594,17 +643,21 @@ pub(crate) fn run(
 
         // S3 — enhance: fixed transform set at full resolution.
         if config.enhance && !run.out_of_budget() {
-            let mut attempts: Vec<Box<dyn Fn() -> LumaImage + '_>> = vec![
-                Box::new(|| transform::otsu_threshold(luma)),
-                Box::new(|| transform::invert(luma)),
-                Box::new(|| transform::contrast_stretch(luma)),
+            let mut attempts: Vec<Attempt<'_>> = vec![
+                Attempt::plain(|| transform::otsu_threshold(luma)),
+                Attempt::inverting(|| transform::invert(luma)),
+                Attempt::plain(|| transform::contrast_stretch(luma)),
             ];
-            for channel in [Channel::R, Channel::G, Channel::B] {
-                if let Some(plane) = planes.channel(channel) {
-                    // channel planes extract at source resolution — cap them
-                    // before they reach the engines
-                    let capped = transform::downscale_to(&plane, config.max_engine_side);
-                    attempts.push(Box::new(move || capped.clone()));
+            if planes.has_color() {
+                let cap = config.max_engine_side;
+                for channel in [Channel::R, Channel::G, Channel::B] {
+                    // LAZY: channel extraction walks the full-res RGB buffer
+                    // — built only when this attempt actually runs, so the
+                    // cost lands AFTER the per-attempt budget check
+                    attempts.push(Attempt::plain(move || {
+                        let plane = planes.channel(channel).unwrap_or_else(|| luma.clone());
+                        transform::downscale_to(&plane, cap)
+                    }));
                 }
             }
             let stop = run.stage("enhance", attempts, &mut stages)?;

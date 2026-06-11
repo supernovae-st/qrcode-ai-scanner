@@ -8,9 +8,12 @@
 //! - **No QR found is `Ok`** with empty detections — `Err` is reserved for real
 //!   faults (corrupt image, invalid buffer, cancellation).
 //! - **Deterministic**: same bytes + same config + same versions ⇒ the same
-//!   attempt sequence, bit for bit — no RNG anywhere. With a wall-clock
-//!   budget configured, where the run CUTS is machine-dependent; set
-//!   `budget_ms: None` for strictly bit-identical reports.
+//!   attempt sequence, bit for bit on a given platform/build — no RNG
+//!   anywhere. Two caveats, both bounded: a wall-clock budget makes the CUT
+//!   point machine-dependent (set `budget_ms: None` for strictly identical
+//!   reports), and CROSS-platform the libm transcendentals (warp kernels,
+//!   gaussian blur) may differ in the last ulp — a stress cell sitting
+//!   exactly on a knee can flip between platforms.
 //! - **Sync by design**: async belongs to the bindings (napi/wasm), never here.
 //! - **Engine-isolated**: third-party decoder panics are caught at the engine
 //!   boundary and recorded in the trace; the ladder continues.
@@ -203,6 +206,7 @@ fn build_report(outcome: ladder::LadderOutcome, scored: Option<(Score, Vec<Hint>
                     ec_level: m.ec,
                     mask: m.mask,
                     modules: m.version.and_then(QrMeta::modules_per_side),
+                    inverted: m.corners.is_some().then_some(m.photometric_inverted),
                 },
                 engines: m.engines,
             }

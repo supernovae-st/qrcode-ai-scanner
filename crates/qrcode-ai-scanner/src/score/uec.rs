@@ -233,7 +233,10 @@ fn zigzag_positions(version: usize) -> Vec<(usize, usize)> {
 /// Returns `None` when the stream is shorter than the version's capacity.
 fn unmask_to_codewords(masked: &[u8], bit_len: usize, version: usize, mask: u8) -> Option<Vec<u8>> {
     let total = VERSIONS[version].total;
-    if bit_len < total * 8 {
+    // BOTH the declared bit length AND the actual buffer must cover the
+    // symbol: bit_len alone is caller-supplied and the loop below indexes
+    // the buffer (doc promise: short stream ⇒ None, never garbage/panic).
+    if bit_len < total * 8 || masked.len() < total {
         return None;
     }
     let positions = zigzag_positions(version);
@@ -470,6 +473,16 @@ mod tests {
     )]
 
     use super::*;
+
+    #[test]
+    fn inconsistent_bit_len_vs_buffer_is_none_not_panic() {
+        // the doc promise: "None when the stream is short — never a garbage
+        // margin". A caller deriving bit_len independently of the buffer
+        // (future binding) must not hit index-out-of-bounds.
+        assert!(compute(&[0u8; 4], 32_000, 2, crate::report::EcLevel::Q, 3).is_none());
+        assert!(compute(&[], 8, 1, crate::report::EcLevel::L, 0).is_none());
+    }
+
     use crate::input::{ImageInput, Limits};
     use crate::ladder::{self, CancelToken, ScanConfig};
     use crate::transform::normalize;

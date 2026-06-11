@@ -356,8 +356,16 @@ pub(crate) fn evaluate(
     // calibrate the cell probe on the unstressed base (its decode class)
     let probe = CellProbe::calibrate(&base, &detection.text).unwrap_or(CellProbe { rung: None });
     let axes = run_axes(&base, &detection.text, depth, cancel, deadline, probe)?;
+    // Photometric checks sample the ORIGINAL luma — when the geometry came
+    // from an INVERTING attempt (light-on-dark symbol), hand them an
+    // inverted view or every module's polarity reads flipped (a clean
+    // symbol would score finder integrity ≈ 0.33 + earn bogus caps/hints).
+    let photometric_view = detection
+        .photometric_inverted
+        .then(|| transform::invert(luma));
+    let sample_luma = photometric_view.as_ref().unwrap_or(luma);
     let structural = match (detection.corners, detection.version) {
-        (Some(corners), Some(version)) => structural::check(luma, corners, version),
+        (Some(corners), Some(version)) => structural::check(sample_luma, corners, version),
         _ => None,
     };
     let uec_report = match (
@@ -373,7 +381,7 @@ pub(crate) fn evaluate(
     };
     let iso = match (detection.corners, detection.version, &structural) {
         (Some(corners), Some(version), Some(s)) => {
-            iso15415::compute(luma, corners, version, s, uec_report.as_ref())
+            iso15415::compute(sample_luma, corners, version, s, uec_report.as_ref())
         }
         _ => None,
     };
@@ -400,6 +408,7 @@ mod tests {
             ec,
             mask: Some(0),
             fnc1: false,
+            photometric_inverted: false,
             engines: vec![crate::report::EngineKind::Rqrr],
         }
     }

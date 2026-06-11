@@ -103,9 +103,19 @@ pub struct QrMeta {
     pub mask: Option<u8>,
     /// Modules per side (`version * 4 + 17`), derived from `version`.
     pub modules: Option<u8>,
+    /// Symbol is photometrically INVERTED (light-on-dark) — measured from
+    /// the geometry source's decode path. `None` when no geometry (the
+    /// rxing-only path handles inverted symbols internally without
+    /// reporting which reading won).
+    pub inverted: Option<bool>,
 }
 
 /// One decoded QR symbol.
+///
+/// Detections merge across engines and attempts BY DECODED TEXT: two
+/// physical symbols carrying the identical payload in one image collapse
+/// into one detection (corners from the first geometry source). Distinct
+/// payloads always stay distinct.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
@@ -385,7 +395,9 @@ pub struct StageTrace {
     pub transforms_tried: u32,
     /// Wall-clock milliseconds spent in this stage.
     pub ms: f64,
-    /// Detections found by this stage.
+    /// RAW engine hits in this stage, PRE-merge — both engines decoding
+    /// the same symbol counts twice here (the merged symbol count is
+    /// `detections.len()` on the report).
     pub detections_found: u32,
 }
 
@@ -500,6 +512,7 @@ mod tests {
                     ec_level: Some(EcLevel::Q),
                     mask: Some(3),
                     modules: Some(37),
+                    inverted: Some(false),
                 },
                 engines: vec![EngineKind::Rxing, EngineKind::Rqrr],
             }],

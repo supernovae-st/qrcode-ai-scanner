@@ -53,7 +53,11 @@ pub(crate) struct RawDetection {
 pub(crate) struct EngineOutcome {
     /// Every detection from every engine (deduplication is the ladder's job).
     pub detections: Vec<RawDetection>,
-    /// Engine panics caught and isolated during this pass.
+    /// Engine panics caught and isolated during this pass. NOTE: isolation
+    /// stops the unwind, but the process-global panic HOOK still runs first
+    /// — server embedders see a backtrace on stderr per caught panic
+    /// (suppress via `std::panic::set_hook` in the application if needed;
+    /// a library must not touch the global hook).
     pub panics: u8,
 }
 
