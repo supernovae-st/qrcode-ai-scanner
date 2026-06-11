@@ -47,7 +47,27 @@ expression: full_report()
   ],
   "score": {
     "value": 87,
-    "grade": "excellent"
+    "grade": "excellent",
+    "axes": [
+      {
+        "axis": "resolution",
+        "passed": 4,
+        "total": 5
+      },
+      {
+        "axis": "perspective",
+        "passed": 3,
+        "total": 5
+      }
+    ],
+    "structural": {
+      "finder_integrity": [
+        1.0,
+        0.96,
+        0.88
+      ],
+      "quiet_zone_ok": true
+    }
   },
   "hints": [
     {

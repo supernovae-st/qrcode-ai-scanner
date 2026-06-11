@@ -159,15 +159,66 @@ impl Grade {
     }
 }
 
-/// Scannability score (contract v3 — enriched by the score module, task A8).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One stress dimension of the score contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
+pub enum StressAxis {
+    /// Downscale ramp — sampling margin (px/module floor).
+    Resolution,
+    /// Gaussian blur ramp — focus/motion margin.
+    Blur,
+    /// Global contrast reduction ramp.
+    Contrast,
+    /// Perspective tilt ramp — grid-estimation margin.
+    Perspective,
+    /// Non-cardinal rotation ramp.
+    Rotation,
+    /// Local lighting defects (shadow · glare · exposure) — pass set.
+    Lighting,
+}
+
+/// Survival result on one stress axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
+pub struct AxisScore {
+    /// The dimension.
+    pub axis: StressAxis,
+    /// Cells survived. Ramps stop at the first failure (the knee);
+    /// the lighting set always runs in full.
+    pub passed: u8,
+    /// Cells in the ramp at this depth.
+    pub total: u8,
+}
+
+/// Structural checks — computed when symbol geometry was measured.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
+pub struct StructuralReport {
+    /// Per-finder 1:1:3:1:1 integrity, 0.0-1.0 — [top-left, top-right,
+    /// bottom-left]. The #1 documented AI-art failure mode.
+    pub finder_integrity: [f32; 3],
+    /// ≥4-module clear border present.
+    pub quiet_zone_ok: bool,
+}
+
+/// Scannability score — contract v3: survival ramps + structural caps.
+/// Validation, NOT ISO verification (no calibrated optics).
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct Score {
-    /// Composite 0-100.
+    /// Composite 0-100 (weighted axis survival, structurally capped).
     pub value: u8,
     /// Interpretation band for `value`.
     pub grade: Grade,
+    /// Per-axis survival breakdown.
+    pub axes: Vec<AxisScore>,
+    /// Structural checks — `None` when no geometry was measured.
+    pub structural: Option<StructuralReport>,
 }
 
 /// Machine-actionable improvement hint — the generator/agent feedback loop.
@@ -318,6 +369,22 @@ mod tests {
             score: Some(Score {
                 value: 87,
                 grade: Grade::Excellent,
+                axes: vec![
+                    AxisScore {
+                        axis: StressAxis::Resolution,
+                        passed: 4,
+                        total: 5,
+                    },
+                    AxisScore {
+                        axis: StressAxis::Perspective,
+                        passed: 3,
+                        total: 5,
+                    },
+                ],
+                structural: Some(StructuralReport {
+                    finder_integrity: [1.0, 0.96, 0.88],
+                    quiet_zone_ok: true,
+                }),
             }),
             hints: vec![
                 Hint::RaiseErrorCorrection {

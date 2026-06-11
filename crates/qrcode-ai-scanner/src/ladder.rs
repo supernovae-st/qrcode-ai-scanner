@@ -42,6 +42,18 @@ impl CancelToken {
     }
 }
 
+/// Stress-scoring depth — how many cells each axis ramp runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ScoreDepth {
+    /// No scoring (camera frames).
+    Off,
+    /// Reduced ramps (upload tool).
+    Reduced,
+    /// Full ramps (generator quality gate).
+    Full,
+}
+
 /// Stage-level scan configuration. Build from a profile preset, then adjust
 /// public fields as needed (the struct is non-exhaustive: presets are the
 /// only constructors).
@@ -64,6 +76,8 @@ pub struct ScanConfig {
     pub deep: bool,
     /// Longest side of the S1 pyramid attempt.
     pub pyramid_side: u32,
+    /// Stress-scoring depth applied after a successful decode.
+    pub score_depth: ScoreDepth,
 }
 
 impl ScanConfig {
@@ -77,6 +91,7 @@ impl ScanConfig {
             enhance: true,
             deep: true,
             pyramid_side: 512,
+            score_depth: ScoreDepth::Full,
         }
     }
 
@@ -86,6 +101,7 @@ impl ScanConfig {
         Self {
             budget_ms: Some(800),
             deep: false,
+            score_depth: ScoreDepth::Reduced,
             ..Self::full()
         }
     }
@@ -97,6 +113,7 @@ impl ScanConfig {
             budget_ms: Some(80),
             enhance: false,
             deep: false,
+            score_depth: ScoreDepth::Off,
             ..Self::full()
         }
     }
@@ -398,6 +415,9 @@ mod tests {
         let frame = ScanProfile::Frame.config();
         assert!(frame.pyramid && frame.direct && !frame.enhance && !frame.deep);
         assert_eq!(frame.budget_ms, Some(80));
+        assert_eq!(full.score_depth, ScoreDepth::Full);
+        assert_eq!(fast.score_depth, ScoreDepth::Reduced);
+        assert_eq!(frame.score_depth, ScoreDepth::Off);
 
         assert_eq!(ScanProfile::default(), ScanProfile::Full);
     }

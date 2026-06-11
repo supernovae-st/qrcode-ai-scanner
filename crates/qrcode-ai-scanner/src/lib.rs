@@ -24,15 +24,16 @@ mod input;
 mod ladder;
 mod payload;
 mod report;
+mod score;
 mod transform;
 
 pub use error::{Result, ScanError};
 pub use input::{ImageInput, Limits};
-pub use ladder::{CancelToken, ScanConfig, ScanProfile};
+pub use ladder::{CancelToken, ScanConfig, ScanProfile, ScoreDepth};
 pub use payload::Payload;
 pub use report::{
-    Charset, DecodedContent, Detection, EcLevel, EngineKind, Grade, Hint, PipelineTrace, Point,
-    QrMeta, ScanReport, Score, StageTrace, Versions,
+    AxisScore, Charset, DecodedContent, Detection, EcLevel, EngineKind, Grade, Hint, PipelineTrace,
+    Point, QrMeta, ScanReport, Score, StageTrace, StressAxis, StructuralReport, Versions,
 };
 
 /// Reusable QR scanner — configure once, scan many. `Send + Sync`, no
@@ -71,7 +72,14 @@ impl Scanner {
     ) -> Result<ScanReport> {
         let planes = transform::normalize(&input, &self.limits)?;
         let outcome = ladder::run(&planes, &self.config, cancel)?;
-        Ok(build_report(outcome))
+        // Score the primary (first) detection when the profile asks for it.
+        let scored = match (outcome.merged.first(), self.config.score_depth) {
+            (Some(detection), depth @ (ScoreDepth::Reduced | ScoreDepth::Full)) => {
+                Some(score::evaluate(&planes.luma, detection, depth, cancel)?)
+            }
+            _ => None,
+        };
+        Ok(build_report(outcome, scored))
     }
 
     /// Scan a batch — the generator best-of-N gate. Parallel under the
@@ -132,7 +140,11 @@ impl ScannerBuilder {
 /// Assemble the public report from ladder output. Text + charset always come
 /// from our own resolution over raw bytes (consistent pair; exotic ECIs are a
 /// documented limit — `raw` preserves the truth for consumers).
-fn build_report(outcome: ladder::LadderOutcome) -> ScanReport {
+fn build_report(outcome: ladder::LadderOutcome, scored: Option<(Score, Vec<Hint>)>) -> ScanReport {
+    let (score, hints) = match scored {
+        Some((score, hints)) => (Some(score), hints),
+        None => (None, Vec::new()),
+    };
     let detections = outcome
         .merged
         .into_iter()
@@ -161,8 +173,8 @@ fn build_report(outcome: ladder::LadderOutcome) -> ScanReport {
         .collect();
     ScanReport {
         detections,
-        score: None,
-        hints: Vec::new(),
+        score,
+        hints,
         trace: outcome.trace,
         versions: Versions::current(),
     }
