@@ -1,0 +1,74 @@
+---
+title: "The decode pipeline"
+description: "Five deterministic stages — from the cheap pyramid to the erasure rescue."
+---
+
+The ladder replaces brute-force retry loops with a **fixed, declared
+attempt order** — no RNG anywhere. Budget and cancellation are honored
+between attempts; engines are panic-isolated.
+
+```text
+ImageInput (Encoded | Rgba8 | Luma8)
+  → validate limits · BT.601 luma · cap to max_engine_side (2048)
+  S1 pyramid    ≤512px downscale — cheapest, often best on artistic
+  S2 direct     full-resolution luma
+  S3 enhance    otsu · invert · contrast stretch · R/G/B channels
+  S4 deep       15 rungs: 12 contrast boosts + 3 morphological closes,
+                then a size × stretch × binarization grid
+  S5 rescue     errors-and-erasures RS over grids the engines read
+                but could not decode
+  → merge (text-keyed) → score → ScanReport
+```
+
+A stage that finds something still **completes** (consensus inside the
+stage is preserved), then the ladder stops. Each later stage exists for a
+documented failure class:
+
+| Stage | Recovers |
+|---|---|
+| S1 | over-sampled artistic renders (downscale averages texture into modules) |
+| S3 invert | light-on-dark symbols (polarity travels with the geometry — `meta.inverted`) |
+| S3 channels | color art where one RGB plane carries the structure |
+| S4 boosts | low-contrast art texture (multiplicative contrast crush) |
+| S4 morphological closes | **blob/dot pixel styles** — gaps between sub-module blobs read as noise until closed |
+| S5 rescue | **logo-occluded symbols** past the engines' RS error wall |
+
+## S5 — the erasure rescue
+
+The flagship. Both engines treat every corrupted codeword as a
+full-price *error* and die at `t > ⌊(d−p)/2⌋`. But the geometry engine
+often still READS the grid and its format info where RS fails — that
+sampled bitstream is recoverable:
+
+<Steps>
+  <Step title="Confidence per codeword">
+    Each codeword's 8 modules are sampled at their centers through the
+    detection homography; the worst |sample − threshold| margin is the
+    codeword's confidence (logo zones and art texture sit near the
+    threshold → low margin).
+  </Step>
+  <Step title="Erasure marking">
+    Low-confidence codewords become **erasures** — known-position losses
+    that cost HALF an unknown error in the capacity law `e + 2t ≤ d − p`.
+  </Step>
+  <Step title="Errors-and-erasures Reed-Solomon">
+    Forney 1965: erasure locator, modified syndromes, Berlekamp-Massey,
+    Chien search, Forney magnitudes — then a hard syndrome re-check and a
+    structural bitstream parse. Refusal-biased: no guess ever reaches the
+    report.
+  </Step>
+</Steps>
+
+Rescued detections carry `engines: ["rescue"]` and a `"rescue"` entry in
+`trace.stages`. **Measured: center occlusion tolerance grows from 20% to
+30% radius (2.2× the area) on v5-H.**
+
+<Note>
+Determinism contract: same bytes + same config + same version ⇒ the same
+attempt sequence, bit for bit on a given platform. A wall-clock budget
+makes the *cut point* machine-dependent; cross-platform, libm
+transcendentals may differ in the last ulp.
+</Note>
+
+The normative version of this page is
+[`spec/07-pipeline.md`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/07-pipeline.md).

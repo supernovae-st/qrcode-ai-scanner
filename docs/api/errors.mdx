@@ -1,0 +1,61 @@
+---
+title: "Errors & exit codes"
+description: "The QRS catalog — and why 'no QR found' is not an error."
+---
+
+<Info>
+**"No QR found" is a RESULT**: `Ok` with empty `detections`. Errors are
+reserved for real faults — invalid input, limits, cancellation.
+</Info>
+
+## The catalog
+
+| Code | Meaning | Server response guidance |
+|---|---|---|
+| `QRS-001` | bytes are not a decodable image | 422 — safe to show "invalid image" |
+| `QRS-002` | width/height over `maxDimension` | 413 — your limits working |
+| `QRS-003` | total pixels over `maxPixels` (incl. decompression bombs) | 413 |
+| `QRS-004` | raw buffer length mismatch (`rgba8`/`luma8` misuse) | 500 — caller bug |
+| `QRS-005` | cancelled via `CancelToken` | — |
+
+Match the **code**, never the prose: the cross-surface contract is the
+regex `QRS-\d{3}`, delimited `[QRS-xxx]` in every message.
+
+<Tabs>
+  <Tab title="Node">
+    ```js
+    try {
+      await scan(buffer, { maxPixels: 16_000_000 });
+    } catch (e) {
+      const code = e.message.match(/QRS-\d{3}/)?.[0];
+      if (code === "QRS-002" || code === "QRS-003") res.status(413).end();
+    }
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    match scanner.scan(input) {
+        Ok(report) => handle(report),
+        Err(e) if e.code() == "QRS-003" => reject_oversized(),
+        Err(e) => log_fault(e), // thiserror + miette diagnostics
+    }
+    ```
+  </Tab>
+  <Tab title="CLI (scripts)">
+    ```bash
+    qrscan in.png -s; case $? in
+      0) echo "decoded, score on stdout" ;;
+      1) echo "no QR in the image" ;;
+      2) echo "invalid input or usage" ;;
+    esac
+    ```
+  </Tab>
+</Tabs>
+
+## CLI exit codes
+
+`0` = ≥1 QR decoded · `1` = scan clean, nothing found (all output modes)
+· `2` = invalid input/usage (QRS fault, unreadable file, `--score-only`
+with the no-scoring `frame` profile).
+
+Normative source: [`spec/03-errors.md`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/03-errors.md).

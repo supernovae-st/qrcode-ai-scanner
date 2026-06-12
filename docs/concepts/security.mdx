@@ -1,0 +1,52 @@
+---
+title: "Security & determinism"
+description: "Anti-DoS limits, attacker-controlled content, and the reproducibility contract."
+---
+
+## Threat model
+
+The scanner processes **attacker-controlled bytes** (uploads) that decode
+into **attacker-controlled text** (QR content). Both layers are hardened
+and fuzzed.
+
+### Image layer
+
+| Defense | Default |
+|---|---|
+| dimension cap (`max_dimension`) | 10 000 px/side — *lower it server-side (4096)* |
+| pixel cap (`max_pixels`) | 64 MP — *lower it server-side (16 MP)* |
+| decoder allocation cap | `max_pixels × 8` bytes (decompression-bomb guard) |
+| engine input cap | 2 048 px longest side — one engine call is never unbounded |
+| whole-scan wall clock | profile budget / `budgetMs` |
+| detection cap | 16 per report |
+| engine panics | caught + isolated (`trace.engine_panics`) |
+
+### Content layer
+
+- Decoded text reaching the GS1/payload parsers is boundary-safe
+  (UTF-8-hostile inputs fuzzed: millions of runs) and allocation-bounded.
+- The CLI `--pretty` path strips terminal escapes AND Unicode bidi/
+  zero-width spoofing characters before echoing content. JSON output is
+  serde-escaped by construction.
+- `low_correction_margin` is the **content-distrust signal**: the decode
+  sat at the Reed-Solomon limit and may be a miscorrection — verify
+  out-of-band before acting on it.
+
+## Determinism
+
+Same bytes + same config + same crate version ⇒ the same attempt
+sequence and the same report, **bit for bit on a given platform**, because
+there is no RNG anywhere in the pipeline. Two bounded caveats:
+
+1. a wall-clock budget makes the *cut point* machine-dependent — use an
+   unbounded budget for strictly reproducible reports;
+2. across platforms, libm transcendentals (warp kernels, gaussian blur)
+   can differ in the last ulp — a stress cell sitting exactly on a knee
+   can flip.
+
+## Verification surface
+
+172 Rust tests · property tests (proptest) on the RS math and parsers ·
+two fuzz targets (image bytes, decoded text) · mutation testing ·
+golden spec examples validated in CI against both the serde types and the
+published JSON Schema.

@@ -1,0 +1,108 @@
+{
+  "detections": [
+    {
+      "content": {
+        "text": "https://qrc-ai.com/Uo54C",
+        "raw": "aHR0cHM6Ly9xcmMtYWkuY29tL1VvNTRD",
+        "charset": "utf8"
+      },
+      "payload": {
+        "kind": "url",
+        "url": "https://qrc-ai.com/Uo54C"
+      },
+      "corners": null,
+      "meta": {
+        "version": null,
+        "ec_level": null,
+        "mask": null,
+        "modules": null,
+        "inverted": null
+      },
+      "engines": [
+        "rxing"
+      ]
+    }
+  ],
+  "score": {
+    "value": 43,
+    "grade": "fair",
+    "axes": [
+      {
+        "axis": "resolution",
+        "passed": 1,
+        "total": 5
+      },
+      {
+        "axis": "blur",
+        "passed": 4,
+        "total": 5
+      },
+      {
+        "axis": "contrast",
+        "passed": 1,
+        "total": 5
+      },
+      {
+        "axis": "perspective",
+        "passed": 2,
+        "total": 5
+      },
+      {
+        "axis": "rotation",
+        "passed": 1,
+        "total": 5
+      },
+      {
+        "axis": "lighting",
+        "passed": 4,
+        "total": 5
+      }
+    ],
+    "structural": null,
+    "uec": null,
+    "iso15415": null
+  },
+  "hints": [
+    {
+      "hint": "increase_contrast"
+    },
+    {
+      "hint": "enlarge_modules"
+    }
+  ],
+  "trace": {
+    "stages": [
+      {
+        "stage": "pyramid",
+        "transforms_tried": 1,
+        "ms": 6.295249999999999,
+        "detections_found": 0
+      },
+      {
+        "stage": "direct",
+        "transforms_tried": 1,
+        "ms": 15.439207999999999,
+        "detections_found": 0
+      },
+      {
+        "stage": "enhance",
+        "transforms_tried": 6,
+        "ms": 93.36554199999999,
+        "detections_found": 0
+      },
+      {
+        "stage": "deep",
+        "transforms_tried": 25,
+        "ms": 369.200875,
+        "detections_found": 2
+      }
+    ],
+    "engine_panics": 0,
+    "total_ms": 484.377916
+  },
+  "versions": {
+    "scanner": "0.3.0",
+    "pipeline": 1,
+    "score_contract": 3
+  }
+}

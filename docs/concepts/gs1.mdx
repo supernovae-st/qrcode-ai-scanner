@@ -1,0 +1,65 @@
+---
+title: "GS1 & retail readiness"
+description: "Element strings, Digital Link, and the conformance verdict — Sunrise 2027-ready."
+---
+
+Retail point-of-sale is moving to 2D barcodes (**GS1 Sunrise 2027**). The
+scanner recognizes and *validates* both GS1 carrier forms and returns a
+machine-actionable verdict.
+
+## The two forms
+
+<CardGroup cols={2}>
+  <Card title="gs1 — element string" icon="barcode">
+    FNC1-in-first-position QR (symbology `]Q3`/`]Q4`): concatenated
+    `(AI, value)` pairs — the B2B/logistics form.
+    `01095060001343521010ABC123…`
+  </Card>
+  <Card title="gs1_digital_link — URI" icon="link">
+    A plain QR carrying a GS1 Digital Link URL — the consumer-facing
+    retail form (also opens in any phone camera).
+    `https://id.gs1.org/01/09506000134352/10/LOT1?17=271231`
+  </Card>
+</CardGroup>
+
+Both come back with the same verdict shape:
+
+```json
+"payload": {
+  "kind": "gs1_digital_link",
+  "url": "https://id.gs1.org/01/09506000134352/10/LOT1?17=271231",
+  "elements": [
+    { "ai": "01", "value": "09506000134352" },
+    { "ai": "10", "value": "LOT1" },
+    { "ai": "17", "value": "271231" }
+  ],
+  "gtin": "09506000134352",
+  "conformant": true,
+  "issues": []
+}
+```
+
+## What `conformant` checks
+
+GTIN check digits (GenSpecs §7.2.7) · AI value formats and lengths
+(CSET 82, YYMMDD dates, predefined lengths §7.8.4) · Digital Link path
+order `01 → 22 → 10 → 21` and the 14-digit GTIN law (DL URI Syntax 1.6).
+Every violation lands in `issues[]` **citing its criterion** — show them
+verbatim, they ARE the fix instructions.
+
+## The verdict your UI should surface
+
+| Situation | Detection | Suggested badge |
+|---|---|---|
+| valid Digital Link | `gs1_digital_link` + `conformant: true` | **Retail-ready ✓** (no competitor generator surfaces this) |
+| valid FNC1 element string | `gs1` + `conformant: true` | GS1 ✓ |
+| GS1 syntax, FNC1 header missing | `gs1` + `conformant: false` + FNC1 issue | "Regenerate with GS1 mode" — the classic generator mistake commercial verifiers flag |
+| violations | either + `conformant: false` | list `issues[]` |
+
+<Note>
+Engine subtlety the scanner absorbs for you: rqrr cannot decode FNC1
+symbols at all — rxing carries the GS1 path, and the S5 rescue parses
+FNC1 segments itself.
+</Note>
+
+Normative grammar + AI subset: [`spec/05-payloads.md`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/05-payloads.md).

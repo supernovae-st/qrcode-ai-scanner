@@ -1,0 +1,68 @@
+---
+title: "Browser — @supernovae-st/qrcode-ai-scanner-wasm"
+description: "SIMD128 wasm for verify flows and live camera — ~617 KB gzipped."
+---
+
+```bash
+npm i @supernovae-st/qrcode-ai-scanner-wasm
+```
+
+`wasm-pack` web target: the `.wasm` resolves via `import.meta.url`.
+Typed returns (`ScanReport`) ship in the package.
+
+## API
+
+```ts
+import init, { scan_image, scan_frame, version }
+  from "@supernovae-st/qrcode-ai-scanner-wasm";
+
+await init(); // once — fetches + instantiates the .wasm
+
+// encoded bytes (PNG/JPEG/WebP/GIF)
+// args: bytes, profile?, max_dimension?, max_pixels?, budget_ms?
+const report = scan_image(bytes, "full", undefined, undefined, 1500);
+
+// raw RGBA frames (live camera) — defaults to the `frame` profile
+const ctx = canvas.getContext("2d")!;
+const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+const frame = scan_frame(new Uint8Array(img.data.buffer),
+                         canvas.width, canvas.height);
+```
+
+<Warning>
+The scan runs **synchronously on the calling thread**. In UI contexts
+either pass `budget_ms` (the verify flow uses 1500 ms) or move the call
+into a Web Worker. `budget_ms: 0` means unbounded.
+</Warning>
+
+## Bundler notes
+
+<AccordionGroup>
+  <Accordion title="Vite / Nuxt">
+    Exclude from dependency pre-bundling — esbuild breaks the
+    `import.meta.url` wasm resolution:
+
+    ```ts
+    vite: { optimizeDeps: { exclude: ["@supernovae-st/qrcode-ai-scanner-wasm"] } }
+    ```
+  </Accordion>
+  <Accordion title="Lazy loading">
+    The package weighs ~617 KB gz. Load it with the feature that needs it
+    (dynamic `import()` in an async chunk) and memoize `init()` —
+    **reset the memo if init rejects**, or one network error bricks the
+    feature until reload:
+
+    ```ts
+    let ready: Promise<unknown> | null = null;
+    ready ??= init().catch(err => { ready = null; throw err; });
+    await ready;
+    ```
+  </Accordion>
+  <Accordion title="Camera loop">
+    Use `scan_frame` (no PNG roundtrip) at `frame` profile; throttle to
+    ~5 fps — decoding every frame buys nothing.
+  </Accordion>
+</AccordionGroup>
+
+Failures throw `JsError` with `[QRS-xxx]`-tagged messages
+([catalog](/api/errors)).

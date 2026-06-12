@@ -1,0 +1,106 @@
+---
+title: "ScanReport"
+description: "The one JSON contract every surface returns."
+---
+
+Every surface (Rust, CLI, Node, WASM) returns the **same JSON shape**.
+Evolution is additive-only; parse leniently (unknown fields, unknown enum
+values may appear).
+
+<Tip>
+Machine-readable mirrors — load these directly in tools and agents:
+- **JSON Schema**: [`spec/scan-report.schema.json`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/scan-report.schema.json)
+- **TypeScript**: `report-types.d.ts` (shipped inside both npm packages)
+- **Golden examples** (real binary output, CI-validated): [`spec/examples/`](https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/spec/examples)
+</Tip>
+
+## Top level
+
+<ResponseField name="detections" type="Detection[]" required>
+  Decoded symbols. **Empty = no QR found** — a valid result, not an
+  error. Max 16; merged by decoded text across engines/attempts.
+</ResponseField>
+
+<ResponseField name="score" type="Score | null" required>
+  Scannability of the PRIMARY (first) detection. `null` in the `frame`
+  profile or when nothing decoded. See [Scoring](/concepts/scoring).
+</ResponseField>
+
+<ResponseField name="hints" type="Hint[]" required>
+  Machine-actionable improvement hints, stable order — the
+  generate → scan → act → regenerate loop. Catalog:
+  [`spec/06-hints.md`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/06-hints.md).
+</ResponseField>
+
+<ResponseField name="trace" type="PipelineTrace" required>
+  Per-stage execution trace (`pyramid`·`direct`·`enhance`·`deep`·`rescue`)
+  — why the scan succeeded or came back empty. `detections_found` counts
+  RAW pre-merge engine hits.
+</ResponseField>
+
+<ResponseField name="versions" type="Versions" required>
+  Contract markers: `scanner` (semver), `pipeline` (1),
+  `score_contract` (3).
+</ResponseField>
+
+## Detection
+
+<ResponseField name="content" type="object" required>
+  `text` (decoded string) · `raw` (base64 — the ORIGINAL bytes, the
+  truth) · `charset` (`utf8` | `shift_jis` | `latin1`). The text/charset
+  pair is resolved once over `raw`.
+</ResponseField>
+
+<ResponseField name="payload" type="Payload" required>
+  Typed classification, `kind`-tagged: `url` · `gs1` ·
+  `gs1_digital_link` · `wifi` · `email` · `sms` · `tel` · `geo` ·
+  `me_card` · `crypto` · `v_card` · `v_event` · `text`. Treat unknown
+  kinds as `text`. See [GS1](/concepts/gs1) for the conformance verdict.
+</ResponseField>
+
+<ResponseField name="corners" type="[Point ×4] | null" required>
+  Clockwise from top-left, ORIGINAL-image pixels (sub-pixel). `null` on
+  the rxing-only path (no geometry measured).
+</ResponseField>
+
+<ResponseField name="meta" type="QrMeta" required>
+  `version` (1-40) · `ec_level` · `mask` · `modules` (= version×4+17) ·
+  `inverted` (light-on-dark, MEASURED). All `null` when no geometry —
+  never fabricated.
+</ResponseField>
+
+<ResponseField name="engines" type="EngineKind[]" required>
+  `rxing` · `rqrr` · `rescue` — who confirmed this payload.
+  `["rescue"]` means both decoders failed and the errors-and-erasures
+  stage recovered the stream (syndrome-verified; heed any
+  `low_correction_margin` hint).
+</ResponseField>
+
+## Example — a rescued, logo-occluded symbol
+
+```json
+{
+  "detections": [{
+    "content": { "text": "https://qrcode-ai.com/rescue-pin", "raw": "aHR0cHM…", "charset": "utf8" },
+    "payload": { "kind": "url", "url": "https://qrcode-ai.com/rescue-pin" },
+    "corners": [{ "x": 32.0, "y": 32.0 }, { "x": 327.0, "y": 32.0 },
+                 { "x": 327.0, "y": 327.0 }, { "x": 32.0, "y": 327.0 }],
+    "meta": { "version": 5, "ec_level": "h", "mask": 3, "modules": 37, "inverted": false },
+    "engines": ["rescue"]
+  }],
+  "score": { "value": 40, "grade": "fair", "axes": ["…"], "structural": null,
+             "uec": { "margin": 0.0, "grade": "f", "worst_block_errors": 13, "worst_block_capacity": 22 },
+             "iso15415": null },
+  "hints": [{ "hint": "low_correction_margin", "errors": 13, "capacity": 22 }],
+  "trace": { "stages": [
+    { "stage": "direct", "transforms_tried": 1, "ms": 8.4, "detections_found": 0 },
+    { "stage": "enhance", "transforms_tried": 3, "ms": 18.7, "detections_found": 0 },
+    { "stage": "deep", "transforms_tried": 17, "ms": 127.7, "detections_found": 0 },
+    { "stage": "rescue", "transforms_tried": 1, "ms": 9.1, "detections_found": 1 }
+  ], "engine_panics": 0, "total_ms": 164.2 },
+  "versions": { "scanner": "0.3.0", "pipeline": 1, "score_contract": 3 }
+}
+```
+
+The full field-by-field normative reference is
+[`spec/01-report.md`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/01-report.md).

@@ -1,0 +1,76 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "QR Code AI Scanner",
+  "description": "QR decoding + scannability scoring for artistic, AI-generated, and photo-captured QR codes. Deterministic, sovereign, pure Rust.",
+  "colors": {
+    "primary": "#F97316",
+    "light": "#FDBA74",
+    "dark": "#C2410C"
+  },
+  "favicon": "/favicon.svg",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting started",
+            "pages": ["introduction", "quickstart"]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/pipeline",
+              "concepts/scoring",
+              "concepts/gs1",
+              "concepts/security"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": ["guides/nuxt-verify", "guides/agents"]
+          }
+        ]
+      },
+      {
+        "tab": "API reference",
+        "groups": [
+          {
+            "group": "The report",
+            "pages": ["api/report", "api/errors"]
+          },
+          {
+            "group": "Surfaces",
+            "pages": ["api/rust", "api/cli", "api/node", "api/wasm"]
+          }
+        ]
+      }
+    ],
+    "global": {
+      "anchors": [
+        {
+          "anchor": "Normative spec",
+          "href": "https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/spec",
+          "icon": "scale-balanced"
+        },
+        {
+          "anchor": "GitHub",
+          "href": "https://github.com/supernovae-st/qrcode-ai-scanner",
+          "icon": "github"
+        },
+        {
+          "anchor": "qrcode-ai.com",
+          "href": "https://qrcode-ai.com",
+          "icon": "qrcode"
+        }
+      ]
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/supernovae-st/qrcode-ai-scanner",
+      "website": "https://qrcode-ai.com"
+    }
+  }
+}

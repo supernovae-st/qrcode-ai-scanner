@@ -1,0 +1,75 @@
+---
+title: "Introduction"
+description: "Decode the undecodable — and know your margin."
+---
+
+**qrcode-ai-scanner** decodes and *grades* QR codes that break standard
+scanners: artistic and AI-generated symbols with damaged finders, low
+module contrast, art texture over data, logos over the center. It powers
+the [qrcode-ai.com](https://qrcode-ai.com) verify flow and ships as four
+artifacts off one Rust core.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Decode your first image on every surface in 5 minutes
+  </Card>
+  <Card title="The pipeline" icon="layer-group" href="/concepts/pipeline">
+    The 5-stage deterministic ladder, S1 pyramid → S5 erasure rescue
+  </Card>
+  <Card title="Scoring" icon="gauge-high" href="/concepts/scoring">
+    Score v3, the synthetic UEC margin, the ISO 15415-informed grade card
+  </Card>
+  <Card title="Report reference" icon="file-code" href="/api/report">
+    Every field of the ScanReport, with the JSON Schema
+  </Card>
+</CardGroup>
+
+## What makes it different
+
+1. **A deterministic multi-engine decode ladder** — rxing (ZXing lineage)
+   + rqrr (quirc lineage) + curated preprocessing rungs. No RNG anywhere:
+   same input, same result, always.
+2. **Score contract v3** — survival ramps across six stress axes with
+   structural caps. The 0-100 value is a real *margin* measure, not
+   "did it decode".
+3. **Synthetic UEC** — the ISO 15415 Unused Error Correction margin from
+   RS syndromes (exact corrected-error counts). It catches real
+   Reed-Solomon *miscorrections* and flags them.
+4. **An ISO 15415-informed grade card** — Symbol Contrast, Modulation,
+   Axial Nonuniformity, Fixed Pattern Damage, UEC; honest by construction
+   (hardware-only parameters reported absent, never faked).
+5. **An erasure-rescue stage** — when both engines give up, the scanner
+   re-decodes the bitstream itself with errors-and-erasures Reed-Solomon.
+   Measured: center-logo occlusion tolerance grows from 20% to **30%
+   radius** (2.2× the area).
+
+Plus **GS1 awareness** (element strings + Digital Link with a per-criterion
+`conformant` verdict — Sunrise 2027-ready) and machine-actionable
+**hints** that close the *generate → scan → act → regenerate* loop.
+
+## The four artifacts
+
+| Artifact | Registry | For |
+|---|---|---|
+| `qrcode-ai-scanner` | crates.io | Rust apps, Nika vision |
+| `qrcode-ai-scanner-cli` (`qrscan`) | crates.io | scripts, CI gates |
+| `@supernovae-st/qrcode-ai-scanner` | npm | Node servers (async, libuv pool) |
+| `@supernovae-st/qrcode-ai-scanner-wasm` | npm | browsers (SIMD128, ~617 KB gz) |
+
+All four speak the **same JSON report** — one contract, machine-validated
+against the [normative spec](https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/spec)
+in CI.
+
+## Measured accuracy
+
+| Corpus | Result |
+|---|---|
+| zxing blackbox (179 images, ground truth) | **170/179** exact-text @ 0° — beats the zxing reference thresholds on all six suites |
+| qrcode-ai.com production templates | **15/15** decoded (incl. the blob-pixel class) |
+| Center-logo occlusion (v5-H) | engines die >20% radius · **rescue decodes through 30%** |
+
+<Note>
+License: **AGPL-3.0-or-later** © SuperNovae Studio. The qrcode-ai.com
+product consumes this library; so can you, under the AGPL's share-alike
+terms.
+</Note>

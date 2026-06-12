@@ -129,10 +129,16 @@ synthetic UEC flags at margin 0 and surfaces as the
 `low_correction_margin` hint. The decode-rate number above counts it as a
 miss; the hint is the mechanism that keeps it from being a *silent* one.
 
-## Architecture & scoring
+## Documentation & spec
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — invariants, pipeline, error model
-- [docs/SCORING.md](docs/SCORING.md) — the v3 score contract (axes, weights, caps, UEC)
+- **[`spec/`](spec/)** — the NORMATIVE contract: wire format, errors,
+  score, payloads, hints, pipeline + a JSON Schema and golden examples
+  **validated in CI** against the real types (they cannot rot).
+- **[`docs/`](docs/)** — the Mintlify documentation site (quickstart,
+  concepts, per-surface API reference, integration guides — for humans
+  AND agents). Renders on Mintlify or reads fine raw.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/SCORING.md](docs/SCORING.md)
+  — engineering deep dives.
 - [docs/plans/2026-06-11-v03-rebuild-design.md](docs/plans/2026-06-11-v03-rebuild-design.md) — design + research evidence
 
 ## Workspace

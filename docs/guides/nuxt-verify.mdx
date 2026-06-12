@@ -1,0 +1,85 @@
+---
+title: "Nuxt verify flow (qrcode-ai.com)"
+description: "The exact pattern the landing's editor uses — swap-in reference."
+---
+
+This is the production integration shipped to the qrcode-ai.com editor
+([PR #11](https://github.com/supernovae-studio/qrcode-ai_landing/pull/11)):
+one native-resolution scan replaces a 3-level canvas filter loop, and the
+quality meter maps from a real margin score.
+
+## The verify handler
+
+```ts
+import { ScanStatus } from "@/types/scan";
+import initQrScanner, { scan_image } from "@supernovae-st/qrcode-ai-scanner-wasm";
+
+// wasm loads once, lazily — and a FAILED init must not stay cached
+let qrScannerReady: Promise<unknown> | null = null;
+
+const onVerify = async () => {
+  const canvas = previewRef.value?.canvas;
+  if (!canvas) return;
+
+  qrScannerReady ??= initQrScanner().catch((err) => {
+    qrScannerReady = null; // retry on the next verify
+    throw err;
+  });
+  await qrScannerReady;
+
+  // NATIVE resolution — no resize prep: downscaling destroys the blob
+  // structure the deep ladder is calibrated for; the scanner caps engine
+  // input internally
+  const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, "image/png"));
+  if (!blob) return;
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+
+  // FULL profile: the blob/dot template class (an editor OUTPUT) only
+  // decodes in the deep stage — `fast` would read NO on valid output.
+  // 1500 ms bounds the UI thread.
+  const report = scan_image(bytes, "full", undefined, undefined, 1500);
+
+  if (!report.detections.length) {
+    scanStatus.value = ScanStatus.NO;
+  } else {
+    const score = report.score?.value ?? 0;
+    scanStatus.value =
+      score >= 80 ? ScanStatus.HIGH : score >= 60 ? ScanStatus.MEDIUM : ScanStatus.LOW;
+  }
+};
+```
+
+## The status mapping
+
+| Meter | Condition | Meaning for the user |
+|---|---|---|
+| HIGH | score ≥ 80 | safe on all devices and conditions |
+| MEDIUM | 60-79 | fine; older phones / poor light may struggle |
+| LOW | decoded, < 60 | works here, fragile in the wild |
+| NO | no detection | regenerate |
+
+## Product upgrades the report enables
+
+<CardGroup cols={2}>
+  <Card title="Retail-ready badge" icon="badge-check">
+    `payload.kind === "gs1_digital_link" && payload.conformant` →
+    "Retail-ready ✓ (GS1 Sunrise 2027)". On `conformant: false`, show
+    `payload.issues` verbatim — each cites its violated GS1 rule.
+  </Card>
+  <Card title="Honest failure on miscorrections" icon="shield-halved">
+    A `low_correction_margin` hint means the decode sat AT the RS limit —
+    show "decodes, but unreliable — regenerate", not a pass.
+  </Card>
+  <Card title="Design guidance" icon="wand-magic-sparkles">
+    Map hints to copy: `fix_finder_pattern` → "clear the art off the
+    {corner} corner" · `enlarge_modules` → "shorten the URL or upscale" ·
+    `reduce_art_texture` → "lighten the texture over the data zone".
+  </Card>
+  <Card title="Rescue awareness" icon="life-ring">
+    `engines: ["rescue"]` = recovered past the engines' wall — fine for
+    verify, but suggest raising EC for print runs.
+  </Card>
+</CardGroup>
+
+Don't forget the Vite exclude
+(`optimizeDeps.exclude: ["@supernovae-st/qrcode-ai-scanner-wasm"]`).

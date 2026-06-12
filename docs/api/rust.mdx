@@ -1,0 +1,81 @@
+---
+title: "Rust — qrcode-ai-scanner"
+description: "The core crate: Scanner, profiles, cancellation, batching."
+---
+
+```toml
+[dependencies]
+qrcode-ai-scanner = "0.3"
+```
+
+Features: `engine-rxing` + `engine-rqrr` (default — at least one
+required) · `parallel` (rayon batching, native only — OFF for wasm) ·
+`serde` (the JSON contract).
+
+## Scanner
+
+`Send + Sync`, no interior state — build once, share across threads.
+
+```rust
+use qrcode_ai_scanner::{
+    CancelToken, ImageInput, Limits, ScanConfig, ScanProfile, Scanner,
+};
+
+let scanner = Scanner::builder()
+    .profile(ScanProfile::Full)          // Full | Fast | Frame | Custom(_)
+    .limits(Limits { max_dimension: 4096, max_pixels: 16_000_000, ..Limits::default() })
+    .build();
+```
+
+### Inputs
+
+| Constructor | Use |
+|---|---|
+| `ImageInput::encoded(&bytes)` | PNG / JPEG / WebP / GIF bytes |
+| `ImageInput::rgba8(&buf, w, h)` | camera frames (`ImageData`-shaped, no PNG roundtrip) |
+| `ImageInput::luma8(&buf, w, h)` | pre-converted grayscale |
+
+### Scanning
+
+```rust
+// the standard call — "no QR" is Ok(empty), never Err
+let report = scanner.scan(ImageInput::encoded(&bytes))?;
+
+// cooperative cancellation (checked between attempts/cells)
+let cancel = CancelToken::new();
+let handle = cancel.clone();           // fire from another thread
+let report = scanner.scan_cancellable(ImageInput::encoded(&bytes), &cancel)?;
+
+// batch — parallel under the `parallel` feature, per-input Results
+let reports = scanner.scan_batch(&inputs);
+```
+
+### Custom profiles
+
+```rust
+let mut config: ScanConfig = ScanProfile::Full.config(); // preset → adjust
+config.budget_ms = Some(1_500);
+let scanner = Scanner::builder()
+    .profile(ScanProfile::Custom(config))
+    .build();
+```
+
+### Errors
+
+`ScanError` (`thiserror` + `miette`): `.code()` → `"QRS-001"…"QRS-005"`
+([catalog](/api/errors)). Pattern-match the code, not the variant — the
+enum is `#[non_exhaustive]`.
+
+## Type surface
+
+Everything the report contains is re-exported at the crate root:
+`ScanReport` · `Detection` · `Payload` · `Gs1Element` · `Score` ·
+`UecReport`/`UecGrade` · `Iso15415Report`/`IsoGrade`/`IsoParameter` ·
+`Hint` · `StructuralReport` · `PipelineTrace` · `EngineKind` · `QrMeta` ·
+`Grade` · `StressAxis` · `Charset` · `EcLevel` · `Point` · `Versions`.
+All public enums/structs are `#[non_exhaustive]` — match with `_` arms.
+
+<Note>
+Scoring evaluates the PRIMARY detection. wasm builds: keep the `parallel`
+feature OFF and the crate is wasm32-clean (`web_time` clocks, no threads).
+</Note>

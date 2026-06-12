@@ -1,0 +1,167 @@
+{
+  "detections": [
+    {
+      "content": {
+        "text": "https://qrcode-ai.com/rescue-pin",
+        "raw": "aHR0cHM6Ly9xcmNvZGUtYWkuY29tL3Jlc2N1ZS1waW4=",
+        "charset": "utf8"
+      },
+      "payload": {
+        "kind": "url",
+        "url": "https://qrcode-ai.com/rescue-pin"
+      },
+      "corners": [
+        {
+          "x": 32.0,
+          "y": 32.0
+        },
+        {
+          "x": 336.0,
+          "y": 32.0
+        },
+        {
+          "x": 336.0,
+          "y": 336.0
+        },
+        {
+          "x": 32.0,
+          "y": 336.0
+        }
+      ],
+      "meta": {
+        "version": 5,
+        "ec_level": "h",
+        "mask": 3,
+        "modules": 37,
+        "inverted": false
+      },
+      "engines": [
+        "rescue"
+      ]
+    }
+  ],
+  "score": {
+    "value": 0,
+    "grade": "poor",
+    "axes": [
+      {
+        "axis": "resolution",
+        "passed": 0,
+        "total": 5
+      },
+      {
+        "axis": "blur",
+        "passed": 0,
+        "total": 5
+      },
+      {
+        "axis": "contrast",
+        "passed": 0,
+        "total": 5
+      },
+      {
+        "axis": "perspective",
+        "passed": 0,
+        "total": 5
+      },
+      {
+        "axis": "rotation",
+        "passed": 0,
+        "total": 5
+      },
+      {
+        "axis": "lighting",
+        "passed": 0,
+        "total": 5
+      }
+    ],
+    "structural": {
+      "finder_integrity": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "quiet_zone_ok": true
+    },
+    "uec": {
+      "margin": 0.0,
+      "grade": "f",
+      "worst_block_errors": 11,
+      "worst_block_capacity": 22
+    },
+    "iso15415": {
+      "symbol_contrast": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "modulation": {
+        "value": 0.003921569,
+        "grade": "f"
+      },
+      "axial_nonuniformity": {
+        "value": 0.0,
+        "grade": "a"
+      },
+      "fixed_pattern_damage": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "unused_error_correction": {
+        "value": 0.0,
+        "grade": "f"
+      },
+      "overall": "f"
+    }
+  },
+  "hints": [
+    {
+      "hint": "increase_contrast"
+    },
+    {
+      "hint": "enlarge_modules"
+    },
+    {
+      "hint": "reduce_art_texture"
+    },
+    {
+      "hint": "low_correction_margin",
+      "errors": 11,
+      "capacity": 22
+    }
+  ],
+  "trace": {
+    "stages": [
+      {
+        "stage": "direct",
+        "transforms_tried": 1,
+        "ms": 4.325417,
+        "detections_found": 0
+      },
+      {
+        "stage": "enhance",
+        "transforms_tried": 3,
+        "ms": 14.485417,
+        "detections_found": 0
+      },
+      {
+        "stage": "deep",
+        "transforms_tried": 17,
+        "ms": 83.037625,
+        "detections_found": 0
+      },
+      {
+        "stage": "rescue",
+        "transforms_tried": 1,
+        "ms": 0.063583,
+        "detections_found": 1
+      }
+    ],
+    "engine_panics": 0,
+    "total_ms": 101.97120799999999
+  },
+  "versions": {
+    "scanner": "0.3.0",
+    "pipeline": 1,
+    "score_contract": 3
+  }
+}

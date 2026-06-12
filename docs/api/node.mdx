@@ -1,0 +1,61 @@
+---
+title: "Node — @supernovae-st/qrcode-ai-scanner"
+description: "Async native binding on the libuv pool — for Nuxt/Next servers and workers."
+---
+
+```bash
+npm i @supernovae-st/qrcode-ai-scanner
+```
+
+Prebuilt for macOS (arm64/x64), Linux (gnu+musl, arm64/x64), Windows
+(x64). Full TypeScript types included.
+
+## API
+
+```ts
+import { scan, scanSync, version } from "@supernovae-st/qrcode-ai-scanner";
+import type { ScanReport, ScanOptions } from "@supernovae-st/qrcode-ai-scanner";
+
+// async on the libuv pool — NEVER blocks the event loop
+const report: ScanReport = await scan(imageBuffer, {
+  profile: "full",        // "full" | "fast" | "frame"   (default full)
+  budgetMs: 1500,         // wall-clock bound; 0 = unbounded
+  maxDimension: 4096,     // anti-DoS — LOWER THESE for untrusted uploads
+  maxPixels: 16_000_000,
+  signal: controller.signal, // cancels QUEUED tasks (see note)
+} satisfies ScanOptions);
+
+const sync = scanSync(buffer, { profile: "fast" }); // scripts only
+```
+
+<Warning>
+`signal` rejects tasks still QUEUED on the pool (and pre-aborted signals
+reject immediately with `AbortError`). A RUNNING scan is not interrupted —
+it completes within its `profile`/`budgetMs` bound. Budget is the real
+latency control.
+</Warning>
+
+## Server recipe (Nitro/Express upload endpoint)
+
+```ts
+export default defineEventHandler(async (event) => {
+  const body = await readRawBody(event, false);
+  try {
+    const report = await scan(body, {
+      profile: "full", budgetMs: 2000,
+      maxDimension: 4096, maxPixels: 16_000_000,
+    });
+    if (!report.detections.length) return { ok: false, reason: "no_qr" };
+    const d = report.detections[0];
+    const untrusted = report.hints.some(h => h.hint === "low_correction_margin");
+    return { ok: true, text: d.content.text, kind: d.payload.kind,
+             score: report.score?.value ?? null, untrusted };
+  } catch (e) {
+    const code = (e as Error).message.match(/QRS-\d{3}/)?.[0];
+    throw createError({ statusCode: code === "QRS-001" ? 422 : 413 });
+  }
+});
+```
+
+Errors reject with `[QRS-xxx]`-tagged messages ([catalog](/api/errors)).
+The report shape is the [one contract](/api/report).

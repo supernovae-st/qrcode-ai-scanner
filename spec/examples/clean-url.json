@@ -1,0 +1,135 @@
+{
+  "detections": [
+    {
+      "content": {
+        "text": "https://qrc-ai.com/76xMa",
+        "raw": "aHR0cHM6Ly9xcmMtYWkuY29tLzc2eE1h",
+        "charset": "utf8"
+      },
+      "payload": {
+        "kind": "url",
+        "url": "https://qrc-ai.com/76xMa"
+      },
+      "corners": [
+        {
+          "x": 78.0,
+          "y": 70.0
+        },
+        {
+          "x": 982.0,
+          "y": 68.0
+        },
+        {
+          "x": 992.0,
+          "y": 992.0
+        },
+        {
+          "x": 66.0,
+          "y": 974.0
+        }
+      ],
+      "meta": {
+        "version": 2,
+        "ec_level": "m",
+        "mask": 6,
+        "modules": 25,
+        "inverted": false
+      },
+      "engines": [
+        "rxing",
+        "rqrr"
+      ]
+    }
+  ],
+  "score": {
+    "value": 89,
+    "grade": "excellent",
+    "axes": [
+      {
+        "axis": "resolution",
+        "passed": 5,
+        "total": 5
+      },
+      {
+        "axis": "blur",
+        "passed": 5,
+        "total": 5
+      },
+      {
+        "axis": "contrast",
+        "passed": 5,
+        "total": 5
+      },
+      {
+        "axis": "perspective",
+        "passed": 5,
+        "total": 5
+      },
+      {
+        "axis": "rotation",
+        "passed": 1,
+        "total": 5
+      },
+      {
+        "axis": "lighting",
+        "passed": 4,
+        "total": 5
+      }
+    ],
+    "structural": {
+      "finder_integrity": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "quiet_zone_ok": true
+    },
+    "uec": {
+      "margin": 1.0,
+      "grade": "a",
+      "worst_block_errors": 0,
+      "worst_block_capacity": 16
+    },
+    "iso15415": {
+      "symbol_contrast": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "modulation": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "axial_nonuniformity": {
+        "value": 0.001117092,
+        "grade": "a"
+      },
+      "fixed_pattern_damage": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "unused_error_correction": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "overall": "a"
+    }
+  },
+  "hints": [],
+  "trace": {
+    "stages": [
+      {
+        "stage": "pyramid",
+        "transforms_tried": 1,
+        "ms": 27.220709,
+        "detections_found": 2
+      }
+    ],
+    "engine_panics": 0,
+    "total_ms": 27.666125
+  },
+  "versions": {
+    "scanner": "0.3.0",
+    "pipeline": 1,
+    "score_contract": 3
+  }
+}

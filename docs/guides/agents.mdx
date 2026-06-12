@@ -1,0 +1,67 @@
+---
+title: "For agents & automation"
+description: "Machine-first integration: the schema, the goldens, the loop."
+---
+
+This page is written for LLM agents and automated pipelines (Nika
+workflows, CI bots) consuming the scanner.
+
+## Ground truth to load
+
+| Artifact | Use |
+|---|---|
+| [`spec/scan-report.schema.json`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/scan-report.schema.json) | validate any report you receive or mock |
+| [`spec/examples/*.json`](https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/spec/examples) | real binary outputs covering: clean URL, rescued occlusion, artistic blob, GS1 Digital Link, no-detection |
+| `report-types.d.ts` (in both npm packages) | typed access in JS/TS tools |
+| [`spec/`](https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/spec) markdown | the normative semantics (≈15 min read) |
+
+## Invariants you can rely on
+
+1. **Empty `detections` is success-with-nothing** — exit 1 on the CLI,
+   resolved Promise elsewhere. Only `QRS-\d{3}` faults are errors.
+2. The JSON shape is identical on every surface and evolves additively —
+   tolerate unknown fields/kinds/hints.
+3. `content.raw` (base64) is the byte truth; `text`+`charset` are one
+   consistent resolution of it.
+4. Determinism: unbounded budget ⇒ same input → same report (per
+   platform/build). Safe to cache by input hash + `versions`.
+5. `meta`/`corners` are measured or `null` — never fabricated.
+
+## The regenerate loop
+
+```text
+generate(params) → scan(full) →
+  ├─ no detection            → adjust per trace (which stage died) + retry
+  ├─ hints non-empty         → apply the mapped fixes:
+  │    fix_finder_pattern{corner} → clear art at that corner
+  │    restore_quiet_zone        → add border margin
+  │    increase_contrast         → darken modules / lighten bg
+  │    enlarge_modules           → shorter content or bigger render
+  │    reduce_art_texture        → lower texture strength over data
+  │    raise_error_correction    → bump EC level (l→m→q→h)
+  │    low_correction_margin     → TREAT AS FAILURE (miscorrection risk)
+  └─ score ≥ threshold & hints ∅ → accept
+```
+
+The hints were designed to be actionable **without image analysis** — an
+agent can drive generation parameters from the report alone.
+
+## Acceptance gates (suggested)
+
+| Context | Gate |
+|---|---|
+| web display | decoded + score ≥ 60 |
+| print / packaging | score ≥ 80 AND uec.grade ∈ {a, b} AND no hints |
+| retail GS1 | the above AND `payload.conformant === true` |
+| ANY content you act on | reject if `low_correction_margin` present |
+
+## CLI patterns for tool use
+
+```bash
+qrscan in.png | jq '{text: .detections[0].content.text,
+                     kind: .detections[0].payload.kind,
+                     score: .score.value,
+                     hints: [.hints[].hint]}'
+```
+
+Exit codes are the branch signal: `0` decoded · `1` nothing · `2` fault.

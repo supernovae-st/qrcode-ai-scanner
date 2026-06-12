@@ -1,0 +1,111 @@
+---
+title: "Quickstart"
+description: "Decode and grade your first QR on every surface."
+---
+
+<Tabs>
+  <Tab title="Rust">
+    ```toml Cargo.toml
+    [dependencies]
+    qrcode-ai-scanner = "0.3"
+    ```
+
+    ```rust
+    use qrcode_ai_scanner::{ImageInput, ScanProfile, Scanner};
+
+    let scanner = Scanner::builder().profile(ScanProfile::Full).build();
+    let report = scanner.scan(ImageInput::encoded(&image_bytes))?;
+
+    match report.detections.first() {
+        Some(d) => {
+            println!("{} (engines: {:?})", d.content.text, d.engines);
+            if let Some(score) = &report.score {
+                println!("score {}/100 ({:?})", score.value, score.grade);
+            }
+        }
+        None => println!("no QR found"), // a RESULT, not an error
+    }
+    for hint in &report.hints {
+        println!("hint: {hint:?}"); // feed back to your generator
+    }
+    ```
+
+    Camera frames skip the PNG roundtrip: `ImageInput::rgba8(&frame, w, h)`.
+  </Tab>
+
+  <Tab title="Node">
+    ```bash
+    npm i @supernovae-st/qrcode-ai-scanner
+    ```
+
+    ```js
+    import { scan } from "@supernovae-st/qrcode-ai-scanner";
+
+    // async on the libuv pool — never blocks the event loop
+    const report = await scan(imageBuffer, {
+      profile: "full",     // full | fast | frame
+      budgetMs: 1500,      // bound the worst case (0 = unbounded)
+      maxDimension: 4096,  // tighten limits for untrusted uploads
+      maxPixels: 16_000_000,
+    });
+
+    if (report.detections.length) {
+      const d = report.detections[0];
+      console.log(d.content.text, d.payload.kind, report.score?.value);
+    }
+    ```
+
+    Full TypeScript types ship in the package (`ScanReport` and friends).
+  </Tab>
+
+  <Tab title="Browser (WASM)">
+    ```bash
+    npm i @supernovae-st/qrcode-ai-scanner-wasm
+    ```
+
+    ```ts
+    import init, { scan_image } from "@supernovae-st/qrcode-ai-scanner-wasm";
+
+    await init(); // loads the .wasm via import.meta.url
+
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    // args: bytes, profile, maxDimension, maxPixels, budgetMs
+    const report = scan_image(bytes, "full", undefined, undefined, 1500);
+
+    console.log(report.detections[0]?.content.text, report.score?.value);
+    ```
+
+    <Warning>
+    The scan runs synchronously **on the calling thread**. In UI contexts,
+    always pass a `budget_ms` (1500 ms is the verify-flow default) or run
+    it in a Worker.
+    </Warning>
+
+    Vite/Nuxt: exclude the package from pre-bundling —
+    `optimizeDeps: { exclude: ["@supernovae-st/qrcode-ai-scanner-wasm"] }`.
+  </Tab>
+
+  <Tab title="CLI">
+    ```bash
+    cargo install qrcode-ai-scanner-cli
+
+    qrscan image.png            # full ScanReport JSON on stdout
+    qrscan image.png --pretty   # human summary (incl. the ISO grade card)
+    qrscan image.png -s         # bare score value for scripts
+    # exit codes: 0 found · 1 none · 2 invalid input/usage
+    ```
+  </Tab>
+</Tabs>
+
+## Choosing a profile
+
+| Profile | Budget | Use it for |
+|---|---|---|
+| `full` | 4 s (override with budget) | generator quality gate, verify flows — **the only profile that decodes the blob/dot template class** |
+| `fast` | 800 ms | upload tools where latency beats recall |
+| `frame` | 80 ms | per-frame camera loops (no scoring) |
+
+<Tip>
+The report's `trace.stages` tells you exactly which stage decoded (or how
+far the ladder walked before giving up) — log it when debugging recall.
+</Tip>

@@ -1,0 +1,89 @@
+---
+title: "Scoring"
+description: "Score v3 · the synthetic UEC margin · the ISO 15415-informed grade card."
+---
+
+The score answers one question: **how much margin does this code have
+before it stops scanning in the real world?**
+
+## The composite (0-100)
+
+Six stress axes, each a ramp of increasingly hostile transforms; survival
+stops at the first failed cell (the knee). Weighted sum → structural caps
+→ grade band.
+
+| Axis | Weight | What it stresses |
+|---|---|---|
+| resolution | 22 | sampling margin (px/module floor) |
+| blur | 18 | focus / motion margin |
+| contrast | 15 | module/background separation |
+| perspective | 20 | grid estimation under tilt |
+| rotation | 10 | non-cardinal angles |
+| lighting | 15 | shadows, glare, exposure defects |
+
+Two structural caps override everything: a dead finder pattern caps the
+score at **40**, a violated quiet zone at **60** — the two documented
+AI-art killers.
+
+<Info>
+Survival is measured relative to the symbol's **own decode class**: an
+artistic symbol that only decodes through a deep rung is stress-tested
+with that rung. "Fragile" is never conflated with "undecodable".
+</Info>
+
+Bands: `excellent` ≥80 · `good` 70-79 · `acceptable` 60-69 · `fair`
+40-59 · `poor` <40. The qrcode-ai.com verify meter maps ≥80 → HIGH,
+60-79 → MEDIUM, decoded <60 → LOW, none → NO.
+
+## The synthetic UEC (`score.uec`)
+
+The ISO 15415 *Unused Error Correction* margin, computed from the
+engine's own sampled bitstream: unmask → de-interleave → Reed-Solomon
+syndromes → Berlekamp-Massey degree = the EXACT number of codewords the
+decode had to correct.
+
+```json
+"uec": { "margin": 0.82, "grade": "a",
+         "worst_block_errors": 2, "worst_block_capacity": 22 }
+```
+
+`margin = 1 − 2t/d` over the worst block. **Margin 0 is special**: the
+block consumed its entire correction budget — the classic signature of a
+*miscorrection* (a decode that LOOKS valid but may be wrong). The
+`low_correction_margin` hint fires; treat the content as unverified.
+This caught a real rqrr miscorrection on the public zxing corpus
+("photography" vs ground-truth "photograph").
+
+## The ISO 15415-informed grade card (`score.iso15415`)
+
+A per-parameter verifier-style card whenever geometry was measured —
+each `{value, grade}` in the official ISO bands, `overall` = the lowest
+parameter (the ISO rule):
+
+```json
+"iso15415": {
+  "symbol_contrast":        { "value": 1.0,   "grade": "a" },
+  "modulation":             { "value": 1.0,   "grade": "a" },
+  "axial_nonuniformity":    { "value": 0.001, "grade": "a" },
+  "fixed_pattern_damage":   { "value": 1.0,   "grade": "a" },
+  "unused_error_correction":{ "value": 1.0,   "grade": "a" },
+  "overall": "a"
+}
+```
+
+<Warning>
+**The honesty line.** A *certified* ISO 15415 grade requires calibrated
+optics (45° illumination, stated wavelength, defined aperture) and
+ISO/IEC 15426-2 hardware conformance — properties of a verifier device.
+This card is **standards-based diagnostics**: same algorithms, same
+bands, uncalibrated capture. Parameters that need the hardware (Grid
+Nonuniformity, Reflectance Margin) are reported absent, never faked.
+If a customer needs a certificate, they need a hardware verifier — this
+scanner tells them *what to fix first*.
+</Warning>
+
+GS1 conformance is different — pure syntax, fully software-checkable:
+see [GS1](/concepts/gs1).
+
+Full normative tables (weights, ramps, bands, caps):
+[`spec/04-score.md`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/04-score.md).

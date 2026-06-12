@@ -1,0 +1,50 @@
+---
+title: "CLI — qrscan"
+description: "The scanner in scripts and CI."
+---
+
+```bash
+cargo install qrcode-ai-scanner-cli
+```
+
+## Usage
+
+```bash
+qrscan <image> [--profile full|fast|frame] [--pretty|-p] [--score-only|-s]
+```
+
+| Mode | Output |
+|---|---|
+| default | the full `ScanReport` JSON, pretty-printed, on stdout |
+| `--pretty` | human summary: content, payload, symbol, score + axes, UEC, ISO grade card, hints |
+| `--score-only` | the bare composite value (`87`) — for shell gates |
+
+## Exit codes (the contract)
+
+| Exit | Meaning |
+|---|---|
+| `0` | ≥1 QR decoded |
+| `1` | scan ran clean, no QR found (all modes) |
+| `2` | invalid input/usage — message on stderr with `[QRS-xxx]` |
+
+## Recipes
+
+```bash
+# CI quality gate: fail the build under score 70
+score=$(qrscan render.png -s) && [ "$score" -ge 70 ] || exit 1
+
+# extract just the decoded text
+qrscan in.png | jq -r '.detections[0].content.text'
+
+# is it retail-ready GS1?
+qrscan in.png | jq '.detections[0].payload | select(.kind=="gs1_digital_link") | .conformant'
+
+# which ladder stage decoded? (recall debugging)
+qrscan hard.png | jq '.trace.stages[] | select(.detections_found>0).stage'
+```
+
+<Note>
+`--pretty` sanitizes decoded content against terminal-escape and Unicode
+bidi/zero-width injection — QR text is attacker-controlled. The JSON mode
+is serde-escaped by construction.
+</Note>
