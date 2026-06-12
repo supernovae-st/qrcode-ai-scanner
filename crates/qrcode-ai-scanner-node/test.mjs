@@ -33,5 +33,8 @@ const tight = scanSync(degraded, { profile: "full", budgetMs: 1 });
 const elapsed = performance.now() - t0;
 assert.equal(tight.detections.length, 0);
 assert.ok(elapsed < 1500, `1ms budget must cut early, took ${elapsed}ms`);
+// 0 = UNBOUNDED, not a 0ms budget — a clean symbol must still decode
+const unbounded = scanSync(clean, { profile: "fast", budgetMs: 0 });
+assert.equal(unbounded.detections.length, 1, "budgetMs 0 means unbounded");
 
 console.log(`node binding OK — native ${version()}`);
