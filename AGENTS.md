@@ -69,8 +69,8 @@ node crates/qrcode-ai-scanner-wasm/test.mjs   # wasm smoke (build first)
   (incl. the `files` allowlist — wasm-pack wipes manual edits).
 - wasm-pack's bundled wasm-opt is too old for Rust ≥1.87 output — use
   binaryen ≥130 (`brew install binaryen`; CI pins version_130).
-- `corpus.toml` is TOML: control bytes (e.g. GS 0x1D) must be ``
-  escapes, never literal.
+- `corpus.toml` is TOML: control bytes (e.g. GS 0x1D) must be written
+  as `\u001D` escapes, never as literal bytes.
 - The score probes decode ONLY the scored symbology
   (`engine::FormatFilter::Only`) — calling `decode_all` in a stress cell
   reintroduces a ~5× cost regression AND false cross-symbology survivals.
