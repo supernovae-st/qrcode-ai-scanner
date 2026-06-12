@@ -10,7 +10,7 @@
 | S2 direct (full res) | ✓ | ✓ | ✓ |
 | S3 enhance (otsu·invert·stretch·RGB) | ✓ | ✓ | — |
 | S4 deep (15 rungs + grid) | ✓ | — | — |
-| S5 rescue (errors-and-erasures) | ✓ | ✓¹ | — |
+| S5 rescue (errors-and-erasures) | ✓ | ✓¹ | ✓¹ |
 | Scoring depth | Full (5 cells/axis) | Reduced (2 cells/axis) | Off (`score: null`) |
 
 Format coverage per stage: S1-S3 decode ALL symbologies; S4 (the
@@ -18,8 +18,10 @@ QR-calibrated deep rungs) and S5 restrict to the QR family — paying the
 1D/PDF417/DataMatrix detectors on 17 recovery rungs would starve the
 budget for nothing.
 
-¹ S5 runs whenever a rescue candidate was collected and the ladder came up
-empty — `fast` collects candidates from S1-S3 attempts.
+¹ S5 runs on EVERY profile whenever a rescue candidate was collected, the
+ladder came up empty and budget remains — `fast` collects candidates from
+S1-S3; under `frame`'s 80 ms budget the stage is usually cut before it
+attempts (the budget, not the profile, is the gate).
 
 **Profile choice rule of thumb:** the blob/dot pixel template class (a
 qrcode-ai.com generator OUTPUT) only decodes in S4 — a verify flow for

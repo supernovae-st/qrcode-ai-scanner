@@ -87,7 +87,12 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
       - run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
-      - run: sudo apt-get update && sudo apt-get install -y binaryen
+      # apt's binaryen is too old for Rust ≥1.87 wasm output (the same
+      # reason build-wasm.sh refuses wasm-pack's bundled wasm-opt) — pin the
+      # release proven locally
+      - run: |
+          curl -sSfL https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz | tar xz -C /tmp
+          echo "/tmp/binaryen-version_130/bin" >> "$GITHUB_PATH"
       - run: ./scripts/build-wasm.sh
       - run: npm publish --access public
         working-directory: crates/qrcode-ai-scanner-wasm/pkg

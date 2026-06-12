@@ -9,6 +9,7 @@ const report = await scan(clean);
 assert.equal(report.detections.length, 1);
 assert.equal(report.detections[0].content.text, "https://qrcode-ai.com/c/v5q");
 assert.equal(report.detections[0].payload.kind, "url");
+assert.equal(report.detections[0].symbology, "qr_code");
 assert.ok(report.score.value >= 70, `score ${report.score.value}`);
 assert.equal(report.score.uec.grade, "a");
 assert.equal(report.versions.score_contract, 3);

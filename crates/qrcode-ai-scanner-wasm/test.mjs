@@ -14,6 +14,7 @@ const fixture = (rel) => readFileSync(new URL(`../../fixtures/${rel}`, import.me
 const clean = scan_image(new Uint8Array(fixture("clean/OK_68ms_100_4e875a2c.png")), "full");
 assert.equal(clean.detections.length, 1);
 assert.equal(clean.detections[0].payload.kind, "url");
+assert.equal(clean.detections[0].symbology, "qr_code");
 assert.ok(clean.score.value >= 70, `score ${clean.score.value}`);
 assert.equal(clean.score.iso15415.overall, "a");
 assert.equal(clean.detections[0].meta.inverted, false);

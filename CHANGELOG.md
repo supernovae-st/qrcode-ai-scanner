@@ -12,8 +12,18 @@ v3, GS1 awareness, ISO-informed grading, hardened bindings. Supersedes the
 
 ### Decoding
 
-- Deterministic decode ladder (S1 pyramid → S2 direct → S3 enhance → S4 deep)
-  replaces the v0.2 RNG brute force — same input, same result, always.
+- Deterministic decode ladder (S1 pyramid → S2 direct → S3 enhance → S4 deep
+  → S5 rescue) replaces the v0.2 RNG brute force — same input, same result,
+  always.
+- **Every mainstream symbology** (19): the QR family (QR · Micro QR · rMQR)
+  plus Data Matrix, Aztec, PDF417, MaxiCode, EAN-13/8, UPC-A/E,
+  Code 128/39/93, Codabar, ITF, GS1 DataBar (+Expanded), Telepen. Every
+  detection carries a required `symbology`; merge identity is
+  (symbology, text); only the QR family carries geometry/UEC/ISO/rescue.
+- **S5 erasure rescue** (Forney 1965 errors-and-erasures RS): grids the
+  engines read but could not decode are re-decoded with low-confidence
+  codewords marked as half-price erasures (`e + 2t ≤ d − p`). Measured:
+  center-logo occlusion tolerance 20% → 30% radius on v5-H.
 - Dual engines: rxing (ZXing lineage, robustness) + rqrr (quirc lineage —
   geometry, format metadata, raw bitstream). Cross-engine merge keyed by
   resolved text (kanji-safe), bitstream + format metadata adopted as a unit.
@@ -60,11 +70,22 @@ v3, GS1 awareness, ISO-informed grading, hardened bindings. Supersedes the
   pool, AbortSignal, `maxDimension`/`maxPixels`/`budgetMs` options, full
   TypeScript types.
 - Browser (`@supernovae-st/qrcode-ai-scanner-wasm`): `scan_image` +
-  `scan_frame`, SIMD128, ~607 KB gz, typed `ScanReport` return, `budget_ms`
+  `scan_frame`, SIMD128, ~797 KB gz (all symbologies), typed `ScanReport` return, `budget_ms`
   override for UI-thread bounds.
 - One canonical TS contract (`report-types.d.ts`) shared by both packages.
 - CLI `qrscan`: JSON by default, `--pretty` (terminal-injection-sanitized),
   `--score-only`, exit codes 0/1/2.
+
+### Spec & docs
+
+- `spec/`: the normative contract (report wire format, profiles, QRS error
+  catalog, score v3, payloads, hints, pipeline) + a JSON Schema and golden
+  examples produced by the real binary — all CI-validated against the serde
+  types (`tests/spec_golden.rs`) and cross-surface type parity
+  (`scripts/check-type-parity.py`).
+- `docs/`: Mintlify documentation site (quickstart, concepts, per-surface
+  API reference, integration guides for the qrcode-ai.com editor and for
+  agents).
 
 ### Measured accuracy (reproduce: `scripts/zxing-blackbox.py` · `scripts/batch-scan.py`)
 
