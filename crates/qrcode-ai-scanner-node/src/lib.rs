@@ -60,9 +60,9 @@ fn scan_error(e: &qrcode_ai_scanner::ScanError) -> Error {
 }
 
 /// One scan job on the libuv pool. The `AbortSignal` cancels QUEUED tasks
-/// (napi semantics); a RUNNING scan is bounded by the whole-scan profile
-/// budget (≤4s Full · ≤800ms Fast · ≤80ms Frame · attempt-granular, engine
-/// inputs size-capped), so in-flight cancellation is not wired.
+/// only (napi semantics); a RUNNING scan is bounded by the whole-scan
+/// profile/budget_ms wall clock — in-flight cancellation is NOT wired
+/// (wire `scan_cancellable` if sub-budget cancel ever matters).
 pub struct ScanTask {
     bytes: Vec<u8>,
     profile: ScanProfile,

@@ -2,7 +2,7 @@
 //!
 //! Every scan starts here: an [`ImageInput`] is validated against [`Limits`]
 //! and normalized into the internal owned luma buffer the engines consume.
-//! EXIF orientation is NOT applied in v0.3.0-alpha (open item — decoders are
+//! EXIF orientation is NOT applied in v0.3 (open item — decoders are
 //! rotation-tolerant; only corner coordinates are affected).
 
 use crate::error::{Result, ScanError};

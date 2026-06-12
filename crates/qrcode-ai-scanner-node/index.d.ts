@@ -10,7 +10,7 @@ export type ScanProfile = "full" | "fast" | "frame";
 export interface ScanOptions {
   /** Default: "full". */
   profile?: ScanProfile;
-  /** Cancels a QUEUED task; a running scan stops at the next decode attempt. */
+  /** Cancels a QUEUED task; a RUNNING scan completes within its profile/budgetMs bound. */
   signal?: AbortSignal;
   /**
    * Max accepted width/height in px (default 10000). Server deployments

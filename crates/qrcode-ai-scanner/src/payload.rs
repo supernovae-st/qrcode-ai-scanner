@@ -307,7 +307,9 @@ fn parse_crypto(scheme: &str, rest: &str) -> Option<Payload> {
 /// producer needs. Conservative guards against false positives on ordinary
 /// numeric text: the WHOLE payload must parse issue-free against the
 /// validated AI subset, AND carry either a check-digit-valid GTIN (AI 01)
-/// or at least two element strings.
+/// or a literal GS separator (0x1D — plain text virtually never contains
+/// one; review-proven that "two parseable elements" alone admits
+/// promo-code/date lookalikes like `202690SUMMER`).
 fn sniff_gs1_without_fnc1(text: &str) -> Option<Payload> {
     if !text.bytes().next().is_some_and(|b| b.is_ascii_digit()) {
         return None;
@@ -316,7 +318,7 @@ fn sniff_gs1_without_fnc1(text: &str) -> Option<Payload> {
     if !parsed.issues.is_empty() || parsed.elements.is_empty() {
         return None;
     }
-    if parsed.gtin.is_none() && parsed.elements.len() < 2 {
+    if parsed.gtin.is_none() && !text.contains('\u{1d}') {
         return None;
     }
     Some(Payload::Gs1 {
@@ -674,6 +676,21 @@ mod tests {
         // multi-element without GTIN also qualifies (≥2 clean elements)
         assert!(matches!(
             classify("11261201\u{1d}10LOT9"),
+            Payload::Gs1 { .. }
+        ));
+    }
+
+    #[test]
+    fn gs1_sniff_rejects_reviewer_lookalikes() {
+        // promo-code shape: AI 20 (any 2 digits) + AI 90 CSET82 — no GS, no GTIN
+        assert_eq!(classify("202690SUMMER"), Payload::Text);
+        // two coincidental YYMMDD dates back to back
+        assert_eq!(classify("1126010111260102"), Payload::Text);
+        // date + AI 99 digits (phone-adjacent 16-digit strings)
+        assert_eq!(classify("1126120199887766"), Payload::Text);
+        // the same multi-element data WITH the GS separator stays Gs1
+        assert!(matches!(
+            classify("11260101\u{1d}11260102"),
             Payload::Gs1 { .. }
         ));
     }

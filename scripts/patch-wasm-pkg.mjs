@@ -14,6 +14,9 @@ pkg.repository = {
   url: "https://github.com/supernovae-st/qrcode-ai-scanner",
 };
 pkg.keywords = ["qrcode", "qr", "scanner", "wasm", "browser", "artistic-qr", "ai-qr"];
+// wasm-pack regenerates package.json each build — re-add the shared types
+// file to the publish allowlist or the tarball ships broken TS types
+pkg.files = [...new Set([...(pkg.files ?? []), "report-types.d.ts"])];
 
 writeFileSync(path, `${JSON.stringify(pkg, null, 2)}\n`);
 console.log(`patched ${path} → ${pkg.name}@${pkg.version}`);

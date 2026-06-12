@@ -53,9 +53,18 @@ struct Cli {
 /// (ANSI/OSC escape injection) before echoing. JSON output is safe (serde
 /// escapes); only this human path needs it.
 fn sanitize_terminal(text: &str) -> String {
+    // Cc/C1 controls + the format (Cf) spoofers: bidi overrides flip the
+    // visual order of the displayed URL, zero-widths hide segments.
+    fn is_spoofing_format(c: char) -> bool {
+        matches!(c,
+            '\u{200B}'..='\u{200F}' // zero-widths + LRM/RLM
+            | '\u{202A}'..='\u{202E}' // bidi embedding/override
+            | '\u{2060}'..='\u{2069}' // word-joiner + invisibles + bidi isolates
+            | '\u{FEFF}')
+    }
     text.chars()
         .map(|c| {
-            if c.is_control() && c != '\t' {
+            if (c.is_control() && c != '\t') || is_spoofing_format(c) {
                 char::REPLACEMENT_CHARACTER
             } else {
                 c
@@ -138,16 +147,21 @@ fn main() -> ExitCode {
     let report = match scanner.scan(ImageInput::encoded(&bytes)) {
         Ok(report) => report,
         Err(error) => {
-            eprintln!("error: {} ({})", error, error.code());
+            eprintln!("error: {} [{}]", error, error.code());
             return ExitCode::from(2);
         }
     };
 
     if cli.score_only {
         let Some(score) = &report.score else {
-            // Frame profile / no detection: 0 would be indistinguishable
-            // from a true zero score — refuse instead of papering.
-            eprintln!("error: no score in this profile/outcome (use --profile full|fast)");
+            // No QR found is exit 1 (the header contract), even score-only.
+            // A score genuinely suppressed by the profile (Frame) is a usage
+            // error: 0 would be indistinguishable from a true zero score.
+            if report.detections.is_empty() {
+                eprintln!("no QR code found — no score");
+                return ExitCode::from(1);
+            }
+            eprintln!("error: the frame profile computes no score (use --profile full|fast)");
             return ExitCode::from(2);
         };
         println!("{}", score.value);

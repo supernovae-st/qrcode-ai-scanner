@@ -47,8 +47,10 @@ fn limits_from(max_dimension: Option<u32>, max_pixels: Option<f64>) -> Limits {
         clippy::cast_sign_loss,
         reason = "JS number → pixel count; negative/fractional clamp to 0 is fine"
     )]
-    if let Some(px) = max_pixels {
-        limits.max_pixels = px.max(0.0) as u64;
+    if let Some(px) = max_pixels
+        && px > 0.0
+    {
+        limits.max_pixels = px as u64;
     }
     limits
 }
@@ -65,7 +67,7 @@ fn run_scan(
         .build();
     let report = scanner
         .scan(input)
-        .map_err(|e| JsError::new(&format!("{} ({})", e, e.code())))?;
+        .map_err(|e| JsError::new(&format!("{} [{}]", e, e.code())))?;
     // None → null (not undefined): one contract across wasm/napi/CLI surfaces
     let serializer = serde_wasm_bindgen::Serializer::new().serialize_missing_as_null(true);
     report

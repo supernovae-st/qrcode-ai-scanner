@@ -41,7 +41,7 @@ pub use payload::Payload;
 pub use report::{
     AxisScore, Charset, DecodedContent, Detection, EcLevel, EngineKind, Grade, Hint,
     Iso15415Report, IsoGrade, IsoParameter, PipelineTrace, Point, QrMeta, ScanReport, Score,
-    StageTrace, StressAxis, StructuralReport, Versions,
+    StageTrace, StressAxis, StructuralReport, UecGrade, UecReport, Versions,
 };
 
 /// Fuzz-only entry points — cargo-fuzz builds the whole graph with

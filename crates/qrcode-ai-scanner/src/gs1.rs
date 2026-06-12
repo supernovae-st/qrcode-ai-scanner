@@ -87,7 +87,7 @@ fn shape_of(ai: &str) -> Option<Shape> {
         "91" | "92" | "93" | "94" | "95" | "96" | "97" | "98" | "99" => Shape::Cset82(90),
         _ if ai.len() == 3 && ("410".."418").contains(&ai) => Shape::DigitsCheck(13),
         _ if ai.len() == 4
-            && matches!(&ai[..2], "31" | "32" | "33" | "34" | "35" | "36")
+            && matches!(ai.get(..2), Some("31" | "32" | "33" | "34" | "35" | "36"))
             && ai.as_bytes()[3].is_ascii_digit() =>
         {
             Shape::Digits(6)
@@ -231,7 +231,10 @@ pub(crate) fn parse_element_string(data: &str) -> Gs1Data {
                 // boundary-safe split: a multi-byte char inside the value
                 // zone shortens the cut — the value then fails shape
                 // validation (CSET 82 / digits are ASCII-only), never panics
-                let (v, tail) = split_head(rest, total - ai.len());
+                // saturating: the predefined-total tables and shape_of are
+                // maintained independently — a future AI longer than its
+                // family total must not underflow
+                let (v, tail) = split_head(rest, total.saturating_sub(ai.len()));
                 rest = tail;
                 if v.len() + ai.len() < total {
                     out.issues.push(format!(
