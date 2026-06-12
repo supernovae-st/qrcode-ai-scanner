@@ -16,7 +16,11 @@
         "groups": [
           {
             "group": "Getting started",
-            "pages": ["introduction", "quickstart"]
+            "pages": [
+              "introduction",
+              "comparison",
+              "quickstart"
+            ]
           },
           {
             "group": "Concepts",
@@ -29,7 +33,10 @@
           },
           {
             "group": "Guides",
-            "pages": ["guides/nuxt-verify", "guides/agents"]
+            "pages": [
+              "guides/nuxt-verify",
+              "guides/agents"
+            ]
           }
         ]
       },
@@ -38,11 +45,19 @@
         "groups": [
           {
             "group": "The report",
-            "pages": ["api/report", "api/errors"]
+            "pages": [
+              "api/report",
+              "api/errors"
+            ]
           },
           {
             "group": "Surfaces",
-            "pages": ["api/rust", "api/cli", "api/node", "api/wasm"]
+            "pages": [
+              "api/rust",
+              "api/cli",
+              "api/node",
+              "api/wasm"
+            ]
           }
         ]
       }

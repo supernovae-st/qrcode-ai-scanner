@@ -132,6 +132,11 @@ miss; the hint is the mechanism that keeps it from being a *silent* one.
 
 ## Documentation & spec
 
+> **Pourquoi ce scanner ?** Avant/après vs `qr-scanner-wechat` + vs les
+> APIs cloud (local · instantané · catégorisé) :
+> [docs/comparison.mdx](docs/comparison.mdx) · Nicolas :
+> [GUIDE-NICOLAS.md](GUIDE-NICOLAS.md) · agents : [AGENTS.md](AGENTS.md).
+
 - **[`spec/`](spec/)** — the NORMATIVE contract: wire format, errors,
   score, payloads, hints, pipeline + a JSON Schema and golden examples
   **validated in CI** against the real types (they cannot rot).
