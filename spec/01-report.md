@@ -20,6 +20,11 @@ serializer is configured `serialize_missing_as_null` to match serde_json).
 
 ```jsonc
 {
+  "symbology": "qr_code" | "micro_qr_code" | "rectangular_micro_qr_code"
+             | "data_matrix" | "aztec" | "pdf417" | "maxi_code"
+             | "ean13" | "ean8" | "upc_a" | "upc_e"
+             | "code128" | "code39" | "code93" | "codabar" | "itf"
+             | "data_bar" | "data_bar_expanded" | "telepen",
   "content": {
     "text":    string,   // decoded text under the resolved charset
     "raw":     string,   // ORIGINAL payload bytes, base64 — the truth
@@ -41,9 +46,14 @@ serializer is configured `serialize_missing_as_null` to match serde_json).
 
 Semantics that bite:
 
-- **Merging is by decoded TEXT** — two physical symbols with the same
-  payload in one image collapse into one detection. Distinct payloads
-  always stay distinct. Max 16 detections per report (anti-amplification).
+- **Merging is by (symbology, decoded text)** — two physical symbols of
+  the SAME symbology with the same payload collapse into one detection;
+  an EAN-13 and a QR carrying identical digits stay two. Max 16
+  detections per report (anti-amplification).
+- **Only the QR family** (`qr_code` · `micro_qr_code` ·
+  `rectangular_micro_qr_code`) can carry `meta` geometry, the UEC margin,
+  the ISO 15415 card and the `rescue` engine. Other symbologies decode
+  content + payload classification (all `meta` fields `null`).
 - `content.text` + `content.charset` form a consistent pair resolved by
   the scanner ONCE over `raw`. If your consumer needs different charset
   politics, decode `raw` yourself.

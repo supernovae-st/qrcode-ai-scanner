@@ -43,6 +43,13 @@ artifacts off one Rust core.
    Measured: center-logo occlusion tolerance grows from 20% to **30%
    radius** (2.2× the area).
 
+And it reads **every mainstream symbology**, not just QR: Micro QR · rMQR
+· Data Matrix · Aztec · PDF417 · MaxiCode · EAN-13/8 · UPC-A/E ·
+Code 128/39/93 · Codabar · ITF · GS1 DataBar · Telepen — every detection
+labeled with its `symbology`, retail 1D codes classified as GTINs with a
+check-digit verdict, GS1-128 and GS1 DataMatrix recognized via their
+FNC1 symbology identifiers.
+
 Plus **GS1 awareness** (element strings + Digital Link with a per-criterion
 `conformant` verdict — Sunrise 2027-ready) and machine-actionable
 **hints** that close the *generate → scan → act → regenerate* loop.

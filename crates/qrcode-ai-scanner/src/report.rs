@@ -34,6 +34,73 @@ pub struct Point {
     pub y: f32,
 }
 
+/// The barcode symbology of a detection. QR-family entries
+/// (`QrCode` · `MicroQrCode` · `RectangularMicroQrCode`) are the only ones
+/// that can carry `QrMeta` geometry, the synthetic UEC, the ISO 15415 card
+/// and the rescue stage; every other symbology decodes content + payload
+/// classification only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
+pub enum Symbology {
+    /// QR Code Model 2 (ISO/IEC 18004).
+    QrCode,
+    /// Micro QR (ISO/IEC 18004 M1-M4).
+    MicroQrCode,
+    /// rMQR — Rectangular Micro QR (ISO/IEC 23941).
+    RectangularMicroQrCode,
+    /// Data Matrix ECC 200 (ISO/IEC 16022).
+    DataMatrix,
+    /// Aztec (ISO/IEC 24778).
+    Aztec,
+    /// PDF417 (ISO/IEC 15438).
+    Pdf417,
+    /// `MaxiCode` (ISO/IEC 16023).
+    MaxiCode,
+    /// EAN-13 (GTIN-13 retail).
+    Ean13,
+    /// EAN-8.
+    Ean8,
+    /// UPC-A (GTIN-12 retail).
+    UpcA,
+    /// UPC-E.
+    UpcE,
+    /// Code 128 (GS1-128 when FNC1-led).
+    Code128,
+    /// Code 39.
+    Code39,
+    /// Code 93.
+    Code93,
+    /// Codabar.
+    Codabar,
+    /// ITF — Interleaved 2 of 5 (ITF-14 when 14 digits).
+    Itf,
+    /// GS1 `DataBar` (RSS-14).
+    DataBar,
+    /// GS1 `DataBar` Expanded.
+    DataBarExpanded,
+    /// Telepen.
+    Telepen,
+}
+
+impl Symbology {
+    /// QR family — the symbologies whose geometry/meta/UEC paths exist.
+    #[must_use]
+    pub fn is_qr_family(self) -> bool {
+        matches!(
+            self,
+            Self::QrCode | Self::MicroQrCode | Self::RectangularMicroQrCode
+        )
+    }
+
+    /// Retail GTIN carriers — the symbol's data IS a GTIN (AI 01 semantics).
+    #[must_use]
+    pub fn is_retail_gtin(self) -> bool {
+        matches!(self, Self::Ean13 | Self::Ean8 | Self::UpcA | Self::UpcE)
+    }
+}
+
 /// Which decode engine produced a detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -124,6 +191,8 @@ pub struct QrMeta {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct Detection {
+    /// The barcode symbology this detection was read as.
+    pub symbology: Symbology,
     /// Decoded content (text + raw bytes + charset).
     pub content: DecodedContent,
     /// Typed payload classification of the text.
@@ -499,6 +568,7 @@ mod tests {
     fn full_report() -> ScanReport {
         ScanReport {
             detections: vec![Detection {
+                symbology: Symbology::QrCode,
                 content: DecodedContent {
                     text: "https://qrcode-ai.com".into(),
                     raw: b"https://qrcode-ai.com".to_vec(),
@@ -590,6 +660,39 @@ mod tests {
                 total_ms: 12.5,
             },
             versions: Versions::current(),
+        }
+    }
+
+    #[test]
+    fn symbology_wire_names_pinned() {
+        for (sym, wire) in [
+            (Symbology::QrCode, "qr_code"),
+            (Symbology::MicroQrCode, "micro_qr_code"),
+            (
+                Symbology::RectangularMicroQrCode,
+                "rectangular_micro_qr_code",
+            ),
+            (Symbology::DataMatrix, "data_matrix"),
+            (Symbology::Aztec, "aztec"),
+            (Symbology::Pdf417, "pdf417"),
+            (Symbology::MaxiCode, "maxi_code"),
+            (Symbology::Ean13, "ean13"),
+            (Symbology::Ean8, "ean8"),
+            (Symbology::UpcA, "upc_a"),
+            (Symbology::UpcE, "upc_e"),
+            (Symbology::Code128, "code128"),
+            (Symbology::Code39, "code39"),
+            (Symbology::Code93, "code93"),
+            (Symbology::Codabar, "codabar"),
+            (Symbology::Itf, "itf"),
+            (Symbology::DataBar, "data_bar"),
+            (Symbology::DataBarExpanded, "data_bar_expanded"),
+            (Symbology::Telepen, "telepen"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(sym).unwrap(),
+                serde_json::Value::String(wire.to_owned())
+            );
         }
     }
 

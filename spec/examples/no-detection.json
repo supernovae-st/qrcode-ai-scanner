@@ -7,24 +7,24 @@
       {
         "stage": "direct",
         "transforms_tried": 1,
-        "ms": 0.0505,
+        "ms": 0.340333,
         "detections_found": 0
       },
       {
         "stage": "enhance",
         "transforms_tried": 3,
-        "ms": 0.104125,
+        "ms": 1.4860419999999999,
         "detections_found": 0
       },
       {
         "stage": "deep",
         "transforms_tried": 17,
-        "ms": 1.302708,
+        "ms": 0.805083,
         "detections_found": 0
       }
     ],
     "engine_panics": 0,
-    "total_ms": 1.461375
+    "total_ms": 2.639459
   },
   "versions": {
     "scanner": "0.3.0",

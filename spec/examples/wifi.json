@@ -1,6 +1,7 @@
 {
   "detections": [
     {
+      "symbology": "qr_code",
       "content": {
         "text": "WIFI:T:WPA;S:QRCodeAI Guest;P:sunrise2027;;",
         "raw": "V0lGSTpUOldQQTtTOlFSQ29kZUFJIEd1ZXN0O1A6c3VucmlzZTIwMjc7Ow==",
@@ -123,12 +124,12 @@
       {
         "stage": "direct",
         "transforms_tried": 1,
-        "ms": 15.468417,
+        "ms": 2.298583,
         "detections_found": 2
       }
     ],
     "engine_panics": 0,
-    "total_ms": 16.819625000000002
+    "total_ms": 2.306083
   },
   "versions": {
     "scanner": "0.3.0",

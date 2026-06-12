@@ -13,7 +13,7 @@ mod rxing_engine;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::input::LumaImage;
-use crate::report::{EcLevel, EngineKind, Point};
+use crate::report::{EcLevel, EngineKind, Point, Symbology};
 
 /// Still-masked codeword bitstream as the engine sampled it (rqrr only) —
 /// feeds the synthetic UEC.
@@ -28,6 +28,8 @@ pub(crate) struct MaskedStream {
 /// What an engine actually measured — no stubs, `None` means "not provided".
 #[derive(Debug, Clone)]
 pub(crate) struct RawDetection {
+    /// Symbology the engine read this as.
+    pub symbology: Symbology,
     /// Decoded payload bytes (charset-independent truth).
     pub raw: Vec<u8>,
     /// Raw sampled bitstream when the engine exposes it (rqrr).
@@ -69,23 +71,50 @@ fn run_isolated<T>(f: impl FnOnce() -> T) -> Option<T> {
     catch_unwind(AssertUnwindSafe(f)).ok()
 }
 
-/// One decode pass: every enabled engine over the same luma image.
+/// Which symbologies a decode pass tries — the cost lever: every extra
+/// format family is another detector walking the image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FormatFilter {
+    /// Everything rxing supports + rqrr.
+    All,
+    /// QR · Micro QR · rMQR (+ rqrr) — the artistic-recovery stages are
+    /// QR-calibrated; paying the 1D/PDF417/DataMatrix detectors on every
+    /// deep rung starves the budget for nothing.
+    QrFamily,
+    /// Exactly one symbology — the scoring fast path (30 stress cells ×
+    /// every decoder is 1× vs ~5× scan cost, and a cross-symbology text
+    /// match would be a false survival signal anyway).
+    Only(Symbology),
+}
+
+/// One decode pass: every enabled engine, all symbologies.
+#[cfg(test)]
 pub(crate) fn decode_all(luma: &LumaImage) -> EngineOutcome {
+    decode_filtered(luma, FormatFilter::All)
+}
+
+/// Decode under a format filter.
+pub(crate) fn decode_filtered(luma: &LumaImage, filter: FormatFilter) -> EngineOutcome {
     let mut outcome = EngineOutcome::default();
 
     #[cfg(feature = "engine-rxing")]
-    match run_isolated(|| rxing_engine::decode(luma)) {
+    match run_isolated(|| rxing_engine::decode(luma, filter)) {
         Some(found) => outcome.detections.extend(found),
         None => outcome.panics += 1,
     }
 
     #[cfg(feature = "engine-rqrr")]
-    match run_isolated(|| rqrr_engine::decode(luma)) {
-        Some((found, rescue)) => {
-            outcome.detections.extend(found);
-            outcome.rescue.extend(rescue);
+    if matches!(
+        filter,
+        FormatFilter::All | FormatFilter::QrFamily | FormatFilter::Only(Symbology::QrCode)
+    ) {
+        match run_isolated(|| rqrr_engine::decode(luma)) {
+            Some((found, rescue)) => {
+                outcome.detections.extend(found);
+                outcome.rescue.extend(rescue);
+            }
+            None => outcome.panics += 1,
         }
-        None => outcome.panics += 1,
     }
 
     outcome

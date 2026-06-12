@@ -13,6 +13,11 @@
 | S5 rescue (errors-and-erasures) | ✓ | ✓¹ | — |
 | Scoring depth | Full (5 cells/axis) | Reduced (2 cells/axis) | Off (`score: null`) |
 
+Format coverage per stage: S1-S3 decode ALL symbologies; S4 (the
+QR-calibrated deep rungs) and S5 restrict to the QR family — paying the
+1D/PDF417/DataMatrix detectors on 17 recovery rungs would starve the
+budget for nothing.
+
 ¹ S5 runs whenever a rescue candidate was collected and the ladder came up
 empty — `fast` collects candidates from S1-S3 attempts.
 

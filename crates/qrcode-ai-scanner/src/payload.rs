@@ -311,10 +311,13 @@ fn parse_crypto(scheme: &str, rest: &str) -> Option<Payload> {
 /// one; review-proven that "two parseable elements" alone admits
 /// promo-code/date lookalikes like `202690SUMMER`).
 fn sniff_gs1_without_fnc1(text: &str) -> Option<Payload> {
-    if !text.bytes().next().is_some_and(|b| b.is_ascii_digit()) {
+    // a leading GS is a legal transmission artifact of GS1 data dumped
+    // into a plain carrier — skip it before the digit gate
+    let body = text.trim_start_matches('\u{1d}');
+    if !body.bytes().next().is_some_and(|b| b.is_ascii_digit()) {
         return None;
     }
-    let parsed = crate::gs1::parse_element_string(text);
+    let parsed = crate::gs1::parse_element_string(body);
     if !parsed.issues.is_empty() || parsed.elements.is_empty() {
         return None;
     }
@@ -331,6 +334,35 @@ fn sniff_gs1_without_fnc1(text: &str) -> Option<Payload> {
                 .to_owned(),
         ],
     })
+}
+
+/// Classify a retail 1D symbol's digits (EAN-13/EAN-8/UPC-A/UPC-E): the
+/// symbol IS a GTIN — AI 01 semantics with the value zero-padded to 14
+/// per `GenSpecs`. `conformant` = the symbol's own mod-10 check digit
+/// validates (same algorithm at every GTIN length). Non-digit content
+/// (decoder add-ons aside, it should never happen) falls back to text.
+pub(crate) fn classify_retail_gtin(text: &str) -> Payload {
+    let digits = text.trim();
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) || digits.len() > 14 {
+        return classify(text);
+    }
+    let gtin14 = format!("{digits:0>14}");
+    let ok = crate::gs1::check_digit_ok(digits);
+    Payload::Gs1 {
+        elements: vec![crate::gs1::Gs1Element {
+            ai: "01".to_owned(),
+            value: gtin14.clone(),
+        }],
+        gtin: Some(gtin14),
+        conformant: ok,
+        issues: if ok {
+            Vec::new()
+        } else {
+            vec![format!(
+                "GTIN check digit invalid for '{digits}' (GenSpecs 7.2.7)"
+            )]
+        },
+    }
 }
 
 /// Classify the data of an FNC1-in-first-position symbol (`]Q3`/`]Q4`):

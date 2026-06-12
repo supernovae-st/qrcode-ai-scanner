@@ -1,6 +1,7 @@
 {
   "detections": [
     {
+      "symbology": "qr_code",
       "content": {
         "text": "MECARD:N:Melen,Thibaut;TEL:+33600000000;URL:https://qrcode-ai.com;;",
         "raw": "TUVDQVJEOk46TWVsZW4sVGhpYmF1dDtURUw6KzMzNjAwMDAwMDAwO1VSTDpodHRwczovL3FyY29kZS1haS5jb207Ow==",
@@ -123,12 +124,12 @@
       {
         "stage": "direct",
         "transforms_tried": 1,
-        "ms": 6.796209,
+        "ms": 3.000791,
         "detections_found": 2
       }
     ],
     "engine_panics": 0,
-    "total_ms": 6.8313749999999995
+    "total_ms": 3.025458
   },
   "versions": {
     "scanner": "0.3.0",

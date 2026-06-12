@@ -342,6 +342,7 @@ pub(crate) const DEEP_RUNGS: [Rung; 15] = [
 /// One payload after cross-engine, cross-attempt merging.
 #[derive(Debug, Clone)]
 pub(crate) struct MergedDetection {
+    pub symbology: crate::report::Symbology,
     pub raw: Vec<u8>,
     /// Charset-resolved text — the merge key (engines may disagree on raw
     /// byte representation for kanji-mode: rxing re-encodes text as UTF-8,
@@ -408,10 +409,11 @@ impl Run<'_> {
         let count = u32::try_from(found.len()).unwrap_or(u32::MAX);
         for detection in found {
             let (text, charset) = engine::charset::resolve(&detection.raw);
-            let slot = self
-                .merged
-                .iter()
-                .position(|existing| existing.text == text);
+            // identity = (symbology, text): an EAN-13 and a QR carrying the
+            // same digits are two detections, never one
+            let slot = self.merged.iter().position(|existing| {
+                existing.symbology == detection.symbology && existing.text == text
+            });
             match slot {
                 Some(index) => {
                     let existing = &mut self.merged[index];
@@ -446,6 +448,7 @@ impl Run<'_> {
                 }
                 None if self.merged.len() >= MAX_DETECTIONS => {}
                 None => self.merged.push(MergedDetection {
+                    symbology: detection.symbology,
                     raw: detection.raw,
                     text,
                     charset,
@@ -461,6 +464,49 @@ impl Run<'_> {
             }
         }
         count
+    }
+
+    /// S5 — try the collected rescue candidates; first success absorbs.
+    fn rescue_stage(&mut self, luma: &LumaImage, stages: &mut Vec<StageTrace>) -> Result<()> {
+        if !self.merged.is_empty() || self.rescue_candidates.is_empty() || self.out_of_budget() {
+            return Ok(());
+        }
+        let started = Instant::now();
+        let candidates = std::mem::take(&mut self.rescue_candidates);
+        let mut tried = 0u32;
+        let mut found = 0u32;
+        for candidate in &candidates {
+            self.check_cancel()?;
+            if self.out_of_budget() {
+                break;
+            }
+            tried += 1;
+            if let Some(rescued) = crate::rescue::attempt(luma, candidate) {
+                found += 1;
+                self.absorb(
+                    vec![RawDetection {
+                        symbology: crate::report::Symbology::QrCode,
+                        raw: rescued.raw,
+                        masked_stream: Some(candidate.stream.clone()),
+                        corners: Some(candidate.corners),
+                        version: Some(candidate.version),
+                        ec: Some(candidate.ec),
+                        mask: Some(candidate.mask),
+                        fnc1: rescued.fnc1,
+                        engine: EngineKind::Rescue,
+                    }],
+                    candidate.inverted,
+                );
+                break; // first rescue wins — candidates are dedupes of one symbol
+            }
+        }
+        stages.push(StageTrace {
+            stage: "rescue".to_owned(),
+            transforms_tried: tried,
+            ms: started.elapsed().as_secs_f64() * 1_000.0,
+            detections_found: found,
+        });
+        Ok(())
     }
 
     /// Keep a bounded set of rescue inputs (S5 cost is per-candidate);
@@ -508,6 +554,7 @@ impl Run<'_> {
         &mut self,
         name: &str,
         attempts: Vec<Attempt<'_>>,
+        filter: engine::FormatFilter,
         stages: &mut Vec<StageTrace>,
     ) -> Result<bool> {
         let started = Instant::now();
@@ -521,7 +568,7 @@ impl Run<'_> {
                 break;
             }
             let img = (attempt.build)();
-            let outcome = engine::decode_all(&img);
+            let outcome = engine::decode_filtered(&img, filter);
             self.panics = self.panics.saturating_add(outcome.panics);
             let dims = (img.width(), img.height());
             let rescaled = rescale_corners(outcome.detections, dims, self.orig);
@@ -674,6 +721,7 @@ pub(crate) fn run(
             let stop = run.stage(
                 "pyramid",
                 vec![Attempt::plain(move || transform::downscale_to(luma, side))],
+                engine::FormatFilter::All,
                 &mut stages,
             )?;
             if stop || !run.merged.is_empty() {
@@ -683,7 +731,12 @@ pub(crate) fn run(
 
         // S2 — direct full resolution.
         if config.direct && !run.out_of_budget() {
-            let stop = run.stage("direct", vec![Attempt::plain(|| luma.clone())], &mut stages)?;
+            let stop = run.stage(
+                "direct",
+                vec![Attempt::plain(|| luma.clone())],
+                engine::FormatFilter::All,
+                &mut stages,
+            )?;
             if stop || !run.merged.is_empty() {
                 break 'ladder;
             }
@@ -708,7 +761,7 @@ pub(crate) fn run(
                     }));
                 }
             }
-            let stop = run.stage("enhance", attempts, &mut stages)?;
+            let stop = run.stage("enhance", attempts, engine::FormatFilter::All, &mut stages)?;
             if stop || !run.merged.is_empty() {
                 break 'ladder;
             }
@@ -717,48 +770,20 @@ pub(crate) fn run(
         // S4 — deep: the curated boost rungs (v0.2 empirical known-good)
         // first, then the size × contrast × binarization grid.
         if config.deep && !run.out_of_budget() {
-            let _ = run.stage("deep", deep_attempts(luma, longest), &mut stages)?;
+            // deep is QR-calibrated recovery: the multi-format detectors on
+            // 17 rungs would starve the budget for nothing
+            let _ = run.stage(
+                "deep",
+                deep_attempts(luma, longest),
+                engine::FormatFilter::QrFamily,
+                &mut stages,
+            )?;
         }
 
         // S5 — rescue: erasure-aware RS over grids the engines detected
         // but could not decode (the logo-occlusion class). Only when the
         // ladder came up empty — a decoded symbol never needs rescuing.
-        if run.merged.is_empty() && !run.rescue_candidates.is_empty() && !run.out_of_budget() {
-            let started = Instant::now();
-            let candidates = std::mem::take(&mut run.rescue_candidates);
-            let mut tried = 0u32;
-            let mut found = 0u32;
-            for candidate in &candidates {
-                run.check_cancel()?;
-                if run.out_of_budget() {
-                    break;
-                }
-                tried += 1;
-                if let Some(rescued) = crate::rescue::attempt(luma, candidate) {
-                    found += 1;
-                    run.absorb(
-                        vec![RawDetection {
-                            raw: rescued.raw,
-                            masked_stream: Some(candidate.stream.clone()),
-                            corners: Some(candidate.corners),
-                            version: Some(candidate.version),
-                            ec: Some(candidate.ec),
-                            mask: Some(candidate.mask),
-                            fnc1: rescued.fnc1,
-                            engine: EngineKind::Rescue,
-                        }],
-                        candidate.inverted,
-                    );
-                    break; // first rescue wins — candidates are dedupes of one symbol
-                }
-            }
-            stages.push(StageTrace {
-                stage: "rescue".to_owned(),
-                transforms_tried: tried,
-                ms: started.elapsed().as_secs_f64() * 1_000.0,
-                detections_found: found,
-            });
-        }
+        run.rescue_stage(luma, &mut stages)?;
     }
 
     Ok(LadderOutcome {

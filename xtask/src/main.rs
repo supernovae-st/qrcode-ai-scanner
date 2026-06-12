@@ -43,6 +43,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("gen-fixtures") => gen_fixtures(),
+        Some("gen-symbology-fixtures") => gen_symbology_fixtures(),
         Some("corpus-report") => corpus_report(args.next().as_deref() == Some("--write")),
         Some("baseline") => {
             let bin = args
@@ -65,6 +66,73 @@ fn save_luma(img: &image::GrayImage, path: &Path) {
         .save(path)
         .unwrap();
     println!("wrote {}", path.display());
+}
+
+/// Render every non-QR symbology rxing can WRITE into fixtures/symbology/
+/// (decoder ≠ encoder modules, so the roundtrip still exercises the real
+/// detect path; EAN-13/Code 128 get independent cross-checks in tests).
+fn gen_symbology_fixtures() {
+    use rxing::{BarcodeFormat, EncodeHints, Writer};
+    let dir = std::path::Path::new("fixtures/symbology");
+    std::fs::create_dir_all(dir).expect("mkdir fixtures/symbology");
+
+    let cases: &[(&str, BarcodeFormat, &str, i32, i32)] = &[
+        (
+            "datamatrix",
+            BarcodeFormat::DATA_MATRIX,
+            "https://qrcode-ai.com/dm",
+            240,
+            240,
+        ),
+        (
+            "aztec",
+            BarcodeFormat::AZTEC,
+            "https://qrcode-ai.com/aztec",
+            240,
+            240,
+        ),
+        (
+            "pdf417",
+            BarcodeFormat::PDF_417,
+            "https://qrcode-ai.com/pdf417",
+            400,
+            160,
+        ),
+        ("ean13", BarcodeFormat::EAN_13, "9506000134352", 320, 140),
+        ("ean8", BarcodeFormat::EAN_8, "96385074", 240, 140),
+        ("upca", BarcodeFormat::UPC_A, "036000291452", 320, 140),
+        ("code128", BarcodeFormat::CODE_128, "QRCAI-0042", 360, 140),
+        ("code39", BarcodeFormat::CODE_39, "SCANNER-39", 360, 140),
+        ("itf14", BarcodeFormat::ITF, "15400141288763", 360, 140),
+        (
+            "datamatrix-gs1",
+            BarcodeFormat::DATA_MATRIX,
+            "\u{1d}010950600013435210AB12",
+            240,
+            240,
+        ),
+    ];
+    for (name, format, content, w, h) in cases {
+        let writer = rxing::MultiFormatWriter;
+        let hints = EncodeHints {
+            Margin: Some("8".to_owned()),
+            ..EncodeHints::default()
+        };
+        let bits = writer
+            .encode_with_hints(content, format, *w, *h, &hints)
+            .unwrap_or_else(|e| panic!("encode {name}: {e:?}"));
+        // BitMatrix → luma png (dark = 0)
+        let (bw, bh) = (bits.width(), bits.height());
+        let mut img = image::GrayImage::new(bw, bh);
+        for y in 0..bh {
+            for x in 0..bw {
+                img.put_pixel(x, y, image::Luma([if bits.get(x, y) { 0 } else { 255 }]));
+            }
+        }
+        let path = dir.join(format!("{name}.png"));
+        img.save(&path).expect("save fixture");
+        println!("wrote {} ({}x{})", path.display(), bw, bh);
+    }
 }
 
 fn gen_fixtures() {

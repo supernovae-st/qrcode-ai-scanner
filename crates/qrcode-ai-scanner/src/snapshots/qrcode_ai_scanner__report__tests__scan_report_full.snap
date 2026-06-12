@@ -5,6 +5,7 @@ expression: full_report()
 {
   "detections": [
     {
+      "symbology": "qr_code",
       "content": {
         "text": "https://qrcode-ai.com",
         "raw": "aHR0cHM6Ly9xcmNvZGUtYWkuY29t",

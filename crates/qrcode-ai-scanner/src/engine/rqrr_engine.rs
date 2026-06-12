@@ -6,7 +6,7 @@
 
 use super::{MaskedStream, RawDetection};
 use crate::input::LumaImage;
-use crate::report::{EcLevel, EngineKind, Point};
+use crate::report::{EcLevel, EngineKind, Point, Symbology};
 use crate::rescue::RescueCandidate;
 
 /// rqrr `ecc_level` is the QR format-info two-bit field: M=0 · L=1 · H=2 · Q=3.
@@ -72,6 +72,7 @@ pub(super) fn decode(luma: &LumaImage) -> (Vec<RawDetection>, Vec<RescueCandidat
             y: p.y as f32,
         });
         found.push(RawDetection {
+            symbology: Symbology::QrCode,
             raw,
             masked_stream,
             corners: Some(corners),

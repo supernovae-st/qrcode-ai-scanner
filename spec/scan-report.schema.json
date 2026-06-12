@@ -505,6 +505,7 @@
     "Detection": {
       "type": "object",
       "required": [
+        "symbology",
         "content",
         "payload",
         "corners",
@@ -512,6 +513,9 @@
         "engines"
       ],
       "properties": {
+        "symbology": {
+          "$ref": "#/$defs/Symbology"
+        },
         "content": {
           "$ref": "#/$defs/DecodedContent"
         },
@@ -873,6 +877,29 @@
           "const": 3
         }
       }
+    },
+    "Symbology": {
+      "enum": [
+        "qr_code",
+        "micro_qr_code",
+        "rectangular_micro_qr_code",
+        "data_matrix",
+        "aztec",
+        "pdf417",
+        "maxi_code",
+        "ean13",
+        "ean8",
+        "upc_a",
+        "upc_e",
+        "code128",
+        "code39",
+        "code93",
+        "codabar",
+        "itf",
+        "data_bar",
+        "data_bar_expanded",
+        "telepen"
+      ]
     }
   }
 }

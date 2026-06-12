@@ -42,7 +42,7 @@ pub use payload::Payload;
 pub use report::{
     AxisScore, Charset, DecodedContent, Detection, EcLevel, EngineKind, Grade, Hint,
     Iso15415Report, IsoGrade, IsoParameter, PipelineTrace, Point, QrMeta, ScanReport, Score,
-    StageTrace, StressAxis, StructuralReport, UecGrade, UecReport, Versions,
+    StageTrace, StressAxis, StructuralReport, Symbology, UecGrade, UecReport, Versions,
 };
 
 /// Fuzz-only entry points — cargo-fuzz builds the whole graph with
@@ -187,14 +187,19 @@ fn build_report(outcome: ladder::LadderOutcome, scored: Option<(Score, Vec<Hint>
         .merged
         .into_iter()
         .map(|m| {
-            // FNC1-first symbols ARE GS1 data (ISO 18004 §7.4.9) — the
-            // element-string reading is the only legal one
+            // payload routing is symbology-aware: FNC1-led carriers (QR
+            // ]Q3/]Q4 · DataMatrix ]d2 · GS1-128 ]C1) are element strings;
+            // retail 1D symbols ARE a GTIN (AI 01 semantics); everything
+            // else goes through the text classifier
             let payload = if m.fnc1 {
                 payload::classify_fnc1(&m.text)
+            } else if m.symbology.is_retail_gtin() {
+                payload::classify_retail_gtin(&m.text)
             } else {
                 payload::classify(&m.text)
             };
             Detection {
+                symbology: m.symbology,
                 content: DecodedContent {
                     text: m.text,
                     raw: m.raw,

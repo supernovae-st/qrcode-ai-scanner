@@ -77,6 +77,7 @@ fn render_pretty(report: &ScanReport) {
     match report.detections.first() {
         Some(d) => {
             println!("content   {}", sanitize_terminal(&d.content.text));
+            println!("symbology {:?}", d.symbology);
             println!("payload   {:?}", d.payload);
             if let (Some(v), Some(m)) = (d.meta.version, d.meta.modules) {
                 println!("symbol    v{v} · {m}x{m} modules");

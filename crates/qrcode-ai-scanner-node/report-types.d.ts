@@ -5,6 +5,17 @@
 
 export interface Point { x: number; y: number }
 /**
+ * Barcode symbology. The QR family (qr_code · micro_qr_code ·
+ * rectangular_micro_qr_code) is the only one that can carry QrMeta
+ * geometry, the UEC margin, the ISO 15415 card and the rescue stage.
+ */
+export type Symbology =
+  | "qr_code" | "micro_qr_code" | "rectangular_micro_qr_code"
+  | "data_matrix" | "aztec" | "pdf417" | "maxi_code"
+  | "ean13" | "ean8" | "upc_a" | "upc_e"
+  | "code128" | "code39" | "code93" | "codabar" | "itf"
+  | "data_bar" | "data_bar_expanded" | "telepen";
+/**
  * "rescue" = the S5 errors-and-erasures stage: a grid the engines detected
  * but could not decode, recovered by treating low-confidence (logo/texture)
  * codewords as half-price erasures (e + 2t ≤ d − p).
@@ -63,6 +74,8 @@ export interface QrMeta {
 }
 
 export interface Detection {
+  /** The symbology this detection was read as. */
+  symbology: Symbology;
   content: DecodedContent;
   payload: Payload;
   corners: [Point, Point, Point, Point] | null;

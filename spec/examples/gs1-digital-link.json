@@ -1,6 +1,7 @@
 {
   "detections": [
     {
+      "symbology": "qr_code",
       "content": {
         "text": "https://id.gs1.org/01/09506000134352/10/LOT1?17=271231",
         "raw": "aHR0cHM6Ly9pZC5nczEub3JnLzAxLzA5NTA2MDAwMTM0MzUyLzEwL0xPVDE/MTc9MjcxMjMx",
@@ -137,12 +138,12 @@
       {
         "stage": "direct",
         "transforms_tried": 1,
-        "ms": 2.713833,
+        "ms": 5.3159160000000005,
         "detections_found": 2
       }
     ],
     "engine_panics": 0,
-    "total_ms": 2.72375
+    "total_ms": 5.3335
   },
   "versions": {
     "scanner": "0.3.0",

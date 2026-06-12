@@ -51,6 +51,13 @@ fn detections_match(found: &[engine::RawDetection], expected_text: &str) -> bool
         .any(|d| engine::charset::resolve(&d.raw).0 == expected_text)
 }
 
+/// Stress cells decode ONLY the scored symbology — survival of the same
+/// content in another symbology would be a false signal, and the filtered
+/// pass keeps cell cost at one decoder instead of all of them.
+fn cell_decode(img: &LumaImage, symbology: crate::report::Symbology) -> engine::EngineOutcome {
+    engine::decode_filtered(img, engine::FormatFilter::Only(symbology))
+}
+
 /// The decode class a symbol's UNSTRESSED baseline needs — stress cells
 /// probe the same class. An artistic symbol that only decodes through a
 /// boost rung would otherwise read margin-zero on every cell (direct+otsu
@@ -59,24 +66,42 @@ fn detections_match(found: &[engine::RawDetection], expected_text: &str) -> bool
 struct CellProbe {
     /// The deep rung the baseline needed, if any.
     rung: Option<crate::ladder::Rung>,
+    /// The symbology being scored — every cell decode filters on it.
+    symbology: crate::report::Symbology,
 }
 
 impl CellProbe {
     /// Calibrate on the unstressed base: direct → otsu → first decoding
     /// deep rung. `None` = the base does not decode at stress scale at
     /// all (score legitimately reads zero margin).
-    fn calibrate(base: &LumaImage, expected_text: &str) -> Option<Self> {
-        if detections_match(&engine::decode_all(base).detections, expected_text) {
-            return Some(Self { rung: None });
+    fn calibrate(
+        base: &LumaImage,
+        expected_text: &str,
+        symbology: crate::report::Symbology,
+    ) -> Option<Self> {
+        if detections_match(&cell_decode(base, symbology).detections, expected_text) {
+            return Some(Self {
+                rung: None,
+                symbology,
+            });
         }
         let binarized = transform::otsu_threshold(base);
-        if detections_match(&engine::decode_all(&binarized).detections, expected_text) {
-            return Some(Self { rung: None });
+        if detections_match(
+            &cell_decode(&binarized, symbology).detections,
+            expected_text,
+        ) {
+            return Some(Self {
+                rung: None,
+                symbology,
+            });
         }
         for rung in crate::ladder::DEEP_RUNGS {
             let boosted = rung.apply(base);
-            if detections_match(&engine::decode_all(&boosted).detections, expected_text) {
-                return Some(Self { rung: Some(rung) });
+            if detections_match(&cell_decode(&boosted, symbology).detections, expected_text) {
+                return Some(Self {
+                    rung: Some(rung),
+                    symbology,
+                });
             }
         }
         None
@@ -93,17 +118,23 @@ impl CellProbe {
 /// the margin is measured RELATIVE to the symbol's own decode class, never
 /// with the full ladder's recovery power (that asymmetry is the point).
 fn cell_passes(img: &LumaImage, expected_text: &str, probe: CellProbe) -> bool {
-    if detections_match(&engine::decode_all(img).detections, expected_text) {
+    if detections_match(&cell_decode(img, probe.symbology).detections, expected_text) {
         return true;
     }
     let binarized = transform::otsu_threshold(img);
-    if detections_match(&engine::decode_all(&binarized).detections, expected_text) {
+    if detections_match(
+        &cell_decode(&binarized, probe.symbology).detections,
+        expected_text,
+    ) {
         return true;
     }
     match probe.rung {
         Some(rung) => {
             let boosted = rung.apply(img);
-            detections_match(&engine::decode_all(&boosted).detections, expected_text)
+            detections_match(
+                &cell_decode(&boosted, probe.symbology).detections,
+                expected_text,
+            )
         }
         None => false,
     }
@@ -354,7 +385,11 @@ pub(crate) fn evaluate(
 ) -> Result<(Score, Vec<Hint>)> {
     let base = transform::downscale_to(luma, STRESS_BASE_SIDE);
     // calibrate the cell probe on the unstressed base (its decode class)
-    let probe = CellProbe::calibrate(&base, &detection.text).unwrap_or(CellProbe { rung: None });
+    let probe =
+        CellProbe::calibrate(&base, &detection.text, detection.symbology).unwrap_or(CellProbe {
+            rung: None,
+            symbology: detection.symbology,
+        });
     let axes = run_axes(&base, &detection.text, depth, cancel, deadline, probe)?;
     // Photometric checks sample the ORIGINAL luma — when the geometry came
     // from an INVERTING attempt (light-on-dark symbol), hand them an
@@ -399,6 +434,7 @@ mod tests {
 
     fn detection_with(ec: Option<EcLevel>) -> MergedDetection {
         MergedDetection {
+            symbology: crate::report::Symbology::QrCode,
             raw: b"x".to_vec(),
             text: "x".into(),
             charset: crate::report::Charset::Utf8,

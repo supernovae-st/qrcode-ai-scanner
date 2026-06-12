@@ -1,15 +1,15 @@
 {
   "detections": [
     {
-      "symbology": "qr_code",
+      "symbology": "data_matrix",
       "content": {
-        "text": "https://qrc-ai.com/Uo54C",
-        "raw": "aHR0cHM6Ly9xcmMtYWkuY29tL1VvNTRD",
+        "text": "https://qrcode-ai.com/dm",
+        "raw": "aHR0cHM6Ly9xcmNvZGUtYWkuY29tL2Rt",
         "charset": "utf8"
       },
       "payload": {
         "kind": "url",
-        "url": "https://qrc-ai.com/Uo54C"
+        "url": "https://qrcode-ai.com/dm"
       },
       "corners": null,
       "meta": {
@@ -25,32 +25,32 @@
     }
   ],
   "score": {
-    "value": 43,
-    "grade": "fair",
+    "value": 97,
+    "grade": "excellent",
     "axes": [
       {
         "axis": "resolution",
-        "passed": 1,
+        "passed": 5,
         "total": 5
       },
       {
         "axis": "blur",
-        "passed": 4,
+        "passed": 5,
         "total": 5
       },
       {
         "axis": "contrast",
-        "passed": 1,
+        "passed": 5,
         "total": 5
       },
       {
         "axis": "perspective",
-        "passed": 2,
+        "passed": 5,
         "total": 5
       },
       {
         "axis": "rotation",
-        "passed": 1,
+        "passed": 5,
         "total": 5
       },
       {
@@ -63,43 +63,18 @@
     "uec": null,
     "iso15415": null
   },
-  "hints": [
-    {
-      "hint": "increase_contrast"
-    },
-    {
-      "hint": "enlarge_modules"
-    }
-  ],
+  "hints": [],
   "trace": {
     "stages": [
       {
-        "stage": "pyramid",
-        "transforms_tried": 1,
-        "ms": 45.325583,
-        "detections_found": 0
-      },
-      {
         "stage": "direct",
         "transforms_tried": 1,
-        "ms": 102.704291,
-        "detections_found": 0
-      },
-      {
-        "stage": "enhance",
-        "transforms_tried": 6,
-        "ms": 676.433625,
-        "detections_found": 0
-      },
-      {
-        "stage": "deep",
-        "transforms_tried": 25,
-        "ms": 473.4535,
-        "detections_found": 2
+        "ms": 1.3484580000000002,
+        "detections_found": 1
       }
     ],
     "engine_panics": 0,
-    "total_ms": 1298.114875
+    "total_ms": 1.358333
   },
   "versions": {
     "scanner": "0.3.0",

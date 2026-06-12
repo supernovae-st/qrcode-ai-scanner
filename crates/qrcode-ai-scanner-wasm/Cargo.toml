@@ -30,7 +30,7 @@ serde.workspace = true
 rxing = { version = "0.9.1", default-features = false, features = [
   "decoders",
   "multi_barcode_readers",
-  "qrcode",
+  "full_barcode_format_support",
   "encoding_rs",
   "wasm_support",
 ] }

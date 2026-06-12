@@ -47,7 +47,10 @@ into a Web Worker. `budget_ms: 0` means unbounded.
     ```
   </Accordion>
   <Accordion title="Lazy loading">
-    The package weighs ~617 KB gz. Load it with the feature that needs it
+    The package weighs ~797 KB gz (all symbologies; a QR-only build
+    drops ~180 KB — flip the wasm crate's rxing feature from
+    `full_barcode_format_support` back to `qrcode` if page weight ever
+    beats multi-symbology). Load it with the feature that needs it
     (dynamic `import()` in an async chunk) and memoize `init()` —
     **reset the memo if init rejects**, or one network error bricks the
     feature until reload:

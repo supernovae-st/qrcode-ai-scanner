@@ -10,6 +10,13 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+rxing = { version = "0.9.1", default-features = false, features = [
+  "decoders",
+  "encoders",
+  "multi_barcode_readers",
+  "full_barcode_format_support",
+  "encoding_rs",
+] }
 qrcode-ai-scanner = { path = "../crates/qrcode-ai-scanner", features = ["serde"] }
 qrcode.workspace = true
 image.workspace = true

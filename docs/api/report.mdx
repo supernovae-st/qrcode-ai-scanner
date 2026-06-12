@@ -45,6 +45,15 @@ Machine-readable mirrors — load these directly in tools and agents:
 
 ## Detection
 
+<ResponseField name="symbology" type="Symbology" required>
+  What the symbol IS: `qr_code` · `micro_qr_code` ·
+  `rectangular_micro_qr_code` · `data_matrix` · `aztec` · `pdf417` ·
+  `maxi_code` · `ean13` · `ean8` · `upc_a` · `upc_e` · `code128` ·
+  `code39` · `code93` · `codabar` · `itf` · `data_bar` ·
+  `data_bar_expanded` · `telepen`. Only the QR family carries `meta`
+  geometry, UEC, the ISO card and the rescue engine.
+</ResponseField>
+
 <ResponseField name="content" type="object" required>
   `text` (decoded string) · `raw` (base64 — the ORIGINAL bytes, the
   truth) · `charset` (`utf8` | `shift_jis` | `latin1`). The text/charset

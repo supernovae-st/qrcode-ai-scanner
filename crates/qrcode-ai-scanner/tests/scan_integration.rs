@@ -566,3 +566,110 @@ fn logo_occluded_symbol_rescued_by_erasure_decoding() {
         report.trace.stages
     );
 }
+
+#[test]
+fn every_symbology_fixture_decodes_with_the_right_label() {
+    use qrcode_ai_scanner::Symbology as S;
+    let cases: &[(&str, S, &str)] = &[
+        (
+            "symbology/datamatrix.png",
+            S::DataMatrix,
+            "https://qrcode-ai.com/dm",
+        ),
+        (
+            "symbology/aztec.png",
+            S::Aztec,
+            "https://qrcode-ai.com/aztec",
+        ),
+        (
+            "symbology/pdf417.png",
+            S::Pdf417,
+            "https://qrcode-ai.com/pdf417",
+        ),
+        ("symbology/ean13.png", S::Ean13, "9506000134352"),
+        ("symbology/ean8.png", S::Ean8, "96385074"),
+        ("symbology/upca.png", S::UpcA, "036000291452"),
+        ("symbology/code128.png", S::Code128, "QRCAI-0042"),
+        ("symbology/code39.png", S::Code39, "SCANNER-39"),
+        ("symbology/itf14.png", S::Itf, "15400141288763"),
+    ];
+    let scanner = Scanner::default();
+    for (path, symbology, text) in cases {
+        let report = scanner.scan(ImageInput::encoded(&fixture(path))).unwrap();
+        assert_eq!(report.detections.len(), 1, "{path}: {:?}", report.trace);
+        let d = &report.detections[0];
+        assert_eq!(d.symbology, *symbology, "{path}");
+        assert_eq!(d.content.text, *text, "{path}");
+        // non-QR symbologies never fabricate QR meta
+        if !symbology.is_qr_family() {
+            assert_eq!(d.meta.version, None, "{path}");
+            assert_eq!(d.meta.inverted, None, "{path}");
+        }
+    }
+}
+
+#[test]
+fn retail_1d_symbols_classify_as_gtin_with_check_digit_verdict() {
+    let report = Scanner::default()
+        .scan(ImageInput::encoded(&fixture("symbology/ean13.png")))
+        .unwrap();
+    match &report.detections[0].payload {
+        Payload::Gs1 {
+            gtin,
+            conformant,
+            elements,
+            issues,
+        } => {
+            assert_eq!(
+                gtin.as_deref(),
+                Some("09506000134352"),
+                "zero-padded GTIN-14"
+            );
+            assert!(conformant, "{issues:?}");
+            assert_eq!(elements[0].ai, "01");
+        }
+        other => panic!("EAN-13 must classify as retail GTIN, got {other:?}"),
+    }
+    // a Code 39 with arbitrary text stays text — no GTIN invention
+    let report = Scanner::default()
+        .scan(ImageInput::encoded(&fixture("symbology/code39.png")))
+        .unwrap();
+    assert_eq!(report.detections[0].payload, Payload::Text);
+}
+
+#[test]
+fn same_digits_in_two_symbologies_stay_two_detections() {
+    // the merge is keyed by (symbology, text) — compose an image carrying
+    // an EAN-13 and a QR with identical digits
+    let ean = image::open(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/symbology/ean13.png"),
+    )
+    .unwrap()
+    .to_luma8();
+    let qr_png = generated_qr_png("9506000134352");
+    let qr = image::load_from_memory(&qr_png).unwrap().to_luma8();
+
+    let w = ean.width().max(qr.width());
+    let h = ean.height() + qr.height() + 40;
+    let mut canvas = image::GrayImage::from_pixel(w, h, image::Luma([255]));
+    image::imageops::overlay(&mut canvas, &ean, 0, 0);
+    image::imageops::overlay(&mut canvas, &qr, 0, i64::from(ean.height()) + 40);
+    let mut buf = Vec::new();
+    image::DynamicImage::ImageLuma8(canvas)
+        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .unwrap();
+
+    let report = Scanner::default().scan(ImageInput::encoded(&buf)).unwrap();
+    let mut symbologies: Vec<_> = report.detections.iter().map(|d| d.symbology).collect();
+    symbologies.sort_by_key(|s| format!("{s:?}"));
+    assert_eq!(
+        symbologies,
+        vec![
+            qrcode_ai_scanner::Symbology::Ean13,
+            qrcode_ai_scanner::Symbology::QrCode
+        ],
+        "{:?}",
+        report.detections
+    );
+}

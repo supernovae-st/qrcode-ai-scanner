@@ -87,6 +87,7 @@ def main() -> None:
 
     # ---- engines + flat enums ----
     for enum_name, ts_pat, def_name in [
+        ("Symbology", r'Symbology =([^;]+);', "Symbology"),
         ("EngineKind", r'EngineKind = ([^;]+);', "EngineKind"),
         ("Charset", r'Charset = ([^;]+);', "Charset"),
         ("Grade", r'\bGrade = ("excellent[^;]+);', "Grade"),

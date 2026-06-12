@@ -130,3 +130,65 @@ path = "fixtures/degraded/logo-occluded-rescue.png"
 category = "degraded"
 expected = "https://qrcode-ai.com/rescue-pin"
 source = "R9 — v5-H + 22% gray logo disk: engines fail (t > t_max), S5 erasure rescue decodes"
+
+# ---- multi-symbology fixtures (R12 · rxing writers, decoder≠encoder) ----
+
+[[entry]]
+path = "fixtures/symbology/datamatrix.png"
+category = "symbology"
+expected = "https://qrcode-ai.com/dm"
+source = "R12 — Data Matrix ECC 200"
+
+[[entry]]
+path = "fixtures/symbology/aztec.png"
+category = "symbology"
+expected = "https://qrcode-ai.com/aztec"
+source = "R12 — Aztec"
+
+[[entry]]
+path = "fixtures/symbology/pdf417.png"
+category = "symbology"
+expected = "https://qrcode-ai.com/pdf417"
+source = "R12 — PDF417"
+
+[[entry]]
+path = "fixtures/symbology/ean13.png"
+category = "symbology"
+expected = "9506000134352"
+source = "R12 — EAN-13 (retail GTIN payload)"
+
+[[entry]]
+path = "fixtures/symbology/ean8.png"
+category = "symbology"
+expected = "96385074"
+source = "R12 — EAN-8"
+
+[[entry]]
+path = "fixtures/symbology/upca.png"
+category = "symbology"
+expected = "036000291452"
+source = "R12 — UPC-A"
+
+[[entry]]
+path = "fixtures/symbology/code128.png"
+category = "symbology"
+expected = "QRCAI-0042"
+source = "R12 — Code 128"
+
+[[entry]]
+path = "fixtures/symbology/code39.png"
+category = "symbology"
+expected = "SCANNER-39"
+source = "R12 — Code 39"
+
+[[entry]]
+path = "fixtures/symbology/itf14.png"
+category = "symbology"
+expected = "15400141288763"
+source = "R12 — ITF-14"
+
+[[entry]]
+path = "fixtures/symbology/datamatrix-gs1.png"
+category = "symbology"
+expected = "\u001D010950600013435210AB12"
+source = "R12 — Data Matrix carrying GS1 element-string data (literal GS lead)"

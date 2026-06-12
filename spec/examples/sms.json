@@ -1,6 +1,7 @@
 {
   "detections": [
     {
+      "symbology": "qr_code",
       "content": {
         "text": "SMSTO:+33600000000:Hello from a QR",
         "raw": "U01TVE86KzMzNjAwMDAwMDAwOkhlbGxvIGZyb20gYSBRUg==",
@@ -121,12 +122,12 @@
       {
         "stage": "direct",
         "transforms_tried": 1,
-        "ms": 4.2275,
+        "ms": 2.661875,
         "detections_found": 2
       }
     ],
     "engine_panics": 0,
-    "total_ms": 4.2375
+    "total_ms": 2.668834
   },
   "versions": {
     "scanner": "0.3.0",

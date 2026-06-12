@@ -1,6 +1,7 @@
 {
   "detections": [
     {
+      "symbology": "qr_code",
       "content": {
         "text": "bitcoin:bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq?amount=0.01",
         "raw": "Yml0Y29pbjpiYzFxYXIwc3Jycjd4Zmt2eTVsNjQzbHlkbnc5cmU1OWd0enp3ZjVtZHE/YW1vdW50PTAuMDE=",
@@ -122,12 +123,12 @@
       {
         "stage": "direct",
         "transforms_tried": 1,
-        "ms": 6.386834,
+        "ms": 5.325333,
         "detections_found": 2
       }
     ],
     "engine_panics": 0,
-    "total_ms": 6.419167
+    "total_ms": 5.347
   },
   "versions": {
     "scanner": "0.3.0",

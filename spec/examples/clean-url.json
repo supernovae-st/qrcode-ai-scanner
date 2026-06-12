@@ -1,6 +1,7 @@
 {
   "detections": [
     {
+      "symbology": "qr_code",
       "content": {
         "text": "https://qrc-ai.com/76xMa",
         "raw": "aHR0cHM6Ly9xcmMtYWkuY29tLzc2eE1h",
@@ -120,12 +121,12 @@
       {
         "stage": "pyramid",
         "transforms_tried": 1,
-        "ms": 27.220709,
+        "ms": 44.024,
         "detections_found": 2
       }
     ],
     "engine_panics": 0,
-    "total_ms": 27.666125
+    "total_ms": 44.248416
   },
   "versions": {
     "scanner": "0.3.0",

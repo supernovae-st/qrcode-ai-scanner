@@ -1,6 +1,7 @@
 {
   "detections": [
     {
+      "symbology": "qr_code",
       "content": {
         "text": "https://qrcode-ai.com/rescue-pin",
         "raw": "aHR0cHM6Ly9xcmNvZGUtYWkuY29tL3Jlc2N1ZS1waW4=",
@@ -134,30 +135,30 @@
       {
         "stage": "direct",
         "transforms_tried": 1,
-        "ms": 4.325417,
+        "ms": 27.086333,
         "detections_found": 0
       },
       {
         "stage": "enhance",
         "transforms_tried": 3,
-        "ms": 14.485417,
+        "ms": 81.672667,
         "detections_found": 0
       },
       {
         "stage": "deep",
         "transforms_tried": 17,
-        "ms": 83.037625,
+        "ms": 118.50116700000001,
         "detections_found": 0
       },
       {
         "stage": "rescue",
         "transforms_tried": 1,
-        "ms": 0.063583,
+        "ms": 0.064167,
         "detections_found": 1
       }
     ],
     "engine_panics": 0,
-    "total_ms": 101.97120799999999
+    "total_ms": 227.401542
   },
   "versions": {
     "scanner": "0.3.0",
