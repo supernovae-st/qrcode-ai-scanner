@@ -694,14 +694,24 @@ fn exif_rotated_phone_photos_still_decode() {
     // pin guards it. (EXIF is NOT applied: corners live in STORED pixel
     // space — documented in spec/01.)
     let qr = Scanner::default()
-        .scan(ImageInput::encoded(&fixture("degraded/exif6-rotated-qr.jpg")))
+        .scan(ImageInput::encoded(&fixture(
+            "degraded/exif6-rotated-qr.jpg",
+        )))
         .unwrap();
-    assert_eq!(qr.detections[0].content.text, "https://qrcode-ai.com/exif-pin");
+    assert_eq!(
+        qr.detections[0].content.text,
+        "https://qrcode-ai.com/exif-pin"
+    );
 
     let ean = Scanner::default()
-        .scan(ImageInput::encoded(&fixture("symbology/exif6-rotated-ean.jpg")))
+        .scan(ImageInput::encoded(&fixture(
+            "symbology/exif6-rotated-ean.jpg",
+        )))
         .unwrap();
-    assert_eq!(ean.detections[0].symbology, qrcode_ai_scanner::Symbology::Ean13);
+    assert_eq!(
+        ean.detections[0].symbology,
+        qrcode_ai_scanner::Symbology::Ean13
+    );
 }
 
 #[test]
