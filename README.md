@@ -26,7 +26,7 @@ is built specifically for them — and it doesn't just say *"decoded"*, it
 tells you **how much margin** the code has before it stops scanning in the
 real world.
 
-Three things no other pure-Rust library ships together:
+Five things no other pure-Rust library ships together:
 
 1. **A deterministic multi-engine decode ladder** tuned on artistic
    corpora (rxing + rqrr, curated preprocessing rungs — no RNG anywhere:
@@ -44,6 +44,13 @@ Three things no other pure-Rust library ships together:
    parameter (the ISO rule). Honest by construction: parameters that NEED
    verifier hardware (Grid Nonuniformity, Reflectance Margin) are reported
    absent, never faked.
+
+5. **An erasure-rescue decode stage** — when both engines give up, the
+   scanner re-decodes the sampled bitstream itself with errors-and-erasures
+   Reed-Solomon (Forney 1965): low-confidence modules (logo zones, art
+   texture) become half-price erasures (`e + 2t ≤ d − p`). Measured: center
+   occlusion tolerance grows from 20% to **30% radius** (2.2× the area) on
+   v5-H — exactly the artistic logo-over-center class.
 
 Plus machine-actionable **hints** (`raise_error_correction`,
 `fix_finder_pattern`, `low_correction_margin`, …) — the feedback loop for
@@ -98,9 +105,9 @@ hand-typed.
 <!-- corpus-report:begin -->
 | category | pass | total | rate | avg ms |
 |---|---|---|---|---|
-| artistic | 2 | 2 | 100% | 628 |
+| artistic | 2 | 2 | 100% | 742 |
 | clean | 13 | 13 | 100% | 9 |
-| degraded | 4 | 4 | 100% | 175 |
+| degraded | 5 | 5 | 100% | 195 |
 <!-- corpus-report:end -->
 
 ### Measured accuracy — external corpora (2026-06-11, v0.3.0)
@@ -114,6 +121,7 @@ vendored — the scripts document the sources).
 | zxing blackbox qrcode-1…6 (179 images, ground truth) | **170/179 exact-text match @ 0°** | beats the zxing reference pass thresholds (153) on **all six suites** |
 | qrcode-ai.com production templates (15 single-symbol styles) | **15/15 decoded** | includes the blob-pixel style no contrast/threshold transform recovers |
 | qrcode-ai.com artistic gallery (single-symbol) | 17/27 | the 10 misses are multi-QR 3D-perspective marketing collages — out of scope |
+| center-logo occlusion (v5-H, gray disk) | engines die at >20% radius · **rescue decodes through 30%** | errors-and-erasures RS — `engines: ["rescue"]` in the report |
 
 One of the 9 zxing misses is rqrr returning a Reed-Solomon
 **miscorrection** ("photography" vs ground-truth "photograph") — which the

@@ -44,6 +44,10 @@ pub enum EngineKind {
     Rxing,
     /// quirc-family engine (rqrr).
     Rqrr,
+    /// The S5 erasure-rescue stage — errors-and-erasures RS over a grid
+    /// the engines detected but could not decode (Forney 1965; the
+    /// logo-occlusion recovery path).
+    Rescue,
 }
 
 /// QR error-correction level.

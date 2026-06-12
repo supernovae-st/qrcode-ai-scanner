@@ -4,7 +4,12 @@
 // insta schema snapshots in crates/qrcode-ai-scanner/src/report.rs.
 
 export interface Point { x: number; y: number }
-export type EngineKind = "rxing" | "rqrr";
+/**
+ * "rescue" = the S5 errors-and-erasures stage: a grid the engines detected
+ * but could not decode, recovered by treating low-confidence (logo/texture)
+ * codewords as half-price erasures (e + 2t ≤ d − p).
+ */
+export type EngineKind = "rxing" | "rqrr" | "rescue";
 export type EcLevel = "l" | "m" | "q" | "h";
 export type Charset = "utf8" | "shift_jis" | "latin1";
 export type Grade = "excellent" | "good" | "acceptable" | "fair" | "poor";

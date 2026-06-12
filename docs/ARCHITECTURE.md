@@ -41,6 +41,9 @@ ImageInput (Encoded | Rgba8 | Luma8)
                      morphological closes (blob/dot pixel styles — gaps
                      between sub-module blobs read as noise until closed)
                      + binarization grid
+       S5 rescue     engines failed but a grid was read: errors-and-erasures
+                     RS (Forney 1965) with confidence-marked erasures —
+                     e + 2t ≤ d − p, twice the budget where the art lives
   → merge            cross-engine, keyed by raw payload bytes → engines consensus
   → score            contract v3 (see SCORING.md) — Full/Fast profiles only
   → ScanReport       versioned serde contract (snake_case · raw as base64)

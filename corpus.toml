@@ -124,3 +124,9 @@ path = "fixtures/artistic/blob-style-monkey-logo.webp"
 category = "artistic"
 expected = "https://qrc-ai.com/Uo54C"
 source = "qrcode-ai.com custom template funny-monkey-blue — blob pixel style + center logo (morph-close rung)"
+
+[[entry]]
+path = "fixtures/degraded/logo-occluded-rescue.png"
+category = "degraded"
+expected = "https://qrcode-ai.com/rescue-pin"
+source = "R9 — v5-H + 22% gray logo disk: engines fail (t > t_max), S5 erasure rescue decodes"

@@ -30,6 +30,7 @@ mod input;
 mod ladder;
 mod payload;
 mod report;
+mod rescue;
 mod score;
 mod transform;
 

@@ -127,7 +127,7 @@ const VERSIONS: [VersionDb; 41] = [
 ];
 
 /// Format-bits index for the table lookup (M=0 · L=1 · H=2 · Q=3).
-fn format_bits_index(ec: EcLevel) -> usize {
+pub(crate) fn format_bits_index(ec: EcLevel) -> usize {
     match ec {
         EcLevel::M => 0,
         EcLevel::L => 1,
@@ -195,7 +195,7 @@ fn mask_bit(mask: u8, y: usize, x: usize) -> bool {
 /// Module position of every emitted data bit, in stream order — replays
 /// rqrr `read_data`'s zigzag exactly (down-up column pairs from the
 /// bottom-right, column 6 skipped).
-fn zigzag_positions(version: usize) -> Vec<(usize, usize)> {
+pub(crate) fn zigzag_positions(version: usize) -> Vec<(usize, usize)> {
     let size = version * 4 + 17;
     let mut positions = Vec::with_capacity(VERSIONS[version].total * 8);
     let mut y = size - 1;
@@ -231,7 +231,12 @@ fn zigzag_positions(version: usize) -> Vec<(usize, usize)> {
 
 /// Unmask the still-masked stream into interleaved codeword bytes.
 /// Returns `None` when the stream is shorter than the version's capacity.
-fn unmask_to_codewords(masked: &[u8], bit_len: usize, version: usize, mask: u8) -> Option<Vec<u8>> {
+pub(crate) fn unmask_to_codewords(
+    masked: &[u8],
+    bit_len: usize,
+    version: usize,
+    mask: u8,
+) -> Option<Vec<u8>> {
     let total = VERSIONS[version].total;
     // BOTH the declared bit length AND the actual buffer must cover the
     // symbol: bit_len alone is caller-supplied and the loop below indexes
@@ -253,9 +258,12 @@ fn unmask_to_codewords(masked: &[u8], bit_len: usize, version: usize, mask: u8) 
 }
 
 /// One de-interleaved RS block: `data ++ ec`, plus its parameters.
-struct Block {
-    bytes: Vec<u8>,
-    npar: usize,
+pub(crate) struct Block {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) npar: usize,
+    /// Interleaved-stream index each byte came from — the erasure-marking
+    /// bridge (confidence is measured per interleaved codeword).
+    pub(crate) origins: Vec<usize>,
 }
 
 /// De-interleave per the ISO 18004 §8.6 round-robin: data round `j` emits
@@ -268,7 +276,7 @@ struct Block {
 /// correction silently absorbs the slip (t=+1 per large block), which is
 /// invisible to decoding but poisons an error-count margin. Pinned by the
 /// pristine matrix test: mixed-block cells (e.g. v5-Q) read t=0 here.
-fn deinterleave(codewords: &[u8], version: usize, ec_index: usize) -> Vec<Block> {
+pub(crate) fn deinterleave(codewords: &[u8], version: usize, ec_index: usize) -> Vec<Block> {
     let ver = &VERSIONS[version];
     let small = ver.ecc[ec_index];
     let large_count = (ver.total - small.bs * small.ns) / (small.bs + 1);
@@ -284,6 +292,7 @@ fn deinterleave(codewords: &[u8], version: usize, ec_index: usize) -> Vec<Block>
             (small.bs + 1, small.dw + 1)
         };
         let mut bytes = Vec::with_capacity(bs);
+        let mut origins = Vec::with_capacity(bs);
         for j in 0..dw {
             let idx = if j < small.dw {
                 // rounds where every block participates
@@ -293,13 +302,17 @@ fn deinterleave(codewords: &[u8], version: usize, ec_index: usize) -> Vec<Block>
                 small.dw * block_count + (i - small.ns)
             };
             bytes.push(codewords[idx]);
+            origins.push(idx);
         }
         for j in 0..(bs - dw) {
-            bytes.push(codewords[ecc_offset + j * block_count + i]);
+            let idx = ecc_offset + j * block_count + i;
+            bytes.push(codewords[idx]);
+            origins.push(idx);
         }
         blocks.push(Block {
             bytes,
             npar: bs - dw,
+            origins,
         });
     }
     blocks
@@ -337,7 +350,7 @@ const GF_LOG: [u8; 256] = {
     log
 };
 
-fn gf_mul(a: u8, b: u8) -> u8 {
+pub(crate) fn gf_mul(a: u8, b: u8) -> u8 {
     if a == 0 || b == 0 {
         return 0;
     }
@@ -346,13 +359,13 @@ fn gf_mul(a: u8, b: u8) -> u8 {
 }
 
 /// α^n.
-fn gf_pow(n: usize) -> u8 {
+pub(crate) fn gf_pow(n: usize) -> u8 {
     GF_EXP[n % 255]
 }
 
 /// RS syndromes `S_i = c(α^i)` for `i ∈ 0..npar`, with `block[len−1−j]`
 /// the coefficient of `x^j` (transmission order) — rqrr convention.
-fn syndromes(block: &[u8], npar: usize) -> Vec<u8> {
+pub(crate) fn syndromes(block: &[u8], npar: usize) -> Vec<u8> {
     let mut s = vec![0u8; npar];
     for (i, slot) in s.iter_mut().enumerate() {
         for j in 0..block.len() {
@@ -403,7 +416,7 @@ fn error_count(synd: &[u8]) -> usize {
     degree
 }
 
-fn gf_inv(a: u8) -> u8 {
+pub(crate) fn gf_inv(a: u8) -> u8 {
     if a == 0 {
         return 0;
     }

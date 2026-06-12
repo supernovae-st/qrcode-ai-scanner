@@ -53,6 +53,9 @@ pub(crate) struct RawDetection {
 pub(crate) struct EngineOutcome {
     /// Every detection from every engine (deduplication is the ladder's job).
     pub detections: Vec<RawDetection>,
+    /// Grids detected but NOT decoded (rqrr `get_raw_data` ok, RS failed) —
+    /// the S5 rescue inputs. Corners are in ATTEMPT space here.
+    pub rescue: Vec<crate::rescue::RescueCandidate>,
     /// Engine panics caught and isolated during this pass. NOTE: isolation
     /// stops the unwind, but the process-global panic HOOK still runs first
     /// — server embedders see a backtrace on stderr per caught panic
@@ -78,7 +81,10 @@ pub(crate) fn decode_all(luma: &LumaImage) -> EngineOutcome {
 
     #[cfg(feature = "engine-rqrr")]
     match run_isolated(|| rqrr_engine::decode(luma)) {
-        Some(found) => outcome.detections.extend(found),
+        Some((found, rescue)) => {
+            outcome.detections.extend(found);
+            outcome.rescue.extend(rescue);
+        }
         None => outcome.panics += 1,
     }
 

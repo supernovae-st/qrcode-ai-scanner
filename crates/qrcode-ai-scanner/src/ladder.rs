@@ -377,6 +377,9 @@ struct Run<'a> {
     /// back into this coordinate space (decodes happen on downscales).
     orig: (u32, u32),
     merged: Vec<MergedDetection>,
+    /// Grids detected but not decoded (rqrr stream readable) — S5 inputs.
+    /// Corners already rescaled to original space; capped to bound cost.
+    rescue_candidates: Vec<crate::rescue::RescueCandidate>,
     panics: u8,
 }
 
@@ -460,6 +463,45 @@ impl Run<'_> {
         count
     }
 
+    /// Keep a bounded set of rescue inputs (S5 cost is per-candidate);
+    /// dedupe by symbol identity (version/ec/mask) — the same physical
+    /// symbol surfaces across many attempts.
+    fn collect_rescue(
+        &mut self,
+        candidates: Vec<crate::rescue::RescueCandidate>,
+        attempt_dims: (u32, u32),
+        inverts: bool,
+    ) {
+        const MAX_RESCUE_CANDIDATES: usize = 4;
+        for mut candidate in candidates {
+            if self.rescue_candidates.len() >= MAX_RESCUE_CANDIDATES {
+                return;
+            }
+            if self.rescue_candidates.iter().any(|c| {
+                (c.version, c.ec, c.mask, c.inverted)
+                    == (candidate.version, candidate.ec, candidate.mask, inverts)
+            }) {
+                continue;
+            }
+            if attempt_dims != self.orig {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "dimensions bounded by Limits::max_dimension — exact in f32"
+                )]
+                let (fx, fy) = (
+                    self.orig.0 as f32 / attempt_dims.0 as f32,
+                    self.orig.1 as f32 / attempt_dims.1 as f32,
+                );
+                for p in &mut candidate.corners {
+                    p.x *= fx;
+                    p.y *= fy;
+                }
+            }
+            candidate.inverted = inverts;
+            self.rescue_candidates.push(candidate);
+        }
+    }
+
     /// Run one stage as a fixed sequence of lazily-built attempts.
     /// Returns `Ok(true)` when the ladder should stop (budget mid-stage).
     fn stage(
@@ -481,9 +523,10 @@ impl Run<'_> {
             let img = (attempt.build)();
             let outcome = engine::decode_all(&img);
             self.panics = self.panics.saturating_add(outcome.panics);
-            let rescaled =
-                rescale_corners(outcome.detections, (img.width(), img.height()), self.orig);
+            let dims = (img.width(), img.height());
+            let rescaled = rescale_corners(outcome.detections, dims, self.orig);
             found_total += self.absorb(rescaled, attempt.inverts);
+            self.collect_rescue(outcome.rescue, dims, attempt.inverts);
             tried += 1;
         }
         stages.push(StageTrace {
@@ -616,6 +659,7 @@ pub(crate) fn run(
         deadline,
         orig: (planes.luma.width(), planes.luma.height()),
         merged: Vec::new(),
+        rescue_candidates: Vec::new(),
         panics: 0,
     };
     let mut stages = Vec::new();
@@ -674,6 +718,46 @@ pub(crate) fn run(
         // first, then the size × contrast × binarization grid.
         if config.deep && !run.out_of_budget() {
             let _ = run.stage("deep", deep_attempts(luma, longest), &mut stages)?;
+        }
+
+        // S5 — rescue: erasure-aware RS over grids the engines detected
+        // but could not decode (the logo-occlusion class). Only when the
+        // ladder came up empty — a decoded symbol never needs rescuing.
+        if run.merged.is_empty() && !run.rescue_candidates.is_empty() && !run.out_of_budget() {
+            let started = Instant::now();
+            let candidates = std::mem::take(&mut run.rescue_candidates);
+            let mut tried = 0u32;
+            let mut found = 0u32;
+            for candidate in &candidates {
+                run.check_cancel()?;
+                if run.out_of_budget() {
+                    break;
+                }
+                tried += 1;
+                if let Some(rescued) = crate::rescue::attempt(luma, candidate) {
+                    found += 1;
+                    run.absorb(
+                        vec![RawDetection {
+                            raw: rescued.raw,
+                            masked_stream: Some(candidate.stream.clone()),
+                            corners: Some(candidate.corners),
+                            version: Some(candidate.version),
+                            ec: Some(candidate.ec),
+                            mask: Some(candidate.mask),
+                            fnc1: rescued.fnc1,
+                            engine: EngineKind::Rescue,
+                        }],
+                        candidate.inverted,
+                    );
+                    break; // first rescue wins — candidates are dedupes of one symbol
+                }
+            }
+            stages.push(StageTrace {
+                stage: "rescue".to_owned(),
+                transforms_tried: tried,
+                ms: started.elapsed().as_secs_f64() * 1_000.0,
+                detections_found: found,
+            });
         }
     }
 
@@ -899,6 +983,42 @@ mod probe {
             }
         }
         println!("v02 probe done");
+    }
+
+    #[test]
+    #[ignore = "dev diagnostic, not a contract"]
+    fn probe_rescue_viability_occluded_disk() {
+        // does rqrr still hand us grid + raw stream where decode fails?
+        for pct in [20u32, 22, 26, 30] {
+            let path = format!("/tmp/rescue-h-{pct}.png");
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
+            let luma = &planes.luma;
+            let width = luma.width() as usize;
+            let data = luma.data();
+            let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(
+                width,
+                luma.height() as usize,
+                |x, y| data[y * width + x],
+            );
+            for grid in prepared.detect_grids() {
+                let mut raw = Vec::new();
+                let decode_ok = grid.decode_to(&mut raw).is_ok();
+                let raw_data = grid.get_raw_data();
+                println!(
+                    "disk {pct}%: decode_to={} get_raw_data={} meta={:?}",
+                    decode_ok,
+                    raw_data.is_ok(),
+                    raw_data
+                        .as_ref()
+                        .ok()
+                        .map(|(m, _)| (m.version.0, m.ecc_level, m.mask)),
+                );
+            }
+        }
+        println!("probe done");
     }
 
     #[test]

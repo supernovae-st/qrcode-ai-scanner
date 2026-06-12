@@ -540,3 +540,29 @@ fn inverted_symbol_structural_checks_read_true_polarity() {
         "FPD must not read damaged: {iso:?}"
     );
 }
+
+#[test]
+fn logo_occluded_symbol_rescued_by_erasure_decoding() {
+    // v5-H with a 22% mid-gray logo disk: both engines fail (RS error count
+    // past t_max) but the S5 rescue recovers via errors-and-erasures —
+    // low-confidence (mid-gray) codewords become half-price erasures.
+    let bytes = fixture("degraded/logo-occluded-rescue.png");
+    let report = Scanner::default()
+        .scan(ImageInput::encoded(&bytes))
+        .unwrap();
+    assert_eq!(report.detections.len(), 1, "trace: {:?}", report.trace);
+    let d = &report.detections[0];
+    assert_eq!(d.content.text, "https://qrcode-ai.com/rescue-pin");
+    assert_eq!(
+        d.engines,
+        vec![qrcode_ai_scanner::EngineKind::Rescue],
+        "the rescue stage is the decode source"
+    );
+    assert!(d.meta.version.is_some() && d.corners.is_some());
+    // rescue ran as a stage in the trace
+    assert!(
+        report.trace.stages.iter().any(|s| s.stage == "rescue"),
+        "{:?}",
+        report.trace.stages
+    );
+}
