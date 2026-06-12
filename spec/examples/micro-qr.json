@@ -1,0 +1,83 @@
+{
+  "detections": [
+    {
+      "symbology": "micro_qr_code",
+      "content": {
+        "text": "HELLO42",
+        "raw": "SEVMTE80Mg==",
+        "charset": "utf8"
+      },
+      "payload": {
+        "kind": "text"
+      },
+      "corners": null,
+      "meta": {
+        "version": null,
+        "ec_level": "m",
+        "mask": null,
+        "modules": null,
+        "inverted": null
+      },
+      "engines": [
+        "rxing"
+      ]
+    }
+  ],
+  "score": {
+    "value": 97,
+    "grade": "excellent",
+    "axes": [
+      {
+        "axis": "resolution",
+        "passed": 5,
+        "total": 5
+      },
+      {
+        "axis": "blur",
+        "passed": 5,
+        "total": 5
+      },
+      {
+        "axis": "contrast",
+        "passed": 5,
+        "total": 5
+      },
+      {
+        "axis": "perspective",
+        "passed": 5,
+        "total": 5
+      },
+      {
+        "axis": "rotation",
+        "passed": 5,
+        "total": 5
+      },
+      {
+        "axis": "lighting",
+        "passed": 4,
+        "total": 5
+      }
+    ],
+    "structural": null,
+    "uec": null,
+    "iso15415": null
+  },
+  "hints": [],
+  "trace": {
+    "stages": [
+      {
+        "stage": "direct",
+        "transforms_tried": 1,
+        "ms": 0.6851659999999999,
+        "detections_found": 1
+      }
+    ],
+    "engine_panics": 0,
+    "total_ms": 0.7072499999999999
+  },
+  "versions": {
+    "scanner": "0.3.0",
+    "pipeline": 1,
+    "score_contract": 3
+  }
+}

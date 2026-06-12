@@ -63,7 +63,14 @@ Semantics that bite:
   `low_correction_margin` hint as the distrust signal it is.
 - `corners`/`meta.version`/`ec_level`/`mask` come from the geometry engine
   (rqrr) or the rescue candidate; the rxing-only path measures none of
-  them — expect `null`s, never fabricated values.
+  them — expect `null`s, never fabricated values. (Micro QR/rMQR decode
+  via rxing only, so they carry no geometry today.)
+- **Detections are ordered QR-family first** (stable within each group) —
+  the scored "primary" (`detections[0]`) is contract, not detector
+  iteration order. On a flyer with a QR + a retail barcode, the QR leads.
+- **EXIF orientation is NOT applied**: decode is rotation-robust anyway
+  (pinned by tests), but `corners` are in STORED pixel space — a browser
+  that displays the JPEG EXIF-rotated will disagree with them.
 
 ## Point
 

@@ -192,3 +192,21 @@ path = "fixtures/symbology/datamatrix-gs1.png"
 category = "symbology"
 expected = "\u001D010950600013435210AB12"
 source = "R12 — Data Matrix carrying GS1 element-string data (literal GS lead)"
+
+[[entry]]
+path = "fixtures/symbology/microqr.png"
+category = "symbology"
+expected = "HELLO42"
+source = "R16 — Micro QR M3 (rxing decodes; rqrr is QR-only so no geometry)"
+
+[[entry]]
+path = "fixtures/degraded/exif6-rotated-qr.jpg"
+category = "degraded"
+expected = "https://qrcode-ai.com/exif-pin"
+source = "R16 — JPEG stored 90deg-rotated with EXIF orientation 6 (phone-photo class)"
+
+[[entry]]
+path = "fixtures/symbology/exif6-rotated-ean.jpg"
+category = "symbology"
+expected = "9506000134352"
+source = "R16 — EAN-13 stored sideways w/ EXIF 6 (TryHarder rotation pin)"

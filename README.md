@@ -105,10 +105,10 @@ hand-typed.
 <!-- corpus-report:begin -->
 | category | pass | total | rate | avg ms |
 |---|---|---|---|---|
-| artistic | 2 | 2 | 100% | 1255 |
-| clean | 13 | 13 | 100% | 10 |
-| degraded | 5 | 5 | 100% | 313 |
-| symbology | 10 | 10 | 100% | 4 |
+| artistic | 2 | 2 | 100% | 804 |
+| clean | 13 | 13 | 100% | 5 |
+| degraded | 6 | 6 | 100% | 166 |
+| symbology | 12 | 12 | 100% | 2 |
 <!-- corpus-report:end -->
 
 ### Measured accuracy — external corpora (2026-06-11, v0.3.0)

@@ -673,3 +673,66 @@ fn same_digits_in_two_symbologies_stay_two_detections() {
         report.detections
     );
 }
+
+#[test]
+fn micro_qr_decodes_with_its_own_label() {
+    let report = Scanner::default()
+        .scan(ImageInput::encoded(&fixture("symbology/microqr.png")))
+        .unwrap();
+    assert_eq!(report.detections.len(), 1, "trace: {:?}", report.trace);
+    let d = &report.detections[0];
+    assert_eq!(d.symbology, qrcode_ai_scanner::Symbology::MicroQrCode);
+    assert_eq!(d.content.text, "HELLO42");
+    // rqrr is QR-model-2-only: micro decodes via rxing, no geometry
+    assert_eq!(d.corners, None);
+}
+
+#[test]
+fn exif_rotated_phone_photos_still_decode() {
+    // phone-photo class: JPEG stored 90°-rotated, EXIF orientation 6.
+    // Decode robustness comes from the engines' rotation handling — the
+    // pin guards it. (EXIF is NOT applied: corners live in STORED pixel
+    // space — documented in spec/01.)
+    let qr = Scanner::default()
+        .scan(ImageInput::encoded(&fixture("degraded/exif6-rotated-qr.jpg")))
+        .unwrap();
+    assert_eq!(qr.detections[0].content.text, "https://qrcode-ai.com/exif-pin");
+
+    let ean = Scanner::default()
+        .scan(ImageInput::encoded(&fixture("symbology/exif6-rotated-ean.jpg")))
+        .unwrap();
+    assert_eq!(ean.detections[0].symbology, qrcode_ai_scanner::Symbology::Ean13);
+}
+
+#[test]
+fn qr_family_is_always_the_primary_detection() {
+    // composite EAN-13 ABOVE a QR: regardless of detector-internal order,
+    // the report puts the QR family first (stable) — the scored "primary"
+    // is contract, not luck.
+    let ean = image::open(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/symbology/ean13.png"),
+    )
+    .unwrap()
+    .to_luma8();
+    let qr_png = generated_qr_png("https://qrcode-ai.com/primary-pin");
+    let qr = image::load_from_memory(&qr_png).unwrap().to_luma8();
+    let w = ean.width().max(qr.width());
+    let h = ean.height() + qr.height() + 40;
+    let mut canvas = image::GrayImage::from_pixel(w, h, image::Luma([255]));
+    image::imageops::overlay(&mut canvas, &ean, 0, 0);
+    image::imageops::overlay(&mut canvas, &qr, 0, i64::from(ean.height()) + 40);
+    let mut buf = Vec::new();
+    image::DynamicImage::ImageLuma8(canvas)
+        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .unwrap();
+
+    let report = Scanner::default().scan(ImageInput::encoded(&buf)).unwrap();
+    assert!(report.detections.len() >= 2, "{:?}", report.detections);
+    assert_eq!(
+        report.detections[0].symbology,
+        qrcode_ai_scanner::Symbology::QrCode,
+        "QR family must lead"
+    );
+    assert!(report.score.is_some(), "the QR is the scored primary");
+}

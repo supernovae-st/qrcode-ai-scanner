@@ -786,8 +786,15 @@ pub(crate) fn run(
         run.rescue_stage(luma, &mut stages)?;
     }
 
+    // PRIMARY-detection contract: detections order is QR-family first
+    // (stable). On a flyer carrying a QR + a retail barcode, the product
+    // cares about the QR — and the scored "primary" (detections[0]) must
+    // not depend on detector-internal iteration order.
+    let mut merged = run.merged;
+    merged.sort_by_key(|m| !m.symbology.is_qr_family());
+
     Ok(LadderOutcome {
-        merged: run.merged,
+        merged,
         trace: PipelineTrace {
             stages,
             engine_panics: run.panics,
