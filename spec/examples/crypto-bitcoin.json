@@ -1,0 +1,137 @@
+{
+  "detections": [
+    {
+      "content": {
+        "text": "bitcoin:bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq?amount=0.01",
+        "raw": "Yml0Y29pbjpiYzFxYXIwc3Jycjd4Zmt2eTVsNjQzbHlkbnc5cmU1OWd0enp3ZjVtZHE/YW1vdW50PTAuMDE=",
+        "charset": "utf8"
+      },
+      "payload": {
+        "kind": "crypto",
+        "scheme": "bitcoin",
+        "address": "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+        "amount": "0.01"
+      },
+      "corners": [
+        {
+          "x": 24.0,
+          "y": 24.0
+        },
+        {
+          "x": 276.0,
+          "y": 24.0
+        },
+        {
+          "x": 276.0,
+          "y": 276.0
+        },
+        {
+          "x": 24.0,
+          "y": 276.0
+        }
+      ],
+      "meta": {
+        "version": 6,
+        "ec_level": "q",
+        "mask": 2,
+        "modules": 41,
+        "inverted": false
+      },
+      "engines": [
+        "rxing",
+        "rqrr"
+      ]
+    }
+  ],
+  "score": {
+    "value": 92,
+    "grade": "excellent",
+    "axes": [
+      {
+        "axis": "resolution",
+        "passed": 5,
+        "total": 5
+      },
+      {
+        "axis": "blur",
+        "passed": 5,
+        "total": 5
+      },
+      {
+        "axis": "contrast",
+        "passed": 5,
+        "total": 5
+      },
+      {
+        "axis": "perspective",
+        "passed": 5,
+        "total": 5
+      },
+      {
+        "axis": "rotation",
+        "passed": 1,
+        "total": 5
+      },
+      {
+        "axis": "lighting",
+        "passed": 5,
+        "total": 5
+      }
+    ],
+    "structural": {
+      "finder_integrity": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "quiet_zone_ok": true
+    },
+    "uec": {
+      "margin": 1.0,
+      "grade": "a",
+      "worst_block_errors": 0,
+      "worst_block_capacity": 24
+    },
+    "iso15415": {
+      "symbol_contrast": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "modulation": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "axial_nonuniformity": {
+        "value": 0.0,
+        "grade": "a"
+      },
+      "fixed_pattern_damage": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "unused_error_correction": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "overall": "a"
+    }
+  },
+  "hints": [],
+  "trace": {
+    "stages": [
+      {
+        "stage": "direct",
+        "transforms_tried": 1,
+        "ms": 6.386834,
+        "detections_found": 2
+      }
+    ],
+    "engine_panics": 0,
+    "total_ms": 6.419167
+  },
+  "versions": {
+    "scanner": "0.3.0",
+    "pipeline": 1,
+    "score_contract": 3
+  }
+}

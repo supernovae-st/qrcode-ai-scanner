@@ -1,0 +1,136 @@
+{
+  "detections": [
+    {
+      "content": {
+        "text": "SMSTO:+33600000000:Hello from a QR",
+        "raw": "U01TVE86KzMzNjAwMDAwMDAwOkhlbGxvIGZyb20gYSBRUg==",
+        "charset": "utf8"
+      },
+      "payload": {
+        "kind": "sms",
+        "number": "+33600000000",
+        "body": "Hello from a QR"
+      },
+      "corners": [
+        {
+          "x": 24.0,
+          "y": 24.0
+        },
+        {
+          "x": 228.0,
+          "y": 24.0
+        },
+        {
+          "x": 228.0,
+          "y": 228.0
+        },
+        {
+          "x": 24.0,
+          "y": 228.0
+        }
+      ],
+      "meta": {
+        "version": 4,
+        "ec_level": "h",
+        "mask": 1,
+        "modules": 33,
+        "inverted": false
+      },
+      "engines": [
+        "rxing",
+        "rqrr"
+      ]
+    }
+  ],
+  "score": {
+    "value": 89,
+    "grade": "excellent",
+    "axes": [
+      {
+        "axis": "resolution",
+        "passed": 5,
+        "total": 5
+      },
+      {
+        "axis": "blur",
+        "passed": 5,
+        "total": 5
+      },
+      {
+        "axis": "contrast",
+        "passed": 5,
+        "total": 5
+      },
+      {
+        "axis": "perspective",
+        "passed": 5,
+        "total": 5
+      },
+      {
+        "axis": "rotation",
+        "passed": 1,
+        "total": 5
+      },
+      {
+        "axis": "lighting",
+        "passed": 4,
+        "total": 5
+      }
+    ],
+    "structural": {
+      "finder_integrity": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "quiet_zone_ok": true
+    },
+    "uec": {
+      "margin": 1.0,
+      "grade": "a",
+      "worst_block_errors": 0,
+      "worst_block_capacity": 16
+    },
+    "iso15415": {
+      "symbol_contrast": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "modulation": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "axial_nonuniformity": {
+        "value": 0.0,
+        "grade": "a"
+      },
+      "fixed_pattern_damage": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "unused_error_correction": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "overall": "a"
+    }
+  },
+  "hints": [],
+  "trace": {
+    "stages": [
+      {
+        "stage": "direct",
+        "transforms_tried": 1,
+        "ms": 4.2275,
+        "detections_found": 2
+      }
+    ],
+    "engine_panics": 0,
+    "total_ms": 4.2375
+  },
+  "versions": {
+    "scanner": "0.3.0",
+    "pipeline": 1,
+    "score_contract": 3
+  }
+}

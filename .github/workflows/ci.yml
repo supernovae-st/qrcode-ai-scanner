@@ -31,6 +31,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
+      - run: python3 scripts/check-type-parity.py
       - run: cargo nextest run --workspace
       - run: cargo test --doc --workspace
 
