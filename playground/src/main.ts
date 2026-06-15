@@ -17,6 +17,7 @@ const cornersSvg = $<SVGSVGElement>('#corners');
 const video = $<HTMLVideoElement>('#video');
 const frameCanvas = $<HTMLCanvasElement>('#frame-canvas');
 const cameraBtn = $<HTMLButtonElement>('#camera-btn');
+const frameCtx = frameCanvas.getContext('2d', { willReadFrequently: true });
 
 /* ---------- tiny safe hyperscript (text via text nodes — never innerHTML) ---------- */
 type Kid = Node | string | null | undefined | false;
@@ -57,6 +58,7 @@ const printable = (s: string) =>
     const code = c.charCodeAt(0);
     if (code <= 0x1f) return String.fromCharCode(0x2400 + code);
     if (code === 0x7f) return String.fromCharCode(0x2421);
+    if (code >= 0x80 && code <= 0x9f) return String.fromCharCode(0xfffd);
     return c;
   }).join("");
 
@@ -83,6 +85,7 @@ async function boot() {
 function scanBytes(bytes: Uint8Array, label: string) {
   if (!ready) return;
   lastBytes = bytes;
+  lastDetection = null; // clear before scan so a throw can't leave stale corners
 
   if (blobUrl) URL.revokeObjectURL(blobUrl);
   blobUrl = URL.createObjectURL(new Blob([bytes]));
@@ -107,7 +110,7 @@ function scanBytes(bytes: Uint8Array, label: string) {
 /* ---------- corners overlay ---------- */
 function placeCorners(det: Detection | null) {
   cornersSvg.replaceChildren();
-  if (!det?.corners || !previewImg.naturalWidth) return;
+  if (!det?.corners || !previewImg.naturalWidth || previewImg.hidden) return;
   cornersSvg.style.left = `${previewImg.offsetLeft}px`;
   cornersSvg.style.top = `${previewImg.offsetTop}px`;
   cornersSvg.style.width = `${previewImg.clientWidth}px`;
@@ -342,7 +345,12 @@ fileInput.addEventListener('change', () => fromFile(fileInput.files?.[0]));
 
 ['dragenter', 'dragover'].forEach((t) =>
   dropzone.addEventListener(t, (e) => { e.preventDefault(); dropzone.classList.add('drag'); }));
-dropzone.addEventListener('dragleave', (e) => { e.preventDefault(); dropzone.classList.remove('drag'); });
+dropzone.addEventListener('dragleave', (e) => {
+  // dragleave bubbles from children — only deactivate when truly leaving the zone
+  if (dropzone.contains((e as DragEvent).relatedTarget as Node)) return;
+  e.preventDefault();
+  dropzone.classList.remove('drag');
+});
 dropzone.addEventListener('drop', (e) => {
   e.preventDefault();
   dropzone.classList.remove('drag');
@@ -405,13 +413,13 @@ function loopFrame(ts = 0) {
   rafId = requestAnimationFrame(loopFrame);
   if (ts - lastFrameAt < 180 || !video.videoWidth) return;
   lastFrameAt = ts;
+  if (!frameCtx) return;
   const w = video.videoWidth, ht = video.videoHeight;
   frameCanvas.width = w; frameCanvas.height = ht;
-  const ctx = frameCanvas.getContext('2d', { willReadFrequently: true })!;
-  ctx.drawImage(video, 0, 0, w, ht);
-  const data = ctx.getImageData(0, 0, w, ht).data;
+  frameCtx.drawImage(video, 0, 0, w, ht);
+  const imageData = frameCtx.getImageData(0, 0, w, ht);
   try {
-    const report = scan_frame(new Uint8Array(data.buffer), w, ht, profile(), budget()) as ScanReport;
+    const report = scan_frame(new Uint8Array(imageData.data), w, ht, profile(), budget()) as ScanReport;
     lastDetection = report.detections[0] ?? null;
     renderReport(report, 0);
     previewCap.textContent = `live · ${w}×${ht} · profile ${profile()}`;

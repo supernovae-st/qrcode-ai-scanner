@@ -44,11 +44,9 @@ body {
   min-height: 100dvh;
   font-family: var(--ui);
   color: var(--ink);
-  background:
-    radial-gradient(120% 90% at 88% -10%, rgba(249, 115, 22, 0.10), transparent 60%),
-    linear-gradient(180deg, var(--bg-2), var(--bg));
+  background-color: var(--bg);
   background-attachment: fixed;
-  /* faint instrument grid */
+  /* warm glow + base gradient + faint instrument grid */
   background-image:
     radial-gradient(120% 90% at 88% -10%, rgba(249, 115, 22, 0.10), transparent 60%),
     linear-gradient(180deg, var(--bg-2), var(--bg)),
