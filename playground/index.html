@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <title>QR Scanner · playground</title>
+    <link rel="preconnect" href="https://api.fontshare.com" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://api.fontshare.com/v2/css?f[]=clash-display@600,700&f[]=general-sans@400,500,600&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <a class="skip-link" href="#readout">Skip to readout</a>
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">▚</span>
+        <span class="brand-name">QR<span class="brand-dot">·</span>SCANNER</span>
+        <span class="brand-sub">playground</span>
+      </div>
+      <div class="status" id="status" data-state="loading">
+        <span class="led" aria-hidden="true"></span>
+        <span class="status-text" id="status-text">loading engine…</span>
+        <span class="version" id="version"></span>
+      </div>
+    </header>
+
+    <main class="deck">
+      <!-- CONTROL DECK -->
+      <section class="control" aria-label="Controls">
+        <div
+          id="dropzone"
+          class="dropzone"
+          role="button"
+          tabindex="0"
+          aria-label="Drop, browse, or paste an image to scan"
+        >
+          <span class="dz-glyph" aria-hidden="true">⤓</span>
+          <span class="dz-title">Drop · Browse · Paste</span>
+          <span class="dz-hint">PNG · JPEG · WebP · GIF — or <kbd>⌘</kbd><kbd>V</kbd> a screenshot</span>
+          <input type="file" id="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
+        </div>
+
+        <fieldset class="seg" id="profile">
+          <legend>Profile</legend>
+          <label><input type="radio" name="profile" value="full" checked /><span>Full</span></label>
+          <label><input type="radio" name="profile" value="fast" /><span>Fast</span></label>
+          <label><input type="radio" name="profile" value="frame" /><span>Frame</span></label>
+        </fieldset>
+
+        <label class="budget">
+          <span>Budget</span>
+          <input type="number" id="budget" value="1500" min="0" step="100" inputmode="numeric" />
+          <span class="unit">ms</span>
+        </label>
+
+        <div class="samples">
+          <span class="samples-label">Samples</span>
+          <div class="samples-row" role="group" aria-label="Sample images">
+            <button type="button" data-sample="clean">clean · 89</button>
+            <button type="button" data-sample="artistic">artistic · 70</button>
+            <button type="button" data-sample="rescue">logo-rescue · 0</button>
+            <button type="button" data-sample="ean13">barcode</button>
+            <button type="button" data-sample="gs1">gs1</button>
+          </div>
+        </div>
+
+        <button type="button" id="camera-btn" class="cam">
+          <span class="cam-glyph" aria-hidden="true">◉</span> Live camera <span class="cam-sub">(scan_frame)</span>
+        </button>
+
+        <figure class="preview" id="preview" hidden>
+          <div class="preview-frame">
+            <img id="preview-img" alt="The image being scanned" />
+            <video id="video" playsinline muted hidden></video>
+            <svg id="corners" class="corners" aria-hidden="true" preserveAspectRatio="none"></svg>
+          </div>
+          <figcaption id="preview-cap" class="preview-cap"></figcaption>
+        </figure>
+      </section>
+
+      <!-- READOUT -->
+      <section id="readout" class="readout" aria-live="polite" aria-label="Scan report">
+        <div class="idle" id="idle">
+          <span class="idle-glyph" aria-hidden="true">▚▚</span>
+          <p class="idle-title">Awaiting a sample.</p>
+          <p class="idle-sub">Drop, browse, or paste a QR / barcode — the report lands here.</p>
+        </div>
+      </section>
+    </main>
+
+    <canvas id="frame-canvas" hidden></canvas>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
