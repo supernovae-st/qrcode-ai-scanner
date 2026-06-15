@@ -1,0 +1,120 @@
+---
+title: "See it in action"
+description: "Real QR images, real scan reports — what scannability looks like, end to end."
+---
+
+Every report below is the **actual output** of `qrscan <image> --pretty` on the
+image shown — nothing hand-typed. The scanner is deterministic, so you get the
+same numbers if you run them yourself (the images live in
+[`fixtures/`](https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/fixtures)).
+
+The point of the gallery: **decoding is binary, scannability is a spectrum.**
+Two codes can both "decode" and have wildly different margins before they fail
+in the real world. That margin is the `score`.
+
+## Clean QR — score 89 / 100 ✅
+
+<Frame caption="A clean v2 QR · qrcode-ai.com short link">
+  <img src="/images/gallery-clean.png" alt="Clean QR code" width="200" />
+</Frame>
+
+| Field | Value |
+|---|---|
+| `symbology` | `qr_code` (v2 · 25×25) |
+| `payload.kind` | `url` → https://qrc-ai.com/76xMa |
+| `score` | **89** (`excellent`) |
+| `engines` | `rxing` + `rqrr` (both decoded, merged) |
+| `uec` | margin 1.00 · grade A (0 of 16 EC codewords used) |
+| weak axis | `rotation` 1/5 |
+
+**Read it like this:** both engines agree, error-correction is untouched
+(margin 1.00), every stress axis is maxed **except** rotation — so the only
+real-world risk is a heavily tilted scan. A naive scanner would just say
+"decoded"; this tells you the one thing to watch.
+
+## AI-art QR — score 70 / 100 🎨
+
+<Frame caption="An AI-generated artistic QR — texture over the data zone">
+  <img src="/images/gallery-artistic.png" alt="Artistic AI-generated QR code" width="200" />
+</Frame>
+
+| Field | Value |
+|---|---|
+| `symbology` | `qr_code` |
+| `payload.kind` | `url` → https://qrc-ai.com/K1Ng2 |
+| `score` | **70** (`good`) |
+| `engines` | `rxing` (took ~686 ms — the deep ladder earned this one) |
+| weak axes | `lighting` 1/5 · `perspective` 2/5 · `rotation` 2/5 |
+
+**Read it like this:** the art doesn't stop the decode, but it erodes the
+*grid-estimation* margin first — exactly the documented blind spot of naive
+scorers. It scans on a good phone in good light; it gets fragile under glare or
+a steep angle. Still `good`, with a clear story about where it bends.
+
+## Logo occlusion → the rescue stage 🛟
+
+<Frame caption="A v5-H QR with a logo disk over the center — past the engines' wall">
+  <img src="/images/gallery-rescue.png" alt="QR code with center logo occlusion" width="200" />
+</Frame>
+
+| Field | Value |
+|---|---|
+| `symbology` | `qr_code` (v5 · 37×37) |
+| `payload.kind` | `url` → https://qrcode-ai.com/rescue-pin |
+| `score` | **0** (`poor`) |
+| `engines` | **`rescue`** (rxing + rqrr both gave up) |
+| `uec` | margin **0.00** · grade F · worst block 11/22 EC used |
+| `hints` | `increase_contrast` · `enlarge_modules` · `reduce_art_texture` · `low_correction_margin` |
+
+**Read it like this — the honesty showcase.** The two standard engines die on
+the occluded center. The errors-and-erasures **rescue** stage re-decodes the
+sampled bitstream and recovers the *exact* URL. But the scanner refuses to
+pretend it's healthy: score 0, grade F, and a `low_correction_margin` hint that
+says **"decoded, but unreliable — treat as unverified, regenerate."** Decoding
+succeeded; scannability did not. Both facts are reported.
+
+## Retail barcode — symbology ≠ payload 🏷️
+
+<Frame caption="A plain EAN-13 retail barcode">
+  <img src="/images/gallery-ean13.png" alt="EAN-13 barcode" width="240" />
+</Frame>
+
+| Field | Value |
+|---|---|
+| `symbology` | `ean13` |
+| `payload.kind` | `gs1` — AI `01` = GTIN `09506000134352`, `conformant: true` |
+| `score` | **68** (`acceptable`) |
+| weak axis | `resolution` 2/5 → hint `enlarge_modules` |
+
+**Read it like this:** the *shape* is a 1D barcode (`symbology: ean13`), but the
+*meaning* is a retail product identifier — so the scanner routes it to a `gs1`
+payload, zero-pads the 13 digits to a GTIN-14, and validates the mod-10 check
+digit (`conformant: true`). `symbology` answers "what kind of code", `payload`
+answers "what does it mean" — two different layers of the report.
+
+## Production template — a real qrcode-ai.com output 🚀
+
+<Frame caption="A live qrcode-ai.com generated template">
+  <img src="/images/gallery-production.png" alt="qrcode-ai.com production QR" width="200" />
+</Frame>
+
+| Field | Value |
+|---|---|
+| `symbology` | `qr_code` |
+| `payload.kind` | `url` → https://qrc-ai.com/black |
+| `score` | **86** (`excellent`) |
+| weak axis | `rotation` 1/5 · `lighting` 3/5 |
+
+**Read it like this:** an actual product output, scored `excellent` — the verify
+meter on the editor would light up HIGH. This is the loop in production:
+generate → scan → show the user a margin-truthful badge.
+
+## Reproduce any of these
+
+```bash
+qrscan fixtures/clean/OK_68ms_100_4e875a2c.png --pretty   # the clean one above
+qrscan fixtures/degraded/logo-occluded-rescue.png --pretty # the rescue one
+```
+
+Same input → same output, always. See [Scoring](/concepts/scoring) for what each
+axis and grade means, and [The report](/api/report) for the full JSON contract.

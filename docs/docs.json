@@ -19,12 +19,15 @@
             "pages": [
               "introduction",
               "comparison",
-              "quickstart"
+              "quickstart",
+              "tutorial",
+              "concepts/gallery"
             ]
           },
           {
             "group": "Concepts",
             "pages": [
+              "concepts/glossary",
               "concepts/pipeline",
               "concepts/scoring",
               "concepts/gs1",

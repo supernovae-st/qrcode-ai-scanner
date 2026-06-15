@@ -1,0 +1,49 @@
+---
+title: "Key terms"
+description: "Every word in a scan report, in one sentence each."
+---
+
+A report uses a dozen precise terms. Here's each one in plain language —
+skim it once and the rest of the docs reads faster.
+
+## The two layers everyone confuses
+
+| Term | In one sentence |
+|---|---|
+| **Symbology** | *What kind of code it is* physically — `qr_code`, `micro_qr_code`, `data_matrix`, `ean13`, `pdf417`… (19 values). |
+| **Payload** | *What the decoded content means*, classified into a `kind` — `url`, `wifi`, `gs1`, `me_card`, `tel`… (13 kinds). |
+
+Same symbol, two questions: an `ean13` **symbology** carries a `gs1` **payload**.
+A `qr_code` symbology might carry a `url`, a `wifi`, or plain `text`.
+
+## Decoding
+
+| Term | In one sentence |
+|---|---|
+| **Detection** | One decoded symbol found in the image — its text, symbology, payload, geometry and which engines confirmed it. |
+| **Engine** | A decoder: `rxing` (ZXing lineage) or `rqrr` (quirc lineage); their results are merged by decoded text. |
+| **Rescue** | The last-resort stage (`engines: ["rescue"]`) that recovers symbols *both* engines fail on, using errors-and-erasures Reed-Solomon. |
+| **Profile** | The speed-vs-thoroughness setting: `full` (deep, ~4 s), `fast` (~800 ms), `frame` (decode-only, ~80 ms, no score). |
+| **Inverted** | Light-on-dark polarity — measured, never assumed (`meta.inverted`). |
+
+## Scannability
+
+| Term | In one sentence |
+|---|---|
+| **Score** | A 0–100 **margin** — how much room the code has before it stops scanning in the real world (not "did it decode"). |
+| **Grade** | The score's band: `excellent` ≥80 · `good` 70–79 · `acceptable` 60–69 · `fair` 40–59 · `poor` &lt;40. |
+| **Axis** | One of six stress dimensions — `resolution`, `blur`, `contrast`, `perspective`, `rotation`, `lighting` — each tested as a survival ramp. |
+| **UEC margin** | *Unused Error Correction*: how much of the Reed-Solomon repair budget was left over (1.0 = none used; **0 = at the limit → distrust the decode**). |
+| **Finder pattern** | The three corner squares a scanner uses to locate and orient a QR; damage here caps the score at 40. |
+| **Quiet zone** | The blank margin around a symbol; a violation caps the score at 60 (it breaks locating in the wild). |
+| **ISO 15415 card** | A verifier-style grade card (Symbol Contrast, Modulation, …) — *informed* by the standard, **not** hardware-certified. |
+
+## The feedback loop
+
+| Term | In one sentence |
+|---|---|
+| **Hint** | A machine-actionable fix — `fix_finder_pattern`, `raise_error_correction`, `low_correction_margin`… — designed to drive regeneration without image analysis. |
+| **`conformant`** (GS1) | Whether a GS1 payload passes syntax + check-digit validation; `false` comes with `issues[]` each citing its violated rule. |
+
+See it all wired together in [How it works](/tutorial) and
+[See it in action](/concepts/gallery).

@@ -21,6 +21,13 @@ reserved for real faults — invalid input, limits, cancellation.
 Match the **code**, never the prose: the cross-surface contract is the
 regex `QRS-\d{3}`, delimited `[QRS-xxx]` in every message.
 
+<Note>
+`QRS-005` only fires if you opt into cancellation —
+`scanner.scan_cancellable(input, &CancelToken)` and `token.cancel()` from
+another thread (checked between decode attempts). The plain `scan()` builds a
+fresh, never-cancelled token, so it never returns `QRS-005`.
+</Note>
+
 <Tabs>
   <Tab title="Node">
     ```js

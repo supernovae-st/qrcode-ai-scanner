@@ -70,7 +70,7 @@ Machine-actionable, stable order — the generate → scan → act → regenerat
 loop: `fix_finder_pattern{corner}` · `restore_quiet_zone` ·
 `increase_contrast` (contrast survival ≤40%) · `enlarge_modules`
 (resolution survival ≤40%) · `reduce_art_texture` (dies at mildest blur) ·
-`raise_error_correction{current}` (score <70 **or** UEC grade D/F, when
+`raise_error_correction{current}` (score &lt;70 **or** UEC grade D/F, when
 EC < H) · `low_correction_margin{errors,capacity}` (UEC margin exactly 0:
 the worst block consumed its entire correction budget — the miscorrection
 signature; caught live on the zxing blackbox corpus where rqrr returned

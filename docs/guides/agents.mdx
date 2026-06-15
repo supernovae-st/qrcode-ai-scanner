@@ -51,7 +51,7 @@ agent can drive generation parameters from the report alone.
 | Context | Gate |
 |---|---|
 | web display | decoded + score ≥ 60 |
-| print / packaging | score ≥ 80 AND uec.grade ∈ {a, b} AND no hints |
+| print / packaging | score ≥ 80 AND uec.grade ∈ `{a, b}` AND no hints |
 | retail GS1 | the above AND `payload.conformant === true` |
 | ANY content you act on | reject if `low_correction_margin` present |
 

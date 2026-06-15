@@ -145,7 +145,7 @@ miss; the hint is the mechanism that keeps it from being a *silent* one.
   AND agents). Renders on Mintlify or reads fine raw.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/SCORING.md](docs/SCORING.md)
   — engineering deep dives.
-- [docs/plans/2026-06-11-v03-rebuild-design.md](docs/plans/2026-06-11-v03-rebuild-design.md) — design + research evidence
+- [plans/2026-06-11-v03-rebuild-design.md](plans/2026-06-11-v03-rebuild-design.md) — design + research evidence
 
 ## Workspace
 

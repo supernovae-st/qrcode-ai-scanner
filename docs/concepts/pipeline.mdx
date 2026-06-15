@@ -63,6 +63,10 @@ Rescued detections carry `engines: ["rescue"]` and a `"rescue"` entry in
 `trace.stages`. **Measured: center occlusion tolerance grows from 20% to
 30% radius (2.2× the area) on v5-H.**
 
+<Frame caption="A logo disk over the center: both engines die here — the rescue stage recovers the exact URL, then honestly scores it 0 with a low_correction_margin hint. See it scored in the gallery.">
+  <img src="/images/gallery-rescue.png" alt="QR code with a logo occluding the center, recovered by the rescue stage" width="200" />
+</Frame>
+
 <Note>
 Determinism contract: same bytes + same config + same version ⇒ the same
 attempt sequence, bit for bit on a given platform. A wall-clock budget

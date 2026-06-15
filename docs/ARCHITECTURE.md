@@ -2,7 +2,7 @@
 
 > Core invariants and the decode pipeline. The score contract lives in
 > [SCORING.md](SCORING.md); design rationale + research evidence in
-> [plans/2026-06-11-v03-rebuild-design.md](plans/2026-06-11-v03-rebuild-design.md).
+> [plans/2026-06-11-v03-rebuild-design.md](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/plans/2026-06-11-v03-rebuild-design.md).
 
 ## Workspace
 

@@ -47,6 +47,38 @@ order `01 → 22 → 10 → 21` and the 14-digit GTIN law (DL URI Syntax 1.6).
 Every violation lands in `issues[]` **citing its criterion** — show them
 verbatim, they ARE the fix instructions.
 
+## Seen on real symbols
+
+A retail **EAN-13** is routed to `gs1` automatically — the symbology itself
+guarantees a GTIN, so the mod-10 check digit alone decides conformance:
+
+<Frame caption="qrscan fixtures/symbology/ean13.png → gs1, GTIN valid, conformant: true">
+  <img src="/images/gallery-ean13.png" alt="EAN-13 retail barcode" width="240" />
+</Frame>
+
+```json
+{ "kind": "gs1", "elements": [{ "ai": "01", "value": "09506000134352" }],
+  "gtin": "09506000134352", "conformant": true, "issues": [] }
+```
+
+This **DataMatrix** carries valid GS1 element syntax (AI `01` + AI `10`) but is
+missing the FNC1-in-first-position header — the validator refuses to call it
+conformant and cites the exact ISO clause:
+
+<Frame caption="qrscan fixtures/symbology/datamatrix-gs1.png → gs1 syntax without FNC1 → conformant: false">
+  <img src="/images/gs1-datamatrix.png" alt="DataMatrix carrying GS1 syntax without an FNC1 header" width="170" />
+</Frame>
+
+```json
+{ "kind": "gs1",
+  "elements": [{ "ai": "01", "value": "09506000134352" }, { "ai": "10", "value": "AB12" }],
+  "gtin": "09506000134352", "conformant": false,
+  "issues": ["FNC1-in-first-position mode header missing — valid GS1 element syntax in a non-GS1 carrier (ISO 18004 §7.4.9; regenerate with GS1 mode enabled)"] }
+```
+
+That `conformant: false` is exactly the "regenerate with GS1 mode" mistake — the
+report names it so the UI can too.
+
 ## The verdict your UI should surface
 
 | Situation | Detection | Suggested badge |

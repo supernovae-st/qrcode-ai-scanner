@@ -47,6 +47,18 @@ wasm decoder) inside a hand-tuned retry loop. Field by field:
 Bundle honesty: ~797 KB gz all-symbologies (the incumbent was ~1 MB;
 a QR-only build drops ~180 KB — documented escape hatch).
 
+The two classes the incumbent loop could not handle — both decode here:
+
+<Frame caption="Artistic template (blob/dot class): 0/3 filter levels in the old loop — decoded here at score 70 via the deep ladder.">
+  <img src="/images/gallery-artistic.png" alt="Artistic QR the old decoder failed on" width="200" />
+</Frame>
+
+<Frame caption="Logo over the center: past the old decoder's Reed-Solomon error wall — the erasure rescue recovers the exact URL and flags the thin margin.">
+  <img src="/images/gallery-rescue.png" alt="Logo-occluded QR recovered by the rescue stage" width="200" />
+</Frame>
+
+See both scored, with their full reports, in [the gallery](/concepts/gallery).
+
 ## Versus cloud decode APIs
 
 | | Cloud decode API | This scanner |
