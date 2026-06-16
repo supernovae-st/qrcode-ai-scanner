@@ -69,13 +69,33 @@ jobs:
       # napi v3: scaffold the per-platform npm/<triple>/ dirs before artifacts
       - run: pnpm exec napi create-npm-dirs
       - run: pnpm exec napi artifacts
-      # --skip-optional-publish: 0.3.0 platform packages already on npm (partial-publish recovery) -- REMOVE for the next release so fresh platform packages publish
-      - run: pnpm exec napi pre-publish -t npm --no-gh-release --skip-optional-publish
+      # Self-detecting + idempotent: if the platform packages for THIS version are
+      # already on npm (re-run / partial-publish recovery), skip re-publishing them;
+      # otherwise publish fresh. No version-specific flag to remember.
+      - name: detect already-published platform packages
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          if npm view "@supernovae-st/qrcode-ai-scanner-darwin-arm64@$VER" version >/dev/null 2>&1; then
+            echo "platform packages already on npm @$VER - will skip optional publish"
+            echo "SKIP_OPTIONAL=--skip-optional-publish" >> "$GITHUB_ENV"
+          else
+            echo "fresh release @$VER - platform packages will publish"
+            echo "SKIP_OPTIONAL=" >> "$GITHUB_ENV"
+          fi
+      - run: pnpm exec napi pre-publish -t npm --no-gh-release $SKIP_OPTIONAL
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --access public
+      # Idempotent: skip the main package if this version is already on npm
+      - name: publish node main (skip if version already on npm)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          if npm view "@supernovae-st/qrcode-ai-scanner@$VER" version >/dev/null 2>&1; then
+            echo "already published @$VER - skipping"
+          else
+            npm publish --access public
+          fi
 
   publish-wasm:
     runs-on: ubuntu-latest
