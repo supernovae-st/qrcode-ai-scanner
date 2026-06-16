@@ -4,10 +4,11 @@
   "name": "QR Code AI Scanner",
   "description": "QR decoding + scannability scoring for artistic, AI-generated, and photo-captured QR codes. Deterministic, sovereign, pure Rust.",
   "colors": {
-    "primary": "#F97316",
-    "light": "#FDBA74",
-    "dark": "#C2410C"
+    "primary": "#005EFF",
+    "light": "#4D8DFF",
+    "dark": "#0047CC"
   },
+  "logo": "/logo.svg",
   "favicon": "/favicon.svg",
   "navigation": {
     "tabs": [
