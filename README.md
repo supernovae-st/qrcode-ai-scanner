@@ -8,6 +8,7 @@ QR decoding + scannability scoring for artistic, AI-generated, and
 photo-captured QR codes. Deterministic, sovereign, pure Rust.
 
 [![crates.io](https://img.shields.io/crates/v/qrcode-ai-scanner?style=flat-square&logo=rust&logoColor=white&label=crates.io&color=dea584)](https://crates.io/crates/qrcode-ai-scanner)
+[![docs.rs](https://img.shields.io/docsrs/qrcode-ai-scanner?style=flat-square&logo=docsdotrs&logoColor=white&label=docs.rs)](https://docs.rs/qrcode-ai-scanner)
 [![npm](https://img.shields.io/npm/v/@supernovae-st/qrcode-ai-scanner?style=flat-square&logo=npm&logoColor=white&label=npm&color=CB3837)](https://www.npmjs.com/package/@supernovae-st/qrcode-ai-scanner)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/supernovae-st/qrcode-ai-scanner/ci.yml?style=flat-square&logo=github&label=CI)](https://github.com/supernovae-st/qrcode-ai-scanner/actions)
@@ -65,6 +66,20 @@ Scoring is **ISO-15415-informed** (the UEC margin uses the ISO bands and
 exact RS error counts) — see [docs/SCORING.md](docs/SCORING.md) for the
 parameter mapping and the honest line between software diagnostics and
 certified hardware verification.
+
+## Install — pick your surface
+
+One Rust core, four ways to use it. **All four return the same versioned
+[`ScanReport`](spec/) contract** — scan once, read the same shape everywhere.
+
+| Surface | Package | Install | One-liner |
+|---|---|---|---|
+| 🦀 **Rust lib** | [`qrcode-ai-scanner`](https://crates.io/crates/qrcode-ai-scanner) · [docs.rs](https://docs.rs/qrcode-ai-scanner) | `cargo add qrcode-ai-scanner` | `Scanner::builder().build().scan(input)?` |
+| 💻 **CLI** | [`qrcode-ai-scanner-cli`](https://crates.io/crates/qrcode-ai-scanner-cli) | `cargo install qrcode-ai-scanner-cli` | `qrscan image.png --pretty` |
+| 📦 **Node** (server) | [`@supernovae-st/qrcode-ai-scanner`](https://www.npmjs.com/package/@supernovae-st/qrcode-ai-scanner) | `npm i @supernovae-st/qrcode-ai-scanner` | `await scan(buffer)` |
+| 🌐 **Browser** (WASM, SIMD) | [`@supernovae-st/qrcode-ai-scanner-wasm`](https://www.npmjs.com/package/@supernovae-st/qrcode-ai-scanner-wasm) | `npm i @supernovae-st/qrcode-ai-scanner-wasm` | `await init(); scan_image(bytes, "fast")` |
+
+Full per-surface guides in [`docs/`](docs/). Examples below ↓
 
 ## Quick start
 
