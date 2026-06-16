@@ -51,5 +51,13 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "optionalDependencies": {
+    "@supernovae-st/qrcode-ai-scanner-darwin-arm64": "0.3.0",
+    "@supernovae-st/qrcode-ai-scanner-darwin-x64": "0.3.0",
+    "@supernovae-st/qrcode-ai-scanner-linux-arm64-gnu": "0.3.0",
+    "@supernovae-st/qrcode-ai-scanner-linux-x64-gnu": "0.3.0",
+    "@supernovae-st/qrcode-ai-scanner-linux-x64-musl": "0.3.0",
+    "@supernovae-st/qrcode-ai-scanner-win32-x64-msvc": "0.3.0"
   }
 }

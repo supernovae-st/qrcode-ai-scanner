@@ -1,18 +1,22 @@
-// Copy the canonical report-types contract into both npm packages and
-// retype the wasm scan functions from `any` to `ScanReport`. Run from the
-// repo root (local + CI, before `npm pack`/`npm publish` of either pkg).
+// Copy the canonical report-types contract into both npm packages and retype
+// the wasm scan functions from `any` to `ScanReport`. All paths resolve from
+// the repo root (this file lives in scripts/), so it runs correctly from ANY
+// cwd — including npm's prepack hook, which runs from the package directory.
 import { copyFileSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
-const CANON = "bindings/report-types.d.ts";
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const CANON = join(ROOT, "bindings/report-types.d.ts");
 
 // node package: plain copy next to index.d.ts (which re-exports it)
-copyFileSync(CANON, "crates/qrcode-ai-scanner-node/report-types.d.ts");
+copyFileSync(CANON, join(ROOT, "crates/qrcode-ai-scanner-node/report-types.d.ts"));
 console.log("synced → crates/qrcode-ai-scanner-node/report-types.d.ts");
 
 // wasm package: copy into pkg/ + retype the two scan functions
-const wasmDts = "crates/qrcode-ai-scanner-wasm/pkg/qrcode-ai-scanner.d.ts";
+const wasmDts = join(ROOT, "crates/qrcode-ai-scanner-wasm/pkg/qrcode-ai-scanner.d.ts");
 if (existsSync(wasmDts)) {
-  copyFileSync(CANON, "crates/qrcode-ai-scanner-wasm/pkg/report-types.d.ts");
+  copyFileSync(CANON, join(ROOT, "crates/qrcode-ai-scanner-wasm/pkg/report-types.d.ts"));
   let dts = readFileSync(wasmDts, "utf8");
   if (!dts.includes("./report-types")) {
     dts = dts.replace(

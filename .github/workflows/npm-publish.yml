@@ -69,7 +69,8 @@ jobs:
       # napi v3: scaffold the per-platform npm/<triple>/ dirs before artifacts
       - run: pnpm exec napi create-npm-dirs
       - run: pnpm exec napi artifacts
-      - run: pnpm exec napi pre-publish -t npm --no-gh-release
+      # --skip-optional-publish: 0.3.0 platform packages already on npm (partial-publish recovery) -- REMOVE for the next release so fresh platform packages publish
+      - run: pnpm exec napi pre-publish -t npm --no-gh-release --skip-optional-publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - run: npm publish --access public
