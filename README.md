@@ -134,8 +134,7 @@ miss; the hint is the mechanism that keeps it from being a *silent* one.
 
 > **Pourquoi ce scanner ?** Avant/après vs `qr-scanner-wechat` + vs les
 > APIs cloud (local · instantané · catégorisé) :
-> [docs/comparison.mdx](docs/comparison.mdx) · Nicolas :
-> [GUIDE-NICOLAS.md](GUIDE-NICOLAS.md) · agents : [AGENTS.md](AGENTS.md).
+> [docs/comparison.mdx](docs/comparison.mdx) · agents : [AGENTS.md](AGENTS.md).
 
 - **[`spec/`](spec/)** — the NORMATIVE contract: wire format, errors,
   score, payloads, hints, pipeline + a JSON Schema and golden examples
@@ -145,7 +144,6 @@ miss; the hint is the mechanism that keeps it from being a *silent* one.
   AND agents). Renders on Mintlify or reads fine raw.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/SCORING.md](docs/SCORING.md)
   — engineering deep dives.
-- [plans/2026-06-11-v03-rebuild-design.md](plans/2026-06-11-v03-rebuild-design.md) — design + research evidence
 
 ## Workspace
 

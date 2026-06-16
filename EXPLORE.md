@@ -225,9 +225,9 @@ Scan any with `qrscan /tmp/<name>.png --pretty`, or drop it into the playground.
 
 | Surface | Change |
 |---|---|
-| **Docs** | fixed the scoring **404**; new gallery / tutorial / glossary; clarity pass; moved `plans/` + `research/` out of the Mintlify tree (validate + broken-links 100% clean) |
+| **Docs** | fixed the scoring **404**; new gallery / tutorial / glossary; clarity pass; `mint validate` + broken-links 100% clean |
 | **Playground** | built from scratch (Vite + wasm), instrument UI, `visual-check.mjs` headless check — all features verified |
-| **Integration** | PR #11 code verified correct against the real wasm API (no change to Nicolas's repo) |
+| **Integration** | the landing-integration code verified correct against the real wasm API (no change to the consumer repo) |
 | **Engine** | re-verified — `cargo test --workspace` 181 pass / 0 fail |
 
 **The release gate (next, when you're convinced):** tag `v0.3.0` → CI builds +

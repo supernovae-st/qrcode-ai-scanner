@@ -1,8 +1,7 @@
 # AGENTS.md — qrcode-ai-scanner
 
 Instructions for AI coding agents (Claude Code, Cursor, …) working in this
-repo. Humans: start at [README.md](README.md); Nicolas: see
-[GUIDE-NICOLAS.md](GUIDE-NICOLAS.md).
+repo. Humans: start at [README.md](README.md).
 
 ## What this is
 

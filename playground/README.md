@@ -3,7 +3,7 @@
 A local, browser playground that exercises **every feature** of
 `@supernovae-st/qrcode-ai-scanner-wasm` in a real **Vite** bundler context —
 the same bundler Nuxt uses, so it de-risks the landing integration without
-touching Nicolas's repo.
+touching the consumer repo.
 
 What it tests: `scan_image` (encoded bytes), `scan_frame` (live camera RGBA),
 all three profiles, the full `ScanReport` (score · 6 survival axes · UEC margin

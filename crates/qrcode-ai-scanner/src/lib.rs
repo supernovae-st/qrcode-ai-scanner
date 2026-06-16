@@ -3,7 +3,7 @@
 //! Decoding + scannability validation for artistic, AI-generated, and
 //! photo-captured QR codes — the codes that break standard scanners.
 //!
-//! Contract (see `plans/2026-06-11-v03-rebuild-design.md` in the repo):
+//! Contract (the normative wire format lives in the `spec/` directory):
 //!
 //! - **No QR found is `Ok`** with empty detections — `Err` is reserved for real
 //!   faults (corrupt image, invalid buffer, cancellation).
