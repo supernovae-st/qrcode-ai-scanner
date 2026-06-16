@@ -10,7 +10,7 @@ allow = [
   "Unicode-3.0",
   "MPL-2.0",
   "CDLA-Permissive-2.0",
-  "AGPL-3.0",
+  "AGPL-3.0-or-later",
 ]
 
 [advisories]
