@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/docs
+    about: Quickstart, concepts, and per-surface API reference.
+  - name: Security report
+    url: https://github.com/supernovae-st/qrcode-ai-scanner/security/policy
+    about: Please report vulnerabilities privately, not as a public issue.

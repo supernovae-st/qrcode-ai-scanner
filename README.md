@@ -154,6 +154,12 @@ miss; the hint is the mechanism that keeps it from being a *silent* one.
 | [`qrcode-ai-scanner-node`](crates/qrcode-ai-scanner-node) (`@supernovae-st/qrcode-ai-scanner`, napi async) | v0.3 — release-ready |
 | [`qrcode-ai-scanner-wasm`](crates/qrcode-ai-scanner-wasm) (`@supernovae-st/qrcode-ai-scanner-wasm`, SIMD128) | v0.3 — release-ready |
 
+## Contributing & security
+
+Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[Code of Conduct](CODE_OF_CONDUCT.md). Found a vulnerability? Please report it
+privately per the [Security Policy](SECURITY.md).
+
 ## License
 
 AGPL-3.0-or-later · © SuperNovae Studio. The [qrcode-ai.com](https://qrcode-ai.com)
