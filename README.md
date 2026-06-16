@@ -19,6 +19,20 @@ photo-captured QR codes. Deterministic, sovereign, pure Rust.
 
 ---
 
+## Install — pick your surface
+
+One Rust core, **four ways to use it** — all return the same versioned
+[`ScanReport`](spec/) contract.
+
+| Surface | Package | Install | One-liner |
+|---|---|---|---|
+| 🦀 **Rust lib** | [`qrcode-ai-scanner`](https://crates.io/crates/qrcode-ai-scanner) · [docs.rs](https://docs.rs/qrcode-ai-scanner) | `cargo add qrcode-ai-scanner` | `Scanner::builder().build().scan(input)?` |
+| 💻 **CLI** | [`qrcode-ai-scanner-cli`](https://crates.io/crates/qrcode-ai-scanner-cli) | `cargo install qrcode-ai-scanner-cli` | `qrscan image.png --pretty` |
+| 📦 **Node** (server) | [`@supernovae-st/qrcode-ai-scanner`](https://www.npmjs.com/package/@supernovae-st/qrcode-ai-scanner) | `npm i @supernovae-st/qrcode-ai-scanner` | `await scan(buffer)` |
+| 🌐 **Browser** (WASM, SIMD) | [`@supernovae-st/qrcode-ai-scanner-wasm`](https://www.npmjs.com/package/@supernovae-st/qrcode-ai-scanner-wasm) | `npm i @supernovae-st/qrcode-ai-scanner-wasm` | `await init(); scan_image(bytes, "fast")` |
+
+Per-surface guides in [`docs/`](docs/) · code examples in the Quick start below.
+
 ## Why
 
 AI-generated and artistic QR codes break standard scanners: damaged finder
@@ -66,20 +80,6 @@ Scoring is **ISO-15415-informed** (the UEC margin uses the ISO bands and
 exact RS error counts) — see [docs/SCORING.md](docs/SCORING.md) for the
 parameter mapping and the honest line between software diagnostics and
 certified hardware verification.
-
-## Install — pick your surface
-
-One Rust core, four ways to use it. **All four return the same versioned
-[`ScanReport`](spec/) contract** — scan once, read the same shape everywhere.
-
-| Surface | Package | Install | One-liner |
-|---|---|---|---|
-| 🦀 **Rust lib** | [`qrcode-ai-scanner`](https://crates.io/crates/qrcode-ai-scanner) · [docs.rs](https://docs.rs/qrcode-ai-scanner) | `cargo add qrcode-ai-scanner` | `Scanner::builder().build().scan(input)?` |
-| 💻 **CLI** | [`qrcode-ai-scanner-cli`](https://crates.io/crates/qrcode-ai-scanner-cli) | `cargo install qrcode-ai-scanner-cli` | `qrscan image.png --pretty` |
-| 📦 **Node** (server) | [`@supernovae-st/qrcode-ai-scanner`](https://www.npmjs.com/package/@supernovae-st/qrcode-ai-scanner) | `npm i @supernovae-st/qrcode-ai-scanner` | `await scan(buffer)` |
-| 🌐 **Browser** (WASM, SIMD) | [`@supernovae-st/qrcode-ai-scanner-wasm`](https://www.npmjs.com/package/@supernovae-st/qrcode-ai-scanner-wasm) | `npm i @supernovae-st/qrcode-ai-scanner-wasm` | `await init(); scan_image(bytes, "fast")` |
-
-Full per-surface guides in [`docs/`](docs/). Examples below ↓
 
 ## Quick start
 
