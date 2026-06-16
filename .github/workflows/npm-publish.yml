@@ -66,8 +66,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: crates/qrcode-ai-scanner-node/artifacts
+      # napi v3: scaffold the per-platform npm/<triple>/ dirs before artifacts
+      - run: pnpm exec napi create-npm-dirs
       - run: pnpm exec napi artifacts
-      - run: pnpm exec napi prepublish -t npm --no-gh-release
+      - run: pnpm exec napi pre-publish -t npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - run: npm publish --access public
@@ -86,14 +88,22 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
       - run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
-      # apt's binaryen is too old for Rust ≥1.87 wasm output (the same
-      # reason build-wasm.sh refuses wasm-pack's bundled wasm-opt) — pin the
+      # apt's binaryen is too old for Rust >=1.87 wasm output (the same
+      # reason build-wasm.sh refuses wasm-pack's bundled wasm-opt) - pin the
       # release proven locally
       - run: |
           curl -sSfL https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz | tar xz -C /tmp
           echo "/tmp/binaryen-version_130/bin" >> "$GITHUB_PATH"
       - run: ./scripts/build-wasm.sh
-      - run: npm publish --access public
+      # idempotent: skip publish if this version is already on npm (safe re-runs)
+      - name: publish wasm (skip if version already on npm)
         working-directory: crates/qrcode-ai-scanner-wasm/pkg
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          if npm view "@supernovae-st/qrcode-ai-scanner-wasm@$VER" version >/dev/null 2>&1; then
+            echo "already published @$VER - skipping"
+          else
+            npm publish --access public
+          fi
