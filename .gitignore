@@ -51,3 +51,6 @@ fuzz/corpus/
 corpus-external/
 img-qr/
 mutants.out*/
+
+# napi-generated platform dirs (regenerated in CI)
+crates/qrcode-ai-scanner-node/npm/
