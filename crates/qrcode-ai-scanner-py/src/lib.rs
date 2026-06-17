@@ -30,7 +30,10 @@ fn scan<'py>(py: Python<'py>, image: &[u8], profile: &str) -> PyResult<Bound<'py
     let report = scanner
         .scan(ImageInput::encoded(image))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    pythonize::pythonize(py, &report).map_err(|e| PyValueError::new_err(e.to_string()))
+    // Round-trip through serde_json::Value so Rust tuples / [T; N] become JSON
+    // arrays → idiomatic Python lists (not tuples), conforming to spec/'s schema.
+    let value = serde_json::to_value(&report).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    pythonize::pythonize(py, &value).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 /// Decode + score a raw RGBA frame (e.g. a camera frame), no image-format roundtrip.
@@ -47,7 +50,10 @@ fn scan_frame<'py>(
     let report = scanner
         .scan(ImageInput::rgba8(rgba, width, height))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    pythonize::pythonize(py, &report).map_err(|e| PyValueError::new_err(e.to_string()))
+    // Round-trip through serde_json::Value so Rust tuples / [T; N] become JSON
+    // arrays → idiomatic Python lists (not tuples), conforming to spec/'s schema.
+    let value = serde_json::to_value(&report).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    pythonize::pythonize(py, &value).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 #[pymodule]

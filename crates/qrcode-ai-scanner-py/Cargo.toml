@@ -19,6 +19,7 @@ crate-type = ["cdylib"]
 # abi3-py38: one stable-ABI wheel works on CPython 3.8 → 3.14+ (no per-version build).
 pyo3 = { version = "0.26", features = ["extension-module", "abi3-py38"] }
 pythonize = "0.26"
+serde_json = "1"
 # aliased to avoid a name clash with this crate's lib name (the Python module
 # is `qrcode_ai_scanner`, which must equal `[lib] name`).
 scanner-core = { package = "qrcode-ai-scanner", path = "../qrcode-ai-scanner", features = ["serde"] }
