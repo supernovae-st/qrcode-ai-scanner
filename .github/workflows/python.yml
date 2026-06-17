@@ -1,0 +1,99 @@
+name: python
+
+# Build + test the PyO3 binding (crates/qrcode-ai-scanner-py) and, on a vX.Y.Z
+# tag, build wheels for the common platforms + sdist and publish to PyPI via
+# trusted publishing (OIDC — no token). The crate is excluded from the cargo
+# workspace, so the core `ci` workflow doesn't cover it; this does.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: crates/qrcode-ai-scanner-py
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/qrcode-ai-scanner-py
+          command: build
+          args: --release --out dist
+          sccache: "true"
+      - name: install + pytest
+        run: |
+          pip install --find-links dist "qrcode-ai-scanner[test]"
+          pytest python/tests -q
+
+  wheels:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { runner: ubuntu-latest, target: x86_64, manylinux: auto }
+          - { runner: ubuntu-latest, target: aarch64, manylinux: auto }
+          - { runner: ubuntu-latest, target: x86_64, manylinux: musllinux_1_2 }
+          - { runner: macos-13, target: x86_64, manylinux: "" }
+          - { runner: macos-latest, target: aarch64, manylinux: "" }
+          - { runner: windows-latest, target: x64, manylinux: "" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/qrcode-ai-scanner-py
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          args: --release --out dist
+          sccache: "true"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.platform.runner }}-${{ matrix.platform.target }}-${{ matrix.platform.manylinux }}
+          path: crates/qrcode-ai-scanner-py/dist
+
+  sdist:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/qrcode-ai-scanner-py
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: crates/qrcode-ai-scanner-py/dist
+
+  release:
+    name: publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [test, wheels, sdist]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write # trusted publishing (OIDC) — no PyPI token needed
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

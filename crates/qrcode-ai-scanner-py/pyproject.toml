@@ -17,9 +17,15 @@ classifiers = [
 ]
 dynamic = ["version"]
 
+[project.optional-dependencies]
+test = ["pytest", "jsonschema", "pillow"]
+
 [project.urls]
 Repository = "https://github.com/supernovae-st/qrcode-ai-scanner"
 Documentation = "https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/docs"
 
 [tool.maturin]
 module-name = "qrcode_ai_scanner"
+
+[tool.maturin.generate-ci.github]
+trusted-publishing = true
