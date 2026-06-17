@@ -48,7 +48,9 @@ jobs:
           - { runner: ubuntu-latest, target: x86_64, manylinux: auto }
           - { runner: ubuntu-latest, target: aarch64, manylinux: auto }
           - { runner: ubuntu-latest, target: x86_64, manylinux: musllinux_1_2 }
-          - { runner: macos-13, target: x86_64, manylinux: "" }
+          # Intel-mac wheel cross-compiled on the Apple-Silicon runner — the
+          # macos-13 (Intel) runner is being retired by GitHub and stalled the job.
+          - { runner: macos-latest, target: x86_64, manylinux: "" }
           - { runner: macos-latest, target: aarch64, manylinux: "" }
           - { runner: windows-latest, target: x64, manylinux: "" }
     steps:
