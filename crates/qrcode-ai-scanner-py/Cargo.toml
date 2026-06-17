@@ -1,0 +1,24 @@
+# Excluded from the workspace (see root Cargo.toml): built by maturin, not cargo
+# workspace tooling. Versions are spelled out here because excluded crates cannot
+# inherit `workspace = true`.
+[package]
+name = "qrcode-ai-scanner-py"
+version = "0.3.0"
+edition = "2024"
+rust-version = "1.87"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/supernovae-st/qrcode-ai-scanner"
+description = "Python bindings for qrcode-ai-scanner — QR decoding + scannability scoring for artistic / AI-generated QR codes."
+publish = false
+
+[lib]
+name = "qrcode_ai_scanner"
+crate-type = ["cdylib"]
+
+[dependencies]
+# abi3-py38: one stable-ABI wheel works on CPython 3.8 → 3.14+ (no per-version build).
+pyo3 = { version = "0.26", features = ["extension-module", "abi3-py38"] }
+pythonize = "0.26"
+# aliased to avoid a name clash with this crate's lib name (the Python module
+# is `qrcode_ai_scanner`, which must equal `[lib] name`).
+scanner-core = { package = "qrcode-ai-scanner", path = "../qrcode-ai-scanner", features = ["serde"] }

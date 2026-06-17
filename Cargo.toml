@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "xtask"]
+# The Python binding (PyO3 cdylib + extension-module) is built by maturin, not
+# cargo workspace tooling — exclude it so `cargo test/clippy --workspace` (CI) skip it.
+exclude = ["crates/qrcode-ai-scanner-py"]
 
 [workspace.package]
 version = "0.3.0"

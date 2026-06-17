@@ -1,0 +1,25 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "qrcode-ai-scanner"
+description = "QR decoding + scannability scoring for artistic, AI-generated, and photo-captured QR codes — Rust core via PyO3."
+requires-python = ">=3.8"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+keywords = ["qrcode", "qr", "scanner", "decoder", "barcode", "validation"]
+classifiers = [
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Multimedia :: Graphics",
+  "Topic :: Scientific/Engineering :: Image Recognition",
+]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/supernovae-st/qrcode-ai-scanner"
+Documentation = "https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/docs"
+
+[tool.maturin]
+module-name = "qrcode_ai_scanner"

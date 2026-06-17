@@ -1,0 +1,8 @@
+cargo:rerun-if-changed=dialect-specs/cp437_control/values.tsv
+cargo:rerun-if-changed=dialect-specs/cp437_control/variants.tsv
+cargo:rerun-if-changed=dialect-specs/cp437_control/documentation.md
+cargo:rerun-if-changed=dialect-specs/cp437_control/overlaps.rs
+cargo:rerun-if-changed=dialect-specs/cp437_wingdings/values.tsv
+cargo:rerun-if-changed=dialect-specs/cp437_wingdings/variants.tsv
+cargo:rerun-if-changed=dialect-specs/cp437_wingdings/documentation.md
+cargo:rerun-if-changed=dialect-specs/cp437_wingdings/overlaps.rs
