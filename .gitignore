@@ -54,3 +54,9 @@ mutants.out*/
 
 # napi-generated platform dirs (regenerated in CI)
 crates/qrcode-ai-scanner-node/npm/
+
+# Python binding (excluded crate) build artifacts + Python caches
+crates/qrcode-ai-scanner-py/target/
+crates/qrcode-ai-scanner-py/dist/
+__pycache__/
+*.pyc
