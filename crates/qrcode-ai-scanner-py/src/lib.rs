@@ -10,14 +10,13 @@ use pyo3::prelude::*;
 use scanner_core::{ImageInput, ScanProfile, Scanner};
 
 fn parse_profile(profile: &str) -> PyResult<ScanProfile> {
-    match profile.to_ascii_lowercase().as_str() {
-        "full" => Ok(ScanProfile::Full),
-        "fast" => Ok(ScanProfile::Fast),
-        "frame" => Ok(ScanProfile::Frame),
-        other => Err(PyValueError::new_err(format!(
-            "unknown profile {other:?} (expected 'full', 'fast', or 'frame')"
-        ))),
-    }
+    // Delegate to the library's canonical parser (same path as the Node/WASM
+    // bindings) so all surfaces stay in sync as profiles evolve.
+    ScanProfile::from_name(profile).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "unknown profile {profile:?} (expected 'full', 'fast', or 'frame')"
+        ))
+    })
 }
 
 // Serialize a ScanReport to a Python object via serde_json::Value so Rust tuples /
@@ -40,7 +39,7 @@ fn scan<'py>(py: Python<'py>, image: &[u8], profile: &str) -> PyResult<Bound<'py
     let profile = parse_profile(profile)?;
     let image = image.to_vec(); // own it before releasing the GIL
     let report = py
-        .allow_threads(|| Scanner::builder().profile(profile).build().scan(ImageInput::encoded(&image)))
+        .detach(move || Scanner::builder().profile(profile).build().scan(ImageInput::encoded(&image)))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     report_to_py(py, &report)
 }
@@ -60,7 +59,7 @@ fn scan_frame<'py>(
     let profile = parse_profile(profile)?;
     let rgba = rgba.to_vec(); // own it before releasing the GIL
     let report = py
-        .allow_threads(|| {
+        .detach(move || {
             Scanner::builder()
                 .profile(profile)
                 .build()

@@ -85,7 +85,7 @@ fn shape_of(ai: &str) -> Option<Shape> {
         "8200" => Shape::Cset82(70),
         "90" | "240" | "241" | "250" | "251" => Shape::Cset82(30),
         "91" | "92" | "93" | "94" | "95" | "96" | "97" | "98" | "99" => Shape::Cset82(90),
-        _ if ai.len() == 3 && ("410".."418").contains(&ai) => Shape::DigitsCheck(13),
+        _ if ai.len() == 3 && ("410"..="418").contains(&ai) => Shape::DigitsCheck(13),
         _ if ai.len() == 4
             && matches!(ai.get(..2), Some("31" | "32" | "33" | "34" | "35" | "36"))
             && ai.as_bytes()[3].is_ascii_digit() =>

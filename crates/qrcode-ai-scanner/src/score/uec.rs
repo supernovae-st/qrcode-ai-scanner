@@ -454,14 +454,14 @@ pub(crate) fn compute(
         };
         #[expect(clippy::cast_precision_loss, reason = "npar ≤ 68, t ≤ 34")]
         let margin = 1.0 - (2.0 * t as f32) / block.npar as f32;
-        if margin < worst_margin {
+        // worst_errors/worst_capacity must describe the SAME block as worst_margin
+        // (the block closest to RS failure) — the LowCorrectionMargin hint reads them.
+        // `<=` so an all-clean symbol (every block margin == 1.0) still reports a real
+        // block capacity rather than 0 (which would violate the spec schema).
+        if margin <= worst_margin {
             worst_margin = margin;
-        }
-        let errors = u8::try_from(t).unwrap_or(u8::MAX);
-        let capacity = u8::try_from(block.npar).unwrap_or(u8::MAX);
-        if errors >= worst_errors {
-            worst_errors = errors;
-            worst_capacity = capacity;
+            worst_errors = u8::try_from(t).unwrap_or(u8::MAX);
+            worst_capacity = u8::try_from(block.npar).unwrap_or(u8::MAX);
         }
     }
     let margin = worst_margin.max(0.0);
