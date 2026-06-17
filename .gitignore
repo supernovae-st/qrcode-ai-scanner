@@ -60,3 +60,6 @@ crates/qrcode-ai-scanner-py/target/
 crates/qrcode-ai-scanner-py/dist/
 __pycache__/
 *.pyc
+
+# UniFFI binding (excluded crate) build artifacts + generated bindings
+crates/qrcode-ai-scanner-uniffi/target/

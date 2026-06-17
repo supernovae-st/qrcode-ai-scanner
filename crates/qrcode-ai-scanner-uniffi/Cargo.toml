@@ -1,0 +1,35 @@
+# Excluded from the workspace (see root Cargo.toml): built via cargo-ndk (Android
+# .so) and cargo + xcodebuild (iOS xcframework), not by cargo workspace tooling.
+# Versions are spelled out because excluded crates cannot inherit `workspace = true`.
+[package]
+name = "qrcode-ai-scanner-uniffi"
+version = "0.3.0"
+edition = "2024"
+rust-version = "1.87"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/supernovae-st/qrcode-ai-scanner"
+description = "Kotlin/Android + Swift/iOS bindings for qrcode-ai-scanner via UniFFI."
+publish = false
+
+[lib]
+# cdylib    → Android .so (loaded by JNA at runtime)
+# staticlib → iOS .a (linked into the xcframework)
+crate-type = ["cdylib", "staticlib"]
+name = "qrcode_ai_scanner_uniffi"
+
+[dependencies]
+uniffi = { version = "0.31", features = ["cli"] }
+serde_json = "1"
+thiserror = "2"
+# alias to dodge the name clash with this crate's lib name, same as the py crate.
+scanner-core = { package = "qrcode-ai-scanner", path = "../qrcode-ai-scanner", features = ["serde"] }
+
+[build-dependencies]
+uniffi = { version = "0.31", features = ["build"] }
+
+# The standalone uniffi-bindgen binary (library-mode generation) lives in this
+# crate so CI can `cargo run --bin uniffi-bindgen` with no separate install and
+# no version skew between the lib's `uniffi` dep and the generator.
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
