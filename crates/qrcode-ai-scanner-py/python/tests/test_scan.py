@@ -88,3 +88,18 @@ def test_bad_profile_raises():
 def test_invalid_image_raises():
     with pytest.raises(ValueError):
         qr.scan(b"definitely not an image", "fast")
+
+
+def test_scan_frame_wrong_buffer_size_raises():
+    # rgba must be width * height * 4 bytes — a mismatch is the most likely caller mistake.
+    with pytest.raises(ValueError):
+        qr.scan_frame(b"\x00" * 10, 2, 2, "frame")  # expects 2*2*4 = 16
+
+
+def test_scan_frame_zero_dimension_raises():
+    with pytest.raises(ValueError):
+        qr.scan_frame(b"", 0, 1, "frame")
+
+
+def test_all_exported():
+    assert set(qr.__all__) == {"scan", "scan_frame", "__version__"}
