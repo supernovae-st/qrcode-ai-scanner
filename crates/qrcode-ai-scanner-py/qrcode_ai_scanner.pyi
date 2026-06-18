@@ -17,20 +17,33 @@ class ScanReport(TypedDict):
     trace: dict[str, Any]
     versions: dict[str, Any]
 
-def scan(image: bytes, profile: str = "full") -> ScanReport:
+def scan(
+    image: bytes,
+    profile: str = "full",
+    max_dimension: int | None = None,
+    max_pixels: int | None = None,
+) -> ScanReport:
     """Decode + score an encoded image (PNG, JPEG, WebP, GIF).
 
     profile: ``"full"`` (quality gate) | ``"fast"`` (upload) | ``"frame"`` (no scoring).
+    max_dimension / max_pixels: optional input-size caps (defaults 10000 px / 64M px) —
+    raise for huge images, lower to harden a server against adversarial input.
     "No QR found" returns a report with empty ``detections``; raises ``ValueError``
-    on invalid input or an unknown profile.
+    on invalid input, an oversized image, or an unknown profile.
     """
     ...
 
 def scan_frame(
-    rgba: bytes, width: int, height: int, profile: str = "frame"
+    rgba: bytes,
+    width: int,
+    height: int,
+    profile: str = "frame",
+    max_dimension: int | None = None,
+    max_pixels: int | None = None,
 ) -> ScanReport:
     """Decode + score a raw RGBA frame (e.g. a camera frame) — no image-format roundtrip.
 
-    ``rgba`` must be ``width * height * 4`` bytes. Raises ``ValueError`` on invalid input.
+    ``rgba`` must be ``width * height * 4`` bytes. max_dimension / max_pixels: optional
+    input-size caps (see ``scan``). Raises ``ValueError`` on invalid input.
     """
     ...

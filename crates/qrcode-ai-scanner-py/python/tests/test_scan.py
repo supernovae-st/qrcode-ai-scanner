@@ -44,6 +44,20 @@ def test_decodes_clean():
     assert isinstance(report["detections"][0]["content"]["text"], str)
 
 
+@pytest.mark.skipif(not CLEAN, reason="no clean fixtures")
+def test_max_dimension_cap_rejects_oversized():
+    # A 1px cap is below any real QR image → the size limit (QRS-002) raises ValueError.
+    with pytest.raises(ValueError):
+        qr.scan(CLEAN[0].read_bytes(), max_dimension=1)
+
+
+@pytest.mark.skipif(not CLEAN, reason="no clean fixtures")
+def test_generous_limits_still_decode():
+    # Explicit large caps don't disturb a normal decode.
+    report = qr.scan(CLEAN[0].read_bytes(), "fast", max_dimension=20000, max_pixels=400_000_000)
+    assert len(report["detections"]) >= 1
+
+
 @pytest.mark.skipif(
     not (CLEAN and HAS_JSONSCHEMA and SCHEMA), reason="needs fixtures + jsonschema + schema"
 )

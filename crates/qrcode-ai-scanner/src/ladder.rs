@@ -63,7 +63,12 @@ pub enum ScoreDepth {
     reason = "stage switches ARE independent booleans — a bitflags layer would obscure the API"
 )]
 pub struct ScanConfig {
-    /// Wall-clock budget in milliseconds (`None` = unbounded).
+    /// Wall-clock budget in milliseconds. `None` = unbounded: the scan runs the full
+    /// ladder, bounded only by the input-size `Limits`, never by time. Every built-in
+    /// profile sets one (full 4 s · fast 800 ms · frame 80 ms) and server callers
+    /// should keep a budget; leave it `None` only for offline/batch decoding where
+    /// reading every symbol outweighs latency. (`Some(0)` cuts immediately; bindings
+    /// exposing a numeric budget may map `0` → unbounded — see each binding's docs.)
     pub budget_ms: Option<u64>,
     /// S1 — decode a ≤`pyramid_side` downscale first (cheapest win).
     pub pyramid: bool,
