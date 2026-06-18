@@ -63,3 +63,18 @@ __pycache__/
 
 # UniFFI binding (excluded crate) build artifacts + generated bindings
 crates/qrcode-ai-scanner-uniffi/target/
+
+# Mobile binding shells: generated source (.kt/.swift) + native libs + the
+# xcframework are regenerated in CI from the uniffi crate — git is not the
+# artifact store (binding-repo architecture plan §1.3).
+# Android (bindings/kotlin/): generated Kotlin + per-ABI .so + Gradle output
+bindings/kotlin/**/src/main/jniLibs/
+bindings/kotlin/**/src/main/kotlin/
+bindings/kotlin/**/build/
+bindings/kotlin/.gradle/
+bindings/kotlin/local.properties
+# Swift (bindings/swift/): generated Swift sources + the xcframework
+bindings/swift/Sources/QrcodeAiScanner/
+bindings/swift/build/
+*.xcframework
+*.xcframework.zip

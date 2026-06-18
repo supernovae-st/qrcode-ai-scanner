@@ -1,0 +1,48 @@
+# JitPack build config — builds + publishes the Kotlin/Android AAR from a Git
+# tag, with ZERO signing friction (uniffi mobile plan §4.3: JitPack-first,
+# Maven Central deferred to v0.2).
+#
+# Consumer (after JitPack builds a tag vX.Y.Z):
+#   repositories { maven { url = uri("https://jitpack.io") } }
+#   implementation("com.github.supernovae-st:qrcode-ai-scanner:vX.Y.Z")
+#
+# Because the AAR embeds NDK-cross-compiled .so's, JitPack's build box must have
+# the Rust toolchain + Android NDK + cargo-ndk, plus the per-ABI .so and the
+# generated UniFFI Kotlin produced BEFORE Gradle assembles the AAR. The `install`
+# block below does exactly that, then runs `maven-publish` (publishToMavenLocal)
+# so JitPack picks up the artifact from the local Maven repo.
+
+# JitPack runs on Ubuntu; pick a JDK with the AGP 8.x toolchain.
+jdk:
+  - openjdk17
+
+before_install:
+  # Rust toolchain (matches the workspace rust-version 1.87) + Android targets.
+  - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.87.0
+  - source "$HOME/.cargo/env"
+  - rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
+  - cargo install cargo-ndk --version 4.1.2 --locked
+  # Android SDK cmdline-tools + NDK r27 (16 KB page-size safe — §7 gotcha #8).
+  # JitPack images ship $ANDROID_HOME with sdkmanager; install the NDK + platform.
+  - yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.0.12077973" "platforms;android-34" "build-tools;34.0.0" >/dev/null
+  - echo "ndk.dir=$ANDROID_HOME/ndk/27.0.12077973" > bindings/kotlin/local.properties
+
+install:
+  - source "$HOME/.cargo/env"
+  - export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
+  # 1. Build the per-ABI .so into the library module's jniLibs (cargo-ndk §4.1).
+  - >
+    cargo ndk
+    -t arm64-v8a -t armeabi-v7a -t x86_64 -t x86
+    -o bindings/kotlin/qrcodeaiscanner/src/main/jniLibs
+    build --release --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml
+  # 2. Build the host cdylib + generate the UniFFI Kotlin into the module (§3.1).
+  - cargo build --release --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml
+  - >
+    cargo run --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml --bin uniffi-bindgen --
+    generate
+    --library crates/qrcode-ai-scanner-uniffi/target/release/libqrcode_ai_scanner_uniffi.so
+    --language kotlin
+    --out-dir bindings/kotlin/qrcodeaiscanner/src/main/kotlin
+  # 3. Assemble + publish the AAR to the local Maven repo (JitPack serves it).
+  - ./bindings/kotlin/gradlew -p bindings/kotlin :qrcodeaiscanner:assembleRelease :qrcodeaiscanner:publishToMavenLocal

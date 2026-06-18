@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Library module manifest. `namespace` (in build.gradle.kts) is the modern
+  source of the package id (AGP 8.x); no `package=` attribute here. A library
+  needs no <application> — it contributes jniLibs + generated Kotlin to the AAR.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />

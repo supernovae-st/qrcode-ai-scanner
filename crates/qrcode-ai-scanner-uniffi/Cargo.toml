@@ -33,3 +33,10 @@ uniffi = { version = "0.31", features = ["build"] }
 [[bin]]
 name = "uniffi-bindgen"
 path = "uniffi-bindgen.rs"
+
+# The dedicated Swift bindgen for the modern xcframework flow (emits the
+# .swift, the FFI .h, and an xcframework-compatible modulemap). Same version-
+# skew guard as the Kotlin bindgen above.
+[[bin]]
+name = "uniffi-bindgen-swift"
+path = "uniffi-bindgen-swift.rs"

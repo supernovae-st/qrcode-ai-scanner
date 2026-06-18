@@ -1,0 +1,149 @@
+name: mobile
+
+# Build the Kotlin/Android (AAR) + Swift/iOS (xcframework) bindings from the
+# shared UniFFI crate (crates/qrcode-ai-scanner-uniffi). That crate is excluded
+# from the cargo workspace, so the core `ci` workflow doesn't cover it — this
+# does. Generated Kotlin/Swift + the per-ABI .so + the xcframework are produced
+# here from one commit (never checked into git): generating the bindings and
+# building the native lib in the SAME run from the SAME commit is the structural
+# guard against the UniFFI contract-checksum skew that crashes at startup
+# (mobile plan §7 gotcha #2 / R2).
+#
+# Mobile does NOT use PyPI OIDC — there are no trusted-publisher artifacts here.
+# v0.1 publish targets: JitPack (Android, see repo-root jitpack.yml) + a GitHub
+# release asset (iOS xcframework zip, consumed by SwiftPM url+checksum). Maven
+# Central + GPG signing is deferred to v0.2 (plan §4.3).
+#
+# Third-party (non actions/*) actions are SHA-pinned, like python.yml pins
+# pypa/gh-action-pypi-publish.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # PR/push gate (mirrors python.yml's `test` job): host build of the wrapper +
+  # a smoke binding generation, so a wrapper that won't compile or whose
+  # metadata won't read fails CI before any tag.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build the uniffi wrapper (host)
+        run: cargo build --release --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml
+      - name: smoke-generate Kotlin bindings (metadata reads)
+        run: |
+          cargo run --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml --bin uniffi-bindgen -- \
+            generate --library crates/qrcode-ai-scanner-uniffi/target/release/libqrcode_ai_scanner_uniffi.so \
+            --language kotlin --out-dir /tmp/kotlin-smoke
+          test -n "$(find /tmp/kotlin-smoke -name '*.kt' -print -quit)" \
+            || { echo 'no .kt generated'; exit 1; }
+
+  android:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+      - uses: Swatinem/rust-cache@v2
+      # SHA-pinned third-party action (nttld/setup-ndk v1.6.0). NDK r27: 16 KB
+      # page-size safe for Android 15+ (plan §7 gotcha #8).
+      - uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
+        with:
+          ndk-version: r27
+      - run: cargo install cargo-ndk --version 4.1.2 --locked
+      - name: build .so per ABI (cargo-ndk → jniLibs)
+        run: |
+          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -t x86 \
+            -o bindings/kotlin/qrcodeaiscanner/src/main/jniLibs \
+            build --release --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml
+      - name: generate Kotlin bindings (same commit as the .so above)
+        run: |
+          cargo build --release --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml
+          cargo run --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml --bin uniffi-bindgen -- \
+            generate --library crates/qrcode-ai-scanner-uniffi/target/release/libqrcode_ai_scanner_uniffi.so \
+            --language kotlin \
+            --out-dir bindings/kotlin/qrcodeaiscanner/src/main/kotlin
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      # gradle/actions/setup-gradle provides `gradle` directly, so CI works even
+      # before the Gradle wrapper jar is committed (JitPack uses ./gradlew).
+      - uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+      - name: assemble AAR
+        working-directory: bindings/kotlin
+        run: gradle :qrcodeaiscanner:assembleRelease
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-aar
+          path: bindings/kotlin/qrcodeaiscanner/build/outputs/aar/*.aar
+          if-no-files-found: error
+      # v0.1 Android publish = JitPack (repo-root jitpack.yml builds from the
+      # tag). The AAR built here is the CI smoke + the artifact for download.
+      # v0.2: maven-publish to Central in an env-gated release job (GPG secrets).
+
+  ios:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: macos-15 # Xcode 16, Apple silicon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+      - name: build static libs (device + both simulator arches)
+        run: |
+          cargo build --release --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml --target aarch64-apple-ios
+          cargo build --release --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml --target aarch64-apple-ios-sim
+          cargo build --release --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml --target x86_64-apple-ios
+      - name: generate Swift sources + headers + xcframework modulemap
+        run: |
+          mkdir -p bindings/swift/Sources/QrcodeAiScanner build/swift/Modules
+          cargo run --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml --bin uniffi-bindgen-swift -- \
+            crates/qrcode-ai-scanner-uniffi/target/aarch64-apple-ios/release/libqrcode_ai_scanner_uniffi.a \
+            bindings/swift/Sources/QrcodeAiScanner --swift-sources
+          cargo run --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml --bin uniffi-bindgen-swift -- \
+            crates/qrcode-ai-scanner-uniffi/target/aarch64-apple-ios/release/libqrcode_ai_scanner_uniffi.a \
+            build/swift/Modules --headers --xcframework --modulemap --modulemap-filename module.modulemap
+      - name: lipo simulator slice + create xcframework
+        run: |
+          mkdir -p build/sim
+          lipo -create \
+            crates/qrcode-ai-scanner-uniffi/target/aarch64-apple-ios-sim/release/libqrcode_ai_scanner_uniffi.a \
+            crates/qrcode-ai-scanner-uniffi/target/x86_64-apple-ios/release/libqrcode_ai_scanner_uniffi.a \
+            -output build/sim/libqrcode_ai_scanner_uniffi.a
+          xcodebuild -create-xcframework \
+            -library crates/qrcode-ai-scanner-uniffi/target/aarch64-apple-ios/release/libqrcode_ai_scanner_uniffi.a -headers build/swift/Modules \
+            -library build/sim/libqrcode_ai_scanner_uniffi.a -headers build/swift/Modules \
+            -output build/QrcodeAiScannerFFI.xcframework
+      - name: zip + checksum
+        run: |
+          (cd build && zip -ry QrcodeAiScannerFFI.xcframework.zip QrcodeAiScannerFFI.xcframework)
+          swift package compute-checksum build/QrcodeAiScannerFFI.xcframework.zip > build/checksum.txt
+          echo "xcframework checksum: $(cat build/checksum.txt)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-xcframework
+          path: |
+            build/QrcodeAiScannerFFI.xcframework.zip
+            build/checksum.txt
+          if-no-files-found: error
+      # v0.1 iOS publish: attach build/QrcodeAiScannerFFI.xcframework.zip to the
+      # GitHub release for the tag, then point bindings/swift/Package.swift's
+      # .binaryTarget at that url + the checksum above. Release-attach is a
+      # follow-up step (see plan §5.3 + the "remaining steps" note) — the zip +
+      # checksum are uploaded as artifacts here.
