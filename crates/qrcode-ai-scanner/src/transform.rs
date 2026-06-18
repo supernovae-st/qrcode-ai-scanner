@@ -187,12 +187,16 @@ pub(crate) fn invert(img: &LumaImage) -> LumaImage {
 
 /// Min-max contrast stretch to the full 0-255 range (flat images unchanged).
 pub(crate) fn contrast_stretch(img: &LumaImage) -> LumaImage {
-    let Some(&min) = img.data().iter().min() else {
-        return img.clone();
+    // Fused min/max in ONE pass (was two separate `.min()`/`.max()` scans) —
+    // identical (min, max) result, half the read traffic before the map pass.
+    let Some((&first, rest)) = img.data().split_first() else {
+        return img.clone(); // empty image: nothing to stretch
     };
-    let Some(&max) = img.data().iter().max() else {
-        return img.clone();
-    };
+    let (mut min, mut max) = (first, first);
+    for &px in rest {
+        min = min.min(px);
+        max = max.max(px);
+    }
     if min == max {
         return img.clone();
     }
@@ -275,20 +279,92 @@ pub(crate) fn contrast_boost(img: &LumaImage, contrast: f32, brightness: f32) ->
 /// GROW by `(k-1)/2` pixels in every direction — on blob/dot pixel styles
 /// this closes the gaps between sub-module blobs so grid sampling reads
 /// solid modules instead of gap-noise. `k` is the full window side; even
-/// values are bumped to the next odd. O(w·h·k) separable: at the ladder's
-/// native-resolution call sites (≤2048, k≤19) this is a few ms and the u8
-/// min lane autovectorizes.
+/// values are bumped to the next odd. Output is identical to the naive
+/// `O(w·h·k)` fold; the sliding-deque core makes it `O(w·h)` regardless of
+/// window size (a single value-pinned test guards the two-impl equivalence).
 pub(crate) fn min_filter(img: &LumaImage, k: u32) -> LumaImage {
-    morph_filter(img, k, u8::min)
+    morph_filter(img, k, MorphPick::Min)
 }
 
 /// Separable windowed-maximum filter (grayscale dilation) — the mirror of
 /// [`min_filter`] for LIGHT blob structures (light-on-dark styles).
 pub(crate) fn max_filter(img: &LumaImage, k: u32) -> LumaImage {
-    morph_filter(img, k, u8::max)
+    morph_filter(img, k, MorphPick::Max)
 }
 
-fn morph_filter(img: &LumaImage, k: u32, pick: fn(u8, u8) -> u8) -> LumaImage {
+/// Extremum direction for the morphological pass.
+#[derive(Clone, Copy)]
+enum MorphPick {
+    Min,
+    Max,
+}
+
+impl MorphPick {
+    /// `true` when `candidate` makes `incumbent` redundant for every FUTURE
+    /// window (i.e. candidate is at-least-as-extreme) — the monotonic-deque
+    /// eviction test. `>=` / `<=` (not strict) keeps the LAST equal index,
+    /// which matches the naive fold's value (ties pick the same u8 anyway).
+    #[inline]
+    fn dominates(self, candidate: u8, incumbent: u8) -> bool {
+        match self {
+            Self::Min => candidate <= incumbent,
+            Self::Max => candidate >= incumbent,
+        }
+    }
+}
+
+/// 1D clamped-border windowed extremum via a monotonic deque — `out[i]` =
+/// extremum over `src[i-r ..= i+r]` clamped to `[0, n-1]`. Amortized O(n):
+/// each index enters and leaves `deque` once. Bit-identical to the naive
+/// `fold` over the same clamped window. `deque`/`out` are caller-owned
+/// scratch (reused across rows/cols), `src` may be strided via `stride`.
+fn windowed_extremum_strided(
+    src: &[u8],
+    n: usize,
+    stride: usize,
+    r: usize,
+    pick: MorphPick,
+    deque: &mut Vec<usize>,
+    out: &mut [u8],
+) {
+    deque.clear();
+    // `head` points at the front (current extremum index) of `deque`.
+    let mut head = 0usize;
+    // seed the window for output 0: indices 0 ..= min(r, n-1)
+    for j in 0..=r.min(n - 1) {
+        let v = src[j * stride];
+        while deque.len() > head && pick.dominates(v, src[deque[deque.len() - 1] * stride]) {
+            deque.pop();
+        }
+        deque.push(j);
+    }
+    for i in 0..n {
+        // window for i is [i-r, i+r] clamped; right edge enters first
+        let hi = (i + r).min(n - 1);
+        // push indices up to `hi` that have not been pushed yet
+        // (already seeded up to min(r, n-1); subsequent i grow `hi` by ≤1)
+        if i > 0 {
+            let prev_hi = (i - 1 + r).min(n - 1);
+            for j in (prev_hi + 1)..=hi {
+                let v = src[j * stride];
+                while deque.len() > head
+                    && pick.dominates(v, src[deque[deque.len() - 1] * stride])
+                {
+                    deque.pop();
+                }
+                deque.push(j);
+            }
+        }
+        // expire the left edge: drop front indices < i-r
+        let lo = i.saturating_sub(r);
+        while deque[head] < lo {
+            head += 1;
+        }
+        out[i * stride] = src[deque[head] * stride];
+    }
+}
+
+fn morph_filter(img: &LumaImage, k: u32, pick: MorphPick) -> LumaImage {
     let r = ((k.max(3) | 1) / 2) as usize; // odd window, radius ≥ 1
     let (w, h) = (img.width() as usize, img.height() as usize);
     let (rx, ry) = (r.min(w.saturating_sub(1)), r.min(h.saturating_sub(1)));
@@ -296,29 +372,18 @@ fn morph_filter(img: &LumaImage, k: u32, pick: fn(u8, u8) -> u8) -> LumaImage {
         return img.clone();
     }
     let src = img.data();
+    let mut deque: Vec<usize> = Vec::with_capacity(2 * r + 2);
     // horizontal pass: out[y][x] = pick over src[y][x-rx ..= x+rx] (clamped)
     let mut horiz = vec![0u8; w * h];
     for y in 0..h {
         let row = &src[y * w..(y + 1) * w];
         let out = &mut horiz[y * w..(y + 1) * w];
-        for (x, slot) in out.iter_mut().enumerate() {
-            let lo = x.saturating_sub(rx);
-            let hi = (x + rx).min(w - 1);
-            *slot = row[lo..=hi].iter().copied().fold(row[x], pick);
-        }
+        windowed_extremum_strided(row, w, 1, rx, pick, &mut deque, out);
     }
-    // vertical pass on the horizontal result
+    // vertical pass on the horizontal result — stride = w (column walk).
     let mut data = vec![0u8; w * h];
-    for y in 0..h {
-        let lo = y.saturating_sub(ry);
-        let hi = (y + ry).min(h - 1);
-        for x in 0..w {
-            let mut acc = horiz[lo * w + x];
-            for row in (lo + 1)..=hi {
-                acc = pick(acc, horiz[row * w + x]);
-            }
-            data[y * w + x] = acc;
-        }
+    for x in 0..w {
+        windowed_extremum_strided(&horiz[x..], h, w, ry, pick, &mut deque, &mut data[x..]);
     }
     #[expect(
         clippy::cast_possible_truncation,
@@ -411,6 +476,74 @@ mod tests {
         // k below the floor (k=1) behaves as k=3
         let single = min_filter(&luma(&[9, 255], 2, 1), 1);
         assert_eq!(single.data(), &[9, 9]);
+    }
+
+    /// Naive O(w·h·k) clamped-window extremum — the REFERENCE the fast
+    /// sliding-deque `morph_filter` must reproduce bit-for-bit. This is the
+    /// exact algorithm the crate shipped before the deque rewrite.
+    fn morph_naive(img: &LumaImage, k: u32, pick: fn(u8, u8) -> u8) -> Vec<u8> {
+        let r = ((k.max(3) | 1) / 2) as usize;
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let (rx, ry) = (r.min(w.saturating_sub(1)), r.min(h.saturating_sub(1)));
+        if rx == 0 && ry == 0 {
+            return img.data().to_vec();
+        }
+        let src = img.data();
+        let mut horiz = vec![0u8; w * h];
+        for y in 0..h {
+            let row = &src[y * w..(y + 1) * w];
+            for x in 0..w {
+                let lo = x.saturating_sub(rx);
+                let hi = (x + rx).min(w - 1);
+                horiz[y * w + x] = row[lo..=hi].iter().copied().fold(row[x], pick);
+            }
+        }
+        let mut data = vec![0u8; w * h];
+        for y in 0..h {
+            let lo = y.saturating_sub(ry);
+            let hi = (y + ry).min(h - 1);
+            for x in 0..w {
+                let mut acc = horiz[lo * w + x];
+                for row in (lo + 1)..=hi {
+                    acc = pick(acc, horiz[row * w + x]);
+                }
+                data[y * w + x] = acc;
+            }
+        }
+        data
+    }
+
+    /// The deque rewrite is an O(w·h) optimization that MUST be output-
+    /// identical to the naive fold for every shape and kernel — a divergence
+    /// would silently change which artistic codes the morph rungs recover.
+    /// Deterministic LCG covers a spread of dims (incl. 1×N, N×1, even/odd k).
+    #[test]
+    fn morph_deque_matches_naive_fold_exhaustively() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = |bound: u32| -> u32 {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) as u32 % bound
+        };
+        for _ in 0..240 {
+            let w = 1 + next(40);
+            let h = 1 + next(40);
+            let k = 1 + next(23); // spans below-floor, even, odd, > dim
+            #[expect(clippy::cast_possible_truncation, reason = "next(256) ∈ 0..256")]
+            let data: Vec<u8> = (0..w * h).map(|_| next(256) as u8).collect();
+            let img = luma(&data, w, h);
+            assert_eq!(
+                min_filter(&img, k).data(),
+                &morph_naive(&img, k, u8::min)[..],
+                "MIN mismatch w={w} h={h} k={k}"
+            );
+            assert_eq!(
+                max_filter(&img, k).data(),
+                &morph_naive(&img, k, u8::max)[..],
+                "MAX mismatch w={w} h={h} k={k}"
+            );
+        }
     }
 
     #[test]
