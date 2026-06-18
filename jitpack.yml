@@ -26,6 +26,10 @@ before_install:
   # JitPack images ship $ANDROID_HOME with sdkmanager; install the NDK + platform.
   - yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.0.12077973" "platforms;android-34" "build-tools;34.0.0" >/dev/null
   - echo "ndk.dir=$ANDROID_HOME/ndk/27.0.12077973" > bindings/kotlin/local.properties
+  # Gradle 8.9 (the AGP 8.5 toolchain) — provisioned here so JitPack needs NO committed
+  # Gradle wrapper jar. Full path is used in `install` (PATH may not persist across steps).
+  - curl -sSL https://services.gradle.org/distributions/gradle-8.9-bin.zip -o /tmp/gradle.zip
+  - unzip -q -o /tmp/gradle.zip -d /opt
 
 install:
   - source "$HOME/.cargo/env"
@@ -45,4 +49,4 @@ install:
     --language kotlin
     --out-dir bindings/kotlin/qrcodeaiscanner/src/main/kotlin
   # 3. Assemble + publish the AAR to the local Maven repo (JitPack serves it).
-  - ./bindings/kotlin/gradlew -p bindings/kotlin :qrcodeaiscanner:assembleRelease :qrcodeaiscanner:publishToMavenLocal
+  - /opt/gradle-8.9/bin/gradle -p bindings/kotlin :qrcodeaiscanner:assembleRelease :qrcodeaiscanner:publishToMavenLocal

@@ -48,27 +48,31 @@ let json = try scan(image: imageData, profile: "full")  // empty detections = no
 ## Build the xcframework locally
 
 ```bash
-# from repo root
+# from repo root — the uniffi crate is EXCLUDED from the workspace, so always
+# address it with --manifest-path and read its crate-local target/ dir (NOT -p,
+# NOT the root target/). This mirrors the `ios` job in .github/workflows/mobile.yml.
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-cargo build --release -p qrcode-ai-scanner-uniffi --target aarch64-apple-ios
-cargo build --release -p qrcode-ai-scanner-uniffi --target aarch64-apple-ios-sim
-cargo build --release -p qrcode-ai-scanner-uniffi --target x86_64-apple-ios
+MP=crates/qrcode-ai-scanner-uniffi/Cargo.toml
+T=crates/qrcode-ai-scanner-uniffi/target
+cargo build --release --manifest-path "$MP" --target aarch64-apple-ios
+cargo build --release --manifest-path "$MP" --target aarch64-apple-ios-sim
+cargo build --release --manifest-path "$MP" --target x86_64-apple-ios
 
 mkdir -p bindings/swift/Sources/QrcodeAiScanner build/swift/Modules
-cargo run -p qrcode-ai-scanner-uniffi --bin uniffi-bindgen-swift -- \
-  target/aarch64-apple-ios/release/libqrcode_ai_scanner_uniffi.a \
+cargo run --manifest-path "$MP" --bin uniffi-bindgen-swift -- \
+  "$T/aarch64-apple-ios/release/libqrcode_ai_scanner_uniffi.a" \
   bindings/swift/Sources/QrcodeAiScanner --swift-sources
-cargo run -p qrcode-ai-scanner-uniffi --bin uniffi-bindgen-swift -- \
-  target/aarch64-apple-ios/release/libqrcode_ai_scanner_uniffi.a \
+cargo run --manifest-path "$MP" --bin uniffi-bindgen-swift -- \
+  "$T/aarch64-apple-ios/release/libqrcode_ai_scanner_uniffi.a" \
   build/swift/Modules --headers --xcframework --modulemap --modulemap-filename module.modulemap
 
 mkdir -p build/sim
 lipo -create \
-  target/aarch64-apple-ios-sim/release/libqrcode_ai_scanner_uniffi.a \
-  target/x86_64-apple-ios/release/libqrcode_ai_scanner_uniffi.a \
+  "$T/aarch64-apple-ios-sim/release/libqrcode_ai_scanner_uniffi.a" \
+  "$T/x86_64-apple-ios/release/libqrcode_ai_scanner_uniffi.a" \
   -output build/sim/libqrcode_ai_scanner_uniffi.a
 xcodebuild -create-xcframework \
-  -library target/aarch64-apple-ios/release/libqrcode_ai_scanner_uniffi.a -headers build/swift/Modules \
+  -library "$T/aarch64-apple-ios/release/libqrcode_ai_scanner_uniffi.a" -headers build/swift/Modules \
   -library build/sim/libqrcode_ai_scanner_uniffi.a -headers build/swift/Modules \
   -output bindings/swift/build/QrcodeAiScannerFFI.xcframework
 ```

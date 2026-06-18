@@ -81,8 +81,8 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      # gradle/actions/setup-gradle provides `gradle` directly, so CI works even
-      # before the Gradle wrapper jar is committed (JitPack uses ./gradlew).
+      # gradle/actions/setup-gradle provides `gradle` directly — no committed
+      # wrapper jar needed here or on JitPack (jitpack.yml self-provisions Gradle 8.9).
       - uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
       - name: assemble AAR
         working-directory: bindings/kotlin
@@ -99,6 +99,8 @@ jobs:
   ios:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: macos-15 # Xcode 16, Apple silicon
+    permissions:
+      contents: write # attach the xcframework to the GitHub release on tags
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -142,8 +144,15 @@ jobs:
             build/QrcodeAiScannerFFI.xcframework.zip
             build/checksum.txt
           if-no-files-found: error
-      # v0.1 iOS publish: attach build/QrcodeAiScannerFFI.xcframework.zip to the
-      # GitHub release for the tag, then point bindings/swift/Package.swift's
-      # .binaryTarget at that url + the checksum above. Release-attach is a
-      # follow-up step (see plan §5.3 + the "remaining steps" note) — the zip +
-      # checksum are uploaded as artifacts here.
+      # On a tag: publish the xcframework as a GitHub release asset so SwiftPM
+      # consumes it via .binaryTarget(url:checksum:). gh CLI = no extra action.
+      - name: attach xcframework to the GitHub release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes || true
+          gh release upload "$GITHUB_REF_NAME" \
+            build/QrcodeAiScannerFFI.xcframework.zip build/checksum.txt --clobber
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/QrcodeAiScannerFFI.xcframework.zip"
+          echo "::notice::SwiftPM — set bindings/swift/Package.swift .binaryTarget url=$url checksum=$(cat build/checksum.txt)"
