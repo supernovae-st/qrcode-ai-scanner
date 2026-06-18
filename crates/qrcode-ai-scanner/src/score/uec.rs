@@ -138,6 +138,7 @@ pub(crate) fn format_bits_index(ec: EcLevel) -> usize {
 
 /// Function-pattern map — mirrors rqrr `reserved_cell` exactly.
 fn reserved_cell(version: usize, i: usize, j: usize) -> bool {
+    debug_assert!((1..=40).contains(&version), "reserved_cell: QR version {version} out of 1..=40");
     let ver = &VERSIONS[version];
     let size = version * 4 + 17;
 
@@ -196,6 +197,7 @@ fn mask_bit(mask: u8, y: usize, x: usize) -> bool {
 /// rqrr `read_data`'s zigzag exactly (down-up column pairs from the
 /// bottom-right, column 6 skipped).
 pub(crate) fn zigzag_positions(version: usize) -> Vec<(usize, usize)> {
+    debug_assert!((1..=40).contains(&version), "zigzag_positions: QR version {version} out of 1..=40");
     let size = version * 4 + 17;
     let mut positions = Vec::with_capacity(VERSIONS[version].total * 8);
     let mut y = size - 1;
@@ -277,6 +279,7 @@ pub(crate) struct Block {
 /// invisible to decoding but poisons an error-count margin. Pinned by the
 /// pristine matrix test: mixed-block cells (e.g. v5-Q) read t=0 here.
 pub(crate) fn deinterleave(codewords: &[u8], version: usize, ec_index: usize) -> Vec<Block> {
+    debug_assert!((1..=40).contains(&version), "deinterleave: QR version {version} out of 1..=40");
     let ver = &VERSIONS[version];
     let small = ver.ecc[ec_index];
     let large_count = (ver.total - small.bs * small.ns) / (small.bs + 1);
@@ -442,35 +445,43 @@ pub(crate) fn compute(
     let codewords = unmask_to_codewords(masked, bit_len, version, mask)?;
     let blocks = deinterleave(&codewords, version, format_bits_index(ec));
 
-    let mut worst_margin = 1.0f32;
-    let mut worst_errors = 0u8;
-    let mut worst_capacity = 0u8;
-    for block in &blocks {
+    let (margin, worst_errors, worst_capacity) = worst_block(blocks.iter().map(|block| {
         let synd = syndromes(&block.bytes, block.npar);
         let t = if synd.iter().all(|&s| s == 0) {
             0
         } else {
             error_count(&synd)
         };
-        #[expect(clippy::cast_precision_loss, reason = "npar ≤ 68, t ≤ 34")]
-        let margin = 1.0 - (2.0 * t as f32) / block.npar as f32;
-        // worst_errors/worst_capacity must describe the SAME block as worst_margin
-        // (the block closest to RS failure) — the LowCorrectionMargin hint reads them.
-        // `<=` so an all-clean symbol (every block margin == 1.0) still reports a real
-        // block capacity rather than 0 (which would violate the spec schema).
-        if margin <= worst_margin {
-            worst_margin = margin;
-            worst_errors = u8::try_from(t).unwrap_or(u8::MAX);
-            worst_capacity = u8::try_from(block.npar).unwrap_or(u8::MAX);
-        }
-    }
-    let margin = worst_margin.max(0.0);
+        (t, block.npar)
+    }));
     Some(UecReport {
         margin,
         grade: UecGrade::from_margin(margin),
         worst_block_errors: worst_errors,
         worst_block_capacity: worst_capacity,
     })
+}
+
+/// From each block's `(errors-corrected t, parity capacity npar)`, pick the block
+/// CLOSEST to RS failure (lowest correction margin) and return its
+/// `(margin, errors, capacity)` — all three describe the SAME block. The
+/// `LowCorrectionMargin` hint depends on this coupling (a prior bug reported the
+/// most-errors block's errors/capacity alongside the worst-margin block). `<=` so an
+/// all-clean symbol (every margin == 1.0) still reports a real capacity, not 0.
+fn worst_block(blocks: impl IntoIterator<Item = (usize, usize)>) -> (f32, u8, u8) {
+    let mut worst_margin = 1.0f32;
+    let mut errors = 0u8;
+    let mut capacity = 0u8;
+    for (t, npar) in blocks {
+        #[expect(clippy::cast_precision_loss, reason = "npar ≤ 68, t ≤ 34")]
+        let margin = 1.0 - (2.0 * t as f32) / npar as f32;
+        if margin <= worst_margin {
+            worst_margin = margin;
+            errors = u8::try_from(t).unwrap_or(u8::MAX);
+            capacity = u8::try_from(npar).unwrap_or(u8::MAX);
+        }
+    }
+    (worst_margin.max(0.0), errors, capacity)
 }
 
 #[cfg(test)]
@@ -725,6 +736,26 @@ mod tests {
         assert_eq!(UecGrade::from_margin(0.37), UecGrade::C);
         assert_eq!(UecGrade::from_margin(0.30), UecGrade::D);
         assert_eq!(UecGrade::from_margin(0.10), UecGrade::F);
+    }
+
+    #[test]
+    fn worst_block_tracks_lowest_margin_not_most_errors() {
+        // Block A: 5 errors / 20 parity → margin 1 - 10/20 = 0.50
+        // Block B: 3 errors /  8 parity → margin 1 -  6/8  = 0.25 (worse margin, FEWER errors)
+        // Regression (P0): worst_block reports the worst-MARGIN block (B), not most-errors (A).
+        let (margin, errors, capacity) = worst_block([(5, 20), (3, 8)]);
+        assert!((margin - 0.25).abs() < 1e-6, "margin {margin}");
+        assert_eq!(errors, 3, "errors must be the worst-margin block's (the bug reported 5)");
+        assert_eq!(capacity, 8, "capacity must be the worst-margin block's (the bug reported 20)");
+
+        // order-independent
+        let (_, e, c) = worst_block([(3, 8), (5, 20)]);
+        assert_eq!((e, c), (3, 8));
+
+        // all-clean (every margin == 1.0) still reports a real capacity, not 0
+        let (m, ze, zc) = worst_block([(0, 10), (0, 14)]);
+        assert!((m - 1.0).abs() < 1e-6);
+        assert_eq!((ze, zc), (0, 14), "all-clean must report a real block capacity, not 0");
     }
 
     #[test]
