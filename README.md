@@ -10,7 +10,7 @@ photo-captured QR codes. Deterministic, sovereign, pure Rust.
 [![crates.io](https://img.shields.io/crates/v/qrcode-ai-scanner?style=flat-square&logo=rust&logoColor=white&label=crates.io&color=dea584)](https://crates.io/crates/qrcode-ai-scanner)
 [![docs.rs](https://img.shields.io/docsrs/qrcode-ai-scanner?style=flat-square&logo=docsdotrs&logoColor=white&label=docs.rs)](https://docs.rs/qrcode-ai-scanner)
 [![npm](https://img.shields.io/npm/v/@supernovae-st/qrcode-ai-scanner?style=flat-square&logo=npm&logoColor=white&label=npm&color=CB3837)](https://www.npmjs.com/package/@supernovae-st/qrcode-ai-scanner)
-[![License](https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square)](LICENSE)
+[![License](https://img.shields.io/badge/license-AGPL--3.0%20or%20Commercial-blue?style=flat-square)](LICENSING.md)
 [![CI](https://img.shields.io/github/actions/workflow/status/supernovae-st/qrcode-ai-scanner/ci.yml?style=flat-square&logo=github&label=CI)](https://github.com/supernovae-st/qrcode-ai-scanner/actions)
 
 **Part of the [QR Code AI](https://qrcode-ai.com) ecosystem**
@@ -179,5 +179,9 @@ privately per the [Security Policy](SECURITY.md).
 
 ## License
 
-AGPL-3.0-or-later · © SuperNovae Studio. The [qrcode-ai.com](https://qrcode-ai.com)
-product consumes this library; so can you, under the AGPL's share-alike terms.
+**Dual-licensed** — full details in [`LICENSING.md`](LICENSING.md):
+- **AGPL-3.0-or-later** (free) for open-source, research, and personal use.
+- **Commercial license** for closed-source / proprietary products (mobile apps, SaaS) —
+  contact `studio.supernovae@gmail.com`.
+
+© SuperNovae Studio. The [qrcode-ai.com](https://qrcode-ai.com) product consumes this library.
