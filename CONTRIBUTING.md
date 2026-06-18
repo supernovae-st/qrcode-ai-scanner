@@ -1,11 +1,14 @@
 # Contributing
 
 Thanks for considering a contribution! `qrcode-ai-scanner` is one Rust core
-(`crates/qrcode-ai-scanner`) with thin façades on top (CLI, Node/napi,
-browser/WASM). Most changes land in the core; the façades stay thin.
+(`crates/qrcode-ai-scanner`) with thin façades on top (CLI, Node/napi, browser/WASM,
+Python/PyO3, and Kotlin+Swift via UniFFI). Most changes land in the core; the façades
+stay thin.
 
-By contributing you agree that your work is licensed under
-**AGPL-3.0-or-later**, the project's licence.
+By contributing you agree that your work is **dual-licensed** under both
+**AGPL-3.0-or-later AND** SuperNovae Studio's commercial license (inbound = outbound,
+dual) — see [`LICENSING.md`](LICENSING.md). This keeps the project free for the
+community and sustainable.
 
 ## Build & test
 
