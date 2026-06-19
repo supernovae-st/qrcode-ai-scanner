@@ -5,7 +5,7 @@
 > core `crates/qrcode-ai-scanner` to **pub.dev**, mirroring the canonical
 > binding surface (`scan` / `scanFrame`) that the Python (PyO3) and Node (napi)
 > bindings already expose.
-> **License**: AGPL-3.0-or-later (see RISK §11.1 — copyleft for app bundlers).
+> **License**: dual — AGPL-3.0-or-later OR commercial (RESOLVED 2026-06-18 · §11.1 + repo `LICENSING.md`).
 
 This plan assumes **zero context**. Every command, file path, and version is
 spelled out. Read top to bottom; do not skip §0 (preflight) or §2 (versions).
@@ -699,23 +699,27 @@ scope here (the existing `qrcode-ai-scanner-wasm` npm package covers browser).
 
 ## 11 · RISK section
 
-### 11.1 ⚠️ AGPL-3.0 copyleft — OPERATOR DECISION REQUIRED (do not resolve here)
+### 11.1 ✅ AGPL-3.0 copyleft — RESOLVED 2026-06-18: dual-license
+
+> **RESOLVED.** The operator picked **dual-license: AGPL-3.0-or-later OR
+> commercial** for the whole project (see repo-root `LICENSING.md` ·
+> commits `26cc231`+`ae5081d`). This is the "offer a dual-license / commercial
+> exception" option below. So the Flutter binding ships AGPL by default and the
+> README must point closed-source app bundlers at the commercial license
+> (`studio.supernovae@gmail.com`) — mirror `bindings/swift/Package.swift`'s
+> license header + the swift/kotlin READMEs. The blocker below is no longer open.
 
 The core and this binding are **AGPL-3.0-or-later**. A Flutter app that bundles
 this package links the AGPL Rust core into the shipped binary. Under AGPL's
 copyleft (and its network-use clause), **any app distributing or serving this
 package may be obligated to release its own source under AGPL-compatible
-terms.** This is materially stricter than MIT/Apache bindings app devs usually
-expect from pub.dev, and is a likely adoption blocker for closed-source apps.
+terms** — unless it holds the commercial license. This is materially stricter
+than MIT/Apache bindings app devs usually expect from pub.dev.
 
-This is **flagged for the operator to decide**, NOT resolved in this plan.
-Options the operator may weigh (no recommendation made here):
+Original options weighed (the operator chose the second):
 - ship as-is (AGPL) and document the obligation loudly on pub.dev;
-- offer a **dual-license / commercial exception** for app bundlers;
-- relicense the binding (only) under a more permissive license (requires the
-  core to permit it — it does not today).
-Engineer: do NOT pick one. Surface it; let the operator choose before the
-first pub.dev publish.
+- **offer a dual-license / commercial exception** for app bundlers ← CHOSEN;
+- relicense the binding (only) under a more permissive license.
 
 ### 11.2 Other risks
 

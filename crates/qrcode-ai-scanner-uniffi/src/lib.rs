@@ -40,7 +40,7 @@ pub fn scan(image: Vec<u8>, profile: String) -> Result<String, ScanBindingError>
         .profile(profile)
         .build()
         .scan(ImageInput::encoded(&image))
-        .map_err(|e| ScanBindingError::ScanFailed(e.to_string()))?;
+        .map_err(|e| ScanBindingError::ScanFailed(format!("{} [{}]", e, e.code())))?;
     serde_json::to_string(&report).map_err(|e| ScanBindingError::ScanFailed(e.to_string()))
 }
 
@@ -54,7 +54,7 @@ pub fn scan_frame(rgba: Vec<u8>, width: u32, height: u32, profile: String) -> Re
         .profile(profile)
         .build()
         .scan(ImageInput::rgba8(&rgba, width, height))
-        .map_err(|e| ScanBindingError::ScanFailed(e.to_string()))?;
+        .map_err(|e| ScanBindingError::ScanFailed(format!("{} [{}]", e, e.code())))?;
     serde_json::to_string(&report).map_err(|e| ScanBindingError::ScanFailed(e.to_string()))
 }
 
@@ -123,11 +123,16 @@ mod tests {
     }
 
     #[test]
-    fn garbage_bytes_map_to_scanfailed_never_panic() {
+    fn garbage_bytes_map_to_scanfailed_with_qrs_code() {
         // Not a decodable image → a real fault, surfaced as ScanFailed. The FFI
-        // boundary must never unwind a panic across it.
+        // boundary must never unwind a panic across it, AND the QRS-xxx wire code
+        // must ride in the message (parity with the node/wasm/flutter bindings —
+        // ScanError's Display omits the code, so the binding appends `[QRS-xxx]`).
         let err = scan(vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01], "full".into()).unwrap_err();
-        assert!(matches!(err, ScanBindingError::ScanFailed(_)), "got {err:?}");
+        let ScanBindingError::ScanFailed(msg) = err else {
+            panic!("expected ScanFailed, got {err:?}");
+        };
+        assert!(msg.contains("[QRS-001]"), "QRS code must ride in the message: {msg}");
     }
 
     #[test]

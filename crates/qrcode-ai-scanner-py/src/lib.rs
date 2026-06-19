@@ -68,7 +68,7 @@ fn scan<'py>(
             };
             builder.build().scan(ImageInput::encoded(&image))
         })
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        .map_err(|e| PyValueError::new_err(format!("{} [{}]", e, e.code())))?;
     report_to_py(py, &report)
 }
 
@@ -98,7 +98,7 @@ fn scan_frame<'py>(
             };
             builder.build().scan(ImageInput::rgba8(&rgba, width, height))
         })
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        .map_err(|e| PyValueError::new_err(format!("{} [{}]", e, e.code())))?;
     report_to_py(py, &report)
 }
 

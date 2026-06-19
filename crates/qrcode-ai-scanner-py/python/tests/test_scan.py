@@ -100,13 +100,15 @@ def test_bad_profile_raises():
 
 
 def test_invalid_image_raises():
-    with pytest.raises(ValueError):
+    # The QRS-xxx wire code must ride in the message (parity with node/wasm/uniffi/
+    # flutter — ScanError's Display omits it, so the binding appends `[QRS-xxx]`).
+    with pytest.raises(ValueError, match=r"\[QRS-001\]"):
         qr.scan(b"definitely not an image", "fast")
 
 
 def test_scan_frame_wrong_buffer_size_raises():
     # rgba must be width * height * 4 bytes — a mismatch is the most likely caller mistake.
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"\[QRS-004\]"):
         qr.scan_frame(b"\x00" * 10, 2, 2, "frame")  # expects 2*2*4 = 16
 
 
