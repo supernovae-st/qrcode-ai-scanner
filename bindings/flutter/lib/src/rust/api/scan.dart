@@ -18,14 +18,10 @@ Future<String> scan({required List<int> image, required String profile}) =>
 /// Decode + score a raw RGBA frame (e.g. a camera frame), no format roundtrip.
 ///
 /// `rgba` must be `width * height * 4` bytes.
-Future<String> scanFrame({
-  required List<int> rgba,
-  required int width,
-  required int height,
-  required String profile,
-}) => RustLib.instance.api.crateApiScanScanFrame(
-  rgba: rgba,
-  width: width,
-  height: height,
-  profile: profile,
-);
+Future<String> scanFrame(
+        {required List<int> rgba,
+        required int width,
+        required int height,
+        required String profile}) =>
+    RustLib.instance.api.crateApiScanScanFrame(
+        rgba: rgba, width: width, height: height, profile: profile);

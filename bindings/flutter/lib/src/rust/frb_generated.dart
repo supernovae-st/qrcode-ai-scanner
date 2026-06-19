@@ -35,8 +35,12 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 
   /// Initialize flutter_rust_bridge in mock mode.
   /// No libraries for FFI are loaded.
-  static void initMock({required RustLibApi api}) {
-    instance.initMockImpl(api: api);
+  static void initMock({
+    required RustLibApi api,
+  }) {
+    instance.initMockImpl(
+      api: api,
+    );
   }
 
   /// Dispose flutter_rust_bridge
@@ -70,27 +74,24 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
-        stem: 'qrcode_ai_scanner',
-        ioDirectory: 'rust/target/release/',
-        webPrefix: 'pkg/',
-        wasmBindgenName: 'wasm_bindgen',
-      );
+    stem: 'qrcode_ai_scanner',
+    ioDirectory: 'rust/target/release/',
+    webPrefix: 'pkg/',
+    wasmBindgenName: 'wasm_bindgen',
+  );
 }
 
 abstract class RustLibApi extends BaseApi {
   Future<void> crateApiScanInitApp();
 
-  Future<String> crateApiScanScan({
-    required List<int> image,
-    required String profile,
-  });
+  Future<String> crateApiScanScan(
+      {required List<int> image, required String profile});
 
-  Future<String> crateApiScanScanFrame({
-    required List<int> rgba,
-    required int width,
-    required int height,
-    required String profile,
-  });
+  Future<String> crateApiScanScanFrame(
+      {required List<int> rgba,
+      required int width,
+      required int height,
+      required String profile});
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -103,100 +104,83 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @override
   Future<void> crateApiScanInitApp() {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 1,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiScanInitAppConstMeta,
-        argValues: [],
-        apiImpl: this,
+    return handler.executeNormal(NormalTask(
+      callFfi: (port_) {
+        final serializer = SseSerializer(generalizedFrbRustBinding);
+        pdeCallFfi(generalizedFrbRustBinding, serializer,
+            funcId: 1, port: port_);
+      },
+      codec: SseCodec(
+        decodeSuccessData: sse_decode_unit,
+        decodeErrorData: null,
       ),
-    );
+      constMeta: kCrateApiScanInitAppConstMeta,
+      argValues: [],
+      apiImpl: this,
+    ));
   }
 
-  TaskConstMeta get kCrateApiScanInitAppConstMeta =>
-      const TaskConstMeta(debugName: "init_app", argNames: []);
+  TaskConstMeta get kCrateApiScanInitAppConstMeta => const TaskConstMeta(
+        debugName: "init_app",
+        argNames: [],
+      );
 
   @override
-  Future<String> crateApiScanScan({
-    required List<int> image,
-    required String profile,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_list_prim_u_8_loose(image, serializer);
-          sse_encode_String(profile, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 2,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_String,
-          decodeErrorData: sse_decode_String,
-        ),
-        constMeta: kCrateApiScanScanConstMeta,
-        argValues: [image, profile],
-        apiImpl: this,
+  Future<String> crateApiScanScan(
+      {required List<int> image, required String profile}) {
+    return handler.executeNormal(NormalTask(
+      callFfi: (port_) {
+        final serializer = SseSerializer(generalizedFrbRustBinding);
+        sse_encode_list_prim_u_8_loose(image, serializer);
+        sse_encode_String(profile, serializer);
+        pdeCallFfi(generalizedFrbRustBinding, serializer,
+            funcId: 2, port: port_);
+      },
+      codec: SseCodec(
+        decodeSuccessData: sse_decode_String,
+        decodeErrorData: sse_decode_String,
       ),
-    );
+      constMeta: kCrateApiScanScanConstMeta,
+      argValues: [image, profile],
+      apiImpl: this,
+    ));
   }
 
-  TaskConstMeta get kCrateApiScanScanConstMeta =>
-      const TaskConstMeta(debugName: "scan", argNames: ["image", "profile"]);
+  TaskConstMeta get kCrateApiScanScanConstMeta => const TaskConstMeta(
+        debugName: "scan",
+        argNames: ["image", "profile"],
+      );
 
   @override
-  Future<String> crateApiScanScanFrame({
-    required List<int> rgba,
-    required int width,
-    required int height,
-    required String profile,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_list_prim_u_8_loose(rgba, serializer);
-          sse_encode_u_32(width, serializer);
-          sse_encode_u_32(height, serializer);
-          sse_encode_String(profile, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 3,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_String,
-          decodeErrorData: sse_decode_String,
-        ),
-        constMeta: kCrateApiScanScanFrameConstMeta,
-        argValues: [rgba, width, height, profile],
-        apiImpl: this,
+  Future<String> crateApiScanScanFrame(
+      {required List<int> rgba,
+      required int width,
+      required int height,
+      required String profile}) {
+    return handler.executeNormal(NormalTask(
+      callFfi: (port_) {
+        final serializer = SseSerializer(generalizedFrbRustBinding);
+        sse_encode_list_prim_u_8_loose(rgba, serializer);
+        sse_encode_u_32(width, serializer);
+        sse_encode_u_32(height, serializer);
+        sse_encode_String(profile, serializer);
+        pdeCallFfi(generalizedFrbRustBinding, serializer,
+            funcId: 3, port: port_);
+      },
+      codec: SseCodec(
+        decodeSuccessData: sse_decode_String,
+        decodeErrorData: sse_decode_String,
       ),
-    );
+      constMeta: kCrateApiScanScanFrameConstMeta,
+      argValues: [rgba, width, height, profile],
+      apiImpl: this,
+    ));
   }
 
   TaskConstMeta get kCrateApiScanScanFrameConstMeta => const TaskConstMeta(
-    debugName: "scan_frame",
-    argNames: ["rgba", "width", "height", "profile"],
-  );
+        debugName: "scan_frame",
+        argNames: ["rgba", "width", "height", "profile"],
+      );
 
   @protected
   String dco_decode_String(dynamic raw) {
@@ -292,21 +276,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @protected
   void sse_encode_list_prim_u_8_loose(
-    List<int> self,
-    SseSerializer serializer,
-  ) {
+      List<int> self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
-    serializer.buffer.putUint8List(
-      self is Uint8List ? self : Uint8List.fromList(self),
-    );
+    serializer.buffer
+        .putUint8List(self is Uint8List ? self : Uint8List.fromList(self));
   }
 
   @protected
   void sse_encode_list_prim_u_8_strict(
-    Uint8List self,
-    SseSerializer serializer,
-  ) {
+      Uint8List self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putUint8List(self);
