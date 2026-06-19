@@ -11,7 +11,7 @@ Swift bindings (one serde wire contract).
 
 ```yaml
 dependencies:
-  qrcode_ai_scanner: ^0.3.0
+  qrcode_ai_scanner: ^0.4.0
 ```
 
 > **Toolchain prerequisite.** This package compiles the Rust core at *your* app's

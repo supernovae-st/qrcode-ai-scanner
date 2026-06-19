@@ -17,7 +17,7 @@ plugins {
 // The workspace version SSOT is root Cargo.toml [workspace.package].version.
 // This field is the drift point the architecture plan §3 closes with
 // `xtask sync-version` (regex/line edit of `version = "..."` below).
-version = "0.3.0"
+version = "0.4.0"
 group = "com.github.supernovae-st"
 
 android {

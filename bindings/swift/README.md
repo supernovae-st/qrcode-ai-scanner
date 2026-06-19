@@ -23,7 +23,7 @@ closed-source and therefore needs the **commercial** license. Contact
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/supernovae-st/qrcode-ai-scanner", from: "0.3.0"),
+    .package(url: "https://github.com/supernovae-st/qrcode-ai-scanner", from: "0.4.0"),
 ],
 // target deps:
 .product(name: "QrcodeAiScanner", package: "qrcode-ai-scanner"),

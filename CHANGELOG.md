@@ -1,8 +1,30 @@
 # Changelog
 
-All notable changes to this workspace. The four artifacts version together
-(`qrcode-ai-scanner` · `qrcode-ai-scanner-cli` · `@supernovae-st/qrcode-ai-scanner`
-· `@supernovae-st/qrcode-ai-scanner-wasm`).
+All notable changes to this workspace. Every surface versions together — the Rust
+crate + CLI, the npm node + wasm packages, the Python wheel, and the
+Kotlin/Android · Swift/iOS · Flutter bindings.
+
+## 0.4.0
+
+New binding surfaces + cross-binding consistency. The core decoding/scoring
+contract is unchanged from 0.3.0 (same `ScanReport`, score contract v3).
+
+### Bindings
+
+- **Kotlin/Android + Swift/iOS** (UniFFI → JitPack / SwiftPM) — the same
+  `ScanReport` as a JSON string. Mobile CI builds the AAR + xcframework.
+- **Flutter/Dart** (flutter_rust_bridge → pub.dev) — typed `ScanReport` facade
+  (sealed `Payload`/`Hint`, ISO 15415 / UEC cards), tolerant of unknown values.
+- **Consistency:** every binding (py · node · wasm · uniffi · flutter) now
+  surfaces the `[QRS-xxx]` wire code in errors (py + uniffi previously dropped it).
+- Python: optional `max_dimension` / `max_pixels` caps on `scan` / `scan_frame`.
+
+### Core
+
+- UEC worst-block now tracks the lowest-margin block (not the most-errors block);
+  all-clean symbols report a real capacity. Morph filter rewritten to an
+  output-identical monotonic-deque pass.
+- Dual-licensed: AGPL-3.0-or-later OR commercial (see `LICENSING.md`).
 
 ## 0.3.0 — 2026-06-12
 

@@ -1,4 +1,4 @@
-## 0.3.0
+## 0.4.0
 
 * Initial Flutter/Dart binding (flutter_rust_bridge v2) for `qrcode-ai-scanner`.
 * `QrcodeAiScanner.scan(bytes, profile:)` + `scanFrame(rgba, w, h, profile:)` —

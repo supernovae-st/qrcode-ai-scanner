@@ -7,7 +7,7 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'qrcode_ai_scanner'
-  s.version          = '0.3.0'
+  s.version          = '0.4.0'
   s.summary          = 'QR decoding + scannability scoring for artistic / AI-generated QR codes.'
   s.description      = <<-DESC
 Native Rust core (via flutter_rust_bridge) for QR decoding + scannability scoring.
