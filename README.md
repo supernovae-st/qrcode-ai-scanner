@@ -34,12 +34,12 @@ One Rust core, **five published surfaces** — all return the same versioned
 
 Per-surface guides in [`docs/`](docs/) · code examples in the Quick start below.
 
-**📱 Mobile (ships with the next tagged release):** Kotlin/Android (UniFFI →
-JitPack) and Swift/iOS (UniFFI → SwiftPM) bindings are built and CI-green today,
-returning the same JSON `ScanReport`. They publish on the next `v*` tag — setup
-in [`bindings/kotlin/`](bindings/kotlin/) and [`bindings/swift/`](bindings/swift/).
-A Flutter/Dart binding (flutter_rust_bridge → pub.dev) is planned next
-([`plans/`](plans/2026-06-17-binding-flutter-plan.md)).
+**📱 Mobile + cross-platform (ship with the next tagged release):** Kotlin/Android
+(UniFFI → JitPack), Swift/iOS (UniFFI → SwiftPM), and Flutter/Dart
+(flutter_rust_bridge → pub.dev) bindings are built and CI-green today, returning
+the same `ScanReport`. They publish on the next `v*` tag — setup in
+[`bindings/kotlin/`](bindings/kotlin/), [`bindings/swift/`](bindings/swift/), and
+[`bindings/flutter/`](bindings/flutter/).
 
 ## Why
 
