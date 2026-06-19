@@ -1,10 +1,15 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "xtask"]
-# The Python (PyO3/maturin) and UniFFI (cargo-ndk/xcodebuild) bindings are built
-# by foreign toolchains, not cargo workspace tooling — exclude them so
-# `cargo test/clippy --workspace` (CI core) skips them.
-exclude = ["crates/qrcode-ai-scanner-py", "crates/qrcode-ai-scanner-uniffi"]
+# The Python (PyO3/maturin), UniFFI (cargo-ndk/xcodebuild) and Flutter
+# (flutter_rust_bridge/cargokit) bindings are built by foreign toolchains, not
+# cargo workspace tooling — exclude them so `cargo test/clippy --workspace`
+# (CI core) skips them. The flutter crate lives inside its pub.dev package.
+exclude = [
+  "crates/qrcode-ai-scanner-py",
+  "crates/qrcode-ai-scanner-uniffi",
+  "bindings/flutter/rust",
+]
 
 [workspace.package]
 version = "0.3.0"

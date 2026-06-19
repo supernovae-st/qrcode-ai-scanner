@@ -1,0 +1,52 @@
+// Android build for the qrcode_ai_scanner Flutter plugin. The native code is
+// the Rust crate in ../rust, compiled per-ABI by cargokit at app-build time
+// (NOT the C stub in ../src — that's only the iOS forwarder's framework shim).
+
+group = "studio.supernovae.qrcode_ai_scanner"
+version = "1.0"
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        classpath("com.android.tools.build:gradle:8.5.2")
+    }
+}
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: "com.android.library"
+
+android {
+    namespace = "studio.supernovae.qrcode_ai_scanner"
+    compileSdk = 34
+
+    // NDK from the consuming app's /android/app/build.gradle. cargokit links the
+    // .so 16 KB-page-aligned with NDK r27+ (Android 15+) — pin r27 in CI.
+    ndkVersion = android.ndkVersion
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    defaultConfig {
+        minSdk = 21
+    }
+}
+
+// cargokit compiles ../rust into the per-ABI native lib `libqrcode_ai_scanner.so`
+// and bundles it into the AAR. This replaces the plugin_ffi C externalNativeBuild.
+apply from: "../cargokit/gradle/plugin.gradle"
+cargokit {
+    manifestDir = "../rust"
+    libname = "qrcode_ai_scanner"
+}

@@ -1,0 +1,116 @@
+name: flutter
+
+# Flutter/Dart binding (bindings/flutter), built from the in-package Rust crate
+# (bindings/flutter/rust) via flutter_rust_bridge + cargokit. The host `test` job
+# runs on every push/PR; the native build jobs + pub.dev publish are tag-gated.
+#
+# pub.dev publish uses OIDC automated publishing (no token) — configure it on the
+# package admin page first (bind this repo + tag pattern `v{{version}}`). Unlike
+# npm/PyPI there is NO skip-existing: bump the pubspec version before tagging.
+#
+# This workflow takes no untrusted event input into any run: step (github.ref /
+# github.event_name are used only in if: conditions), so it is injection-safe.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: bindings/flutter
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Host gate: analyze + the report.dart contract tests, plus a FRB regen-drift
+  # check so a change to rust/src/api/*.rs without re-running `generate` fails CI.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/flutter/rust
+      - uses: subosito/flutter-action@e938fdf56512cc96ef2f93601a5a40bde3801046 # v2.19.0
+        with:
+          channel: stable
+      - run: flutter pub get
+      - run: flutter analyze
+      - name: report.dart contract tests (host)
+        run: flutter test
+      - name: FRB bindings are in sync with rust/src/api (no drift)
+        run: |
+          cargo install flutter_rust_bridge_codegen --version 2.12.0 --locked
+          flutter_rust_bridge_codegen generate
+          git diff --exit-status -- lib/src/rust rust/src/frb_generated.rs \
+            || { echo '::error::generated bindings are stale — run flutter_rust_bridge_codegen generate and commit'; exit 1; }
+
+  build-android:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/flutter/rust
+      # NDK r27 = 16 KB page-size safe for Android 15+ (cargokit links the .so).
+      - uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
+        with:
+          ndk-version: r27
+      - uses: subosito/flutter-action@e938fdf56512cc96ef2f93601a5a40bde3801046 # v2.19.0
+        with:
+          channel: stable
+      - run: cargo install cargo-ndk --version 4.1.2 --locked
+      # `flutter build apk` drives cargokit, which cross-compiles the Rust crate
+      # per ABI and bundles the .so — the real end-to-end Android build.
+      - name: build the example APK (exercises cargokit android path)
+        working-directory: bindings/flutter/example
+        run: flutter build apk --debug
+
+  build-ios:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: macos-15 # Xcode 16, Apple silicon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/flutter/rust
+      - uses: subosito/flutter-action@e938fdf56512cc96ef2f93601a5a40bde3801046 # v2.19.0
+        with:
+          channel: stable
+      # `flutter build ios` drives cargokit's podspec script_phase (builds the
+      # static lib, force-loads it) — the real end-to-end iOS build.
+      - name: build the example iOS app (exercises cargokit ios path)
+        working-directory: bindings/flutter/example
+        run: flutter build ios --debug --no-codesign
+
+  publish:
+    name: publish to pub.dev
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [test, build-android, build-ios]
+    runs-on: ubuntu-latest
+    environment: pub.dev
+    permissions:
+      id-token: write # OIDC — pub.dev automated publishing, no token
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@e938fdf56512cc96ef2f93601a5a40bde3801046 # v2.19.0
+        with:
+          channel: stable
+      - run: flutter pub get
+      - name: publish (OIDC)
+        run: flutter pub publish --force

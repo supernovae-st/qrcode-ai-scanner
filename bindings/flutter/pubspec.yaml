@@ -1,0 +1,46 @@
+name: qrcode_ai_scanner
+description: >-
+  QR decoding + scannability scoring for artistic / AI-generated QR codes — the
+  codes that break standard scanners. Native Rust core via flutter_rust_bridge.
+version: 0.3.0
+repository: https://github.com/supernovae-st/qrcode-ai-scanner
+homepage: https://github.com/supernovae-st/qrcode-ai-scanner
+topics:
+  - qr
+  - barcode
+  - scanner
+  - ffi
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+  flutter: ">=3.19.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # EXACT pin, NOT ^2.12.0 — the Dart runtime, the Rust crate (rust/Cargo.toml
+  # `=2.12.0`), and the codegen CLI must be the SAME version or FRB panics at
+  # runtime with a codec-version mismatch (the cost: `pub publish` warns about a
+  # tight constraint; that's the accepted FRB lock-step tradeoff). Bump all three
+  # together. The generated bindings under lib/src/rust are tied to this version.
+  flutter_rust_bridge: 2.12.0
+  plugin_platform_interface: ^2.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  integration_test:
+    sdk: flutter
+
+# Dual-licensed AGPL-3.0-or-later OR commercial — see the repo-root LICENSING.md.
+# A closed-source app on the stores almost always needs the commercial license
+# (it links the AGPL Rust core): studio.supernovae@gmail.com.
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        ffiPlugin: true
+      ios:
+        ffiPlugin: true

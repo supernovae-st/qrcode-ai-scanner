@@ -1,0 +1,44 @@
+# Flutter/Dart bindings crate for qrcode-ai-scanner (flutter_rust_bridge v2).
+#
+# LOCATION (deliberate): the Rust crate lives INSIDE the Flutter package
+# (bindings/flutter/rust/) rather than the repo's crates/ tree. This is REQUIRED,
+# not a style preference — `dart pub publish` only ships files under the package
+# root, so a crate in crates/ would never reach pub.dev consumers (who build it
+# at app-build time via cargokit). The binding plan §3.2 sanctions this fallback.
+#
+# Excluded from the cargo workspace (root Cargo.toml): built by cargokit at
+# Flutter app-build time, not by `cargo --workspace`. Versions are spelled out
+# (excluded crates cannot inherit `workspace = true`). Edition stays 2021 (what
+# FRB's `integrate` generated frb_generated.rs against); the crate may depend on
+# the edition-2024 core regardless (editions are per-crate).
+[package]
+name = "qrcode_ai_scanner"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.87"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/supernovae-st/qrcode-ai-scanner"
+description = "Flutter/Dart bindings for qrcode-ai-scanner — QR decoding + scannability scoring for artistic / AI-generated QR codes."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+flutter_rust_bridge = "=2.12.0"
+serde_json = "1"
+# The core, aliased to dodge a name clash with this crate's lib name (both
+# default to `qrcode_ai_scanner`) — same trick as the py/uniffi bindings. The
+# `serde` feature is the JSON wire contract shared by every surface.
+scanner-core = { package = "qrcode-ai-scanner", path = "../../../crates/qrcode-ai-scanner", features = ["serde"] }
+
+# The flutter crate is workspace-excluded, so the root [profile.release]
+# (lto/strip) does NOT apply — restate it or the native lib ships unstripped and
+# un-LTO'd, bloating every ABI (binding plan §10 gotcha #7).
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
