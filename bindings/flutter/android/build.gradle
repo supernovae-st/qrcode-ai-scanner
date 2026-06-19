@@ -12,7 +12,10 @@ buildscript {
     }
 
     dependencies {
-        classpath("com.android.tools.build:gradle:8.5.2")
+        // Match the example app's AGP (example/android/settings.gradle.kts) — a
+        // version skew between the plugin and the consuming app's AGP breaks the
+        // build. AGP 8.x is also what the vendored cargokit supports (not AGP 9).
+        classpath("com.android.tools.build:gradle:8.7.3")
     }
 }
 

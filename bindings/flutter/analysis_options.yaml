@@ -1,4 +1,14 @@
 include: package:flutter_lints/flutter.yaml
 
+analyzer:
+  exclude:
+    # Vendored flutter_rust_bridge/cargokit build tooling — its own Dart project
+    # with its own pubspec/deps (resolved only when its build runs). Not our code;
+    # analyzing it here fails CI on unresolved imports (package:github/http/...).
+    - cargokit/**
+    - rust_builder/**
+    # FRB-generated bridge — machine output, carries its own ignore_for_file.
+    - lib/src/rust/**
+
 # Additional information about this file can be found at
 # https://dart.dev/guides/language/analysis-options
