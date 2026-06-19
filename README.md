@@ -21,8 +21,8 @@ photo-captured QR codes. Deterministic, sovereign, pure Rust.
 
 ## Install — pick your surface
 
-One Rust core, **four ways to use it** — all return the same versioned
-[`ScanReport`](spec/) contract.
+One Rust core, **five published surfaces** — all return the same versioned
+[`ScanReport`](spec/) contract (mobile bindings ship next, below).
 
 | Surface | Package | Install | One-liner |
 |---|---|---|---|
@@ -33,6 +33,13 @@ One Rust core, **four ways to use it** — all return the same versioned
 | 🐍 **Python** | [`qrcode-ai-scanner`](https://pypi.org/project/qrcode-ai-scanner/) | `pip install qrcode-ai-scanner` | `import qrcode_ai_scanner as q; q.scan(png_bytes)` |
 
 Per-surface guides in [`docs/`](docs/) · code examples in the Quick start below.
+
+**📱 Mobile (ships with the next tagged release):** Kotlin/Android (UniFFI →
+JitPack) and Swift/iOS (UniFFI → SwiftPM) bindings are built and CI-green today,
+returning the same JSON `ScanReport`. They publish on the next `v*` tag — setup
+in [`bindings/kotlin/`](bindings/kotlin/) and [`bindings/swift/`](bindings/swift/).
+A Flutter/Dart binding (flutter_rust_bridge → pub.dev) is planned next
+([`plans/`](plans/2026-06-17-binding-flutter-plan.md)).
 
 ## Why
 
