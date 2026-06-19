@@ -30,17 +30,18 @@ let package = Package(
         ),
         // The compiled Rust, as a binary xcframework.
         //
-        // DEV (default below): a local-path xcframework built by CI / the build
-        // commands into `build/` (git-ignored). Uncomment for local iteration.
+        // DEV (the path form below): a local-path xcframework built by the
+        // release.sh build steps into `build/` (git-ignored). This is the
+        // pre-first-release default; it does NOT resolve for a remote consumer.
+        // `bindings/swift/release.sh vX.Y.Z` rewrites this to the url+checksum
+        // RELEASE form (and mobile.yml Guard A blocks a tag that's still path
+        // mode). After the first release the committed form is url+checksum.
         .binaryTarget(
             name: "QrcodeAiScannerFFI",
             path: "build/QrcodeAiScannerFFI.xcframework"
         ),
-        // RELEASE: switch to a url + checksum pointing at the GitHub release
-        // asset. CI zips the xcframework, attaches it to the `vX.Y.Z` release,
-        // and computes the checksum (`swift package compute-checksum`). On
-        // release, replace the `.binaryTarget` above with this form (CI fills
-        // the <VERSION> and <CHECKSUM> placeholders):
+        // RELEASE form that release.sh writes (url + checksum of the exact asset
+        // it publishes to the vX.Y.Z release; Guard B re-verifies it in CI):
         //
         // .binaryTarget(
         //     name: "QrcodeAiScannerFFI",

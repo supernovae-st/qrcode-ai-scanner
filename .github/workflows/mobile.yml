@@ -40,8 +40,30 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The uniffi + py crates are workspace-EXCLUDED, so they can't inherit
+      # `version.workspace = true` — their versions (and the Kotlin module's) are
+      # hand-spelled and silently drift from the workspace SSOT. Catch it here on
+      # every PR (the `xtask sync-version` the plan references doesn't exist yet).
+      - name: versions agree across all publish surfaces
+        run: |
+          v() { grep -m1 -E '^version' "$1" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'; }
+          ws=$(v Cargo.toml)
+          declare -A got=(
+            [workspace]="$ws"
+            [uniffi]="$(v crates/qrcode-ai-scanner-uniffi/Cargo.toml)"
+            [python]="$(v crates/qrcode-ai-scanner-py/Cargo.toml)"
+            [kotlin]="$(v bindings/kotlin/qrcodeaiscanner/build.gradle.kts)"
+          )
+          fail=0
+          for k in "${!got[@]}"; do
+            echo "  $k = ${got[$k]}"
+            [ "${got[$k]}" = "$ws" ] || { echo "::error::$k version ${got[$k]} != workspace $ws"; fail=1; }
+          done
+          exit $fail
       - name: build the uniffi wrapper (host)
         run: cargo build --release --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml
+      - name: test the uniffi wrapper (profile parse · JSON envelope · FFI-safety no-panic)
+        run: cargo test --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml
       - name: smoke-generate Kotlin bindings (metadata reads)
         run: |
           cargo run --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml --bin uniffi-bindgen -- \
@@ -77,6 +99,16 @@ jobs:
             generate --library crates/qrcode-ai-scanner-uniffi/target/release/libqrcode_ai_scanner_uniffi.so \
             --language kotlin \
             --out-dir bindings/kotlin/qrcodeaiscanner/src/main/kotlin
+      # The generated package MUST match consumer-rules.pro's -keep rule, or an
+      # R8-minified consuming app crashes at runtime (the keep silently protects
+      # nothing). Pin the contract here.
+      - name: generated Kotlin package matches the ProGuard keep rule
+        run: |
+          pkg=uniffi.qrcode_ai_scanner_uniffi
+          grep -rq "^package $pkg" bindings/kotlin/qrcodeaiscanner/src/main/kotlin \
+            || { echo "::error::generated package != '$pkg' (update consumer-rules.pro)"; exit 1; }
+          grep -q "keep class $pkg" bindings/kotlin/qrcodeaiscanner/consumer-rules.pro \
+            || { echo "::error::consumer-rules.pro has no -keep for '$pkg'"; exit 1; }
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -103,6 +135,18 @@ jobs:
       contents: write # attach the xcframework to the GitHub release on tags
     steps:
       - uses: actions/checkout@v4
+      # A committed Package.swift in dev (local-path) mode does NOT resolve for a
+      # remote SwiftPM consumer — the path is git-ignored. A tagged release MUST
+      # carry the url+checksum binaryTarget. bindings/swift/release.sh produces it.
+      - name: guard — a tagged SwiftPM release needs url+checksum (not dev path mode)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          if grep -q 'path: "build/' bindings/swift/Package.swift; then
+            echo "::error::bindings/swift/Package.swift is still in local-path (dev) mode."
+            echo "::error::Run  bindings/swift/release.sh $GITHUB_REF_NAME  (on a mac) and commit"
+            echo "::error::the url+checksum Package.swift it produces BEFORE pushing the tag."
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
@@ -144,15 +188,41 @@ jobs:
             build/QrcodeAiScannerFFI.xcframework.zip
             build/checksum.txt
           if-no-files-found: error
-      # On a tag: publish the xcframework as a GitHub release asset so SwiftPM
-      # consumes it via .binaryTarget(url:checksum:). gh CLI = no extra action.
-      - name: attach xcframework to the GitHub release (tags only)
+      # On a tag: make sure the release carries the xcframework, then VERIFY the
+      # published asset's checksum equals the one Package.swift pins — so a
+      # SwiftPM consumer's url+checksum resolution is guaranteed to succeed.
+      # bindings/swift/release.sh is the authoritative publisher (it builds the
+      # exact asset whose checksum it pins); this step is the safety net + the
+      # CI-built fallback when no asset was attached yet.
+      - name: publish + verify the xcframework asset (tags only)
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes || true
-          gh release upload "$GITHUB_REF_NAME" \
-            build/QrcodeAiScannerFFI.xcframework.zip build/checksum.txt --clobber
-          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/QrcodeAiScannerFFI.xcframework.zip"
-          echo "::notice::SwiftPM — set bindings/swift/Package.swift .binaryTarget url=$url checksum=$(cat build/checksum.txt)"
+          set -euo pipefail
+          # 1. The release must exist — create if absent, else confirm. Never mask
+          #    a real create failure behind `|| true` (that yields a confusing
+          #    "release not found" on the next line instead of the root cause).
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes 2>/dev/null \
+            || gh release view "$GITHUB_REF_NAME" >/dev/null
+          # 2. Attach the CI-built asset ONLY if none is present — never clobber a
+          #    release.sh-published artifact, whose checksum is what Package.swift pins.
+          if gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' \
+               | grep -qx 'QrcodeAiScannerFFI.xcframework.zip'; then
+            echo "::notice::xcframework asset already attached — leaving it untouched."
+          else
+            gh release upload "$GITHUB_REF_NAME" build/QrcodeAiScannerFFI.xcframework.zip build/checksum.txt
+            echo "::notice::attached the CI-built xcframework."
+          fi
+          # 3. VERIFY the PUBLISHED asset (whoever uploaded it) matches the pin.
+          gh release download "$GITHUB_REF_NAME" -p QrcodeAiScannerFFI.xcframework.zip -O /tmp/published.zip --clobber
+          published="$(swift package compute-checksum /tmp/published.zip)"
+          pinned="$(grep -oE '[a-f0-9]{64}' bindings/swift/Package.swift | head -n1 || true)"
+          echo "published asset : $published"
+          echo "Package.swift   : ${pinned:-<none>}"
+          if [ "$published" != "${pinned:-}" ]; then
+            echo "::error::checksum mismatch — SwiftPM would reject this release."
+            echo "::error::Re-run  bindings/swift/release.sh $GITHUB_REF_NAME  so the pin matches the asset."
+            exit 1
+          fi
+          echo "::notice::SwiftPM checksum verified — the release resolves cleanly."

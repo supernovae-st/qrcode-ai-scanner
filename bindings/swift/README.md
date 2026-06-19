@@ -76,3 +76,22 @@ xcodebuild -create-xcframework \
   -library build/sim/libqrcode_ai_scanner_uniffi.a -headers build/swift/Modules \
   -output bindings/swift/build/QrcodeAiScannerFFI.xcframework
 ```
+
+## Cutting a release (iOS)
+
+A SwiftPM binary target resolves a remote consumer via `url + checksum`, and the
+checksum must match the **exact** asset the release serves. `release.sh` is the
+one place that produces a matching pair — it builds the xcframework, computes its
+checksum, and pins `Package.swift` from a single local build. Run it on a mac:
+
+```bash
+bindings/swift/release.sh v0.4.0
+```
+
+It mutates only the working tree (rewrites `Package.swift`, fills `build/`) and
+prints the exact `git` + `gh release` commands — the network steps stay in your
+hands. The tag then fires `mobile.yml`, where two guards make a broken release
+impossible: **Guard A** rejects a tag whose `Package.swift` is still in dev
+(`path:`) mode, and **Guard B** re-downloads the published asset and fails if its
+checksum ≠ the pin. So a tagged release either resolves cleanly for consumers or
+never ships.

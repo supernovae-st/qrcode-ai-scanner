@@ -78,3 +78,6 @@ bindings/swift/Sources/QrcodeAiScanner/
 bindings/swift/build/
 *.xcframework
 *.xcframework.zip
+# Repo-root build/ staging dir that mobile.yml + bindings/swift/release.sh write
+# into (xcframework + checksum.txt + swift headers/modulemap + lipo'd .a's).
+/build/

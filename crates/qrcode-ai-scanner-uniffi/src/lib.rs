@@ -57,3 +57,103 @@ pub fn scan_frame(rgba: Vec<u8>, width: u32, height: u32, profile: String) -> Re
         .map_err(|e| ScanBindingError::ScanFailed(e.to_string()))?;
     serde_json::to_string(&report).map_err(|e| ScanBindingError::ScanFailed(e.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use serde_json::Value;
+
+    // The clean v5-Q QR fixture the core's spec_golden test also uses. The crate
+    // is workspace-EXCLUDED, so CARGO_MANIFEST_DIR is crates/qrcode-ai-scanner-uniffi.
+    fn clean_qr() -> Vec<u8> {
+        std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/clean/gen_v5_q.png"
+        ))
+        .expect("clean fixture present")
+    }
+
+    // Every binding emits the same 5-key ScanReport envelope
+    // (spec/scan-report.schema.json). Assert the contract structurally, not by
+    // `!is_empty()`.
+    fn assert_envelope(json: &str) -> Value {
+        let v: Value = serde_json::from_str(json).expect("binding output is valid JSON");
+        let obj = v.as_object().expect("report is a JSON object");
+        for key in ["detections", "score", "hints", "trace", "versions"] {
+            assert!(obj.contains_key(key), "missing required key `{key}` in {json}");
+        }
+        assert!(v["detections"].is_array(), "detections must be an array");
+        v
+    }
+
+    #[test]
+    fn scan_clean_fixture_decodes_to_envelope_with_text() {
+        let v = assert_envelope(&scan(clean_qr(), "full".into()).unwrap());
+        let dets = v["detections"].as_array().unwrap();
+        assert_eq!(dets.len(), 1, "single-QR fixture → exactly one detection");
+        let text = dets[0]["content"]["text"]
+            .as_str()
+            .expect("decoded text is a string");
+        assert!(!text.is_empty(), "a clean QR must decode to non-empty text");
+        // full profile scores the primary detection (frame leaves it null).
+        assert!(v["score"].is_object(), "full profile must populate score");
+    }
+
+    #[test]
+    fn all_wire_profiles_parse_and_keep_the_envelope() {
+        // The cross-binding profile contract: full · fast · frame are the only
+        // valid names, and all three emit the 5-key envelope (frame → score:null,
+        // which the schema's anyOf allows).
+        for profile in ["full", "fast", "frame"] {
+            let out = scan(clean_qr(), profile.into())
+                .unwrap_or_else(|e| panic!("profile `{profile}` should scan: {e}"));
+            assert_envelope(&out);
+        }
+    }
+
+    #[test]
+    fn unknown_profile_is_a_typed_error_not_a_scan() {
+        let err = scan(clean_qr(), "turbo".into()).unwrap_err();
+        match err {
+            ScanBindingError::UnknownProfile(name) => assert_eq!(name, "turbo"),
+            other => panic!("expected UnknownProfile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn garbage_bytes_map_to_scanfailed_never_panic() {
+        // Not a decodable image → a real fault, surfaced as ScanFailed. The FFI
+        // boundary must never unwind a panic across it.
+        let err = scan(vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01], "full".into()).unwrap_err();
+        assert!(matches!(err, ScanBindingError::ScanFailed(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn scan_frame_buffer_mismatch_maps_to_scanfailed_never_panic() {
+        // 2x2 RGBA needs 16 bytes; pass 4. The core validates the buffer length
+        // and returns an error — the binding surfaces it, never panics.
+        let err = scan_frame(vec![0u8; 4], 2, 2, "frame".into()).unwrap_err();
+        assert!(matches!(err, ScanBindingError::ScanFailed(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn scan_frame_zero_dimension_maps_to_scanfailed_never_panic() {
+        let err = scan_frame(Vec::new(), 0, 0, "frame".into()).unwrap_err();
+        assert!(matches!(err, ScanBindingError::ScanFailed(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn scan_frame_blank_buffer_is_no_qr_not_an_error() {
+        // A valid all-white 16x16 RGBA frame decodes to "nothing found" — a
+        // normal empty-detections report, NOT an error.
+        let out = scan_frame(vec![0xFFu8; 16 * 16 * 4], 16, 16, "frame".into())
+            .expect("a valid blank frame is not an error");
+        let v = assert_envelope(&out);
+        assert!(
+            v["detections"].as_array().unwrap().is_empty(),
+            "a blank frame finds no QR"
+        );
+    }
+}
