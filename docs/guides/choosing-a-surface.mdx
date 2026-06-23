@@ -1,0 +1,45 @@
+---
+title: "Choosing a surface"
+description: "Seven ways to run the same scanner — pick by where your code runs and what it needs to install."
+---
+
+One Rust core, seven surfaces, the [same JSON report](/api/report). Pick by where
+your code runs:
+
+| Your context | Surface | Install |
+|---|---|---|
+| Rust app / service | [`qrcode-ai-scanner`](/api/rust) | `cargo add qrcode-ai-scanner` |
+| Shell scripts, CI gates | [CLI `qrscan`](/api/cli) | `cargo install qrcode-ai-scanner-cli` |
+| Node server (Nuxt/Next/worker) | [`@supernovae-st/qrcode-ai-scanner`](/api/node) | `npm i …` |
+| Browser | [`…-wasm`](/api/wasm) | `npm i …-wasm` |
+| Python | [`qrcode-ai-scanner`](/api/python) | `pip install qrcode-ai-scanner` |
+| Native Android / iOS | [Kotlin / Swift](/api/mobile) | JitPack / SwiftPM |
+| Cross-platform app | [Flutter](/api/flutter) | `qrcode_ai_scanner` (pub.dev) |
+
+## What each surface needs to *install*
+
+Most surfaces ship **prebuilt** — your build needs nothing but the package:
+
+- **Rust / CLI** — a Rust toolchain (you already have it).
+- **Node / WASM** — prebuilt native binary (Node) / `.wasm` (browser). No Rust.
+- **Python** — one prebuilt `abi3` wheel. No Rust.
+- **Kotlin/Android** — the AAR bundles the per-ABI `.so` (built on JitPack). **No Rust.**
+- **Swift/iOS** — a prebuilt `.xcframework` binary target. **No Rust.**
+
+The one exception:
+
+- **Flutter** — compiles the Rust core at *your app's* build time (cargokit), so the
+  building machine needs the **Rust toolchain + Android NDK**. A one-time `rustup`
+  install; no Rust knowledge required. (A prebuilt-binary distribution that removes
+  this is on the roadmap — see the binding plan.)
+
+## Picking a profile
+
+Every surface takes a `profile`: `full` (full ladder + scannability score — the
+generator quality gate), `fast` (reduced, for upload tools), `frame` (per-frame
+camera decode, no scoring). Default is `full` (`frame` for the `scanFrame` entry
+points). Bound the worst case with a budget (see each surface's API page).
+
+Whatever you pick, the result is the **same versioned [`ScanReport`](/api/report)** —
+machine-validated against the [normative spec](https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/spec)
+in CI, so you can prototype on one surface and ship on another.

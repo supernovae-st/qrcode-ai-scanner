@@ -41,6 +41,7 @@
           {
             "group": "Guides",
             "pages": [
+              "guides/choosing-a-surface",
               "guides/nuxt-verify",
               "guides/agents"
             ]
