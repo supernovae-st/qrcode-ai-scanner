@@ -1,0 +1,55 @@
+---
+title: "Flutter — qrcode_ai_scanner"
+description: "flutter_rust_bridge binding — a fully typed ScanReport, scans on the Rust worker pool."
+---
+
+```yaml
+dependencies:
+  qrcode_ai_scanner: ^0.4.0
+```
+
+<Warning>
+This package compiles the Rust core at **your app's build time** (via cargokit) —
+the building machine needs the **Rust toolchain (≥1.87)** and, for Android, the
+**NDK (r27+)**. A one-time `rustup` install; no Rust knowledge required.
+</Warning>
+
+## API
+
+```dart
+import 'package:qrcode_ai_scanner/qrcode_ai_scanner.dart';
+
+await QrcodeAiScanner.init();                       // once, before any scan
+
+// encoded image (PNG/JPEG/WebP/GIF) → typed ScanReport
+final report = await QrcodeAiScanner.scan(pngBytes); // profile: 'full' (default)
+
+// raw RGBA camera frame (width*height*4 bytes), no scoring
+final frame = await QrcodeAiScanner.scanFrame(rgba, w, h); // profile: 'frame'
+```
+
+Scans run on flutter_rust_bridge's Rust worker pool, so `await` never blocks the
+UI isolate. Profiles: `'full'` · `'fast'` · `'frame'`.
+
+Unlike the Kotlin/Swift bindings (which return a JSON string), Flutter ships a
+**typed** [`ScanReport`](/api/report) — sealed `Payload`/`Hint`, `Score` with the
+ISO 15415 / UEC grade cards. Unknown enum values and payload kinds decode to
+`unknown` / catch-all variants, never a throw (additively forward-compatible).
+
+```dart
+if (report.detections.isEmpty) {
+  // 'no QR found' — a result, not an error
+} else {
+  final d = report.detections.first;
+  print('${d.content.text}  •  ${d.payload.kind}  •  ${report.score?.grade.name}');
+}
+```
+
+## Errors + license
+
+Invalid input / a bad profile throws with the `[QRS-xxx]` wire code in the
+message ([catalog](/api/errors)). The report shape is the [one contract](/api/report).
+
+Dual-licensed AGPL-3.0-or-later OR commercial. An app on the stores links the
+AGPL core and almost always needs the **commercial** license —
+`studio.supernovae@gmail.com`.

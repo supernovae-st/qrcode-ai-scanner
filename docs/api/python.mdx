@@ -1,0 +1,56 @@
+---
+title: "Python — qrcode-ai-scanner"
+description: "Native PyO3 binding — one abi3 wheel for CPython 3.8 → 3.14, GIL released during the scan."
+---
+
+```bash
+pip install qrcode-ai-scanner
+```
+
+One `abi3` wheel covers CPython 3.8 → 3.14. Prebuilt for macOS (arm64/x64),
+Linux (manylinux + musllinux, x64/aarch64), and Windows (x64). The scan releases
+the GIL, so it never blocks other Python threads.
+
+## API
+
+```python
+import qrcode_ai_scanner as q
+
+# encoded image (PNG · JPEG · WebP · GIF) → ScanReport as a dict
+report = q.scan(
+    image_bytes,
+    "full",              # "full" | "fast" | "frame"   (default "full")
+    max_dimension=4096,  # anti-DoS — LOWER THESE for untrusted uploads
+    max_pixels=16_000_000,
+)
+
+# raw RGBA camera frame (width * height * 4 bytes), no format roundtrip
+frame = q.scan_frame(rgba_bytes, width, height, "frame")
+
+q.version()  # "0.4.0"
+```
+
+`scan` / `scan_frame` return the [`ScanReport`](/api/report) as a plain dict
+(`detections`, `score`, `hints`, `trace`, `versions`) — schema-conformant, since
+the dict is built from the same serde JSON every binding ships. Types ship too
+(`qrcode_ai_scanner.pyi`).
+
+## Recipe (upload endpoint)
+
+```python
+def handle_upload(image_bytes: bytes) -> dict:
+    try:
+        report = q.scan(image_bytes, "full", max_dimension=4096, max_pixels=16_000_000)
+    except ValueError as e:
+        # message carries the wire code, e.g. "...: bad image [QRS-001]"
+        raise BadRequest(str(e))
+    if not report["detections"]:
+        return {"ok": False, "reason": "no_qr"}      # not an error — just empty
+    d = report["detections"][0]
+    untrusted = any(h["hint"] == "low_correction_margin" for h in report["hints"])
+    return {"ok": True, "text": d["content"]["text"], "kind": d["payload"]["kind"],
+            "score": (report["score"] or {}).get("value"), "untrusted": untrusted}
+```
+
+Invalid input / a bad profile raises `ValueError` with a `[QRS-xxx]`-tagged
+message ([catalog](/api/errors)). The report shape is the [one contract](/api/report).

@@ -63,7 +63,10 @@
               "api/rust",
               "api/cli",
               "api/node",
-              "api/wasm"
+              "api/wasm",
+              "api/python",
+              "api/mobile",
+              "api/flutter"
             ]
           }
         ]

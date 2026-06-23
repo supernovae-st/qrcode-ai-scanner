@@ -1,0 +1,54 @@
+---
+title: "Mobile — Kotlin/Android + Swift/iOS"
+description: "Native UniFFI bindings. Both return the ScanReport as a JSON string (parse against the schema)."
+---
+
+Kotlin/Android and Swift/iOS share one [UniFFI](https://mozilla.github.io/uniffi-rs/)
+crate. Both expose `scan` / `scanFrame` and return the [`ScanReport`](/api/report)
+as a **JSON string** — parse it (`kotlinx.serialization`, `JSONDecoder`, …) against
+[`spec/scan-report.schema.json`](/api/report). `"No QR found"` is an empty
+`detections` array, not an error.
+
+## Kotlin / Android (JitPack)
+
+```kotlin
+// settings.gradle.kts
+dependencyResolutionManagement {
+  repositories { maven { url = uri("https://jitpack.io") } }
+}
+// build.gradle.kts
+implementation("com.github.supernovae-st:qrcode-ai-scanner:v0.4.0")
+```
+
+```kotlin
+import uniffi.qrcode_ai_scanner_uniffi.scan
+
+val json: String = scan(imageBytes, "full")   // "full" | "fast" | "frame"
+// parse `json` into your ScanReport model; empty detections = no QR
+```
+
+minSdk 21, 16 KB-page-safe (NDK r27). The scan is synchronous — call it off the
+main thread.
+
+## Swift / iOS (SwiftPM)
+
+```swift
+// Package.swift
+.package(url: "https://github.com/supernovae-st/qrcode-ai-scanner", from: "0.4.0"),
+```
+
+```swift
+import QrcodeAiScanner
+
+let json = try scan(image: imageData, profile: "full")  // empty detections = no QR
+let report = try JSONDecoder().decode(ScanReport.self, from: Data(json.utf8))
+```
+
+iOS 13+. A native app on the App Store is almost always closed-source and needs
+the **commercial** license (it links the AGPL core) — `studio.supernovae@gmail.com`.
+
+## Errors
+
+`scan` throws on invalid input / a bad profile; the message carries the
+`[QRS-xxx]` wire code ([catalog](/api/errors)). The report shape is the
+[one contract](/api/report).
