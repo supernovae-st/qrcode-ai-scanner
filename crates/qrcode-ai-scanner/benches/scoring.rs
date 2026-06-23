@@ -17,7 +17,11 @@ use qrcode_ai_scanner::{ImageInput, ScanConfig, ScanProfile, Scanner};
 use std::hint::black_box;
 
 fn fixture(rel: &str) -> Vec<u8> {
-    std::fs::read(format!("{}/../../fixtures/{rel}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    std::fs::read(format!(
+        "{}/../../fixtures/{rel}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
 }
 
 /// The Full profile with the wall-clock budget removed — the full scoring
@@ -45,10 +49,16 @@ fn bench_scoring(c: &mut Criterion) {
         b.iter(|| full.scan(black_box(ImageInput::encoded(&clean))).unwrap());
     });
     group.bench_function("clean_ok_68ms", |b| {
-        b.iter(|| full.scan(black_box(ImageInput::encoded(&clean_big))).unwrap());
+        b.iter(|| {
+            full.scan(black_box(ImageInput::encoded(&clean_big)))
+                .unwrap()
+        });
     });
     group.bench_function("artistic_ok_1069ms", |b| {
-        b.iter(|| full.scan(black_box(ImageInput::encoded(&artistic))).unwrap());
+        b.iter(|| {
+            full.scan(black_box(ImageInput::encoded(&artistic)))
+                .unwrap()
+        });
     });
     group.bench_function("artistic_monkey", |b| {
         b.iter(|| full.scan(black_box(ImageInput::encoded(&monkey))).unwrap());

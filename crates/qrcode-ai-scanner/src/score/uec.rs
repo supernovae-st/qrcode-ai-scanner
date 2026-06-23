@@ -138,7 +138,10 @@ pub(crate) fn format_bits_index(ec: EcLevel) -> usize {
 
 /// Function-pattern map — mirrors rqrr `reserved_cell` exactly.
 fn reserved_cell(version: usize, i: usize, j: usize) -> bool {
-    debug_assert!((1..=40).contains(&version), "reserved_cell: QR version {version} out of 1..=40");
+    debug_assert!(
+        (1..=40).contains(&version),
+        "reserved_cell: QR version {version} out of 1..=40"
+    );
     let ver = &VERSIONS[version];
     let size = version * 4 + 17;
 
@@ -197,7 +200,10 @@ fn mask_bit(mask: u8, y: usize, x: usize) -> bool {
 /// rqrr `read_data`'s zigzag exactly (down-up column pairs from the
 /// bottom-right, column 6 skipped).
 pub(crate) fn zigzag_positions(version: usize) -> Vec<(usize, usize)> {
-    debug_assert!((1..=40).contains(&version), "zigzag_positions: QR version {version} out of 1..=40");
+    debug_assert!(
+        (1..=40).contains(&version),
+        "zigzag_positions: QR version {version} out of 1..=40"
+    );
     let size = version * 4 + 17;
     let mut positions = Vec::with_capacity(VERSIONS[version].total * 8);
     let mut y = size - 1;
@@ -279,7 +285,10 @@ pub(crate) struct Block {
 /// invisible to decoding but poisons an error-count margin. Pinned by the
 /// pristine matrix test: mixed-block cells (e.g. v5-Q) read t=0 here.
 pub(crate) fn deinterleave(codewords: &[u8], version: usize, ec_index: usize) -> Vec<Block> {
-    debug_assert!((1..=40).contains(&version), "deinterleave: QR version {version} out of 1..=40");
+    debug_assert!(
+        (1..=40).contains(&version),
+        "deinterleave: QR version {version} out of 1..=40"
+    );
     let ver = &VERSIONS[version];
     let small = ver.ecc[ec_index];
     let large_count = (ver.total - small.bs * small.ns) / (small.bs + 1);
@@ -745,8 +754,14 @@ mod tests {
         // Regression (P0): worst_block reports the worst-MARGIN block (B), not most-errors (A).
         let (margin, errors, capacity) = worst_block([(5, 20), (3, 8)]);
         assert!((margin - 0.25).abs() < 1e-6, "margin {margin}");
-        assert_eq!(errors, 3, "errors must be the worst-margin block's (the bug reported 5)");
-        assert_eq!(capacity, 8, "capacity must be the worst-margin block's (the bug reported 20)");
+        assert_eq!(
+            errors, 3,
+            "errors must be the worst-margin block's (the bug reported 5)"
+        );
+        assert_eq!(
+            capacity, 8,
+            "capacity must be the worst-margin block's (the bug reported 20)"
+        );
 
         // order-independent
         let (_, e, c) = worst_block([(3, 8), (5, 20)]);
@@ -755,7 +770,11 @@ mod tests {
         // all-clean (every margin == 1.0) still reports a real capacity, not 0
         let (m, ze, zc) = worst_block([(0, 10), (0, 14)]);
         assert!((m - 1.0).abs() < 1e-6);
-        assert_eq!((ze, zc), (0, 14), "all-clean must report a real block capacity, not 0");
+        assert_eq!(
+            (ze, zc),
+            (0, 14),
+            "all-clean must report a real block capacity, not 0"
+        );
     }
 
     #[test]

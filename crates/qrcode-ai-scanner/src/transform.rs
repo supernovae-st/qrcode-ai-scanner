@@ -347,8 +347,7 @@ fn windowed_extremum_strided(
             let prev_hi = (i - 1 + r).min(n - 1);
             for j in (prev_hi + 1)..=hi {
                 let v = src[j * stride];
-                while deque.len() > head
-                    && pick.dominates(v, src[deque[deque.len() - 1] * stride])
+                while deque.len() > head && pick.dominates(v, src[deque[deque.len() - 1] * stride])
                 {
                     deque.pop();
                 }
