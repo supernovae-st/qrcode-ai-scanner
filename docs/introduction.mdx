@@ -61,7 +61,7 @@ Plus **GS1 awareness** (element strings + Digital Link with a per-criterion
 `conformant` verdict — Sunrise 2027-ready) and machine-actionable
 **hints** that close the *generate → scan → act → regenerate* loop.
 
-## The four artifacts
+## The surfaces
 
 | Artifact | Registry | For |
 |---|---|---|
@@ -69,8 +69,11 @@ Plus **GS1 awareness** (element strings + Digital Link with a per-criterion
 | `qrcode-ai-scanner-cli` (`qrscan`) | crates.io | scripts, CI gates |
 | `@supernovae-st/qrcode-ai-scanner` | npm | Node servers (async, libuv pool) |
 | `@supernovae-st/qrcode-ai-scanner-wasm` | npm | browsers (SIMD128, ~778 KB gz) |
+| `qrcode-ai-scanner` | PyPI | Python — one abi3 wheel, 3.8 → 3.14 |
+| Kotlin/Android · Swift/iOS | JitPack · SwiftPM | native mobile (UniFFI) |
+| `qrcode_ai_scanner` | pub.dev | Flutter — typed `ScanReport` (flutter_rust_bridge) |
 
-All four speak the **same JSON report** — one contract, machine-validated
+Every surface speaks the **same JSON report** — one contract, machine-validated
 against the [normative spec](https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/spec)
 in CI.
 
