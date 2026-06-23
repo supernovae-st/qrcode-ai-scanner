@@ -95,7 +95,28 @@ description: "Decode and grade your first QR on every surface."
     # exit codes: 0 found · 1 none · 2 invalid input/usage
     ```
   </Tab>
+
+  <Tab title="Python">
+    ```bash
+    pip install qrcode-ai-scanner
+    ```
+
+    ```python
+    import qrcode_ai_scanner as q
+
+    report = q.scan(image_bytes, "full")   # → ScanReport dict; the scan releases the GIL
+    dets = report["detections"]
+    if dets:
+        d = dets[0]
+        print(d["content"]["text"], d["payload"]["kind"], (report["score"] or {}).get("value"))
+    ```
+
+    One `abi3` wheel covers CPython 3.8 → 3.14. Types ship (`qrcode_ai_scanner.pyi`).
+  </Tab>
 </Tabs>
+
+Mobile (Kotlin/Android · Swift/iOS) and Flutter ship the same report — see their
+[API pages](/api/mobile) for install + usage.
 
 ## Choosing a profile
 
