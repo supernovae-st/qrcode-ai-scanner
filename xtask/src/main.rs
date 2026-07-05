@@ -8,6 +8,9 @@
 //!   against `corpus-external.tsv` instead (see `external.rs`).
 //! - `gen-external-manifest` — pin the measured state of `corpus-external/`
 //!   into the committed manifest (expectations from a real run, never typed).
+//! - `rescue-stress` — QD-2 adversarial miscorrection measurement: a
+//!   deterministic synthetic-occlusion sweep reporting the S5 rescue's
+//!   wrong-vs-refuse rate under rising occlusion (see `rescue_stress.rs`).
 //! - `baseline` — run the corpus through a v0.2 CLI binary (`--bin <path>`)
 //!   and write `docs/baseline-v02.json` (the Phase A exit-gate comparator).
 
@@ -19,6 +22,7 @@
 )] // automation tool: fail loud, bounded pixel math
 
 mod external;
+mod rescue_stress;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -55,6 +59,7 @@ fn main() {
         Some("gen-fixtures") => gen_fixtures(),
         Some("gen-symbology-fixtures") => gen_symbology_fixtures(),
         Some("gen-external-manifest") => external::generate(),
+        Some("rescue-stress") => rescue_stress::run(),
         Some("corpus-report") => {
             let flags: Vec<String> = args.collect();
             let write = flags.iter().any(|f| f == "--write");
@@ -79,7 +84,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: xtask <gen-fixtures | gen-external-manifest | corpus-report [--write | --external] | baseline --bin <p>>"
+                "usage: xtask <gen-fixtures | gen-external-manifest | corpus-report [--write | --external] | rescue-stress | baseline --bin <p>>"
             );
             std::process::exit(2);
         }
