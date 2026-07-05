@@ -47,18 +47,33 @@ jobs:
       - name: versions agree across all publish surfaces
         run: |
           v() { grep -m1 -E '^version' "$1" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'; }
+          vq() { grep -m1 -E '"version"' "$1" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'; }
           ws=$(v Cargo.toml)
+          # swift is absent by design: SwiftPM versions ARE the git tags
+          # (bindings/swift/Package.swift header) — nothing to sync there.
           declare -A got=(
             [workspace]="$ws"
             [uniffi]="$(v crates/qrcode-ai-scanner-uniffi/Cargo.toml)"
             [python]="$(v crates/qrcode-ai-scanner-py/Cargo.toml)"
             [kotlin]="$(v bindings/kotlin/qrcodeaiscanner/build.gradle.kts)"
+            [node]="$(vq crates/qrcode-ai-scanner-node/package.json)"
+            [flutter]="$(v bindings/flutter/pubspec.yaml)"
           )
           fail=0
           for k in "${!got[@]}"; do
             echo "  $k = ${got[$k]}"
             [ "${got[$k]}" = "$ws" ] || { echo "::error::$k version ${got[$k]} != workspace $ws"; fail=1; }
           done
+          # On a v* tag the tag itself must match the workspace version —
+          # a forgotten bump otherwise turns publish idempotency into a
+          # silent non-release (npm-publish.yml / flutter.yml skip-if-exists).
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              tag="${GITHUB_REF#refs/tags/v}"
+              echo "  tag = $tag"
+              [ "$tag" = "$ws" ] || { echo "::error::tag v$tag != workspace $ws"; fail=1; }
+              ;;
+          esac
           exit $fail
       - name: build the uniffi wrapper (host)
         run: cargo build --release --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml

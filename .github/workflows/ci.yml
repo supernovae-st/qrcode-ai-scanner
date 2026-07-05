@@ -35,6 +35,17 @@ jobs:
       - run: cargo nextest run --workspace
       - run: cargo test --doc --workspace
 
+  # MSRV floor — every manifest says rust-version 1.87 and jitpack.yml PINS
+  # 1.87.0, but stable-only CI lets MSRV rot land silently and break JitPack
+  # at release time. Core crate is enough: the bindings inherit its floor.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.87
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p qrcode-ai-scanner --all-features
+
   wasm-shape:
     runs-on: ubuntu-latest
     steps:
@@ -50,6 +61,11 @@ jobs:
           cargo check -p qrcode-ai-scanner
           --target wasm32-unknown-unknown
           --no-default-features --features engine-rqrr,serde
+      # The PUBLISHED wasm crate was previously never built on PRs — breakage
+      # only surfaced at tag time (npm-publish.yml). Cheap check here.
+      - run: >
+          cargo check -p qrcode-ai-scanner-wasm
+          --target wasm32-unknown-unknown
 
   corpus:
     runs-on: ubuntu-latest
