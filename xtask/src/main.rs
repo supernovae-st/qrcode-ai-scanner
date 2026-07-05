@@ -33,6 +33,11 @@ struct Entry {
     category: String,
     /// Ground-truth text. Absent = expected NOT to decode (negative sample).
     expected: Option<String>,
+    /// Frontier pin. `"fail"` marks a documented blind spot we cannot decode
+    /// yet: staying blind is GREEN (frontier held), a fresh decode is a loud
+    /// RED ("capability gained — flip expect to pass"). Absent / `"pass"` = the
+    /// normal contract (decode must match `expected`).
+    expect: Option<String>,
 }
 
 fn repo_root() -> PathBuf {
@@ -196,16 +201,28 @@ struct CategoryStats {
     total: u32,
     decoded_ok: u32,
     wrong_or_missed: u32,
+    /// Frontier (`expect="fail"`) entries that stayed blind — the GREEN state.
+    frontier_held: u32,
+    /// Frontier entries that unexpectedly decoded — the LOUD RED state.
+    frontier_gained: u32,
     total_ms: f64,
 }
 
-fn run_corpus() -> BTreeMap<String, CategoryStats> {
+/// Corpus results plus the list of frontier fixtures that newly decoded — a
+/// non-empty list means a blind spot was crossed and the run must go red.
+struct CorpusRun {
+    stats: BTreeMap<String, CategoryStats>,
+    gained: Vec<String>,
+}
+
+fn run_corpus() -> CorpusRun {
     let root = repo_root();
     let manifest: Corpus =
         toml::from_str(&std::fs::read_to_string(root.join("corpus.toml")).unwrap()).unwrap();
     let scanner = Scanner::builder().profile(ScanProfile::Full).build();
 
     let mut stats: BTreeMap<String, CategoryStats> = BTreeMap::new();
+    let mut gained: Vec<String> = Vec::new();
     for entry in &manifest.entry {
         let bytes =
             std::fs::read(root.join(&entry.path)).unwrap_or_else(|e| panic!("{}: {e}", entry.path));
@@ -214,34 +231,62 @@ fn run_corpus() -> BTreeMap<String, CategoryStats> {
         stat.total += 1;
         stat.total_ms += report.trace.total_ms;
         let got = report.detections.first().map(|d| d.content.text.as_str());
-        match (&entry.expected, got) {
-            (Some(expected), Some(text)) if text == expected => stat.decoded_ok += 1,
-            (None, None) => stat.decoded_ok += 1, // negative sample stayed negative
-            _ => {
-                stat.wrong_or_missed += 1;
-                println!(
-                    "MISS {} — expected {:?}, got {:?}",
-                    entry.path, entry.expected, got
-                );
+        if entry.expect.as_deref() == Some("fail") {
+            // Frontier pin. With a known ground truth, "gained" means we finally
+            // reached it; without one, ANY decode of a pinned blind spot is a
+            // gain worth surfacing. Refusing (no decode) is the expected GREEN.
+            let now_passes = match &entry.expected {
+                Some(expected) => got == Some(expected.as_str()),
+                None => got.is_some(),
+            };
+            if now_passes {
+                stat.frontier_gained += 1;
+                gained.push(format!("{} — decoded {got:?}", entry.path));
+            } else {
+                stat.frontier_held += 1;
+            }
+        } else {
+            match (&entry.expected, got) {
+                (Some(expected), Some(text)) if text == expected => stat.decoded_ok += 1,
+                (None, None) => stat.decoded_ok += 1, // negative sample stayed negative
+                _ => {
+                    stat.wrong_or_missed += 1;
+                    println!(
+                        "MISS {} — expected {:?}, got {:?}",
+                        entry.path, entry.expected, got
+                    );
+                }
             }
         }
     }
-    stats
+    CorpusRun { stats, gained }
 }
 
 fn corpus_report(write_readme: bool) {
-    let stats = run_corpus();
+    let CorpusRun { stats, gained } = run_corpus();
     let mut table =
         String::from("| category | pass | total | rate | avg ms |\n|---|---|---|---|---|\n");
     for (category, s) in &stats {
-        let rate = f64::from(s.decoded_ok) * 100.0 / f64::from(s.total);
         let avg = s.total_ms / f64::from(s.total);
-        writeln!(
-            table,
-            "| {category} | {} | {} | {rate:.0}% | {avg:.0} |",
-            s.decoded_ok, s.total
-        )
-        .unwrap();
+        if s.frontier_held + s.frontier_gained > 0 {
+            // Frontier rows pin blind spots (expect=fail): the honest metric is
+            // how many are still HELD (blind, as pinned), not a decode rate.
+            // `held` in the rate column marks the row as expect-fail.
+            writeln!(
+                table,
+                "| {category} | {} | {} | held | {avg:.0} |",
+                s.frontier_held, s.total
+            )
+            .unwrap();
+        } else {
+            let rate = f64::from(s.decoded_ok) * 100.0 / f64::from(s.total);
+            writeln!(
+                table,
+                "| {category} | {} | {} | {rate:.0}% | {avg:.0} |",
+                s.decoded_ok, s.total
+            )
+            .unwrap();
+        }
     }
     println!("\n{table}");
 
@@ -259,8 +304,13 @@ fn corpus_report(write_readme: bool) {
         println!("README corpus block updated");
     }
 
+    // A crossed frontier is progress, but it must be LOUD and fail the run so
+    // CI forces the pin to be flipped (expect=fail → pass) deliberately.
+    for msg in &gained {
+        eprintln!("capability gained — flip expect to pass: {msg}");
+    }
     let failed: u32 = stats.values().map(|s| s.wrong_or_missed).sum();
-    if failed > 0 {
+    if failed > 0 || !gained.is_empty() {
         std::process::exit(1);
     }
 }

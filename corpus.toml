@@ -210,3 +210,46 @@ path = "fixtures/symbology/exif6-rotated-ean.jpg"
 category = "symbology"
 expected = "9506000134352"
 source = "R16 — EAN-13 stored sideways w/ EXIF 6 (TryHarder rotation pin)"
+
+# ---- frontier fixtures (expect="fail" · vendored qrcode-ai product output) ----
+# Documented blind spots: the Full ladder runs to completion (all stages, well
+# under budget) yet decodes nothing. Staying blind is GREEN (frontier held); a
+# fresh decode fails the run LOUD so the pin gets flipped deliberately. No
+# `expected` — ground truth is unrecoverable offline (our engines and zbar both
+# refuse), so ANY decode of one of these is the signal to review.
+
+[[entry]]
+path = "fixtures/frontier/perspective-3d-laptop.webp"
+category = "frontier"
+expect = "fail"
+source = "qrcode-ai product output — QR on an angled screen (3D-perspective mockup)"
+
+[[entry]]
+path = "fixtures/frontier/multi-qr-collage-artistic.webp"
+category = "frontier"
+expect = "fail"
+source = "qrcode-ai product output — collage of several artistic QRs (multi-symbol)"
+
+[[entry]]
+path = "fixtures/frontier/multi-qr-custom-shapes.webp"
+category = "frontier"
+expect = "fail"
+source = "qrcode-ai product output — custom module-shape QRs in a multi-symbol layout"
+
+[[entry]]
+path = "fixtures/frontier/multi-qr-design-gallery.webp"
+category = "frontier"
+expect = "fail"
+source = "qrcode-ai product output — design-gallery grid of many QRs (multi-symbol)"
+
+[[entry]]
+path = "fixtures/frontier/multi-qr-scene-mockup.webp"
+category = "frontier"
+expect = "fail"
+source = "qrcode-ai product output — QRs composited into a product scene (multi-symbol)"
+
+[[entry]]
+path = "fixtures/frontier/scene-photo-overlay.webp"
+category = "frontier"
+expect = "fail"
+source = "qrcode-ai product output — QR over a busy photographic scene with icon overlay"
