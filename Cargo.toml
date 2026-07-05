@@ -1,5 +1,9 @@
 [workspace]
-resolver = "2"
+# resolver 3 = MSRV-aware resolution: any re-lock, under any toolchain,
+# selects dependency versions compatible with rust-version 1.87 (the live
+# class: image 0.25.10 raised its floor to 1.88 mid-cycle and broke fresh
+# CI resolution while 0.25.9 was fine).
+resolver = "3"
 members = ["crates/*", "xtask"]
 # The Python (PyO3/maturin), UniFFI (cargo-ndk/xcodebuild) and Flutter
 # (flutter_rust_bridge/cargokit) bindings are built by foreign toolchains, not

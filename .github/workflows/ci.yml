@@ -44,7 +44,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.87
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check -p qrcode-ai-scanner --all-features
+      # --locked: the gate tests the COMMITTED dependency graph — without it
+      # a fresh re-resolution can pull a dep whose MSRV floor moved (image
+      # 0.25.10 → 1.88 did exactly that) and fail the job for the wrong
+      # reason. Lockfile drift then fails loudly here instead.
+      - run: cargo check -p qrcode-ai-scanner --all-features --locked
 
   wasm-shape:
     runs-on: ubuntu-latest

@@ -42,9 +42,16 @@ jobs:
       # seed read-only from the tracked `fixtures/` tree; the bitstream target
       # carries its own committed seeds under its corpus dir. 300 s each keeps
       # the whole matrix inside the 30-min job budget.
+      #
+      # --target is EXPLICIT: taiki-e ships cargo-fuzz as a musl-static
+      # binary and cargo-fuzz defaults --target to its OWN build triple, so
+      # without this the job builds x86_64-unknown-linux-musl — where ASAN
+      # is incompatible with static libc and the std isn't installed
+      # (the 14s red of run 28735462680).
       - name: fuzz targets
         run: |
           for target in fuzz_scan_encoded fuzz_scan_full fuzz_rescue_bitstream fuzz_classify_text; do
             mkdir -p "fuzz/corpus/$target"
-            cargo +nightly fuzz run "$target" "fuzz/corpus/$target" fixtures -- -max_total_time=300
+            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu \
+              "$target" "fuzz/corpus/$target" fixtures -- -max_total_time=300
           done
