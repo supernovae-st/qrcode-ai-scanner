@@ -1,0 +1,11 @@
+# cargo-mutants policy.
+#
+# The `fuzzing::` bridge (lib.rs `#[cfg(fuzzing)] pub mod fuzzing`) exists
+# ONLY for the fuzz targets — unit tests never exercise it, so every mutant
+# there is a structural MISSED (the cfg is off under `cargo mutants`, the
+# gutted fn never even compiles into the test build). Weekly run 28740297335
+# reported exactly that noise class; exclude it so `missed` stays a real
+# assertion-gap signal.
+# (matched against the full mutant line, which starts with the file path —
+# never anchor.)
+exclude_re = ["replace fuzzing::"]
