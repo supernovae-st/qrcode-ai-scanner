@@ -39,7 +39,11 @@ reading "NO" on valid product output is the documented trap.
   WASM `budget_ms` (positional arg #5 of `scan_image`, #5 of `scan_frame`).
 - `0` or negative = **unbounded** (NOT a zero-millisecond budget).
 - With a budget set, WHERE the run cuts is machine-dependent — set
-  `budget_ms: None`/unbounded for strictly reproducible reports.
+  `budget_ms: None`/unbounded for strictly reproducible reports. The cut is
+  best-effort and observable after the fact: the per-stage `trace` records
+  how far the ladder got (`transforms_tried` per stage). A future
+  work-counted budget (bounding ATTEMPTS instead of milliseconds, fully
+  deterministic) would be additive; this contract does not foreclose it.
 
 ## Anti-DoS limits (validated BEFORE decode)
 

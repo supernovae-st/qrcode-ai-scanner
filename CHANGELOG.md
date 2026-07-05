@@ -34,6 +34,21 @@ unchanged (score contract v3); two wire VALUES corrected as bugfixes.
 - Golden-value pins for `otsu_threshold` / morphology / `downscale_to`
   (the surviving-mutant cluster) + direct rqrr/rxing adapter tests + the
   UEC 0.25/0.24 grade edge.
+- Mutant-harvest sweep to zero on the hot math: Berlekamp-Massey locator
+  degree pinned exact on injected errors (0–3 plus a 90-pattern sweep across
+  `npar` 4..=20), `windowed_extremum` clamp/identity edges, Otsu's
+  negative-variance init and argmax weighting, `has_color` source-kind flag,
+  and `finder_score`'s region-mean threshold.
+- Threaded determinism pinned: one shared `Scanner` scanned from 4 OS
+  threads under contention produces byte-identical reports vs a sequential
+  baseline (wall-clock trace fields zeroed — the one documented
+  nondeterminism). The three stock-budget artistic integration tests now run
+  in a serialized nextest group, so a loaded machine no longer flakes them.
+- External corpora pinned without vendoring: `corpus-external.tsv` commits
+  sha256 + measured decode status for all 522 files (zxing blackbox 170/179
+  @ 0°, gallery 17/27); `corpus-report --external` re-hashes + re-scans
+  budget-free and exits red on regression AND capability gained. CI gains
+  `pipefail` — a red exit piped through `tee` used to be swallowed.
 - Type-parity gate v2: 8 enums · 15 contract structs · payload kinds ·
   hint tags, held identical across Rust ↔ TypeScript ↔ JSON-Schema ↔ Dart
   (the Dart mirror was previously ungated).
