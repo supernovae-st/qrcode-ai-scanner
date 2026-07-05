@@ -7,11 +7,11 @@
 //! the logo-occluded / low-confidence codewords as erasures is what makes
 //! the artistic-QR rescue stage recover past that wall.
 //!
-//! Convention (matches `score::uec::syndromes`): the block is a polynomial
+//! Convention (matches `matrix::gf256::syndromes`): the block is a polynomial
 //! with `block[len−1−j]` as the `x^j` coefficient — "power position" j
 //! counts from the LAST byte; generator roots are α^0..α^(npar−1) (b = 0).
 
-use crate::score::uec::{gf_inv, gf_mul, gf_pow, syndromes};
+use crate::matrix::gf256::{gf_inv, gf_mul, gf_pow, syndromes};
 
 /// Multiply two GF(256) polynomials (ascending-power coefficient vectors).
 fn poly_mul(a: &[u8], b: &[u8]) -> Vec<u8> {
@@ -37,8 +37,8 @@ fn poly_at(poly: &[u8], x: u8) -> u8 {
 }
 
 /// Berlekamp-Massey on (modified) syndromes — returns the error locator
-/// Λ(x), ascending powers. Identical recurrence to `uec::error_count` but
-/// keeping the polynomial, not just its degree.
+/// Λ(x), ascending powers. Identical recurrence to `score::uec::error_count`
+/// but keeping the polynomial, not just its degree.
 fn berlekamp_massey(synd: &[u8]) -> Vec<u8> {
     let len = synd.len();
     let mut locator = vec![0u8; len + 1];

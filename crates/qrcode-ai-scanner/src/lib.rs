@@ -28,6 +28,7 @@ mod error;
 mod gs1;
 mod input;
 mod ladder;
+mod matrix;
 mod payload;
 mod report;
 mod rescue;

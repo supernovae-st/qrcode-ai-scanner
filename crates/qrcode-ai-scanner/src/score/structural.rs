@@ -1,14 +1,12 @@
 //! Structural checks — finder-pattern integrity + quiet zone.
 //!
-//! Works in module space: the detection corners define a homography from the
-//! unit square onto the rqrr bounds quad. Quirc heritage (source-verified,
-//! rqrr 0.10.1 `prepare.rs:243`): bounds span `grid_size + 1` grid cells —
-//! `map(0,0)` to `map(N+1, N+1)` — so module (mx, my) of an N-wide symbol
-//! has its center at unit `((mx+0.5)/(N+1), (my+0.5)/(N+1))`. All thresholds
-//! are local and deterministic.
+//! Works in module space via [`GridSampler`] (`crate::matrix::sampler`): the
+//! detection corners define a homography from the unit square onto the rqrr
+//! bounds quad, and every check samples module centers through it. All
+//! thresholds are local and deterministic.
 
-use super::warp::{Homography, sample_bilinear};
 use crate::input::LumaImage;
+use crate::matrix::sampler::GridSampler;
 use crate::report::{Point, StructuralReport};
 
 /// The canonical 7×7 finder pattern (true = dark module).
@@ -27,39 +25,6 @@ const FINDER: [[bool; 7]; 7] = {
     }
     pattern
 };
-
-/// Module-space sampler over a detected symbol.
-pub(crate) struct GridSampler<'a> {
-    img: &'a LumaImage,
-    unit_to_image: Homography,
-    modules: u32,
-}
-
-impl<'a> GridSampler<'a> {
-    /// Build from detection corners (clockwise from top-left) + module count.
-    pub(crate) fn new(img: &'a LumaImage, corners: [Point; 4], modules: u32) -> Option<Self> {
-        let quad = corners.map(|p| (p.x, p.y));
-        Some(Self {
-            img,
-            unit_to_image: Homography::unit_square_to_quad(quad)?,
-            modules,
-        })
-    }
-
-    /// Sample the center of module (mx, my). Off-grid coordinates are legal
-    /// (negative / ≥ modules) — they probe the quiet zone.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "module indices ≤ 177, exact in f32"
-    )]
-    pub(crate) fn module(&self, mx: i32, my: i32) -> Option<u8> {
-        // rqrr bounds cover N+1 grid cells (quirc heritage) — see module docs.
-        let denom = self.modules as f32 + 1.0;
-        let (ux, uy) = ((mx as f32 + 0.5) / denom, (my as f32 + 0.5) / denom);
-        let (x, y) = self.unit_to_image.apply(ux, uy)?;
-        Some(sample_bilinear(self.img, x, y))
-    }
-}
 
 /// Score one finder region: fraction of the 49 modules matching the canonical
 /// pattern under a LOCAL threshold (mean of the region's samples — robust to

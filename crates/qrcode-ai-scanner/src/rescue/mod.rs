@@ -19,9 +19,11 @@ mod ee;
 
 use crate::engine::MaskedStream;
 use crate::input::LumaImage;
+use crate::matrix::deinterleave::deinterleave;
+use crate::matrix::sampler::GridSampler;
+use crate::matrix::version_db::format_bits_index;
+use crate::matrix::zigzag::{unmask_to_codewords, zigzag_positions};
 use crate::report::{EcLevel, Point};
-use crate::score::structural::GridSampler;
-use crate::score::uec;
 
 /// A grid the engines detected but could not decode — the rescue input.
 #[derive(Debug, Clone)]
@@ -67,7 +69,7 @@ fn codeword_margins(
     let version = usize::from(candidate.version);
     let modules = u32::from(candidate.version) * 4 + 17;
     let sampler = GridSampler::new(luma, candidate.corners, modules)?;
-    let positions = uec::zigzag_positions(version);
+    let positions = zigzag_positions(version);
     if positions.len() < total_codewords * 8 {
         return None;
     }
@@ -116,7 +118,7 @@ pub(crate) fn attempt(luma: &LumaImage, candidate: &RescueCandidate) -> Option<R
     let inverted_view = candidate.inverted.then(|| crate::transform::invert(luma));
     let sample_luma = inverted_view.as_ref().unwrap_or(luma);
 
-    let codewords = uec::unmask_to_codewords(
+    let codewords = unmask_to_codewords(
         &candidate.stream.bits,
         candidate.stream.bit_len,
         version,
@@ -125,7 +127,7 @@ pub(crate) fn attempt(luma: &LumaImage, candidate: &RescueCandidate) -> Option<R
     let margins = codeword_margins(sample_luma, candidate, codewords.len())?;
 
     let p = protection(candidate.version, candidate.ec);
-    let blocks = uec::deinterleave(&codewords, version, uec::format_bits_index(candidate.ec));
+    let blocks = deinterleave(&codewords, version, format_bits_index(candidate.ec));
 
     let mut data = Vec::new();
     for block in &blocks {
@@ -199,6 +201,7 @@ mod probe {
 
     use super::*;
     use crate::input::{ImageInput, Limits};
+    use crate::matrix::gf256::syndromes;
     use crate::transform::normalize;
 
     #[test]
@@ -243,7 +246,7 @@ mod probe {
                 candidate.version, candidate.ec, candidate.mask, candidate.stream.bit_len
             );
             let version = usize::from(candidate.version);
-            let codewords = uec::unmask_to_codewords(
+            let codewords = unmask_to_codewords(
                 &candidate.stream.bits,
                 candidate.stream.bit_len,
                 version,
@@ -254,15 +257,14 @@ mod probe {
             let margins = codeword_margins(luma, &candidate, codewords.len()).expect("margins");
             let weak = margins.iter().filter(|&&m| m < 0.30).count();
             println!("weak codewords (<0.30): {weak}/{}", margins.len());
-            let blocks =
-                uec::deinterleave(&codewords, version, uec::format_bits_index(candidate.ec));
+            let blocks = deinterleave(&codewords, version, format_bits_index(candidate.ec));
             for (bi, block) in blocks.iter().enumerate() {
                 let weak_in_block = block
                     .origins
                     .iter()
                     .filter(|&&o| margins.get(o).copied().unwrap_or(0.0) < 0.30)
                     .count();
-                let synd = uec::syndromes(&block.bytes, block.npar);
+                let synd = syndromes(&block.bytes, block.npar);
                 let dirty = synd.iter().any(|&s| s != 0);
                 println!(
                     "block {bi}: len={} npar={} weak={} dirty={}",

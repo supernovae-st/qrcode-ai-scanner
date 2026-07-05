@@ -6,8 +6,8 @@
 //! (noise robustness on photographic inputs), grade bands verbatim from
 //! ISO 15415 (cross-checked against the GS1 2D verification guideline).
 
-use super::structural::GridSampler;
 use crate::input::LumaImage;
+use crate::matrix::sampler::GridSampler;
 use crate::report::{Iso15415Report, IsoGrade, IsoParameter, Point, StructuralReport, UecReport};
 
 /// Grade a "higher is better" value against descending band floors
