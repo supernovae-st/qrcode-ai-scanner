@@ -149,3 +149,115 @@ pub(super) fn decode(luma: &LumaImage, filter: super::FormatFilter) -> Vec<RawDe
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::decode;
+    use crate::engine::FormatFilter;
+    use crate::input::LumaImage;
+    use crate::report::{EcLevel, EngineKind, Symbology};
+
+    /// Render a QR to a luma plane (default 4-module quiet zone, 6px modules).
+    fn render(content: &[u8], ec: qrcode::EcLevel) -> LumaImage {
+        let code = qrcode::QrCode::with_error_correction_level(content, ec).unwrap();
+        let img = code
+            .render::<image::Luma<u8>>()
+            .module_dimensions(6, 6)
+            .build();
+        let (w, h) = (img.width(), img.height());
+        LumaImage::new(img.into_raw(), w, h)
+    }
+
+    /// Render an FNC1-in-first-position (GS1) symbol from an explicit bitstream.
+    fn render_fnc1(byte_data: &[u8]) -> LumaImage {
+        let mut bits = qrcode::bits::Bits::new(qrcode::Version::Normal(3));
+        bits.push_fnc1_first_position().unwrap();
+        bits.push_byte_data(byte_data).unwrap();
+        bits.push_terminator(qrcode::EcLevel::M).unwrap();
+        let code = qrcode::QrCode::with_bits(bits, qrcode::EcLevel::M).unwrap();
+        let img = code
+            .render::<image::Luma<u8>>()
+            .module_dimensions(6, 6)
+            .build();
+        let (w, h) = (img.width(), img.height());
+        LumaImage::new(img.into_raw(), w, h)
+    }
+
+    #[test]
+    fn decodes_a_clean_qr_with_raw_bytes_and_ec() {
+        let luma = render(b"parity check 1234", qrcode::EcLevel::Q);
+        let found = decode(&luma, FormatFilter::All);
+        let d = found
+            .iter()
+            .find(|d| d.symbology == Symbology::QrCode)
+            .expect("rxing decodes a clean QR");
+        assert_eq!(d.raw, b"parity check 1234");
+        assert_eq!(d.engine, EngineKind::Rxing);
+        assert_eq!(d.ec, Some(EcLevel::Q));
+        // the rxing 0.9.1 QR path supplies no geometry/stream — rqrr owns that
+        assert_eq!(d.version, None);
+        assert!(d.corners.is_none() && d.masked_stream.is_none() && d.mask.is_none());
+        assert!(!d.fnc1, "plain byte-mode QR is not FNC1");
+    }
+
+    #[test]
+    fn surfaces_the_fnc1_flag_on_a_gs1_symbol() {
+        // rxing is THE GS1 engine: it reads the ]Q3 symbology identifier and
+        // stamps fnc1=true so the payload router sends the bytes to the
+        // element-string classifier. The raw bytes are the BYTE_SEGMENTS data.
+        let luma = render_fnc1(b"010950600013435210ABC123\x1d17261231");
+        let found = decode(&luma, FormatFilter::All);
+        let d = found
+            .iter()
+            .find(|d| d.symbology == Symbology::QrCode)
+            .expect("rxing decodes the GS1 QR");
+        assert!(d.fnc1, "the ]Q3 identifier must surface as fnc1");
+        assert!(
+            d.raw.starts_with(b"0109506000134352"),
+            "raw carries the element data: {:?}",
+            d.raw
+        );
+    }
+
+    #[test]
+    fn decodes_an_inverted_symbol_via_also_inverted() {
+        // AlsoInverted is forced on in the adapter (light-on-dark artistic
+        // codes are real). Photometrically invert a clean render — rxing still
+        // reads it, proving the hint is wired.
+        let luma = render(b"inverted-ok", qrcode::EcLevel::M);
+        let inverted = LumaImage::new(
+            luma.data().iter().map(|&p| 255 - p).collect(),
+            luma.width(),
+            luma.height(),
+        );
+        let found = decode(&inverted, FormatFilter::All);
+        let d = found
+            .iter()
+            .find(|d| d.symbology == Symbology::QrCode)
+            .expect("AlsoInverted decodes a light-on-dark QR");
+        assert_eq!(d.raw, b"inverted-ok");
+    }
+
+    #[test]
+    fn only_filter_restricts_to_the_requested_symbology() {
+        // FormatFilter::Only(QrCode) routes through formats_for → a one-format
+        // hint set; a clean QR still decodes under the restriction.
+        let luma = render(b"only-qr", qrcode::EcLevel::M);
+        let found = decode(&luma, FormatFilter::Only(Symbology::QrCode));
+        assert!(
+            found
+                .iter()
+                .any(|d| d.symbology == Symbology::QrCode && d.raw == b"only-qr")
+        );
+    }
+
+    #[test]
+    fn a_blank_image_yields_no_detection_and_never_panics() {
+        // NotFound is a miss, not an error — the adapter returns empty. (The
+        // catch_unwind boundary itself lives in engine::run_isolated, mod.rs.)
+        let blank = LumaImage::new(vec![255u8; 48 * 48], 48, 48);
+        assert!(decode(&blank, FormatFilter::All).is_empty());
+    }
+}
