@@ -321,7 +321,11 @@ fn sniff_gs1_without_fnc1(text: &str) -> Option<Payload> {
     if !parsed.issues.is_empty() || parsed.elements.is_empty() {
         return None;
     }
-    if parsed.gtin.is_none() && !text.contains('\u{1d}') {
+    // Evidence gate on the BODY, not `text`: the leading GS was already
+    // stripped as a transmission artifact, so it must not be the thing that
+    // satisfies "carries a GS separator". A lone non-GTIN element preceded
+    // only by that leading GS is not enough signal.
+    if parsed.gtin.is_none() && !body.contains('\u{1d}') {
         return None;
     }
     Some(Payload::Gs1 {
@@ -738,6 +742,22 @@ mod tests {
         // empty / non-digit starts skip the sniff entirely
         assert_eq!(classify(""), Payload::Text);
         assert_eq!(classify("hello 01"), Payload::Text);
+    }
+
+    #[test]
+    fn gs1_sniff_ignores_the_stripped_leading_gs_as_evidence() {
+        // A leading GS is a legal transmission artifact of GS1 data dumped
+        // into a plain carrier; it is stripped before the parse and must NOT
+        // itself satisfy the "interior GS separator" evidence gate. A single
+        // non-GTIN element whose ONLY GS is that leading one lacks evidence →
+        // stays Text (the gate must look at the post-strip BODY, not the raw
+        // pre-strip text).
+        assert_eq!(classify("\u{1d}11260101"), Payload::Text);
+        // an INTERIOR GS separator IS real evidence — still classifies as Gs1.
+        assert!(matches!(
+            classify("\u{1d}11260101\u{1d}10LOT9"),
+            Payload::Gs1 { .. }
+        ));
     }
 
     proptest::proptest! {

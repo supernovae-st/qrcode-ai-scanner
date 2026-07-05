@@ -63,9 +63,10 @@ Both GS1 kinds carry the same verdict shape:
 | GS1 SYNTAX in a plain QR (no FNC1) | `gs1` | `false` + FNC1 issue | the classic generator mistake — flag "regenerate with GS1 mode" |
 
 The no-FNC1 sniff is conservative: the whole payload must parse
-issue-free AND carry a check-digit-valid GTIN or a literal GS byte
-(0x1D) — plain numeric text (phone numbers, dates, order IDs) stays
-`text`.
+issue-free AND carry a check-digit-valid GTIN or an **interior** GS byte
+(0x1D). A leading GS is a stripped transmission artifact and does NOT
+count as evidence, so plain numeric text (phone numbers, dates, order
+IDs) — with or without a leading GS — stays `text`.
 
 ### Scope honesty
 
