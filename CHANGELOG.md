@@ -4,6 +4,27 @@ All notable changes to this workspace. Every surface versions together — the R
 crate + CLI, the npm node + wasm packages, the Python wheel, and the
 Kotlin/Android · Swift/iOS · Flutter bindings.
 
+## Unreleased
+
+### Fixed
+
+- JitPack (Kotlin/Android) v0.5.0 build died exit-127: `/opt` is not writable
+  on the JitPack image and the quiet `unzip` swallowed the gradle-provisioning
+  failure. Gradle now unpacks into `$HOME` with loud failure at every step.
+  First working JitPack build lands with the next tag.
+
+### Testing / CI
+
+- cargo-deny findings in the flutter binding tree cleared: stale-lock updates
+  (backtrace → 0.3.76 drops `adler` entirely, futures → 0.3.32 un-yanks) and a
+  `[[licenses.clarify]]` pinning allo-isolate's real Apache-2.0 (repo LICENSE;
+  metadata fix merged upstream, unreleased).
+- Shard-0 harvest closed: builder limits-threading pinned (a builder that
+  discards its config now fails QRS-002/003 assertions), engine panic tally
+  consolidated into one `run_engine()` helper and pinned deterministically.
+  cargo-mutants now runs under nextest (`test_tool` policy) so the wall-clock
+  test group serialization applies to mutants baselines too.
+
 ## 0.5.0 — 2026-07-05
 
 Correctness + release-trust hardening (night sweep 2026-07-05). Wire schema

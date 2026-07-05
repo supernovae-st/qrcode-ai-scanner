@@ -70,3 +70,68 @@ pub(crate) fn deinterleave(codewords: &[u8], version: usize, ec_index: usize) ->
     }
     blocks
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::needless_range_loop)]
+
+    use super::*;
+
+    /// Structural pin across ALL 160 (version, ec) cells: the de-interleave
+    /// of an identity stream must be a PERMUTATION of 0..total with exactly
+    /// the table's block shapes (ns small blocks of bs, the rest bs+1) and a
+    /// constant npar. Kills the `large_count` divisor mutants at :35
+    /// (`small.bs + 1` → `- 1` / `* 1`) that the version-table test misses —
+    /// it re-derives the same formula instead of calling `deinterleave()`,
+    /// and a formula duplicated into a test can never kill its own mutation.
+    /// Any arithmetic slip here breaks coverage, shape, or npar on some cell
+    /// with large blocks (first mixed cell: v5-Q).
+    #[test]
+    fn deinterleave_is_a_shaped_permutation_on_every_version_cell() {
+        for version in 1..=40usize {
+            let ver = &VERSIONS[version];
+            for ec_index in 0..4 {
+                let small = ver.ecc[ec_index];
+                let large_count = (ver.total - small.bs * small.ns) / (small.bs + 1);
+                #[expect(clippy::cast_possible_truncation, reason = "identity mod 256")]
+                let stream: Vec<u8> = (0..ver.total).map(|i| i as u8).collect();
+                let blocks = deinterleave(&stream, version, ec_index);
+
+                assert_eq!(
+                    blocks.len(),
+                    small.ns + large_count,
+                    "v{version} ec{ec_index}: block count"
+                );
+                let mut seen = vec![false; ver.total];
+                for (b, block) in blocks.iter().enumerate() {
+                    let expect_bs = if b < small.ns { small.bs } else { small.bs + 1 };
+                    assert_eq!(
+                        block.bytes.len(),
+                        expect_bs,
+                        "v{version} ec{ec_index} block {b}: size"
+                    );
+                    assert_eq!(
+                        block.npar,
+                        expect_bs - if b < small.ns { small.dw } else { small.dw + 1 },
+                        "v{version} ec{ec_index} block {b}: npar"
+                    );
+                    for (&byte, &origin) in block.bytes.iter().zip(&block.origins) {
+                        assert_eq!(
+                            usize::from(byte),
+                            origin % 256,
+                            "v{version} ec{ec_index} block {b}: byte↔origin"
+                        );
+                        assert!(
+                            !std::mem::replace(&mut seen[origin], true),
+                            "v{version} ec{ec_index}: origin {origin} emitted twice"
+                        );
+                    }
+                }
+                assert!(
+                    seen.iter().all(|&s| s),
+                    "v{version} ec{ec_index}: stream not fully covered"
+                );
+            }
+        }
+    }
+}

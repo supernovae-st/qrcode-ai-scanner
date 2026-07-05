@@ -1,5 +1,14 @@
 # cargo-mutants policy.
 #
+# nextest as the test tool — NOT a speed preference: .config/nextest.toml
+# serializes the wall-clock test group (the three stock-budget artistic
+# integration tests), and that grouping only exists under nextest. Plain
+# `cargo test` runs them fully parallel, so a loaded machine flakes the
+# BASELINE of local + sharded-CI mutants runs (observed 2026-07-05 under
+# three concurrent builds). Trailing `-- --all-features` args stay valid
+# (a cargo build flag, shared by both harnesses).
+test_tool = "nextest"
+#
 # The `fuzzing::` bridge (lib.rs `#[cfg(fuzzing)] pub mod fuzzing`) exists
 # ONLY for the fuzz targets — unit tests never exercise it, so every mutant
 # there is a structural MISSED (the cfg is off under `cargo mutants`, the

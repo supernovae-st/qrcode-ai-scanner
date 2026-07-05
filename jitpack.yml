@@ -28,8 +28,12 @@ before_install:
   - echo "ndk.dir=$ANDROID_HOME/ndk/27.0.12077973" > bindings/kotlin/local.properties
   # Gradle 8.9 (the AGP 8.5 toolchain) — provisioned here so JitPack needs NO committed
   # Gradle wrapper jar. Full path is used in `install` (PATH may not persist across steps).
-  - curl -sSL https://services.gradle.org/distributions/gradle-8.9-bin.zip -o /tmp/gradle.zip
-  - unzip -q -o /tmp/gradle.zip -d /opt
+  # $HOME, not /opt: the v0.5.0 build died exit-127 at the gradle step — /opt is
+  # not writable for the jitpack build user and the quiet unzip swallowed the
+  # failure. `-f` on curl + the trailing ls make the provisioning fail LOUD.
+  - curl -fsSL https://services.gradle.org/distributions/gradle-8.9-bin.zip -o /tmp/gradle.zip
+  - unzip -q -o /tmp/gradle.zip -d "$HOME"
+  - ls "$HOME/gradle-8.9/bin/gradle"
 
 install:
   - source "$HOME/.cargo/env"
@@ -49,4 +53,4 @@ install:
     --language kotlin
     --out-dir bindings/kotlin/qrcodeaiscanner/src/main/kotlin
   # 3. Assemble + publish the AAR to the local Maven repo (JitPack serves it).
-  - /opt/gradle-8.9/bin/gradle -p bindings/kotlin :qrcodeaiscanner:assembleRelease :qrcodeaiscanner:publishToMavenLocal
+  - '"$HOME"/gradle-8.9/bin/gradle -p bindings/kotlin :qrcodeaiscanner:assembleRelease :qrcodeaiscanner:publishToMavenLocal'

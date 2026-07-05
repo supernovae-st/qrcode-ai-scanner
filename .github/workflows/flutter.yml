@@ -106,11 +106,28 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     needs: [test, build-android, build-ios]
     runs-on: ubuntu-latest
+    # v0.5.0 post-mortem: without the token exchange below, `pub publish` falls
+    # back to INTERACTIVE auth and hangs on stdin forever (the job sat 2 h and
+    # was hand-cancelled). Cap the whole job well under the 6 h runner default.
+    timeout-minutes: 15
     environment: pub.dev
     permissions:
       id-token: write # OIDC — pub.dev automated publishing, no token
     steps:
       - uses: actions/checkout@v4
+      # The OIDC→pub.dev temporary-credential exchange. subosito/flutter-action
+      # does NOT perform it; dart-lang/setup-dart does (its documented
+      # publishing support). Order matters: exchange first, then the Flutter
+      # toolchain lands its own dart on PATH — the credential store is shared.
+      #
+      # FIRST publish of a package cannot be automated at all: pub.dev only
+      # accepts OIDC from a package whose admin has enabled GitHub-Actions
+      # publishing — a setting that exists only once the package exists. The
+      # first `flutter pub publish` is a manual operator act (Google account),
+      # then enable automated publishing (repo supernovae-st/qrcode-ai-scanner,
+      # tag pattern v{{version}}, environment pub.dev) and every later tag
+      # publishes hands-free.
+      - uses: dart-lang/setup-dart@e51d8e571e22473a2ddebf0ef8a2123f0ab2c02c # v1.7.1
       - uses: subosito/flutter-action@e938fdf56512cc96ef2f93601a5a40bde3801046 # v2.19.0
         with:
           channel: stable
