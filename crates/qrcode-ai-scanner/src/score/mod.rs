@@ -700,6 +700,154 @@ mod tests {
         assert_eq!(depth_indices(ScoreDepth::Full), &[0, 1, 2, 3, 4]);
     }
 
+    /// An axis can legitimately carry `total == 0` (`ScoreDepth::Off`, an empty
+    /// ramp). Every `score.total > 0` guard protects a division BY that total,
+    /// so a `>`→`>=` swap divides by zero. Under each mutant the matching
+    /// compose below panics; under the real guard it yields the exact value.
+    #[test]
+    fn zero_total_axes_are_skipped_not_divided() {
+        let d = detection_with(Some(EcLevel::H));
+
+        // weighted-sum guard (:286) — resolution skipped ⇒ (100−22) = 78
+        let (score, _) = compose(
+            axes_with(&[(StressAxis::Resolution, 0, 0)]),
+            None,
+            None,
+            None,
+            &d,
+        );
+        assert_eq!(score.value, 78);
+
+        // contrast-hint guard (:322) — contrast skipped ⇒ (100−15) = 85, no hint
+        let (score, hints) = compose(
+            axes_with(&[(StressAxis::Contrast, 0, 0)]),
+            None,
+            None,
+            None,
+            &d,
+        );
+        assert_eq!(score.value, 85);
+        assert!(!hints.contains(&Hint::IncreaseContrast), "{hints:?}");
+
+        // resolution-hint guard (:328) — a 0/0 axis is not "≤40% survival"
+        let (_, hints) = compose(
+            axes_with(&[(StressAxis::Resolution, 0, 0)]),
+            None,
+            None,
+            None,
+            &d,
+        );
+        assert!(!hints.contains(&Hint::EnlargeModules), "{hints:?}");
+
+        // blur-hint guard (:334) — total==0 must NOT read as "dies at the
+        // mildest blur" (that guard is `t > 0`, then `p == 0`)
+        let (score, hints) = compose(axes_with(&[(StressAxis::Blur, 0, 0)]), None, None, None, &d);
+        assert_eq!(score.value, 82);
+        assert!(!hints.contains(&Hint::ReduceArtTexture), "{hints:?}");
+    }
+
+    /// `value < 70` (strict) is the raise-EC gate — the companion test pins the
+    /// FIRES side at value 62; this pins the boundary: value EXACTLY 70 with
+    /// EC<H and a healthy margin must NOT fire (:350 `<`→`<=`). Perspective 0/5
+    /// + Rotation 0/5 drop 20+10 weight ⇒ weighted 7000 ⇒ value 70.
+    #[test]
+    fn raise_ec_hint_uses_strict_less_than_at_the_value_boundary() {
+        let d = detection_with(Some(EcLevel::Q));
+        let (score, hints) = compose(
+            axes_with(&[
+                (StressAxis::Perspective, 0, 5),
+                (StressAxis::Rotation, 0, 5),
+            ]),
+            None,
+            None,
+            None,
+            &d,
+        );
+        assert_eq!(score.value, 70);
+        assert!(
+            !hints
+                .iter()
+                .any(|h| matches!(h, Hint::RaiseErrorCorrection { .. })),
+            "value==70 is NOT below the strict-< 70 threshold: {hints:?}"
+        );
+    }
+
+    /// Decode a pristine QR and hand back the calibrated stress base + probe,
+    /// so the private `run_axes` can be driven directly (its internals never
+    /// had a value-level test — the lighting accumulator and deadline break
+    /// only surface here).
+    fn clean_base_and_probe() -> (LumaImage, String, CellProbe) {
+        let code =
+            qrcode::QrCode::with_error_correction_level(b"stress-axis pin", qrcode::EcLevel::Q)
+                .unwrap();
+        let img = code
+            .render::<image::Luma<u8>>()
+            .module_dimensions(8, 8)
+            .build();
+        let mut png = Vec::new();
+        image::DynamicImage::ImageLuma8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let planes = normalize(&ImageInput::encoded(&png), &Limits::default()).unwrap();
+        let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
+        let d = &outcome.merged[0];
+        let base = transform::downscale_to(&planes.luma, STRESS_BASE_SIDE);
+        let probe = CellProbe::calibrate(&base, &d.text, d.symbology).unwrap();
+        (base, d.text.clone(), probe)
+    }
+
+    /// The lighting set counts survivors with `lighting_passed += 1`; a
+    /// `+=`→`*=` swap (:261) would multiply the zero seed forever. A pristine
+    /// symbol survives ≥1 of the five lighting cells, so the count must move.
+    #[test]
+    fn lighting_pass_count_accumulates() {
+        let (base, text, probe) = clean_base_and_probe();
+        let axes = run_axes(
+            &base,
+            &text,
+            ScoreDepth::Full,
+            &CancelToken::new(),
+            None,
+            probe,
+        )
+        .unwrap();
+        let lighting = axes
+            .iter()
+            .find(|a| a.axis == StressAxis::Lighting)
+            .unwrap();
+        assert!(
+            lighting.passed >= 1,
+            "clean symbol must survive ≥1 lighting cell: {lighting:?}"
+        );
+    }
+
+    /// A deadline already in the past must break the lighting loop before any
+    /// cell runs (`Instant::now() >= d`). The mutant `<` (:257) never fires, so
+    /// it would process the set and report survivors — the ramps break either
+    /// way, so the lighting axis is the discriminator.
+    #[test]
+    fn a_past_deadline_stops_the_lighting_set() {
+        let (base, text, probe) = clean_base_and_probe();
+        let past = Instant::now();
+        let axes = run_axes(
+            &base,
+            &text,
+            ScoreDepth::Full,
+            &CancelToken::new(),
+            Some(past),
+            probe,
+        )
+        .unwrap();
+        let lighting = axes
+            .iter()
+            .find(|a| a.axis == StressAxis::Lighting)
+            .unwrap();
+        assert_eq!(
+            lighting.passed, 0,
+            "a past deadline must break before any lighting cell: {lighting:?}"
+        );
+    }
+
     /// Kanji-mode regression for the SCORING path (the ladder-side fix has
     /// its own test): stress cells must match by resolved text — raw-keyed
     /// cells silently failed every rxing-only survival on kanji symbols.
