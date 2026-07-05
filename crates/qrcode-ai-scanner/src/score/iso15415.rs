@@ -273,6 +273,32 @@ mod tests {
         assert_eq!(modulation.grade, IsoGrade::F);
     }
 
+    /// The percentile index is `round((len − 1) · p)`; a `-`→`/` swap (:54,
+    /// `len / 1 == len`) shifts it up by one. With 196 low values then 4 high
+    /// ones, the 98th percentile lands on index 195 (still low) — a one-index
+    /// slip reads the outlier instead, flipping span 0 → 200 (contrast F → A).
+    #[test]
+    fn percentile_index_uses_len_minus_one() {
+        let mut samples = vec![40u8; 196];
+        samples.extend([240u8; 4]);
+        // r_high = sorted[195] = 40, r_low = sorted[4] = 40 → span 0 → flat
+        let (sc, modulation) = contrast_and_modulation(&samples).unwrap();
+        assert_eq!(sc.grade, IsoGrade::F, "{sc:?}");
+        assert_eq!(modulation.grade, IsoGrade::F, "{modulation:?}");
+    }
+
+    /// The sub-sample guard is `< 16` (strict): exactly 16 module means is
+    /// enough to grade. A `<`→`<=` or `<`→`==` swap (:60) would refuse 16.
+    #[test]
+    fn sixteen_module_means_is_the_minimum_admitted() {
+        let sixteen: Vec<u8> = (0..16).map(|i| if i % 2 == 0 { 0 } else { 255 }).collect();
+        assert!(contrast_and_modulation(&sixteen).is_some());
+        // 15 is genuinely too few → None (also traps the `<`→`==` swap, which
+        // would otherwise let 15 samples through)
+        let fifteen: Vec<u8> = (0..15).map(|i| if i % 2 == 0 { 0 } else { 255 }).collect();
+        assert!(contrast_and_modulation(&fifteen).is_none());
+    }
+
     #[test]
     fn fixed_pattern_damage_caps_at_d_on_quiet_zone_violation() {
         let pristine = StructuralReport {

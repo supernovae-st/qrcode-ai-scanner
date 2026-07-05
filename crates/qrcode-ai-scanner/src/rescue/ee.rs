@@ -290,6 +290,20 @@ mod tests {
         assert!(correct(&mut b, 0, &[]).is_none());
     }
 
+    #[test]
+    fn block_length_versus_parity_is_a_strict_lower_bound() {
+        // `block.len() < npar` is the true reject — a block with FEWER bytes
+        // than parity symbols can't carry a codeword. A `<`→`<=` or `<`→`==`
+        // swap (:91) would also reject len == npar; an all-parity (zero-data)
+        // block is degenerate-but-valid and takes the clean-syndrome exit.
+        assert_eq!(correct(&mut [0u8; 6], 6, &[]), Some((0, 0)));
+
+        // len == npar−1 is genuinely too short → None. The `||`→`&&` swap on
+        // the `block.is_empty()` leg (:92) would fold the short-guard into the
+        // empty-guard, letting this non-empty short block reach Some((0, 0)).
+        assert_eq!(correct(&mut [0u8; 5], 6, &[]), None);
+    }
+
     proptest::proptest! {
         /// Roundtrip law: any corruption within e + 2t ≤ npar, with the
         /// erased positions marked, must restore the exact codeword.

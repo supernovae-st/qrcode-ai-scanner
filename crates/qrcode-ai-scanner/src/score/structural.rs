@@ -288,6 +288,51 @@ mod tests {
         );
     }
 
+    /// Synthetic samplers pin the interior-mean arithmetic of `quiet_zone_ok`
+    /// that a real high-contrast QR leaves robust (its 255-vs-0 probes sit far
+    /// from the interior mean). The affine quad (25,25)-(115,115) at modules=8
+    /// lands every module center on an exact integer pixel (30 + 10·k), so the
+    /// bilinear sampler reads the pixel back verbatim.
+    #[test]
+    fn quiet_zone_interior_mean_is_load_bearing() {
+        let corners = [
+            crate::report::Point { x: 25.0, y: 25.0 },
+            crate::report::Point { x: 115.0, y: 25.0 },
+            crate::report::Point { x: 115.0, y: 115.0 },
+            crate::report::Point { x: 25.0, y: 115.0 },
+        ];
+
+        // (A) a UNIFORM image: no probe is brighter than the interior mean, so
+        // the quiet zone is NOT ok. `interior_sum *= v` (:114) and `sum % n`
+        // (:124) both collapse the mean to 0 (every probe then reads "light"),
+        // and `v >= mean` (:139) lets the equal probes count — all three would
+        // wrongly pass.
+        let uniform = LumaImage::new(vec![90u8; 130 * 130], 130, 130);
+        let sampler = GridSampler::new(&uniform, corners, 8).unwrap();
+        assert!(
+            !quiet_zone_ok(&sampler, 8),
+            "a uniform image has no distinguishable quiet zone"
+        );
+
+        // (B) interior 95 with a single dark module (0,0)=0, quiet ring 90.
+        // Correct mean = 5985/64 = 93, so the 90-probes read dark → NOT ok.
+        // `step = modules*8` (:108) samples only module (0,0)=0 → mean 0 →
+        // every probe flips to "light" → would wrongly pass.
+        let mut data = vec![90u8; 130 * 130];
+        for y in 25..115 {
+            for x in 25..115 {
+                data[y * 130 + x] = 95;
+            }
+        }
+        data[30 * 130 + 30] = 0; // module (0,0) center pixel
+        let img_b = LumaImage::new(data, 130, 130);
+        let sampler_b = GridSampler::new(&img_b, corners, 8).unwrap();
+        assert!(
+            !quiet_zone_ok(&sampler_b, 8),
+            "a dark interior corner must not invert the quiet-zone verdict"
+        );
+    }
+
     #[test]
     fn ink_in_the_margin_breaks_quiet_zone() {
         let (luma, corners, version) = decoded_clean();
