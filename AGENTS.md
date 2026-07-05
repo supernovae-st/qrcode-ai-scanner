@@ -30,7 +30,7 @@ Everything runs **locally** (no network calls anywhere in the library).
 ## Commands
 
 ```bash
-cargo nextest run --workspace        # the test suite (~180 tests)
+cargo nextest run --workspace        # the test suite (count = whatever it prints)
 cargo clippy --workspace --all-targets   # MUST stay at 0 warnings (pedantic)
 cargo fmt --all
 python3 scripts/check-type-parity.py # Rust ↔ TS ↔ JSON-Schema drift gate

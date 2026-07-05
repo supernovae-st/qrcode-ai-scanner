@@ -13,6 +13,15 @@
 | `qrcode-ai-scanner-wasm` | browser wasm (phase C) |
 | `xtask` | repo automation: gen-fixtures · corpus-report · baseline |
 
+Workspace-EXCLUDED (foreign toolchains build them; `cargo … --workspace`
+skips them by design — see the root `Cargo.toml` comment):
+
+| Crate / tree | Role |
+|---|---|
+| `qrcode-ai-scanner-py` | PyO3/maturin wheel (PyPI) |
+| `qrcode-ai-scanner-uniffi` | UniFFI wrapper behind Kotlin (JitPack) + Swift (SwiftPM) |
+| `bindings/flutter/rust` | flutter_rust_bridge crate inside the pub.dev package |
+
 ## Core invariants
 
 1. **No QR found is `Ok`** with empty `detections` — `Err` only for real
