@@ -456,25 +456,28 @@ class AxisScore {
 }
 
 class StructuralReport {
-  final List<int> finderIntegrity; // [a, b, c]
+  // 0.0-1.0 per corner — int truncation would collapse any partial
+  // integrity (e.g. 0.96) to 0.
+  final List<double> finderIntegrity; // [a, b, c]
   final bool quietZoneOk;
   const StructuralReport(this.finderIntegrity, this.quietZoneOk);
   factory StructuralReport.fromJson(Map<String, dynamic> j) => StructuralReport(
         (j['finder_integrity'] as List? ?? const [])
-            .map((e) => _int(e) ?? 0)
+            .map(_double)
             .toList(),
         j['quiet_zone_ok'] == true,
       );
 }
 
 class UecReport {
-  final int margin;
+  // 0.0-1.0 (1.0 = pristine) — int truncation read every real margin as 0.
+  final double margin;
   final LetterGrade grade;
   final int worstBlockErrors, worstBlockCapacity;
   const UecReport(
       this.margin, this.grade, this.worstBlockErrors, this.worstBlockCapacity);
   factory UecReport.fromJson(Map<String, dynamic> j) => UecReport(
-        _int(j['margin']) ?? 0,
+        _double(j['margin']),
         LetterGrade.from(j['grade']),
         _int(j['worst_block_errors']) ?? 0,
         _int(j['worst_block_capacity']) ?? 0,
