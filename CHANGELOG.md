@@ -4,10 +4,11 @@ All notable changes to this workspace. Every surface versions together — the R
 crate + CLI, the npm node + wasm packages, the Python wheel, and the
 Kotlin/Android · Swift/iOS · Flutter bindings.
 
-## Unreleased
+## 0.5.0 — 2026-07-05
 
 Correctness + release-trust hardening (night sweep 2026-07-05). Wire schema
-unchanged (score contract v3); two wire VALUES corrected as bugfixes.
+unchanged (score contract v3); two wire VALUES corrected as bugfixes. First
+mobile release: pub.dev + SwiftPM xcframework + JitPack all fire on this tag.
 
 ### Added
 
@@ -47,7 +48,14 @@ unchanged (score contract v3); two wire VALUES corrected as bugfixes.
   degree pinned exact on injected errors (0–3 plus a 90-pattern sweep across
   `npar` 4..=20), `windowed_extremum` clamp/identity edges, Otsu's
   negative-variance init and argmax weighting, `has_color` source-kind flag,
-  and `finder_score`'s region-mean threshold.
+  and `finder_score`'s region-mean threshold. Second pass killed the
+  quiet-zone / strided-window / zigzag-bounds survivors; the 13 remaining
+  are individually proven equivalent and pinned in `.cargo/mutants.toml` —
+  the weekly missed count is a zero-baseline signal now.
+- Internal: the symbology substrate (GF(256) tables, version DB, zigzag
+  walk, block deinterleave, grid sampler) moved out of `score::` into a
+  dedicated `matrix/` module — the rescue path no longer imports scoring
+  code. No API or behavior change (same test count green, wire identical).
 - Threaded determinism pinned: one shared `Scanner` scanned from 4 OS
   threads under contention produces byte-identical reports vs a sequential
   baseline (wall-clock trace fields zeroed — the one documented
