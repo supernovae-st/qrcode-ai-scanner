@@ -350,4 +350,189 @@ mod tests {
         let report = check(&inked, corners, version).unwrap();
         assert!(!report.quiet_zone_ok, "margin ink must trip the check");
     }
+
+    // ---------------------------------------------------------------------
+    // quiet_zone_ok mutant pins — every image below uses the exact-integer
+    // affine quad (25,25)–(25+10·(N+1)) at modules N so module (mx,my) reads
+    // pixel (30+10·mx, 30+10·my) verbatim (bilinear at an integer coordinate
+    // returns that pixel). Each test documents WHICH survivor its verdict traps.
+    // ---------------------------------------------------------------------
+
+    /// The interior step is `(modules / 8).max(1)`. At modules=10 the correct
+    /// step is 1 (every row); the mutant `(modules % 8).max(1)` = 2 samples
+    /// only EVEN rows. Odd interior rows are dark, even light → the two step
+    /// choices give interior means 50 vs 100, and a probe of 75 is light under
+    /// the true mean and dark under the mutant.
+    #[test]
+    fn quiet_zone_interior_step_divides_not_modulos() {
+        let corners = [
+            crate::report::Point { x: 25.0, y: 25.0 },
+            crate::report::Point { x: 135.0, y: 25.0 },
+            crate::report::Point { x: 135.0, y: 135.0 },
+            crate::report::Point { x: 25.0, y: 135.0 },
+        ];
+        let mut data = vec![75u8; 150 * 150]; // quiet-zone probes read 75
+        for my in 0..10usize {
+            for mx in 0..10usize {
+                let v = if my % 2 == 0 { 100 } else { 0 };
+                data[(30 + 10 * my) * 150 + (30 + 10 * mx)] = v;
+            }
+        }
+        let img = LumaImage::new(data, 150, 150);
+        let sampler = GridSampler::new(&img, corners, 10).unwrap();
+        // correct mean 50 → 75 light → ok; mutant mean 100 → 75 dark → NOT ok.
+        assert!(quiet_zone_ok(&sampler, 10));
+    }
+
+    /// Both interior loop bounds (`my < modules`, `mx < modules`) are STRICT.
+    /// Uniform interior 100 (mean 100), quiet probes 95 (< mean → dark → NOT
+    /// ok). A `< → <=` slip reads one extra row/column at module index 8
+    /// (pixel row/col 110, inked to 0), dragging the mean to 88 so the 95
+    /// probes flip to light → ok. Either bound alone flips the verdict.
+    #[test]
+    fn quiet_zone_interior_loop_bounds_are_strict() {
+        let corners = [
+            crate::report::Point { x: 25.0, y: 25.0 },
+            crate::report::Point { x: 115.0, y: 25.0 },
+            crate::report::Point { x: 115.0, y: 115.0 },
+            crate::report::Point { x: 25.0, y: 115.0 },
+        ];
+        let mut data = vec![95u8; 130 * 130]; // probes read 95
+        for my in 0..8usize {
+            for mx in 0..8usize {
+                data[(30 + 10 * my) * 130 + (30 + 10 * mx)] = 100; // interior 100
+            }
+        }
+        for k in 0..8usize {
+            data[110 * 130 + (30 + 10 * k)] = 0; // module (k, 8): row below symbol
+            data[(30 + 10 * k) * 130 + 110] = 0; // module (8, k): column right of it
+        }
+        let img = LumaImage::new(data, 130, 130);
+        let sampler = GridSampler::new(&img, corners, 8).unwrap();
+        assert!(!quiet_zone_ok(&sampler, 8));
+    }
+
+    /// The ring offsets `[-2, -1]` sit OUTSIDE the symbol. Deleting the `-` on
+    /// the `-1` makes the second offset `+1`, sampling INSIDE the (all-dark)
+    /// symbol. Interior all 0 (mean 0), quiet zone white (255 > 0 → light → ok);
+    /// under the mutant the `+1` layer reads 0 (not > 0 → dark) and the light
+    /// fraction falls to ~67% → NOT ok.
+    #[test]
+    fn quiet_zone_probe_ring_is_outside_the_symbol() {
+        let corners = [
+            crate::report::Point { x: 25.0, y: 25.0 },
+            crate::report::Point { x: 115.0, y: 25.0 },
+            crate::report::Point { x: 115.0, y: 115.0 },
+            crate::report::Point { x: 25.0, y: 115.0 },
+        ];
+        let mut data = vec![255u8; 130 * 130];
+        for my in 0..8usize {
+            for mx in 0..8usize {
+                data[(30 + 10 * my) * 130 + (30 + 10 * mx)] = 0;
+            }
+        }
+        let img = LumaImage::new(data, 130, 130);
+        let sampler = GridSampler::new(&img, corners, 8).unwrap();
+        assert!(quiet_zone_ok(&sampler, 8));
+    }
+
+    /// A symbol filling the ENTIRE image puts every ring probe outside the
+    /// frame — and `sample_bilinear` reads outside-the-image as 255 (paper):
+    /// a tight crop gets the benefit of the doubt, the unseen quiet zone is
+    /// assumed clean. Pins that convention end-to-end (96/96 probes light →
+    /// ok) — and documents why the `total > 0` gate's `> → >=` survivor is
+    /// EQUIVALENT: `total == 0` needs `Homography::apply` to return `None`
+    /// (|w| < ε) for all 96 ring probes while interior samples still land,
+    /// and a single w≈0 band cannot contain a ring that surrounds the
+    /// interior. The gate guards a geometrically unreachable state.
+    #[test]
+    fn quiet_zone_outside_the_frame_reads_as_paper() {
+        let corners = [
+            crate::report::Point { x: 0.0, y: 0.0 },
+            crate::report::Point { x: 80.0, y: 0.0 },
+            crate::report::Point { x: 80.0, y: 80.0 },
+            crate::report::Point { x: 0.0, y: 80.0 },
+        ];
+        let img = LumaImage::new(vec![100u8; 80 * 80], 80, 80);
+        let sampler = GridSampler::new(&img, corners, 8).unwrap();
+        assert!(
+            quiet_zone_ok(&sampler, 8),
+            "edge-to-edge symbol: out-of-frame quiet zone reads as paper"
+        );
+    }
+
+    /// The probe sweep is `-2..=(modules + 1)`. Uniform interior 100 (mean 100);
+    /// 18 of the 96 ring probes are inked dark (top edge m=2..7 + left edge
+    /// m=2..4, both offsets) → clean fraction 78/96 = 81.25% (ok). All darks sit
+    /// at sweep index m ∈ 2..7, so:
+    ///   `+ → -` drops m=8,9  → 62/80 = 77.5%  → NOT ok
+    ///   `+ → *` drops m=9    → 70/88 = 79.5%  → NOT ok
+    ///   deleting the `-2` start drops m=-2..1 → 46/64 = 71.9% → NOT ok
+    #[test]
+    fn quiet_zone_probe_sweep_spans_the_full_ring() {
+        let corners = [
+            crate::report::Point { x: 25.0, y: 25.0 },
+            crate::report::Point { x: 115.0, y: 25.0 },
+            crate::report::Point { x: 115.0, y: 115.0 },
+            crate::report::Point { x: 25.0, y: 115.0 },
+        ];
+        let mut data = vec![255u8; 130 * 130];
+        for my in 0..8usize {
+            for mx in 0..8usize {
+                data[(30 + 10 * my) * 130 + (30 + 10 * mx)] = 100;
+            }
+        }
+        for m in 2..8usize {
+            data[10 * 130 + (30 + 10 * m)] = 0; // top probe, offset -2
+            data[20 * 130 + (30 + 10 * m)] = 0; // top probe, offset -1
+        }
+        for m in 2..5usize {
+            data[(30 + 10 * m) * 130 + 10] = 0; // left probe, offset -2
+            data[(30 + 10 * m) * 130 + 20] = 0; // left probe, offset -1
+        }
+        let img = LumaImage::new(data, 130, 130);
+        let sampler = GridSampler::new(&img, corners, 8).unwrap();
+        assert!(quiet_zone_ok(&sampler, 8));
+    }
+
+    /// The bottom `my` and right `mx` ring coordinate is `modules - 1 - offset`.
+    /// Uniform interior 100 (mean 100); 12 top-edge probes (m=2..7, both offsets)
+    /// inked dark → clean fraction 84/96 = 87.5% (ok). Each arithmetic slip
+    /// relocates a whole edge onto an inked column/row (or onto the interior,
+    /// which equals the mean → not light), dropping the fraction under 80%:
+    ///   bottom `(M-1)/offset` → row 0             (off-2)     → 72/96  NOT ok
+    ///   right  `(M+1)-offset` → cols 140,130                  → 60/96  NOT ok
+    ///   right  `(M/1)-offset` → col 130,(120 white) (off-2)   → 72/96  NOT ok
+    ///   right  `(M-1)+offset` → cols 80,90 = interior (=mean) → 64/96  NOT ok
+    ///   right  `(M-1)/offset` → col 0             (off-2)     → 72/96  NOT ok
+    #[test]
+    fn quiet_zone_ring_coordinate_arithmetic_is_pinned() {
+        let corners = [
+            crate::report::Point { x: 25.0, y: 25.0 },
+            crate::report::Point { x: 115.0, y: 25.0 },
+            crate::report::Point { x: 115.0, y: 115.0 },
+            crate::report::Point { x: 25.0, y: 115.0 },
+        ];
+        let w = 160usize;
+        let mut data = vec![255u8; w * w];
+        for my in 0..8usize {
+            for mx in 0..8usize {
+                data[(30 + 10 * my) * w + (30 + 10 * mx)] = 100;
+            }
+        }
+        for m in 2..8usize {
+            data[10 * w + (30 + 10 * m)] = 0; // top probe, offset -2
+            data[20 * w + (30 + 10 * m)] = 0; // top probe, offset -1
+        }
+        // ink the columns/rows the mutated ring coordinates land on.
+        for y in 0..w {
+            data[y * w] = 0; // col 0   (both `/`-to-column-0 slips)
+            data[y * w + 130] = 0; // col 130
+            data[y * w + 140] = 0; // col 140
+        }
+        data[..w].fill(0); // row 0
+        let img = LumaImage::new(data, w as u32, w as u32);
+        let sampler = GridSampler::new(&img, corners, 8).unwrap();
+        assert!(quiet_zone_ok(&sampler, 8));
+    }
 }

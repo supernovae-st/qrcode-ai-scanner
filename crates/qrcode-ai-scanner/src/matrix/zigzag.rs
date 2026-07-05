@@ -142,6 +142,22 @@ pub(crate) fn unmask_to_codewords(
 mod tests {
     use super::*;
 
+    /// The finder/format reservation `if j < 9 && (i < 9 || …)` is STRICT: the
+    /// finder + format box spans modules 0..=8, so row/column 9 is the first
+    /// DATA cell. A `< → <=` slip would wrongly reserve module row/column 9,
+    /// dropping it from every zigzag position → a scrambled bitstream. Pin both
+    /// `<` with cells exactly AT the boundary that v5 leaves free (its alignment
+    /// centre sits at 6/30, clear of these cells).
+    #[test]
+    fn reserved_cell_finder_bounds_are_strict() {
+        // column 9 (j=9): `j < 9` is false → free. `j <= 9` would reserve it.
+        assert!(!reserved_cell(5, 0, 9), "column 9 is data, not reserved");
+        // row 9 (i=9): the inner `i < 9` is false → free. `i <= 9` reserves it.
+        assert!(!reserved_cell(5, 9, 0), "row 9 is data, not reserved");
+        // sanity on the TRUE side: (8,8) is the far corner of the box.
+        assert!(reserved_cell(5, 8, 8), "the finder+format box is reserved");
+    }
+
     /// Hand-computed ISO 18004 mask-formula truth table — the pristine
     /// matrix only exercises whichever masks the generator picked; mutation
     /// testing showed masks 1 and 6 had no kill coverage.
@@ -182,5 +198,25 @@ mod tests {
             );
         }
         assert!(!mask_bit(8, 0, 0), "unknown mask is never set");
+    }
+
+    /// The masks 5/6/7 use MODULO, not addition — a `% → +` slip changes the
+    /// value fed to the `== 0` / `is_multiple_of(2)` test. Each assertion below
+    /// straddles the mutant. (Two of the mask-6/7 `% 2 → + 2` slips are proven
+    /// EQUIVALENT: `n + 2 ≡ n (mod 2)` so the parity feeding `is_multiple_of(2)`
+    /// is unchanged — those are justified in the commit, not pinned here.)
+    #[test]
+    fn mask_bit_uses_modulo_not_addition() {
+        // mask 5 ≡ (y·x ≡ 0 mod 6). Both `% 2 → + 2` and `% 3 → + 3` push the
+        // LHS to ≥ 2, so it can never equal 0 → every TRUE case dies. y·x = 6.
+        assert!(mask_bit(5, 2, 3), "y·x=6 → 6%2 + 6%3 = 0 → set");
+        assert!(mask_bit(5, 1, 6), "y·x=6 → set");
+        assert!(!mask_bit(5, 1, 1), "y·x=1 → 1%2 + 1%3 = 2 → clear");
+        // mask 6: `(y·x)%3 → (y·x)+3` flips the parity into is_multiple_of(2).
+        // y·x=1: (1%2 + 1%3)=2 even → set; mutant (1 + (1+3))=5 odd → clear.
+        assert!(mask_bit(6, 1, 1), "1%2 + 1%3 = 2 even → set");
+        // mask 7: `(y·x)%3 → (y·x)+3` flips the parity. y·x=1, y+x=2:
+        // (1%3 + 2%2)=(1+0)=1 odd → clear; mutant ((1+3)+0)=4 even → set.
+        assert!(!mask_bit(7, 1, 1), "1%3 + 2%2 = 1 odd → clear");
     }
 }

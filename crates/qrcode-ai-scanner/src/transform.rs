@@ -889,4 +889,35 @@ mod tests {
         windowed_extremum_strided(&src, 5, 1, 0, MorphPick::Max, &mut deque, &mut out);
         assert_eq!(out, [9, 1, 5, 5, 2]);
     }
+
+    /// A TRUE strided pass (stride > 1, asymmetric window) — the incremental
+    /// catch-up `let prev_hi = (i - 1 + r).min(n - 1); for j in (prev_hi + 1)..=hi`
+    /// only runs the STRIDED path via `morph_filter`'s vertical column walk.
+    /// The window minimum/maximum ENTERS at the last index, so an `i - 1`
+    /// mutation (→ `i + 1` / `i / 1`) fails to push the newly-arriving index
+    /// and misreads the tail (in fact it walks the deque head off the end and
+    /// panics). The `prev_hi + 1 → prev_hi * 1` slip is a proven idempotent
+    /// re-push of the monotonic deque's back element (justified in the commit).
+    #[test]
+    fn windowed_extremum_strided_slides_with_a_real_stride() {
+        // logical values [50,40,60,45,10] at stride-2 slots; 255 = filler.
+        let src = [50u8, 255, 40, 255, 60, 255, 45, 255, 10];
+        let mut deque = Vec::new();
+        let mut out = [0u8; 9];
+        windowed_extremum_strided(&src, 5, 2, 1, MorphPick::Min, &mut deque, &mut out);
+        // window [i-1,i+1] clamped: min(50,40)=40 · min(50,40,60)=40 ·
+        // min(40,60,45)=40 · min(60,45,10)=10 · min(45,10)=10
+        assert_eq!(
+            [out[0], out[2], out[4], out[6], out[8]],
+            [40, 40, 40, 10, 10]
+        );
+        // MAX mirror — the extremum enters at the tail here too.
+        windowed_extremum_strided(&src, 5, 2, 1, MorphPick::Max, &mut deque, &mut out);
+        // max(50,40)=50 · max(50,40,60)=60 · max(40,60,45)=60 ·
+        // max(60,45,10)=60 · max(45,10)=45
+        assert_eq!(
+            [out[0], out[2], out[4], out[6], out[8]],
+            [50, 60, 60, 60, 45]
+        );
+    }
 }
