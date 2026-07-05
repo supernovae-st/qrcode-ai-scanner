@@ -663,4 +663,150 @@ mod tests {
         assert!(planes.channel(Channel::R).is_none());
         assert_eq!(planes.luma.data(), &[0, 255]);
     }
+
+    // ---------------------------------------------------------------------
+    // Golden-value pins — expected outputs computed BY HAND (in comments)
+    // from the algorithm, NOT frozen from `fn` output, so a regression in
+    // the arithmetic is caught rather than blessed. Cover the otsu variance
+    // argmax + tie-break, the separable morph passes end-to-end, and the
+    // box-downscale dimension math + truncation.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn otsu_unbalanced_classes_pin_the_variance_argmax() {
+        // 8 px @40 · 4 px @120 · 4 px @200 (total 16, weighted_sum 1600).
+        // Between-class variance ω_bg·ω_fg·(μ_bg−μ_fg)² over the 3 candidate
+        // thresholds that add mass:
+        //   t=40  → 8·8·(40−160)²   = 64·14400 = 921600  ← unique max
+        //   t=120 → 12·4·(66.67−200)² ≈ 48·17778 ≈ 853333
+        //   t=200 → foreground empty, loop breaks
+        // argmax threshold = 40, and the binarize step maps px>40 → 255. A
+        // mutation that shifts the argmax to 120 would flip the 120-row to 0.
+        #[rustfmt::skip]
+        let img = luma(&[
+            40,  40,  40,  40,
+            40,  40,  40,  40,
+            120, 120, 120, 120,
+            200, 200, 200, 200,
+        ], 4, 4);
+        let out = otsu_threshold(&img);
+        let want = [
+            0u8, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255,
+        ];
+        assert_eq!(out.data(), &want[..]);
+    }
+
+    #[test]
+    fn otsu_variance_tie_keeps_the_lower_threshold() {
+        // 6 px @40 · 4 px @120 · 6 px @200 (total 16, weighted_sum 1920).
+        //   t=40  → 6·10·(40−168)²  = 60·16384 = 983040
+        //   t=120 → 10·6·(72−200)²  = 60·16384 = 983040  (EXACT f64 tie)
+        // The comparison is strict `variance > best_variance`, so the FIRST
+        // (lower) threshold 40 wins the tie. A `>=` mutation would advance to
+        // 120 and drop the 120-cluster below the cut → observable flip.
+        #[rustfmt::skip]
+        let img = luma(&[
+            40,  40,  40,  40,
+            40,  40,  120, 120,
+            120, 120, 200, 200,
+            200, 200, 200, 200,
+        ], 4, 4);
+        let out = otsu_threshold(&img);
+        // threshold 40 → px>40 ? 255 : 0
+        let want = [
+            0u8, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        ];
+        assert_eq!(out.data(), &want[..]);
+    }
+
+    #[test]
+    fn otsu_uniform_zero_image_maps_to_black() {
+        // All-zero: t=0 adds every pixel to background, foreground is empty →
+        // the loop breaks at the first step with best_threshold still 0. The
+        // binarize is px>0, so 0 is NOT > 0 → the whole image lands black.
+        // (Mirror of `otsu_flat_image_maps_to_white`, which pins the >0 case.)
+        let img = luma(&[0; 9], 3, 3);
+        let out = otsu_threshold(&img);
+        assert_eq!(out.data(), &[0; 9]);
+    }
+
+    #[test]
+    fn min_filter_closes_a_one_pixel_gap_and_dilates_the_dark_bar() {
+        // 8×8 white field with a dark bar on row 3 broken by a 1px light gap
+        // at col 4. min_filter (windowed minimum, k=3 → radius 1) is a
+        // grayscale erosion of the light / dilation of the dark.
+        let mut data = [255u8; 64];
+        data[3 * 8..4 * 8].copy_from_slice(&[255, 0, 0, 0, 255, 0, 0, 255]);
+        let out = min_filter(&luma(&data, 8, 8), 3);
+        // Horizontal pass: every row-3 cell has a dark neighbour, so the whole
+        // row collapses to 0 (the col-4 gap closes AND the bar reaches the
+        // borders). Vertical pass then grows that solid dark row up into row 2
+        // and down into row 4. Rows 0,1,5,6,7 stay white.
+        let mut want = [255u8; 64];
+        for row in 2..=4 {
+            for col in 0..8 {
+                want[row * 8 + col] = 0;
+            }
+        }
+        assert_eq!(out.data(), &want[..]);
+    }
+
+    #[test]
+    fn max_filter_mirrors_the_gap_close_on_light_structures() {
+        // Photometric mirror of the min case: dark field, a light bar on row 3
+        // with a 1px dark gap at col 4. max_filter (windowed maximum) grows
+        // the LIGHT structure, so the mirrored output is rows 2,3,4 all white.
+        let mut data = [0u8; 64];
+        data[3 * 8..4 * 8].copy_from_slice(&[0, 255, 255, 255, 0, 255, 255, 0]);
+        let out = max_filter(&luma(&data, 8, 8), 3);
+        let mut want = [0u8; 64];
+        for row in 2..=4 {
+            for col in 0..8 {
+                want[row * 8 + col] = 255;
+            }
+        }
+        assert_eq!(out.data(), &want[..]);
+    }
+
+    #[test]
+    fn morph_filter_on_a_uniform_field_is_identity() {
+        // No structure to erode/dilate: every window extremum is the field
+        // value. This exercises the FULL two-pass path (an 8×8 does not hit
+        // the collapsed-radius early return) yet must return the input.
+        let img = luma(&[128u8; 64], 8, 8);
+        assert_eq!(min_filter(&img, 3).data(), img.data());
+        assert_eq!(max_filter(&img, 5).data(), img.data());
+    }
+
+    #[test]
+    fn downscale_odd_dimension_uses_uneven_boxes() {
+        // 5×5 → longest side 5 > max_side 2 → new dims (5·2/5)=2 each. The
+        // source→dest box mapping is uneven: rows/cols split {0,1} | {2,3,4},
+        // so the four output boxes cover 2×2, 2×3, 3×2, 3×3 source pixels.
+        // Each box below is filled with one value so its mean is exact.
+        #[rustfmt::skip]
+        let img = luma(&[
+            40,  40,  100, 100, 100,
+            40,  40,  100, 100, 100,
+            200, 200, 130, 130, 130,
+            200, 200, 130, 130, 130,
+            200, 200, 130, 130, 130,
+        ], 5, 5);
+        let out = downscale_to(&img, 2);
+        assert_eq!((out.width(), out.height()), (2, 2));
+        // (0,0)=mean(40)=40 · (0,1)=mean(100)=100 · (1,0)=mean(200)=200 ·
+        // (1,1)=mean(130)=130
+        assert_eq!(out.data(), &[40, 100, 200, 130]);
+    }
+
+    #[test]
+    fn downscale_truncates_the_box_mean() {
+        // 2×2 → 1×1: the single output pixel is the integer (truncating) mean
+        // of all four. (10+20+30+41)/4 = 101/4 = 25 — NOT 25.25 rounded to 25
+        // by luck; a `+1` or rounding mutation on the divide would read 26.
+        let img = luma(&[10, 20, 30, 41], 2, 2);
+        let out = downscale_to(&img, 1);
+        assert_eq!((out.width(), out.height()), (1, 1));
+        assert_eq!(out.data(), &[25]);
+    }
 }
