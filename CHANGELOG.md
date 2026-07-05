@@ -9,6 +9,15 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
 Correctness + release-trust hardening (night sweep 2026-07-05). Wire schema
 unchanged (score contract v3); two wire VALUES corrected as bugfixes.
 
+### Added
+
+- DoS-hardening + latency knobs across the mobile/server bindings: UniFFI
+  (Kotlin/Swift) `scan` / `scan_frame` gain `max_dimension` / `max_pixels`
+  input caps and a `budget_ms` wall-clock override; Python gains `budget_ms`
+  (its input caps landed earlier this cycle). Same names, same semantics as
+  Node/WASM (`0` = unbounded — spec/02). All arguments default, so existing
+  call-sites are untouched.
+
 ### Fixed
 
 - **UPC-E `gtin`/`conformant` were wrong**: the check digit was computed over

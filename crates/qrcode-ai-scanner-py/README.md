@@ -17,9 +17,13 @@ if report["detections"]:
     print(report["hints"])                                      # machine-actionable
 ```
 
-- `scan(image: bytes, profile="full") -> dict` — decode encoded bytes (PNG/JPEG/WebP/GIF).
-- `scan_frame(rgba: bytes, width: int, height: int, profile="frame") -> dict` — raw RGBA
-  frame, no image-format roundtrip.
+- `scan(image: bytes, profile="full", max_dimension=None, max_pixels=None, budget_ms=None)
+  -> dict` — decode encoded bytes (PNG/JPEG/WebP/GIF).
+- `scan_frame(rgba: bytes, width: int, height: int, profile="frame", max_dimension=None,
+  max_pixels=None, budget_ms=None) -> dict` — raw RGBA frame, no image-format roundtrip.
+- Optional kwargs: `max_dimension` / `max_pixels` cap inputs BEFORE any pixel work
+  (defaults 10000 px / 64 MP — lower them for untrusted uploads); `budget_ms` bounds the
+  scan wall-clock (`0` = unbounded — leave unset for strictly reproducible reports).
 - "No QR found" returns a `dict` with empty `detections`; `ValueError` is raised only for
   invalid input.
 

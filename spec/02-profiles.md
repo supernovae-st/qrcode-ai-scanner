@@ -36,7 +36,8 @@ reading "NO" on valid product output is the documented trap.
   interruptible (which is why engine inputs are size-capped — see Limits).
 - Override per call: Rust `ScanProfile::Custom(config)` ·
   CLI `--profile` only (no budget flag yet) · Node `budgetMs` ·
-  WASM `budget_ms` (positional arg #5 of `scan_image`, #5 of `scan_frame`).
+  WASM `budget_ms` (positional arg #5 of `scan_image`, #5 of `scan_frame`) ·
+  Python `budget_ms` kwarg · Kotlin/Swift (UniFFI) `budget_ms`.
 - `0` or negative = **unbounded** (NOT a zero-millisecond budget).
 - With a budget set, WHERE the run cuts is machine-dependent — set
   `budget_ms: None`/unbounded for strictly reproducible reports. The cut is
@@ -49,8 +50,8 @@ reading "NO" on valid product output is the documented trap.
 
 | Limit | Default | Surface knobs |
 |---|---|---|
-| `max_dimension` (px per side) | 10 000 | Rust `Limits` · Node `maxDimension` · WASM arg |
-| `max_pixels` (total) | 64 000 000 | Rust `Limits` · Node `maxPixels` · WASM arg |
+| `max_dimension` (px per side) | 10 000 | Rust `Limits` · Node `maxDimension` · WASM arg · Python/UniFFI `max_dimension` |
+| `max_pixels` (total) | 64 000 000 | Rust `Limits` · Node `maxPixels` · WASM arg · Python/UniFFI `max_pixels` |
 | `max_engine_side` (internal) | 2 048 | Rust `ScanConfig` only — engines NEVER see larger |
 | decoder allocation cap | `max_pixels × 8` bytes | automatic (decompression-bomb guard) |
 | detections per report | 16 | fixed |
@@ -67,3 +68,6 @@ Server guidance: lower `maxDimension`/`maxPixels` for untrusted uploads
   within its budget (in-flight cancel is NOT wired — by design at ≤4 s
   budgets).
 - WASM: synchronous on the calling thread — budget IS the bound.
+- Python / Kotlin / Swift: synchronous like WASM — `budget_ms` is the bound
+  (Python releases the GIL for the scan's duration; mobile callers keep the
+  scan off the main thread).

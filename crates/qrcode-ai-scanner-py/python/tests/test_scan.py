@@ -58,6 +58,31 @@ def test_generous_limits_still_decode():
     assert len(report["detections"]) >= 1
 
 
+@pytest.mark.skipif(not CLEAN, reason="no clean fixtures")
+def test_budget_zero_is_unbounded():
+    # 0 = unbounded (NOT a zero-millisecond budget) — the cross-binding convention
+    # from spec/02. Deterministic: no wall-clock dependence.
+    report = qr.scan(CLEAN[0].read_bytes(), "full", budget_ms=0)
+    assert len(report["detections"]) >= 1
+    assert report["score"]  # full profile still scores unbounded
+
+
+@pytest.mark.skipif(not CLEAN, reason="no clean fixtures")
+def test_generous_budget_keeps_the_contract():
+    # A 10-minute budget cannot cut a clean-fixture scan: asserts the budget
+    # PLUMBING (the Custom-profile path) without wall-clock flakiness.
+    report = qr.scan(CLEAN[0].read_bytes(), "full", budget_ms=600_000)
+    assert len(report["detections"]) >= 1
+    assert report["score"]
+
+
+@pytest.mark.skipif(not (CLEAN and HAS_PIL), reason="needs fixtures + Pillow")
+def test_scan_frame_accepts_budget():
+    im = Image.open(CLEAN[0]).convert("RGBA")
+    report = qr.scan_frame(im.tobytes(), im.width, im.height, "frame", budget_ms=600_000)
+    assert len(report["detections"]) >= 1
+
+
 @pytest.mark.skipif(
     not (CLEAN and HAS_JSONSCHEMA and SCHEMA), reason="needs fixtures + jsonschema + schema"
 )

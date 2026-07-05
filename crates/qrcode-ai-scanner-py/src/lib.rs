@@ -33,6 +33,20 @@ fn build_limits(max_dimension: Option<u32>, max_pixels: Option<u64>) -> Option<L
     })
 }
 
+/// `budget_ms` overrides the profile's wall-clock budget (0 = unbounded, NOT a
+/// zero-millisecond budget — spec/02): server embedders bound tail latency
+/// without giving up the deep ladder.
+fn with_budget(profile: ScanProfile, budget_ms: Option<u64>) -> ScanProfile {
+    match budget_ms {
+        None => profile,
+        Some(ms) => {
+            let mut config = profile.config();
+            config.budget_ms = (ms > 0).then_some(ms);
+            ScanProfile::Custom(config)
+        }
+    }
+}
+
 // Serialize a ScanReport to a Python object via serde_json::Value so Rust tuples /
 // [T; N] become JSON arrays → idiomatic Python lists, conforming to spec/'s schema.
 fn report_to_py<'py>(
@@ -47,16 +61,18 @@ fn report_to_py<'py>(
 ///
 /// Returns the `ScanReport` as a `dict`. "No QR found" is a normal result (empty
 /// `detections`); a `ValueError` is raised only for invalid input or cancellation.
+/// `budget_ms` overrides the profile's wall-clock budget (0 = unbounded).
 #[pyfunction]
-#[pyo3(signature = (image, profile = "full", max_dimension = None, max_pixels = None))]
+#[pyo3(signature = (image, profile = "full", max_dimension = None, max_pixels = None, budget_ms = None))]
 fn scan<'py>(
     py: Python<'py>,
     image: &[u8],
     profile: &str,
     max_dimension: Option<u32>,
     max_pixels: Option<u64>,
+    budget_ms: Option<u64>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let profile = parse_profile(profile)?;
+    let profile = with_budget(parse_profile(profile)?, budget_ms);
     let limits = build_limits(max_dimension, max_pixels);
     let image = image.to_vec(); // own it before releasing the GIL
     let report = py
@@ -74,9 +90,14 @@ fn scan<'py>(
 
 /// Decode + score a raw RGBA frame (e.g. a camera frame), no image-format roundtrip.
 ///
-/// `rgba` must be `width * height * 4` bytes.
+/// `rgba` must be `width * height * 4` bytes. `budget_ms` overrides the profile's
+/// wall-clock budget (0 = unbounded) — the camera loop's per-frame bound.
 #[pyfunction]
-#[pyo3(signature = (rgba, width, height, profile = "frame", max_dimension = None, max_pixels = None))]
+#[pyo3(signature = (rgba, width, height, profile = "frame", max_dimension = None, max_pixels = None, budget_ms = None))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the Python signature IS the cross-binding contract (dims + profile + caps + budget)"
+)]
 fn scan_frame<'py>(
     py: Python<'py>,
     rgba: &[u8],
@@ -85,8 +106,9 @@ fn scan_frame<'py>(
     profile: &str,
     max_dimension: Option<u32>,
     max_pixels: Option<u64>,
+    budget_ms: Option<u64>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let profile = parse_profile(profile)?;
+    let profile = with_budget(parse_profile(profile)?, budget_ms);
     let limits = build_limits(max_dimension, max_pixels);
     let rgba = rgba.to_vec(); // own it before releasing the GIL
     let report = py
@@ -96,7 +118,9 @@ fn scan_frame<'py>(
                 Some(l) => builder.limits(l),
                 None => builder,
             };
-            builder.build().scan(ImageInput::rgba8(&rgba, width, height))
+            builder
+                .build()
+                .scan(ImageInput::rgba8(&rgba, width, height))
         })
         .map_err(|e| PyValueError::new_err(format!("{} [{}]", e, e.code())))?;
     report_to_py(py, &report)
