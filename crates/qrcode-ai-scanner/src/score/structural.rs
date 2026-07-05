@@ -333,6 +333,40 @@ mod tests {
         );
     }
 
+    /// A mid-gray finder region pins `finder_score`'s local threshold as the
+    /// MEAN of the 49 samples (`sum / 49`, :84). Real QR fixtures are 0/255
+    /// polarized, so both `sum / 49` (≈83) and the harvest survivor `sum % 49`
+    /// (≈13) classify them identically — here the two values straddle the
+    /// classes. Same exact-integer affine quad as the quiet-zone pin: modules
+    /// = 8 puts module (mx, my) center on pixel (30+10mx, 30+10my) verbatim.
+    /// FINDER-dark cells read 90, light cells 110 → sum = 33·90 + 16·110 =
+    /// 4730 → threshold 96 splits them (90 dark · 110 light) → score 1.0.
+    /// The mutant threshold 4730 % 49 = 26 reads EVERYTHING light → 16/49.
+    #[test]
+    fn finder_score_threshold_is_the_region_mean() {
+        let corners = [
+            crate::report::Point { x: 25.0, y: 25.0 },
+            crate::report::Point { x: 115.0, y: 25.0 },
+            crate::report::Point { x: 115.0, y: 115.0 },
+            crate::report::Point { x: 25.0, y: 115.0 },
+        ];
+        let mut data = vec![110u8; 130 * 130];
+        for (dy, row) in FINDER.iter().enumerate() {
+            for (dx, &dark) in row.iter().enumerate() {
+                if dark {
+                    data[(30 + 10 * dy) * 130 + (30 + 10 * dx)] = 90;
+                }
+            }
+        }
+        let img = LumaImage::new(data, 130, 130);
+        let sampler = GridSampler::new(&img, corners, 8).unwrap();
+        let score = finder_score(&sampler, 0, 0);
+        assert!(
+            (score - 1.0).abs() < f32::EPSILON,
+            "mean threshold 96 must split 90-dark from 110-light: {score}"
+        );
+    }
+
     #[test]
     fn ink_in_the_margin_breaks_quiet_zone() {
         let (luma, corners, version) = decoded_clean();

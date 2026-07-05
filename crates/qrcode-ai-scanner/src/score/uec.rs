@@ -779,6 +779,80 @@ mod tests {
         );
     }
 
+    /// An all-zero block is a valid RS codeword, so its syndromes are the
+    /// error polynomial's evaluations alone: inject `e` byte errors into one
+    /// and Berlekamp-Massey's locator degree must be EXACTLY `e` (the crate
+    /// invariant: exact for e ≤ npar/2). The e2e fixtures only ever reach
+    /// t ≤ 1, which left BM's multi-error branch structure unpinned — the
+    /// mutant-harvest survivors (run 28740297335) live there:
+    /// - e=0 → 0: a `-> 1` stub (:395) reports a phantom error
+    /// - e=1, value 1, coeff x⁰ (block END: syndromes reads block[len−1−j]):
+    ///   `S_i` = 1 ∀i — round 0 must set degree = round + 1 − degree = 1; the
+    ///   `+`→`*` swap (:416) leaves 0 and every later discrepancy cancels →
+    ///   returns 0
+    /// - e=2 EQUAL values: `S_0` = v⊕v = 0, so round 0 exercises the
+    ///   discrepancy-0 branch's `shift += 1` (:409) BEFORE any length change;
+    ///   a stale shift (`*= 1`) mis-slides the update window of every round
+    ///   that follows
+    /// - e=3 asymmetric: any surviving bookkeeping slip drifts the degree
+    #[test]
+    fn berlekamp_massey_degree_counts_injected_errors_exactly() {
+        let npar = 10;
+        let clean = vec![0u8; 26];
+        assert_eq!(error_count(&syndromes(&clean, npar)), 0, "no errors");
+
+        let mut one = vec![0u8; 26];
+        one[25] = 1; // coefficient of x^0
+        assert_eq!(error_count(&syndromes(&one, npar)), 1, "single error");
+
+        let mut pair = vec![0u8; 26];
+        pair[3] = 0xA5;
+        pair[17] = 0xA5;
+        assert_eq!(error_count(&syndromes(&pair, npar)), 2, "equal-value pair");
+
+        let mut triple = vec![0u8; 26];
+        triple[0] = 5;
+        triple[9] = 200;
+        triple[21] = 33;
+        assert_eq!(error_count(&syndromes(&triple, npar)), 3, "three errors");
+    }
+
+    /// Deterministic LCG sweep — 90 error patterns across npar 4..=20 with
+    /// 1 ≤ e ≤ npar/2. BM is exact on every one, so any slip in the update
+    /// fold (`^=` :414), the update-window bound (`len + 1 − shift`
+    /// :413/:422) or the shift bookkeeping (`+=` :425) shifts some pattern's
+    /// locator degree. Mirrors the morph deque-vs-naive sweep convention.
+    #[test]
+    fn berlekamp_massey_degree_matches_error_count_on_lcg_sweep() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = |bound: u32| -> u32 {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) as u32 % bound
+        };
+        for case in 0..90 {
+            let npar = (4 + next(17)) as usize; // 4..=20
+            let len = npar + 10 + next(20) as usize;
+            let e = (1 + next(npar as u32 / 2)) as usize; // 1..=npar/2
+            let mut block = vec![0u8; len];
+            let mut placed = 0;
+            while placed < e {
+                let pos = next(len as u32) as usize;
+                if block[pos] == 0 {
+                    block[pos] = (1 + next(255)) as u8;
+                    placed += 1;
+                }
+            }
+            let synd = syndromes(&block, npar);
+            assert_eq!(
+                error_count(&synd),
+                e,
+                "case {case}: npar={npar} len={len} e={e} block={block:?}"
+            );
+        }
+    }
+
     #[test]
     fn version_table_totals_are_consistent() {
         // total codewords must equal the de-interleave block sum, all

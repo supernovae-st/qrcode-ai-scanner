@@ -809,4 +809,84 @@ mod tests {
         assert_eq!((out.width(), out.height()), (1, 1));
         assert_eq!(out.data(), &[25]);
     }
+
+    // ---------------------------------------------------------------------
+    // Mutant-harvest pins (weekly deep-checks run 28740297335) — each test
+    // documents WHICH surviving mutant its assertion traps, by line.
+    // ---------------------------------------------------------------------
+
+    /// `has_color` gates the ladder's per-channel enhance rungs; a `-> false`
+    /// stub (:36) silently disables channel splitting for every color source
+    /// (plain codes still decode off luma, so no e2e test notices). Pin the
+    /// flag on both sides of the source kind.
+    #[test]
+    fn has_color_reflects_the_source_kind() {
+        let rgba = [10u8, 20, 30, 255];
+        let planes = normalize(&ImageInput::rgba8(&rgba, 1, 1), &Limits::default()).unwrap();
+        assert!(planes.has_color(), "an rgba source retains color planes");
+        let planes = normalize(&ImageInput::luma8(&[7], 1, 1), &Limits::default()).unwrap();
+        assert!(!planes.has_color(), "a luma source has no color planes");
+    }
+
+    /// The variance argmax must start BELOW every real candidate. With two
+    /// pixels {100, 101} the single computed variance is EXACTLY
+    /// 1·1·(100−101)² = 1.0 (integers are exact in f64), so the −1.0 init
+    /// admits it and t=100 wins → [0, 255]. A `delete -` on the init (:150)
+    /// starts the argmax at +1.0; strict `>` then rejects the candidate, the
+    /// threshold stays 0, and the whole image flips light → [255, 255].
+    #[test]
+    fn otsu_two_pixel_split_needs_the_negative_variance_init() {
+        let img = luma(&[100, 101], 2, 1);
+        let out = otsu_threshold(&img);
+        assert_eq!(out.data(), &[0, 255]);
+    }
+
+    /// 2@0 · 3@5 · 1@20 pins the mean/weight arithmetic of the variance
+    /// argmax (every quantity below is a dyadic rational — exact in f64):
+    ///   t=0: ω 2·4 · (0 − 35/4)² = 8·76.5625 = 612.5
+    ///   t=5: ω 5·1 · (3 − 20)²   = 5·289     = 1445   ← argmax → px > 5
+    /// Four harvest survivors all flip the argmax to t=0, misreading the
+    /// 5-cluster as light ([0,0,255,255,255,255]):
+    ///   :164 `/`→`*` — `μ_fg` = rest·count = 140 → t=0 var 156 800 ≫ 1445
+    ///   :166:48 `*`→`+` — var = `ω_bg` + `ω_fg`·sep² → t=0 308.25 > t=5 294
+    ///   :166:74/:87 `*`→`/` — var ≈ `ω_bg`·`ω_fg` → t=0 8 > t=5 5
+    #[test]
+    fn otsu_argmax_weighs_class_balance_times_separation_squared() {
+        let img = luma(&[0, 0, 5, 5, 5, 20], 6, 1);
+        let out = otsu_threshold(&img);
+        assert_eq!(out.data(), &[0, 0, 0, 0, 0, 255]);
+    }
+
+    /// The seed loop's `r.min(n − 1)` clamp (:334) is load-bearing for
+    /// oversized radii: the fn contract clamps the window to [0, n−1] for ANY
+    /// r, and `morph_filter`'s own radius clamp never exercises r ≥ n. The
+    /// harvest mutants `n − 1` → `n + 1` / `n / 1` seed one index past the
+    /// slice and die on out-of-bounds instead of returning the fully clamped
+    /// extremum (the global min/max replicated).
+    #[test]
+    fn windowed_extremum_oversized_radius_clamps_at_the_seed() {
+        let src = [7u8, 200, 3];
+        let mut deque = Vec::new();
+        let mut out = [0u8; 3];
+        windowed_extremum_strided(&src, 3, 1, 5, MorphPick::Min, &mut deque, &mut out);
+        assert_eq!(out, [3, 3, 3]);
+        windowed_extremum_strided(&src, 3, 1, 5, MorphPick::Max, &mut deque, &mut out);
+        assert_eq!(out, [200, 200, 200]);
+    }
+
+    /// r = 0 is a legal degenerate window ([i, i] — the identity map) that
+    /// `morph_filter`'s radius floor (≥ 1) never produces — pin it by direct
+    /// call. At i=1, `prev_hi` = (i−1+r).min(n−1) = 0 and the catch-up loop
+    /// starts at `prev_hi + 1`; the harvest mutant `+`→`−` (:348) computes
+    /// 0 − 1 and dies on usize underflow instead of walking [1, hi].
+    #[test]
+    fn windowed_extremum_zero_radius_is_identity() {
+        let src = [9u8, 1, 5, 5, 2];
+        let mut deque = Vec::new();
+        let mut out = [0u8; 5];
+        windowed_extremum_strided(&src, 5, 1, 0, MorphPick::Min, &mut deque, &mut out);
+        assert_eq!(out, [9, 1, 5, 5, 2]);
+        windowed_extremum_strided(&src, 5, 1, 0, MorphPick::Max, &mut deque, &mut out);
+        assert_eq!(out, [9, 1, 5, 5, 2]);
+    }
 }
