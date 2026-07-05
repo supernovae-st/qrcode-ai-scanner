@@ -1,0 +1,46 @@
+name: crates-publish
+
+# Publishes the Rust lib + CLI to crates.io on a release tag. Requires the
+# CARGO_REGISTRY_TOKEN repo secret.
+#
+# This pipeline was MISSING through v0.4.0 and v0.5.0: the README's first
+# install surface (`cargo add qrcode-ai-scanner`) silently served 0.3.0 while
+# npm/PyPI moved on — nothing gated the drift. Both 0.5.0 crates were
+# published by hand on 2026-07-06; from the next tag this job owns it.
+#
+# `cargo publish` is idempotent-hostile (re-publishing an existing version is
+# a hard error), so each crate is gated on a registry existence probe — a
+# re-run tag or a partial failure resumes cleanly instead of going red.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: publish lib then cli (skip versions already live)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          ws=$(grep -m1 -E '^version' Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          live() {
+            curl -fsSL -H "User-Agent: qrcode-ai-scanner-ci (release gate)" \
+              "https://crates.io/api/v1/crates/$1/$2" >/dev/null 2>&1
+          }
+          for crate in qrcode-ai-scanner qrcode-ai-scanner-cli; do
+            if live "$crate" "$ws"; then
+              echo "$crate $ws already on crates.io — skip"
+            else
+              cargo publish -p "$crate" --locked
+            fi
+          done
