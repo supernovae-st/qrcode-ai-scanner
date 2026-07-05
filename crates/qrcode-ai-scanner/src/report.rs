@@ -265,8 +265,9 @@ pub enum StressAxis {
 pub struct AxisScore {
     /// The dimension.
     pub axis: StressAxis,
-    /// Cells survived. Ramps stop at the first failure (the knee);
-    /// the lighting set always runs in full.
+    /// Cells survived. Ramps stop at the first failure (the knee); the
+    /// lighting set is unordered — no knee-exit (depth still picks the
+    /// cell subset).
     pub passed: u8,
     /// Cells in the ramp at this depth.
     pub total: u8,
@@ -332,7 +333,9 @@ pub struct StructuralReport {
     /// Per-finder 1:1:3:1:1 integrity, 0.0-1.0 — [top-left, top-right,
     /// bottom-left]. The #1 documented AI-art failure mode.
     pub finder_integrity: [f32; 3],
-    /// ≥4-module clear border present.
+    /// Clear border present — probed on a 2-module outer ring (ISO/IEC
+    /// 18004 recommends 4 modules; the lenient probe targets what breaks
+    /// locators in practice).
     pub quiet_zone_ok: bool,
 }
 

@@ -6,8 +6,9 @@
 //! reflectance-class signals (contrast/lighting survival) are relative.
 //!
 //! Determinism: every stress cell is a pure transform of the normalized
-//! luma; ramps stop at the first failure (the knee), the lighting set always
-//! runs in full. Same input + same depth ⇒ same score, always.
+//! luma; ramps stop at the first failure (the knee). The lighting set is
+//! unordered — no knee-exit, though depth still picks the cell subset.
+//! Same input + same depth ⇒ same score, always.
 
 pub(crate) mod iso15415;
 pub(crate) mod structural;

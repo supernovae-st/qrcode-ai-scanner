@@ -81,8 +81,10 @@ fn berlekamp_massey(synd: &[u8]) -> Vec<u8> {
 /// Correct one RS block in place. `erasures` are POWER positions (j with
 /// `block[len−1−j]` the x^j coefficient) marked unreliable by the caller.
 /// Returns `(errors, erasures)` actually corrected on success; `None` when
-/// the block is beyond capacity or inconsistent — never a miscorrection
-/// that survives the final syndrome re-check.
+/// the block is beyond capacity or inconsistent. The final syndrome
+/// re-check rejects INCONSISTENT corrections — a miscorrection that lands
+/// on another valid codeword passes it by construction (that class is
+/// what the UEC margin-0 `low_correction_margin` hint flags downstream).
 pub(super) fn correct(block: &mut [u8], npar: usize, erasures: &[usize]) -> Option<(usize, usize)> {
     if npar == 0
         || erasures.len() >= npar

@@ -16,7 +16,7 @@ cell (the knee). Weights are contract constants:
 | `contrast` | 15 | multiplicative crush ×0.7 · 0.55 · 0.4 · 0.3 · 0.2 |
 | `perspective` | 20 | tilt 10° · 18° · 26° · 34° · 42° |
 | `rotation` | 10 | 10° · 20° · 30° · 40° · 50° |
-| `lighting` | 15 | defect SET (shadow · glare · exposure …) — always runs in full |
+| `lighting` | 15 | defect SET (shadow · glare · exposure …) — unordered: no knee-exit; depth still picks the cell subset |
 
 Survival is measured **relative to the symbol's own decode class**
 (`CellProbe`): an artistic symbol that only decodes through a deep rung is

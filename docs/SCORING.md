@@ -21,11 +21,12 @@
 
 ## Survival axes
 
-Each axis is an ordered intensity ramp decoded with a FAST subset
-(direct + otsu — the score measures *margin*, not the deep ladder's
-recovery power; that asymmetry is deliberate). Ramps stop at the first
-failure (the knee). Full depth = 5 cells/axis · Fast profile = 2 ·
-Frame = no scoring.
+Each axis is an ordered intensity ramp decoded with a FAST subset relative
+to the symbol's own decode class: direct + otsu, plus the one deep rung the
+unstressed baseline needed, when it needed one (`CellProbe` — "fragile" is
+never conflated with "undecodable"; the score still measures *margin*, not
+the deep ladder's recovery power). Ramps stop at the first failure (the
+knee). Full depth = 5 cells/axis · Fast profile = 2 · Frame = no scoring.
 
 | Axis | Weight | Ramp |
 |---|---|---|
