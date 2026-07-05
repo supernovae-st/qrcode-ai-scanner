@@ -1,0 +1,21 @@
+# Wall-clock scheduling for the test suite.
+#
+# The three artistic integration tests scan with the stock Full profile —
+# a 4 s wall-clock budget BY DESIGN — so on a saturated machine the budget
+# cuts the ladder mid-flight and the decode/score assertions flake (observed
+# at load ≈ 100: they fail at ~4.1 s in a full parallel run, pass serially).
+# The threaded-determinism pin generates exactly that kind of load: four
+# budget-free full-ladder scans at once. Put all four in one serialized
+# group so wall-clock budgets are never starved by our own suite; the
+# determinism test also declares the four scheduler slots it really uses.
+
+[test-groups]
+wall-clock = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(artistic_image_that_decodes_must_not_score_zero) + test(blob_style_template_decodes_and_scores) + test(legacy_artistic_image_decodes_within_full_ladder) + test(concurrent_scans_yield_byte_identical_reports)'
+test-group = 'wall-clock'
+
+[[profile.default.overrides]]
+filter = 'test(concurrent_scans_yield_byte_identical_reports)'
+threads-required = 4
