@@ -9,17 +9,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Sharded: the suite outgrew a single runner (203+ tests × every mutant —
-  # the un-sharded job hit the 90-min wall on 2026-07-05 without finishing).
-  # 4 shards ≈ 25 min each; add shards if the wall returns, never the
-  # timeout (a longer wall just delays the report a week).
+  # Sharded: the suite outgrew a single runner (203+ tests × ~1900 mutants —
+  # the un-sharded job hit the 90-min wall on 2026-07-05, and 4 shards STILL
+  # timed out at 90 min while uploading partials). 8 shards ≈ 240 mutants
+  # each. Add shards if the wall returns, never the timeout (a longer wall
+  # just delays the report a week).
   mutants:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -28,7 +29,7 @@ jobs:
         with:
           tool: cargo-mutants,cargo-nextest
       - run: >
-          cargo mutants -p qrcode-ai-scanner --shard ${{ matrix.shard }}/4
+          cargo mutants -p qrcode-ai-scanner --shard ${{ matrix.shard }}/8
           --minimum-test-timeout 120 -- --all-features
         continue-on-error: true
       - uses: actions/upload-artifact@v4

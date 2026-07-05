@@ -7,5 +7,6 @@
 # reported exactly that noise class; exclude it so `missed` stays a real
 # assertion-gap signal.
 # (matched against the full mutant line, which starts with the file path —
-# never anchor.)
-exclude_re = ["replace fuzzing::"]
+# never anchor.) Both bridge layers: lib.rs `fuzzing::` re-exports and the
+# rescue-internal `fuzz_api::` it forwards to.
+exclude_re = ["replace fuzzing::", "replace fuzz_api::"]
