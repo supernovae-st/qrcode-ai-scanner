@@ -744,6 +744,8 @@ mod tests {
         assert_eq!(UecGrade::from_margin(0.49), UecGrade::C);
         assert_eq!(UecGrade::from_margin(0.37), UecGrade::C);
         assert_eq!(UecGrade::from_margin(0.30), UecGrade::D);
+        assert_eq!(UecGrade::from_margin(0.25), UecGrade::D);
+        assert_eq!(UecGrade::from_margin(0.24), UecGrade::F);
         assert_eq!(UecGrade::from_margin(0.10), UecGrade::F);
     }
 
