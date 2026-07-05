@@ -34,8 +34,8 @@ fn scan_one(content: &str) -> Payload {
     report.detections[0].payload.clone()
 }
 
-/// The builder's WIFI escaping (ZXing convention): `\ ; , : "` each get a
-/// backslash. Mirrors `escapeWifiField` in the landing repo.
+/// The builder's `WIFI:` escaping (`ZXing` convention): `\ ; , : "` each
+/// get a backslash. Mirrors `escapeWifiField` in the landing repo.
 fn escape_wifi(field: &str) -> String {
     let mut out = String::with_capacity(field.len());
     for c in field.chars() {
