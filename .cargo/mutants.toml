@@ -9,4 +9,51 @@
 # (matched against the full mutant line, which starts with the file path —
 # never anchor.) Both bridge layers: lib.rs `fuzzing::` re-exports and the
 # rescue-internal `fuzz_api::` it forwards to.
-exclude_re = ["replace fuzzing::", "replace fuzz_api::"]
+#
+# Below the bridge class: the 13 PROVEN-EQUIVALENT mutants from the
+# 2026-07-05 full-file proof runs (each argued in commits 63d5895 + this
+# one; re-derive before touching). Anchored line:col ON PURPOSE — a
+# fn-scoped operator pattern would swallow killable siblings (e.g. 9
+# CAUGHT `< with <=` live in reserved_cell next to the 2 equivalents).
+# Line drift makes an entry stale in the SAFE direction: the known
+# equivalent resurfaces in the weekly report and gets re-anchored; a
+# killable mutant is never hidden.
+#
+# transform.rs
+#   235:87 / 238:96  downscale `.max(y0+1)`/`.max(x0+1)` `+`→`*`: h ≥ new_h
+#     always in a downscale, the guard never binds (upscale-only defense).
+#   347:45  `-`→`+`/`/` in `.min(n - 1)`: the clamp only fires when the
+#     catch-up loop is empty either way (prev_hi ≥ hi at that point).
+#   348:31  `prev_hi + 1`→`* 1`: re-push of the back index; `dominates` is
+#     non-strict, so the equal-value copy pops its original — deque
+#     bit-identical.
+#   367:24  `(k | 1)`→`^`: for m = k.max(3), (m|1)/2 == (m^1)/2 for all m
+#     (integer-division identity, odd and even).
+# score/structural.rs
+#   98:33 / 100:30  `modules - 1 / offset` mirror: offsets {-2,-1} swap
+#     their target rows/cols {modules, modules+1}; the aggregated
+#     light/total count is order-independent.
+#   111:11  `total > 0`→`>=`: total == 0 needs Homography::apply to return
+#     None on all 96 ring probes while the interior still samples — a w≈0
+#     band is a line and cannot contain a ring surrounding the interior.
+# matrix/zigzag.rs
+#   33:28 / 33:75  `i < 6`/`j < 6`→`<=` in the version-info arm: the
+#     timing-pattern check (i == 6 || j == 6) returns first.
+#   66:23 / 67:37  `%`→`+` inside is_multiple_of(2): +2 preserves parity
+#     and %2 preserves value mod 2 — same predicate.
+exclude_re = [
+    "replace fuzzing::",
+    "replace fuzz_api::",
+    "transform\\.rs:235:87: replace \\+ with \\* in downscale_to",
+    "transform\\.rs:238:96: replace \\+ with \\* in downscale_to",
+    "transform\\.rs:347:45: replace - with . in windowed_extremum_strided",
+    "transform\\.rs:348:31: replace \\+ with \\* in windowed_extremum_strided",
+    "transform\\.rs:367:24: replace \\| with \\^ in morph_filter",
+    "structural\\.rs:98:33: replace - with / in quiet_zone_ok",
+    "structural\\.rs:100:30: replace - with / in quiet_zone_ok",
+    "structural\\.rs:111:11: replace > with >= in quiet_zone_ok",
+    "zigzag\\.rs:33:28: replace < with <= in reserved_cell",
+    "zigzag\\.rs:33:75: replace < with <= in reserved_cell",
+    "zigzag\\.rs:66:23: replace % with \\+ in mask_bit",
+    "zigzag\\.rs:67:37: replace % with \\+ in mask_bit",
+]
