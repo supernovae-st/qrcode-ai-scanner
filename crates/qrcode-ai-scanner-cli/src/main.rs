@@ -40,6 +40,12 @@ struct Cli {
     #[arg(long, value_enum, default_value = "full")]
     profile: ProfileArg,
 
+    /// Override the profile's wall-clock budget in ms (0 = unbounded).
+    /// Unbounded is also the strictly-reproducible mode — with a budget set,
+    /// WHERE the ladder cuts is machine-dependent (spec/02).
+    #[arg(long)]
+    budget_ms: Option<u32>,
+
     /// Human-readable summary instead of JSON.
     #[arg(long, short = 'p')]
     pretty: bool,
@@ -144,7 +150,17 @@ fn main() -> ExitCode {
         }
     };
 
-    let scanner = Scanner::builder().profile(cli.profile.into()).build();
+    // --budget-ms overrides the preset's wall-clock budget (0 = unbounded) —
+    // the same semantics as Node `budgetMs` / WASM / Python / UniFFI.
+    let profile = match cli.budget_ms {
+        None => cli.profile.into(),
+        Some(ms) => {
+            let mut config = ScanProfile::from(cli.profile).config();
+            config.budget_ms = (ms > 0).then_some(u64::from(ms));
+            ScanProfile::Custom(config)
+        }
+    };
+    let scanner = Scanner::builder().profile(profile).build();
     let report = match scanner.scan(ImageInput::encoded(&bytes)) {
         Ok(report) => report,
         Err(error) => {

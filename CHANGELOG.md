@@ -6,6 +6,20 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
 
 ## Unreleased
 
+### Added
+
+- CLI `--budget-ms` — override the profile's wall-clock budget (0 =
+  unbounded), same semantics as every other binding surface. The CLI was the
+  last surface without the knob.
+- QD-2 settled by measurement: `cargo xtask rescue-stress` (2304
+  deterministic occlusion scans, no RNG, byte-identical reruns) shows the S5
+  erasure rescue is refusal-safe — 82/82 rescue decodes correct, 77% refusal
+  rate, zero miscorrections. The harness runs weekly in deep-checks with a
+  hard zero-rescue-wrong gate. Separately measured: the base rxing engine
+  wrong-decodes ~1% at format-info-adjacent occlusion and carries no
+  bitstream, so `low_correction_margin` structurally cannot flag that class
+  (tracked as its own decision).
+
 ### Fixed
 
 - JitPack (Kotlin/Android) v0.5.0 build died exit-127: `/opt` is not writable

@@ -37,6 +37,27 @@ fn found_is_exit_0_with_json() {
     assert_eq!(report["detections"].as_array().unwrap().len(), 1);
 }
 
+/// `--budget-ms` must actually thread into the scan: 0 (unbounded) and a
+/// generous budget both decode the clean fixture; the flag parsing itself
+/// is the contract (a typo'd flag would exit 2 before scanning).
+#[test]
+fn budget_ms_flag_threads_into_the_scan() {
+    for budget in ["0", "60000"] {
+        let out = qrscan()
+            .arg(fixture("clean/gen_v2_l.png"))
+            .args(["--budget-ms", budget])
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "--budget-ms {budget}: clean fixture must decode"
+        );
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(report["detections"].as_array().unwrap().len(), 1);
+    }
+}
+
 #[test]
 fn not_found_is_exit_1_in_every_output_mode() {
     let blank = white_png();

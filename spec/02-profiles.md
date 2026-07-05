@@ -35,7 +35,7 @@ reading "NO" on valid product output is the documented trap.
 - Granularity is the ATTEMPT/CELL: an in-flight engine call is not
   interruptible (which is why engine inputs are size-capped — see Limits).
 - Override per call: Rust `ScanProfile::Custom(config)` ·
-  CLI `--profile` only (no budget flag yet) · Node `budgetMs` ·
+  CLI `--budget-ms` · Node `budgetMs` ·
   WASM `budget_ms` (positional arg #5 of `scan_image`, #5 of `scan_frame`) ·
   Python `budget_ms` kwarg · Kotlin/Swift (UniFFI) `budget_ms`.
 - `0` or negative = **unbounded** (NOT a zero-millisecond budget).

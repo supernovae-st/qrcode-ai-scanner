@@ -66,3 +66,36 @@ jobs:
             cargo +nightly fuzz run --target x86_64-unknown-linux-gnu \
               "$target" "fuzz/corpus/$target" fixtures -- -max_total_time=300
           done
+
+  # The QD-2 measurement as a standing instrument: 2304 deterministic
+  # occlusion scans. Two invariants gate:
+  #   1. same-machine determinism — two runs must be byte-identical
+  #      (cross-machine byte-parity is NOT asserted; f32 warp sampling may
+  #      differ in the last ulp across platforms, spec/04 determinism note)
+  #   2. rescue_wrong == 0 — the refusal-safety claim (measured 0/82 at
+  #      2026-07-06 baseline, commit 51af645). A platform where the rescue
+  #      miscorrects is a REAL finding, not a flake — this stays a hard gate.
+  # The full table uploads as an artifact for trend reading.
+  rescue-stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: two runs, byte-identical, zero rescue-wrong
+        run: |
+          set -euo pipefail
+          cargo run --release -p xtask -- rescue-stress > run1.txt
+          cargo run --release -p xtask -- rescue-stress > run2.txt
+          diff run1.txt run2.txt
+          grep -E 'rescue_succeeded.*wrong 0\)' run1.txt || {
+            echo "::error::rescue path produced a WRONG decode — refusal-safety violated"
+            grep -E 'rescue_' run1.txt || true
+            exit 1
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rescue-stress-report
+          path: run1.txt
