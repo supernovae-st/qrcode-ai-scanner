@@ -4,6 +4,54 @@ All notable changes to this workspace. Every surface versions together — the R
 crate + CLI, the npm node + wasm packages, the Python wheel, and the
 Kotlin/Android · Swift/iOS · Flutter bindings.
 
+## Unreleased
+
+Correctness + release-trust hardening (night sweep 2026-07-05). Wire schema
+unchanged (score contract v3); two wire VALUES corrected as bugfixes.
+
+### Fixed
+
+- **UPC-E `gtin`/`conformant` were wrong**: the check digit was computed over
+  the compressed 8-digit form and the GTIN-14 padded from it. Now expands
+  UPC-E → UPC-A first (GS1 rule), then check-digits and pads from the
+  expansion.
+- GS1 evidence sniffing no longer counts the *stripped leading* GS of a
+  transmission artifact as element-string evidence.
+- Flutter mirror: `UecReport.margin` and `StructuralReport.finderIntegrity`
+  are `double` now — the previous `int` truncation read every real margin
+  (0.85, 0.62…) as 0. Lands before the first pub.dev publish.
+
+### Testing / CI
+
+- Rescue path fuzzed at last: `fuzz_scan_full` (reaches S4 deep + S5 rescue)
+  and `fuzz_rescue_bitstream` (adversarial bitstream → errors-and-erasures
+  correction via a `cfg(fuzzing)` bridge). Weekly fuzz job repaired (missing
+  gitignored corpus dir) and now runs all four targets.
+- Corpus gains `expect = "fail"` frontier entries: 6 vendored blind-spot
+  fixtures (multi-symbol collages · extreme 3D perspective · busy scenes);
+  an expected-fail that starts passing fails the run loudly — capability
+  gains are detected, never silent.
+- Golden-value pins for `otsu_threshold` / morphology / `downscale_to`
+  (the surviving-mutant cluster) + direct rqrr/rxing adapter tests + the
+  UEC 0.25/0.24 grade edge.
+- Type-parity gate v2: 8 enums · 15 contract structs · payload kinds ·
+  hint tags, held identical across Rust ↔ TypeScript ↔ JSON-Schema ↔ Dart
+  (the Dart mirror was previously ungated).
+- Release trust: the version gate now covers the node package.json + flutter
+  pubspec + tag==workspace (a forgotten bump used to become a silent
+  non-release); new MSRV 1.87 job; the published wasm crate is now
+  cargo-checked on every PR; cargo-deny enforces bans+sources on the
+  workspace and scans the three excluded binding lockfiles (report-only).
+
+### Docs
+
+- Prose truth-sync with the implementation: the erasure-rescue re-check
+  rejects *inconsistent* corrections (a codeword-valued miscorrection is
+  the UEC margin-0 class, flagged downstream); stress-cell probe set
+  documented as direct + otsu + the baseline's deep rung (`CellProbe`);
+  quiet-zone probe documented as the 2-module ring it is; the lighting
+  set's no-knee-exit semantics clarified everywhere.
+
 ## 0.4.0
 
 New binding surfaces + cross-binding consistency. The core decoding/scoring
