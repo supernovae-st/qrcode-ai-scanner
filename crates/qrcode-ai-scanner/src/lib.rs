@@ -240,3 +240,54 @@ fn build_report(outcome: ladder::LadderOutcome, scored: Option<(Score, Vec<Hint>
         versions: Versions::current(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // The public contract is exercised via the re-exported surface; the
+    // workspace deny targets `src/`, so tests opt back into unwrap/expect.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{ImageInput, Limits, Scanner};
+
+    #[test]
+    fn builder_threads_custom_limits_into_the_scan() {
+        // Traps the builder-plumbing survivor (`ScannerBuilder::limits` →
+        // Default::default(), shard-0): a builder that discarded the
+        // configured Limits would fall back to the 10_000px / 64MP defaults
+        // and wave this input straight through. Pin that BOTH limit fields
+        // are threaded from the builder into input validation.
+        let data = vec![255u8; 64 * 64];
+
+        // (a) dimension cap: 64px per side > 16px limit → QRS-002
+        let strict_dim = Scanner::builder()
+            .limits(Limits {
+                max_dimension: 16,
+                ..Limits::default()
+            })
+            .build();
+        let err = strict_dim
+            .scan(ImageInput::luma8(&data, 64, 64))
+            .expect_err("64px input must exceed the 16px builder limit");
+        assert_eq!(err.code(), "QRS-002", "dimension cap threaded from builder");
+
+        // (b) pixel cap: 4096px total > 100px limit → QRS-003
+        let strict_pixels = Scanner::builder()
+            .limits(Limits {
+                max_pixels: 100,
+                ..Limits::default()
+            })
+            .build();
+        let err = strict_pixels
+            .scan(ImageInput::luma8(&data, 64, 64))
+            .expect_err("4096px input must exceed the 100px builder limit");
+        assert_eq!(err.code(), "QRS-003", "pixel cap threaded from builder");
+
+        // Control: the SAME input sails through DEFAULT limits — proving the
+        // configured cap, not the input, is what rejected it above (so the
+        // builder genuinely threaded the value rather than defaulting it away).
+        let report = Scanner::default()
+            .scan(ImageInput::luma8(&data, 64, 64))
+            .expect("default 10_000px / 64MP limits accept a 64px plane");
+        assert!(report.detections.is_empty(), "a blank plane carries no QR");
+    }
+}

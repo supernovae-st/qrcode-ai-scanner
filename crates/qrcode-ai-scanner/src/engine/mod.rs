@@ -71,6 +71,20 @@ fn run_isolated<T>(f: impl FnOnce() -> T) -> Option<T> {
     catch_unwind(AssertUnwindSafe(f)).ok()
 }
 
+/// Run one engine pass under the panic boundary, tallying an isolated panic
+/// into `panics`. `None` = the engine panicked (already counted). This is the
+/// single place `EngineOutcome::panics` is incremented, so the two engine call
+/// sites cannot drift on how — or whether — a caught panic is recorded.
+fn run_engine<T>(panics: &mut u8, engine: impl FnOnce() -> T) -> Option<T> {
+    let outcome = run_isolated(engine);
+    if outcome.is_none() {
+        // a caught panic is isolated but counted — the ladder surfaces the
+        // running tally as `PipelineTrace::engine_panics`.
+        *panics += 1;
+    }
+    outcome
+}
+
 /// Which symbologies a decode pass tries — the cost lever: every extra
 /// format family is another detector walking the image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,23 +112,19 @@ pub(crate) fn decode_filtered(luma: &LumaImage, filter: FormatFilter) -> EngineO
     let mut outcome = EngineOutcome::default();
 
     #[cfg(feature = "engine-rxing")]
-    match run_isolated(|| rxing_engine::decode(luma, filter)) {
-        Some(found) => outcome.detections.extend(found),
-        None => outcome.panics += 1,
+    if let Some(found) = run_engine(&mut outcome.panics, || rxing_engine::decode(luma, filter)) {
+        outcome.detections.extend(found);
     }
 
     #[cfg(feature = "engine-rqrr")]
     if matches!(
         filter,
         FormatFilter::All | FormatFilter::QrFamily | FormatFilter::Only(Symbology::QrCode)
-    ) {
-        match run_isolated(|| rqrr_engine::decode(luma)) {
-            Some((found, rescue)) => {
-                outcome.detections.extend(found);
-                outcome.rescue.extend(rescue);
-            }
-            None => outcome.panics += 1,
-        }
+    ) && let Some((found, rescue)) =
+        run_engine(&mut outcome.panics, || rqrr_engine::decode(luma))
+    {
+        outcome.detections.extend(found);
+        outcome.rescue.extend(rescue);
     }
 
     outcome
@@ -274,5 +284,28 @@ mod tests {
         assert!(caught.is_none());
         let fine = run_isolated(|| 7u8);
         assert_eq!(fine, Some(7));
+    }
+
+    #[test]
+    fn run_engine_tallies_each_isolated_panic_by_exactly_one() {
+        // Pins the `EngineOutcome::panics` counter that `decode_filtered`
+        // threads for both engines (mod.rs `*panics += 1`). Traps the shard-0
+        // survivors: `+=` → `-=` (0u8 - 1 underflows → the pass panics, the
+        // isolation contract broken) and `+=` → `*=` (0 * 1 stays 0, a caught
+        // panic goes unrecorded). A clean pass must NOT touch the counter, and
+        // a second panic must ACCUMULATE — pinning `+=` (not `=`) and step 1.
+        let mut panics = 0u8;
+
+        let ok = run_engine(&mut panics, || 7u8);
+        assert_eq!(ok, Some(7), "a surviving engine returns its value");
+        assert_eq!(panics, 0, "a clean pass tallies nothing");
+
+        let boom: Option<u8> = run_engine(&mut panics, || panic!("engine exploded"));
+        assert!(boom.is_none(), "an isolated panic yields None");
+        assert_eq!(panics, 1, "one caught panic is exactly one tally");
+
+        let again: Option<u8> = run_engine(&mut panics, || panic!("engine exploded again"));
+        assert!(again.is_none());
+        assert_eq!(panics, 2, "a second caught panic accumulates (+=, not =)");
     }
 }

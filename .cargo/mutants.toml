@@ -10,7 +10,7 @@
 # never anchor.) Both bridge layers: lib.rs `fuzzing::` re-exports and the
 # rescue-internal `fuzz_api::` it forwards to.
 #
-# Below the bridge class: the 13 PROVEN-EQUIVALENT mutants from the
+# Below the bridge class: the 14 PROVEN-EQUIVALENT mutants from the
 # 2026-07-05 full-file proof runs (each argued in commits 63d5895 + this
 # one; re-derive before touching). Anchored line:col ON PURPOSE — a
 # fn-scoped operator pattern would swallow killable siblings (e.g. 9
@@ -41,6 +41,14 @@
 #     timing-pattern check (i == 6 || j == 6) returns first.
 #   66:23 / 67:37  `%`→`+` inside is_multiple_of(2): +2 preserves parity
 #     and %2 preserves value mod 2 — same predicate.
+# lib.rs
+#   87:9  `Scanner::builder`→`Default::default()`: the fn body already IS
+#     `ScannerBuilder::default()`, and the `-> ScannerBuilder` return type
+#     pins `Default::default()` to `<ScannerBuilder as Default>::default()`
+#     — the byte-identical call. No test can distinguish them. The killable
+#     builder siblings DISCARD state and ARE caught: `limits` (178:9) and
+#     `profile` (171:9) drop the argument, `build` (185:9) recurses forever
+#     via `Scanner::default` (timeout). This one alone is a true equivalent.
 exclude_re = [
     "replace fuzzing::",
     "replace fuzz_api::",
@@ -56,4 +64,5 @@ exclude_re = [
     "zigzag\\.rs:33:75: replace < with <= in reserved_cell",
     "zigzag\\.rs:66:23: replace % with \\+ in mask_bit",
     "zigzag\\.rs:67:37: replace % with \\+ in mask_bit",
+    "lib\\.rs:87:9: replace Scanner::builder -> ScannerBuilder with Default::default\\(\\)",
 ]
