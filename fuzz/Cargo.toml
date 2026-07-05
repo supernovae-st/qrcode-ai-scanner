@@ -27,3 +27,17 @@ path = "fuzz_targets/fuzz_classify_text.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_scan_full"
+path = "fuzz_targets/fuzz_scan_full.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_rescue_bitstream"
+path = "fuzz_targets/fuzz_rescue_bitstream.rs"
+test = false
+doc = false
+bench = false

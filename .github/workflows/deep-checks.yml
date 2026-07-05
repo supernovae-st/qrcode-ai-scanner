@@ -36,4 +36,15 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
-      - run: cargo +nightly fuzz run fuzz_scan_encoded fuzz/corpus fixtures -- -max_total_time=900
+      # Run every registered target. `fuzz/corpus/` is gitignored (absent on a
+      # fresh checkout), so `mkdir -p` each target's primary corpus dir before
+      # the run — libfuzzer errors on a missing corpus directory. Image targets
+      # seed read-only from the tracked `fixtures/` tree; the bitstream target
+      # carries its own committed seeds under its corpus dir. 300 s each keeps
+      # the whole matrix inside the 30-min job budget.
+      - name: fuzz targets
+        run: |
+          for target in fuzz_scan_encoded fuzz_scan_full fuzz_rescue_bitstream fuzz_classify_text; do
+            mkdir -p "fuzz/corpus/$target"
+            cargo +nightly fuzz run "$target" "fuzz/corpus/$target" fixtures -- -max_total_time=300
+          done

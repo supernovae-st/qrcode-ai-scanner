@@ -166,6 +166,33 @@ pub(crate) fn attempt(luma: &LumaImage, candidate: &RescueCandidate) -> Option<R
     Some(Rescued { raw, fnc1 })
 }
 
+/// Fuzz-only handles onto the two rescue internals that own a decode over
+/// attacker-shaped bytes: the errors-and-erasures RS corrector (`ee::correct`)
+/// and the data-codeword bitstream parser (`bitstream::parse`). A rescued
+/// stream never reaches the engines, so these are the ONLY parsers over that
+/// content — both must refuse (`None`) rather than panic on garbage. Compiled
+/// only under `--cfg fuzzing` (cargo-fuzz builds the graph with it); this
+/// surface does not exist in any normal build.
+#[cfg(fuzzing)]
+pub(crate) mod fuzz_api {
+    /// Parse rescued data codewords into payload bytes; `None` on any
+    /// malformed structure. Never panics — see `bitstream::parse`.
+    pub(crate) fn parse_bitstream(data: &[u8], version: u8) -> Option<(Vec<u8>, bool)> {
+        super::bitstream::parse(data, version)
+    }
+
+    /// Errors-and-erasures correct one RS block in place over the QR field;
+    /// `None` when beyond capacity or inconsistent. Never panics — see
+    /// `ee::correct`.
+    pub(crate) fn correct_block(
+        block: &mut [u8],
+        npar: usize,
+        erasures: &[usize],
+    ) -> Option<(usize, usize)> {
+        super::ee::correct(block, npar, erasures)
+    }
+}
+
 #[cfg(test)]
 mod probe {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_precision_loss)]

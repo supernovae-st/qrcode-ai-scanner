@@ -56,6 +56,19 @@ pub mod fuzzing {
         let _ = crate::payload::classify(text);
         let _ = crate::payload::classify_fnc1(text);
     }
+
+    /// Drive the S5 rescue bitstream parser over attacker-controlled data
+    /// codewords. A rescued stream never reaches the engines, so this parser
+    /// owns the decode and must never panic (refusal is the correct answer).
+    pub fn parse_bitstream(data: &[u8], version: u8) {
+        let _ = crate::rescue::fuzz_api::parse_bitstream(data, version);
+    }
+
+    /// Drive the errors-and-erasures RS corrector over an adversarial block,
+    /// parity count, and erasure set — must never panic (`None` on garbage).
+    pub fn correct_block(block: &mut [u8], npar: usize, erasures: &[usize]) {
+        let _ = crate::rescue::fuzz_api::correct_block(block, npar, erasures);
+    }
 }
 
 /// Reusable QR scanner — configure once, scan many. `Send + Sync`, no
