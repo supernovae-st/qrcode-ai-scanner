@@ -79,7 +79,7 @@ node crates/qrcode-ai-scanner-wasm/test.mjs   # wasm smoke (build first)
 
 ## Style
 
-Edition 2024, MSRV 1.87. Comments explain WHY/constraints, not what the
+Edition 2024, MSRV 1.88. Comments explain WHY/constraints, not what the
 next line does. Doc comments on every public item (`missing_docs` warns).
 Conventional commits, lowercase descriptions.
 

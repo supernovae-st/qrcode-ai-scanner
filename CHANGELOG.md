@@ -39,9 +39,15 @@ unchanged (score contract v3); two wire VALUES corrected as bugfixes.
   (the Dart mirror was previously ungated).
 - Release trust: the version gate now covers the node package.json + flutter
   pubspec + tag==workspace (a forgotten bump used to become a silent
-  non-release); new MSRV 1.87 job; the published wasm crate is now
-  cargo-checked on every PR; cargo-deny enforces bans+sources on the
-  workspace and scans the three excluded binding lockfiles (report-only).
+  non-release); the published wasm crate is now cargo-checked on every PR;
+  cargo-deny enforces bans+sources on the workspace and scans the three
+  excluded binding lockfiles (report-only).
+- New MSRV CI job — whose first run proved the declared 1.87 floor had
+  never compiled (let-chains stabilized in 1.88). **MSRV is now honestly
+  1.88** across all manifests + the JitPack pin. Cargo.lock is committed
+  (the workspace ships binaries and claims determinism; a floating dep
+  graph contradicted both) and the workspace uses resolver 3, so re-locks
+  are MSRV-aware by construction.
 
 ### Docs
 

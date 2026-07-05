@@ -17,8 +17,8 @@ jdk:
   - openjdk17
 
 before_install:
-  # Rust toolchain (matches the workspace rust-version 1.87) + Android targets.
-  - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.87.0
+  # Rust toolchain (matches the workspace rust-version 1.88) + Android targets.
+  - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0
   - source "$HOME/.cargo/env"
   - rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
   - cargo install cargo-ndk --version 4.1.2 --locked

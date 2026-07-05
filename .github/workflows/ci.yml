@@ -35,14 +35,16 @@ jobs:
       - run: cargo nextest run --workspace
       - run: cargo test --doc --workspace
 
-  # MSRV floor — every manifest says rust-version 1.87 and jitpack.yml PINS
-  # 1.87.0, but stable-only CI lets MSRV rot land silently and break JitPack
-  # at release time. Core crate is enough: the bindings inherit its floor.
+  # MSRV floor — every manifest says rust-version 1.88 and jitpack.yml PINS
+  # 1.88.0; stable-only CI lets MSRV rot land silently and break JitPack at
+  # release time. Core crate is enough: the bindings inherit its floor.
+  # (This job's first run proved the previously-declared 1.87 was fiction —
+  # the code uses let-chains, stabilized in 1.88.)
   msrv:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.87
+      - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
       # --locked: the gate tests the COMMITTED dependency graph — without it
       # a fresh re-resolution can pull a dep whose MSRV floor moved (image

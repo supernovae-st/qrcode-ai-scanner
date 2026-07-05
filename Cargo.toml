@@ -1,8 +1,8 @@
 [workspace]
 # resolver 3 = MSRV-aware resolution: any re-lock, under any toolchain,
-# selects dependency versions compatible with rust-version 1.87 (the live
-# class: image 0.25.10 raised its floor to 1.88 mid-cycle and broke fresh
-# CI resolution while 0.25.9 was fine).
+# selects dependency versions compatible with the declared rust-version
+# (the live class: image raised its floor 1.85 → 1.88 mid-cycle and a
+# fresh resolution inherited it silently).
 resolver = "3"
 members = ["crates/*", "xtask"]
 # The Python (PyO3/maturin), UniFFI (cargo-ndk/xcodebuild) and Flutter
@@ -18,7 +18,7 @@ exclude = [
 [workspace.package]
 version = "0.4.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.88"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/supernovae-st/qrcode-ai-scanner"
 authors = [
