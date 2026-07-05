@@ -5,6 +5,8 @@
 //! presentation is the consumer's choice. Anything unparseable falls back to
 //! [`Payload::Text`]; classification never fails and never panics.
 
+use crate::report::Symbology;
+
 /// Classified payload of a decoded QR content string.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -342,16 +344,31 @@ fn sniff_gs1_without_fnc1(text: &str) -> Option<Payload> {
 
 /// Classify a retail 1D symbol's digits (EAN-13/EAN-8/UPC-A/UPC-E): the
 /// symbol IS a GTIN — AI 01 semantics with the value zero-padded to 14
-/// per `GenSpecs`. `conformant` = the symbol's own mod-10 check digit
-/// validates (same algorithm at every GTIN length). Non-digit content
-/// (decoder add-ons aside, it should never happen) falls back to text.
-pub(crate) fn classify_retail_gtin(text: &str) -> Payload {
+/// per `GenSpecs`. `conformant` = the mod-10 check digit validates (same
+/// algorithm at every GTIN length). Non-digit content (decoder add-ons
+/// aside, it should never happen) falls back to text.
+///
+/// UPC-E is special: the decoder yields the COMPRESSED 8-digit form, but its
+/// check digit and GTIN are defined by the 12-digit UPC-A expansion — so a
+/// UPC-E symbol is expanded FIRST, then check-digited and padded from the
+/// expansion. Every other retail symbology is already in GTIN form.
+pub(crate) fn classify_retail_gtin(text: &str, symbology: Symbology) -> Payload {
     let digits = text.trim();
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) || digits.len() > 14 {
         return classify(text);
     }
-    let gtin14 = format!("{digits:0>14}");
-    let ok = crate::gs1::check_digit_ok(digits);
+    let gtin_digits = if symbology == Symbology::UpcE {
+        match crate::gs1::expand_upce_to_upca(digits) {
+            Some(upca) => upca,
+            // not a well-formed UPC-E (should never reach here from the
+            // decoder) — don't fabricate a GTIN from the compressed form
+            None => return classify(text),
+        }
+    } else {
+        digits.to_owned()
+    };
+    let gtin14 = format!("{gtin_digits:0>14}");
+    let ok = crate::gs1::check_digit_ok(&gtin_digits);
     Payload::Gs1 {
         elements: vec![crate::gs1::Gs1Element {
             ai: "01".to_owned(),
@@ -363,7 +380,7 @@ pub(crate) fn classify_retail_gtin(text: &str) -> Payload {
             Vec::new()
         } else {
             vec![format!(
-                "GTIN check digit invalid for '{digits}' (GenSpecs 7.2.7)"
+                "GTIN check digit invalid for '{gtin_digits}' (GenSpecs 7.2.7)"
             )]
         },
     }
@@ -742,6 +759,54 @@ mod tests {
         // empty / non-digit starts skip the sniff entirely
         assert_eq!(classify(""), Payload::Text);
         assert_eq!(classify("hello 01"), Payload::Text);
+    }
+
+    #[test]
+    fn upce_retail_gtin_expands_before_check_and_gtin14() {
+        // UPC-E 04252614 → UPC-A 042100005264 → GTIN-14 00042100005264, and
+        // the check digit (defined by the EXPANSION, not the compressed 8) is
+        // valid → conformant. Pre-fix this ran mod-10 over "04252614" and
+        // padded THAT to 14 — both wrong.
+        match classify_retail_gtin("04252614", Symbology::UpcE) {
+            Payload::Gs1 {
+                gtin,
+                conformant,
+                elements,
+                issues,
+            } => {
+                assert_eq!(gtin.as_deref(), Some("00042100005264"));
+                assert_eq!(elements[0].value, "00042100005264");
+                assert!(conformant, "{issues:?}");
+            }
+            other => panic!("UPC-E must classify as retail GTIN, got {other:?}"),
+        }
+        // a UPC-E whose 8th digit is not the expansion's check digit → the
+        // GTIN is still surfaced (as written) but flagged non-conformant
+        match classify_retail_gtin("04252615", Symbology::UpcE) {
+            Payload::Gs1 {
+                gtin, conformant, ..
+            } => {
+                assert_eq!(gtin.as_deref(), Some("00042100005265"));
+                assert!(!conformant);
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ean8_is_not_upce_expanded_even_though_both_are_8_digits() {
+        // regression guard for the symbology-aware path: ONLY UPC-E expands.
+        // EAN-8 96385074 IS the GTIN-8 — zero-pad to 14, mod-10 over the 8
+        // digits (a valid EAN-8 check). Expanding it would corrupt the GTIN.
+        match classify_retail_gtin("96385074", Symbology::Ean8) {
+            Payload::Gs1 {
+                gtin, conformant, ..
+            } => {
+                assert_eq!(gtin.as_deref(), Some("00000096385074"));
+                assert!(conformant, "96385074 is a valid EAN-8");
+            }
+            other => panic!("EAN-8 must classify as retail GTIN, got {other:?}"),
+        }
     }
 
     #[test]

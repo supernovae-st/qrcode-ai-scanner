@@ -113,6 +113,55 @@ pub(crate) fn check_digit_ok(digits: &str) -> bool {
     u32::from(bytes[bytes.len() - 1] - b'0') == expect
 }
 
+/// Expand an 8-digit UPC-E symbol (number-system digit · 6 compressed data
+/// digits · check digit) to its equivalent 12-digit UPC-A, per the UPC-E
+/// zero-suppression table (GS1 General Specifications §5.2.2.4 / the
+/// barcodeisland UPC-E reference — the inverse of UPC-A→UPC-E compression).
+///
+/// The LAST compressed data digit selects the split:
+/// `0/1/2`→`M1 M2 D 0000 M3 M4 M5` · `3`→`M1 M2 M3 00000 M4 M5` ·
+/// `4`→`M1 M2 M3 M4 00000 M5` · `5-9`→`M1..M5 0000 D`. The UPC-E check digit
+/// is defined by this expansion, NOT by the compressed string, so callers
+/// must run the mod-10 check + derive GTIN-14 from the returned UPC-A.
+/// `None` for anything that is not exactly 8 ASCII digits.
+pub(crate) fn expand_upce_to_upca(upce: &str) -> Option<String> {
+    let b = upce.as_bytes();
+    if b.len() != 8 || !b.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let number_system = b[0];
+    let data = &b[1..7]; // the 6 compressed manufacturer/product digits
+    let check = b[7];
+    let mut expanded = Vec::with_capacity(12);
+    expanded.push(number_system);
+    match data[5] {
+        b'0' | b'1' | b'2' => {
+            expanded.extend_from_slice(&data[0..2]);
+            expanded.push(data[5]);
+            expanded.extend_from_slice(b"0000");
+            expanded.extend_from_slice(&data[2..5]);
+        }
+        b'3' => {
+            expanded.extend_from_slice(&data[0..3]);
+            expanded.extend_from_slice(b"00000");
+            expanded.extend_from_slice(&data[3..5]);
+        }
+        b'4' => {
+            expanded.extend_from_slice(&data[0..4]);
+            expanded.extend_from_slice(b"00000");
+            expanded.push(data[4]);
+        }
+        _ => {
+            expanded.extend_from_slice(&data[0..5]);
+            expanded.extend_from_slice(b"0000");
+            expanded.push(data[5]);
+        }
+    }
+    expanded.push(check);
+    // every pushed byte was an ASCII digit → always valid UTF-8
+    String::from_utf8(expanded).ok()
+}
+
 /// CSET 82 (`GenSpecs` figure 7.11-1) — GS1's own value-charset class.
 fn is_cset82(c: char) -> bool {
     matches!(c,
@@ -530,6 +579,30 @@ mod tests {
         assert!(!check_digit_ok("09506000134353"));
         assert!(!check_digit_ok(""));
         assert!(!check_digit_ok("12a4"));
+    }
+
+    #[test]
+    fn upce_expands_to_upca_per_the_gs1_zero_suppression_table() {
+        // 8-digit UPC-E (numsys · 6 data · check) → 12-digit UPC-A. Each
+        // expansion is computed BY HAND from the split table; the last data
+        // digit picks the case. The first pair is the Wikipedia UPC worked
+        // example (external anchor); the rest cover the 3, 4 and 5-9 splits.
+        for (upce, upca) in [
+            ("04252614", "042100005264"), // last data digit 1 → {0,1,2} split
+            ("03456733", "034500000673"), // last data digit 3 → 3-split
+            ("03456741", "034560000071"), // last data digit 4 → 4-split
+            ("02345680", "023456000080"), // last data digit 8 → {5-9} split
+        ] {
+            assert_eq!(expand_upce_to_upca(upce).as_deref(), Some(upca), "{upce}");
+            // the expansion is internally consistent — its own mod-10 holds…
+            assert!(check_digit_ok(upca), "{upca} check digit");
+            // …and the UPC-E's 8th digit IS that expansion's check digit
+            assert_eq!(upce.as_bytes()[7], upca.as_bytes()[11], "{upce}");
+        }
+        // ill-formed input yields None rather than a fabricated GTIN
+        assert_eq!(expand_upce_to_upca("0123"), None);
+        assert_eq!(expand_upce_to_upca("0123456a"), None);
+        assert_eq!(expand_upce_to_upca("012345678"), None); // 9 digits
     }
 
     #[test]

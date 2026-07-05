@@ -194,7 +194,7 @@ fn build_report(outcome: ladder::LadderOutcome, scored: Option<(Score, Vec<Hint>
             let payload = if m.fnc1 {
                 payload::classify_fnc1(&m.text)
             } else if m.symbology.is_retail_gtin() {
-                payload::classify_retail_gtin(&m.text)
+                payload::classify_retail_gtin(&m.text, m.symbology)
             } else {
                 payload::classify(&m.text)
             };

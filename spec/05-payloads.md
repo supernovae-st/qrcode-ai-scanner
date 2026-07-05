@@ -14,7 +14,7 @@ Classification starts from the detection's symbology:
 | Symbology | Route |
 |---|---|
 | FNC1-led carriers (QR `]Q3`/`]Q4` · DataMatrix `]d2` · Code 128 `]C1` = GS1-128) | `gs1` element string |
-| retail 1D (`ean13` · `ean8` · `upc_a` · `upc_e`) | `gs1` — the symbol IS a GTIN: AI 01, value zero-padded to 14, `conformant` = the symbol's own mod-10 check digit |
+| retail 1D (`ean13` · `ean8` · `upc_a` · `upc_e`) | `gs1` — the symbol IS a GTIN: AI 01, value zero-padded to 14, `conformant` = the mod-10 check digit. **UPC-E is first expanded to its 12-digit UPC-A** — its check digit and GTIN are defined by the expansion, not the compressed 8-digit form. |
 | everything else | the text classifier below |
 
 ## Kinds
