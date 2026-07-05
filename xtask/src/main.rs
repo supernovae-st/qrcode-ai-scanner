@@ -4,7 +4,10 @@
 //!   once, outputs committed; re-running must be byte-identical).
 //! - `corpus-report` — run the scanner over `corpus.toml`, print per-category
 //!   results, and rewrite the README managed block (derived numbers are
-//!   never hand-typed).
+//!   never hand-typed). `--external` runs the external-corpus truth gate
+//!   against `corpus-external.tsv` instead (see `external.rs`).
+//! - `gen-external-manifest` — pin the measured state of `corpus-external/`
+//!   into the committed manifest (expectations from a real run, never typed).
 //! - `baseline` — run the corpus through a v0.2 CLI binary (`--bin <path>`)
 //!   and write `docs/baseline-v02.json` (the Phase A exit-gate comparator).
 
@@ -14,6 +17,8 @@
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss
 )] // automation tool: fail loud, bounded pixel math
+
+mod external;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -49,7 +54,23 @@ fn main() {
     match args.next().as_deref() {
         Some("gen-fixtures") => gen_fixtures(),
         Some("gen-symbology-fixtures") => gen_symbology_fixtures(),
-        Some("corpus-report") => corpus_report(args.next().as_deref() == Some("--write")),
+        Some("gen-external-manifest") => external::generate(),
+        Some("corpus-report") => {
+            let flags: Vec<String> = args.collect();
+            let write = flags.iter().any(|f| f == "--write");
+            let ext = flags.iter().any(|f| f == "--external");
+            if flags.iter().any(|f| f != "--write" && f != "--external") || (write && ext) {
+                // --write manages the vendored README block only; the external
+                // gate never rewrites prose.
+                eprintln!("usage: xtask corpus-report [--write | --external]");
+                std::process::exit(2);
+            }
+            if ext {
+                external::verify();
+            } else {
+                corpus_report(write);
+            }
+        }
         Some("baseline") => {
             let bin = args
                 .nth(1)
@@ -57,7 +78,9 @@ fn main() {
             baseline(&bin);
         }
         _ => {
-            eprintln!("usage: xtask <gen-fixtures | corpus-report [--write] | baseline --bin <p>>");
+            eprintln!(
+                "usage: xtask <gen-fixtures | gen-external-manifest | corpus-report [--write | --external] | baseline --bin <p>>"
+            );
             std::process::exit(2);
         }
     }

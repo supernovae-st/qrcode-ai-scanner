@@ -138,9 +138,11 @@ hand-typed.
 
 ### Measured accuracy — external corpora (2026-06-11, v0.3.0)
 
-Hand-run against public ground truth and production data; reproduce with
-`scripts/zxing-blackbox.py` and `scripts/batch-scan.py` (corpora are not
-vendored — the scripts document the sources).
+Measured against public ground truth and production data. The corpora are
+not vendored (30 MB of third-party/production images) — the measured state
+IS: [`corpus-external.tsv`](corpus-external.tsv) pins sha256 + per-image
+decode status for every file, generated from a real run, never hand-typed
+(see “Reproducing the headline numbers” below).
 
 | corpus | result | note |
 |---|---|---|
@@ -154,6 +156,33 @@ One of the 9 zxing misses is rqrr returning a Reed-Solomon
 synthetic UEC flags at margin 0 and surfaces as the
 `low_correction_margin` hint. The decode-rate number above counts it as a
 miss; the hint is the mechanism that keeps it from being a *silent* one.
+(In the manifest it is the one `wrong` pin — its own status, distinct from
+`blind`, so a silent flip in either direction fails the gate.)
+
+#### Reproducing the headline numbers
+
+Place the corpora at the repo root (layout below), then run the gate:
+
+```
+corpus-external/
+├── zxing-blackbox/qrcode-{1..6}/   # zxing core/src/test/resources/blackbox — images + .txt ground truth
+└── qrcode-ai/                      # qrcode-ai.com production gallery exports (private)
+```
+
+```sh
+cargo run --release -p xtask -- corpus-report --external
+```
+
+Verifies presence + sha256 of every manifested file, rescans every image
+(budget-free full ladder — machine-independent per the determinism
+contract; scoring off), prints the per-suite table, and exits non-zero on
+any divergence: a regression AND a fresh decode of a pinned-blind image
+both fail, so pins are flipped deliberately by regenerating —
+`cargo run --release -p xtask -- gen-external-manifest` (~20 s) — and
+committing the diff. When `corpus-external/` is absent (CI checkouts) the
+gate skips gracefully but loudly, printing exactly how many pins went
+unverified. `scripts/batch-scan.py` and `scripts/zxing-blackbox.py` stay
+as exploratory reporters.
 
 ## Documentation & spec
 

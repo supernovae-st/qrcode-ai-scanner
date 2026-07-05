@@ -79,7 +79,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo run -p xtask -- corpus-report | tee corpus-report.txt
+      # set -o pipefail: the default `bash -e {0}` run shell has NO pipefail —
+      # `| tee` was swallowing a red corpus-report's exit 1 (gate held by luck).
+      - run: set -o pipefail; cargo run -p xtask -- corpus-report | tee corpus-report.txt
+      # corpus-external/ is not vendored: on CI this exercises the manifest
+      # parse + the loud-skip path (locally, with corpora present, it gates).
+      - run: set -o pipefail; cargo run -p xtask -- corpus-report --external | tee -a corpus-report.txt
       - uses: actions/upload-artifact@v4
         with:
           name: corpus-report

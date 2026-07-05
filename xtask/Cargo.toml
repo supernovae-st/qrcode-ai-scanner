@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Repo automation — fixture generation · corpus report · v0.2 baseline"
+description = "Repo automation — fixture generation · corpus report · external truth gate · v0.2 baseline"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -23,6 +23,9 @@ image.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 toml = "1"
+# external-corpus truth gate — content hashing + parallel batch scan
+sha2 = "0.10"
+rayon.workspace = true
 
 [lints]
 workspace = true
