@@ -13,6 +13,16 @@ allow = [
   "AGPL-3.0-or-later",
 ]
 
+# allo-isolate 0.1.27 (flutter_rust_bridge hard dep) published with only
+# `license-file = "LICENSE"` — crates.io metadata reads "non-standard" though
+# the repo LICENSE is plain Apache-2.0 (github.com/shekohex/allo-isolate;
+# fixed upstream in PR #69, merged 2025-09-01, unreleased as of 2026-07-05).
+# Clarify pins the SPDX expression until a 0.1.28 ships the metadata.
+[[licenses.clarify]]
+crate = "allo-isolate"
+expression = "Apache-2.0"
+license-files = [{ path = "LICENSE", hash = 0 }]
+
 [advisories]
 yanked = "deny"
 
