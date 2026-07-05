@@ -403,4 +403,100 @@ mod tests {
         assert_eq!(exposure(&img, 40).data(), &[50, 168, 255]);
         assert_eq!(exposure(&img, -40).data(), &[0, 88, 210]);
     }
+
+    // ---- direct pins for `inverse` + `apply` -------------------------------
+    // The roundtrip test above exercises `inverse` only through `apply`, which
+    // is PROJECTIVELY SCALE-INVARIANT: multiplying the whole inverse matrix by
+    // any nonzero constant leaves every `apply` result unchanged. So every
+    // mutation of the determinant (a global scale on the adjugate) survived a
+    // roundtrip test. These tests assert the matrix ELEMENTS directly, making
+    // the exact determinant and adjugate load-bearing.
+
+    #[test]
+    fn inverse_matches_hand_computed_adjugate() {
+        // Distinct primes in every slot — no entry is 0 or ±1, so every
+        // sub-product/-difference in the determinant is discriminated (a `*`→`/`
+        // or `*`→`+` swap always changes the value).
+        let h = Homography([2.0, 3.0, 5.0, 7.0, 11.0, 13.0, 17.0, 19.0, 29.0]);
+        // det = 2·(11·29 − 13·19) − 3·(7·29 − 13·17) + 5·(7·19 − 11·17)
+        //     = 2·72 − 3·(−18) + 5·(−54) = 144 + 54 − 270 = −72
+        // inverse = (adjugateᵀ) / det, adjugateᵀ = [72,8,−16,18,−27,9,−54,13,1]:
+        let expected: [f32; 9] = [
+            -1.0,         // 72  / −72
+            -1.0 / 9.0,   // 8   / −72
+            2.0 / 9.0,    // −16 / −72
+            -0.25,        // 18  / −72
+            0.375,        // −27 / −72
+            -0.125,       // 9   / −72
+            0.75,         // −54 / −72
+            -13.0 / 72.0, // 13  / −72
+            -1.0 / 72.0,  // 1   / −72
+        ];
+        let inv = h.inverse().expect("nonsingular");
+        for (k, (&got, want)) in inv.0.iter().zip(expected).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-4,
+                "inv[{k}] = {got}, want {want} (a wrong det rescales EVERY element)"
+            );
+        }
+    }
+
+    #[test]
+    fn inverse_of_singular_is_none() {
+        // rows 1 and 2 are linearly dependent (row1 = 2·row0) → det = 0. The
+        // guard `det.abs() < 1e-12` must refuse; a `<`→`==` swap would slip a
+        // 1/0 = ∞ matrix through instead of returning None.
+        let singular = Homography([1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 1.0, 1.0, 1.0]);
+        assert!(singular.inverse().is_none());
+    }
+
+    #[test]
+    fn apply_projecting_to_infinity_returns_none() {
+        // m[6]=1, m[7]=0, m[8]=0 ⇒ w = x. At x=0 the point projects to
+        // infinity (w=0) → None; the `w.abs() < EPSILON` guard is what catches
+        // it (a `<`→`==` swap would divide by zero instead).
+        let h = Homography([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0]);
+        assert!(h.apply(0.0, 5.0).is_none());
+        // a finite point still maps: w = 2 → (2/2, 5/2)
+        assert_eq!(h.apply(2.0, 5.0), Some((1.0, 2.5)));
+    }
+
+    #[test]
+    fn unit_square_to_quad_projects_interior_points_exactly() {
+        // A genuinely projective (non-affine) quad — exercises the perspective
+        // divide, not just an affine scale. H = [2/3,0,0, 0,2/3,0, −1/3,−1/3,1],
+        // so apply(u,v) divides by w = 1 − (u+v)/3.
+        let quad = [(0.0, 0.0), (1.0, 0.0), (2.0, 2.0), (0.0, 1.0)];
+        let h = Homography::unit_square_to_quad(quad).expect("nonsingular quad");
+        let cases = [
+            ((0.0, 0.0), (0.0, 0.0)), // corners
+            ((1.0, 0.0), (1.0, 0.0)),
+            ((1.0, 1.0), (2.0, 2.0)),
+            ((0.0, 1.0), (0.0, 1.0)),
+            ((0.5, 0.5), (0.5, 0.5)), // center: w=2/3
+            ((0.5, 0.0), (0.4, 0.0)), // off-center: w=5/6 → (1/3)/(5/6)=0.4
+            ((0.25, 0.25), (0.2, 0.2)),
+        ];
+        for ((u, v), (ex, ey)) in cases {
+            let (x, y) = h.apply(u, v).expect("finite");
+            assert!(
+                (x - ex).abs() < 1e-5 && (y - ey).abs() < 1e-5,
+                "({u},{v}) → ({x},{y}), want ({ex},{ey})"
+            );
+        }
+    }
+
+    #[test]
+    fn bilinear_weights_average_the_checker() {
+        // 2×2 checker: (0,0)=0 (1,0)=255 (0,1)=255 (1,1)=0
+        let img = checker(2);
+        // exact pixel centers read the pixel back
+        assert_eq!(sample_bilinear(&img, 0.0, 0.0), 0);
+        assert_eq!(sample_bilinear(&img, 1.0, 0.0), 255);
+        // the shared midpoint averages all four: (0+255+255+0)/4 = 127.5 → 127
+        assert_eq!(sample_bilinear(&img, 0.5, 0.5), 127);
+        // quarter along the top row pins the fx weights: 0·0.75 + 255·0.25
+        // = 63.75 → 63 (a +/- or */÷ weight swap misses this)
+        assert_eq!(sample_bilinear(&img, 0.25, 0.0), 63);
+    }
 }
