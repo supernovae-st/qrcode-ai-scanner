@@ -83,6 +83,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Workspace graph — the hard gate. advisories · bans · licenses · sources
+      # (bans + sources are enforced by the [bans]/[sources] policy in deny.toml).
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check licenses advisories
+          command: check advisories bans licenses sources
+      # The py · uniffi · flutter trees are workspace-EXCLUDED (foreign
+      # toolchains: pyo3 · uniffi · flutter_rust_bridge) and ship their OWN
+      # lockfiles the workspace scan never sees. Scan each against the same root
+      # policy (--config deny.toml). Report-only / non-gating: their upstream
+      # graphs carry advisories we surface LOUDLY (::warning annotation + full
+      # log) but never blanket-ignore in deny.toml, and never block the pipeline
+      # on foreign-toolchain upstream churn. Triage findings; fix or escalate.
+      - uses: taiki-e/install-action@cargo-deny
+      - name: cargo-deny · excluded binding trees (report-only)
+        run: |
+          for m in crates/qrcode-ai-scanner-py \
+                   crates/qrcode-ai-scanner-uniffi \
+                   bindings/flutter/rust; do
+            echo "::group::cargo-deny $m"
+            cargo deny --manifest-path "$m/Cargo.toml" check --config deny.toml \
+              || echo "::warning file=$m/Cargo.toml::cargo-deny found issues in $m — triage (report, don't blanket-ignore)"
+            echo "::endgroup::"
+          done

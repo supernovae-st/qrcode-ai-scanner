@@ -15,3 +15,22 @@ allow = [
 
 [advisories]
 yanked = "deny"
+
+[bans]
+# Duplicate transitive versions are a warn (a nudge to dedup), not a hard fail —
+# the engine crates (rxing/rqrr/image) pull a wide graph we don't fully control.
+multiple-versions = "warn"
+# A wildcard version requirement is a supply-chain hole (any future release is
+# auto-accepted). We pin everything, so make a `*` dep a hard error — except the
+# intra-workspace `path = "../…"` deps (which resolve to `*` but carry no
+# registry risk); those are exempted by allow-wildcard-paths.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# crates.io only. Every lockfile (workspace + the 3 foreign-toolchain trees)
+# resolves 100% from crates.io today — no git deps — so unknown registries and
+# unknown git sources are hard errors. Add an `allow-git`/`allow-org` entry here
+# (with rationale) the day a vetted git dependency is genuinely needed.
+unknown-registry = "deny"
+unknown-git = "deny"
