@@ -17,14 +17,24 @@ jdk:
   - openjdk17
 
 before_install:
+  # JitPack joins every command of a section into ONE `;`-chained shell line
+  # (proven by the 9cbe59aa02 build log), so a leading `set -e` guards the
+  # whole section. Without it, the SHA build published a 78 KB AAR with ZERO
+  # .so inside — cargo-ndk had failed on a missing NDK, `;` marched on, and
+  # gradle happily packaged an AAR that would UnsatisfiedLinkError at runtime.
+  - set -e
   # Rust toolchain (matches the workspace rust-version 1.88) + Android targets.
   - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0
   - source "$HOME/.cargo/env"
   - rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
   - cargo install cargo-ndk --version 4.1.2 --locked
   # Android SDK cmdline-tools + NDK r27 (16 KB page-size safe — §7 gotcha #8).
-  # JitPack images ship $ANDROID_HOME with sdkmanager; install the NDK + platform.
-  - yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.0.12077973" "platforms;android-34" "build-tools;34.0.0" >/dev/null
+  # Licenses FIRST (a pending license makes sdkmanager --install a silent
+  # no-op), output NOT swallowed (the >/dev/null here is what hid the missing
+  # NDK on 9cbe59aa02), and the exact path verified loud before moving on.
+  - yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+  - yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.0.12077973" "platforms;android-34" "build-tools;34.0.0" | tail -5
+  - ls -d "$ANDROID_HOME/ndk/27.0.12077973"
   - echo "ndk.dir=$ANDROID_HOME/ndk/27.0.12077973" > bindings/kotlin/local.properties
   # Gradle 8.9 (the AGP 8.5 toolchain) — provisioned here so JitPack needs NO committed
   # Gradle wrapper jar. Full path is used in `install` (PATH may not persist across steps).
@@ -36,6 +46,7 @@ before_install:
   - ls "$HOME/gradle-8.9/bin/gradle"
 
 install:
+  - set -e
   - source "$HOME/.cargo/env"
   - export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
   # 1. Build the per-ABI .so into the library module's jniLibs (cargo-ndk §4.1).
@@ -52,5 +63,12 @@ install:
     --library crates/qrcode-ai-scanner-uniffi/target/release/libqrcode_ai_scanner_uniffi.so
     --language kotlin
     --out-dir bindings/kotlin/qrcodeaiscanner/src/main/kotlin
-  # 3. Assemble + publish the AAR to the local Maven repo (JitPack serves it).
-  - '"$HOME"/gradle-8.9/bin/gradle -p bindings/kotlin :qrcodeaiscanner:assembleRelease :qrcodeaiscanner:publishToMavenLocal'
+  # 3. The anti-lying-AAR gate: all four ABI .so's must be IN the aar before
+  #    it is allowed anywhere near a Maven repo. The 9cbe59aa02 SHA build
+  #    shipped a 78 KB AAR with zero natives and called it success.
+  - '"$HOME"/gradle-8.9/bin/gradle -p bindings/kotlin :qrcodeaiscanner:assembleRelease'
+  - SO_COUNT=$(unzip -l bindings/kotlin/qrcodeaiscanner/build/outputs/aar/qrcodeaiscanner-release.aar | grep -c 'jni/.*\.so$')
+  - echo "native libs in AAR = $SO_COUNT (need 4)"
+  - test "$SO_COUNT" -eq 4
+  # 4. Only a verified AAR gets published (JitPack serves the local repo).
+  - '"$HOME"/gradle-8.9/bin/gradle -p bindings/kotlin :qrcodeaiscanner:publishToMavenLocal'
