@@ -662,4 +662,158 @@ mod tests {
             dl.issues
         );
     }
+
+    // ── AI dictionary + boundary predicates (mutation pins) ──────────────
+
+    /// Collapse a `Shape` to a comparable `(kind, param)` literal so the AI
+    /// table can be asserted against hand-derived GS1 values WITHOUT deriving
+    /// `PartialEq` on the production enum and WITHOUT letting `shape_of` grade
+    /// its own output.
+    fn shape_tag(s: Shape) -> (&'static str, usize) {
+        match s {
+            Shape::Digits(n) => ("Digits", n),
+            Shape::DigitsCheck(n) => ("DigitsCheck", n),
+            Shape::Date => ("Date", 0),
+            Shape::Cset82(n) => ("Cset82", n),
+            Shape::VarDigits(n) => ("VarDigits", n),
+        }
+    }
+
+    #[test]
+    fn shape_of_maps_every_ai_to_its_genspecs_shape() {
+        // (AI, expected shape) — every value a LITERAL read from the GS1
+        // General Specifications (release 25 / ref.gs1.org/ai), never computed
+        // by shape_of. Deleting ANY arm turns its AI into `None`, tripping the
+        // pair below. Subset scope pinned by spec/05-payloads.md §Scope honesty
+        // (00·01·02·10-22·30·37·240/241/250/251·310n-369n·41x·8005·8011·8019·
+        // 8020·8200·90-99).
+        let table: &[(&str, (&str, usize))] = &[
+            ("00", ("DigitsCheck", 18)), // SSCC, N18 incl. check
+            ("01", ("DigitsCheck", 14)), // GTIN, N14 incl. check
+            ("02", ("DigitsCheck", 14)), // GTIN of contained items
+            ("11", ("Date", 0)),         // production date YYMMDD
+            ("12", ("Date", 0)),         // due date
+            ("13", ("Date", 0)),         // packaging date
+            ("15", ("Date", 0)),         // best-before date
+            ("16", ("Date", 0)),         // sell-by date
+            ("17", ("Date", 0)),         // expiry date
+            ("20", ("Digits", 2)),       // product variant, N2
+            ("10", ("Cset82", 20)),      // batch/lot,  X..20
+            ("21", ("Cset82", 20)),      // serial,     X..20
+            ("22", ("Cset82", 20)),      // CPV,        X..20
+            ("30", ("VarDigits", 8)),    // variable count, N..8
+            ("37", ("VarDigits", 8)),    // count of items, N..8
+            ("235", ("Cset82", 28)),     // TPX,        X..28
+            ("8005", ("Digits", 6)),     // price per UoM, N6
+            ("8011", ("VarDigits", 12)), // CPID serial, N..12
+            ("8019", ("VarDigits", 10)), // SRIN,        N..10
+            ("8020", ("Cset82", 25)),    // payment slip ref, X..25
+            ("8200", ("Cset82", 70)),    // product URL, X..70
+            ("90", ("Cset82", 30)),      // mutually agreed, X..30
+            ("240", ("Cset82", 30)),     // additional product id
+            ("241", ("Cset82", 30)),     // customer part number
+            ("250", ("Cset82", 30)),     // secondary serial
+            ("251", ("Cset82", 30)),     // ref to source entity
+            ("91", ("Cset82", 90)),      // company internal 91..99, X..90
+            ("92", ("Cset82", 90)),
+            ("93", ("Cset82", 90)),
+            ("94", ("Cset82", 90)),
+            ("95", ("Cset82", 90)),
+            ("96", ("Cset82", 90)),
+            ("97", ("Cset82", 90)),
+            ("98", ("Cset82", 90)),
+            ("99", ("Cset82", 90)),
+            ("410", ("DigitsCheck", 13)), // ship-to GLN, N13 incl. check
+            ("411", ("DigitsCheck", 13)), // bill-to GLN
+            ("414", ("DigitsCheck", 13)), // physical location GLN
+            ("417", ("DigitsCheck", 13)), // party GLN
+            ("418", ("DigitsCheck", 13)), // range upper bound
+            ("3103", ("Digits", 6)),      // net weight kg, 3 dp — 31nn stem
+            ("3600", ("Digits", 6)),      // volume — 36nn stem, edge byte '0'
+        ];
+        for &(ai, expected) in table {
+            assert_eq!(shape_of(ai).map(shape_tag), Some(expected), "AI {ai}");
+        }
+
+        // Negative pins around `_ if ai.len() == 3 && ("410"..="418")…`: the
+        // range must not leak to neighbours, and a 4-digit "41xx" must NOT be
+        // taken for a 3-digit AI. shape_of("4100") == None is the exact witness
+        // that dies when `==` flips to `!=` (len 4 ≠ 3 passes the length half,
+        // and "4100" IS lexically inside "410".."418"). The 80xx / 82xx pins
+        // prove those arms are exact-match, not prefix.
+        for unknown in ["409", "419", "4100", "42", "8000", "8201"] {
+            assert!(shape_of(unknown).is_none(), "AI {unknown} must be unknown");
+        }
+    }
+
+    #[test]
+    fn valid_date_enforces_yymmdd() {
+        // GenSpecs §3.4: 6 ASCII digits, MM in 1..=12, DD in 00..=31 (DD=00 is
+        // the legal "end of month" form).
+        assert!(valid_date("261231")); // 2026-12-31
+        assert!(valid_date("000101")); // 2000-01-01
+        assert!(valid_date("261200")); // DD=00 end-of-month
+        assert!(!valid_date("261301")); // month 13
+        assert!(!valid_date("260001")); // month 00
+        assert!(!valid_date("261232")); // day 32
+        assert!(!valid_date("2612")); // too short
+        assert!(!valid_date("26123100")); // too long
+        // The reject-guard is `len != 6 OR non-digit`. Flipping OR→AND lets a
+        // non-digit-but-6-long value (a lettered year) slip through to the
+        // numeric parse, which yields a "valid" 12/31 — this witness dies:
+        assert!(!valid_date("ab1231"));
+    }
+
+    #[test]
+    fn validate_flags_each_shape_conjunction() {
+        // Every branch tests `length && charset`. Feeding one half true and the
+        // other false MUST still flag. Flipping `&&`→`||` (mutants 184/186/211)
+        // drops the issue — these witnesses die.
+        fn issues(ai: &str, value: &str, shape: Shape) -> Vec<String> {
+            let mut v = Vec::new();
+            validate(ai, value, shape, &mut v);
+            v
+        }
+
+        // Digits(2): correct length, non-digit char → 184 && → ||
+        let d = issues("20", "1a", Shape::Digits(2));
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert!(d[0].contains("ref.gs1.org/ai/20"), "{d:?}");
+
+        // DigitsCheck(14): all-digit but WRONG length. `||` would enter the
+        // check-digit branch, where "123" happens to carry a valid mod-10 →
+        // wrongly accepted; the original rejects it as a format violation. → 186
+        let dc = issues("01", "123", Shape::DigitsCheck(14));
+        assert_eq!(dc.len(), 1, "{dc:?}");
+        assert!(dc[0].contains("violates the AI format"), "{dc:?}");
+
+        // VarDigits(8): in-range length, non-digit char → 211 && → ||
+        let vd = issues("30", "12a", Shape::VarDigits(8));
+        assert_eq!(vd.len(), 1, "{vd:?}");
+        assert!(vd[0].contains("ref.gs1.org/ai/30"), "{vd:?}");
+
+        // Conformant values of each shape raise NO issue (proves the asserts
+        // above pin the violation, not a validator that flags everything).
+        assert!(issues("20", "42", Shape::Digits(2)).is_empty());
+        assert!(issues("01", "09506000134352", Shape::DigitsCheck(14)).is_empty());
+        assert!(issues("30", "12345", Shape::VarDigits(8)).is_empty());
+    }
+
+    #[test]
+    fn split_head_walks_down_to_the_char_boundary() {
+        // ASCII: exact cut, and an over-long budget returns the whole head.
+        assert_eq!(split_head("abcdef", 3), ("abc", "def"));
+        assert_eq!(split_head("ab", 9), ("ab", ""));
+        // A budget LANDING inside a multi-byte char walks DOWN to the boundary
+        // before it (never up). "é0" = [C3 A9 30]: budget 1 is mid-é, so the
+        // head is empty and é stays with the tail. `-=`→`+=` (mutant 228) would
+        // walk UP and yield ("é","0") — this witness dies. The down-walk also
+        // shows why `cut > 0` vs `cut >= 0` (mutant 227) is behaviourally
+        // identical: at cut==0, is_char_boundary(0) is always true, so both
+        // conditions stop the loop at the same index (argued equivalent).
+        assert_eq!(split_head("é0", 1), ("", "é0"));
+        assert_eq!(split_head("🦋x", 2), ("", "🦋x"));
+        // A budget exactly on a boundary is kept as-is.
+        assert_eq!(split_head("é0", 2), ("é", "0"));
+    }
 }
