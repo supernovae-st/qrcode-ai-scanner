@@ -58,6 +58,24 @@ test_tool = "nextest"
 #     builder siblings DISCARD state and ARE caught: `limits` (178:9) and
 #     `profile` (171:9) drop the argument, `build` (185:9) recurses forever
 #     via `Scanner::default` (timeout). This one alone is a true equivalent.
+#
+# ladder.rs — the wall-clock-SHRINK pair (NOT strict equivalents; untestable).
+#   Both replace `* 1_000.0` with `/ 1_000.0` in a stage-scope seconds→ms
+#   conversion (`started.elapsed().as_secs_f64() * 1_000.0`). They shrink the
+#   reported `ms` by 1e6 to a smaller-but-still-positive value.
+#   511:49  Run::rescue_stage `ms`  ·  587:49  Run::stage `ms`
+#   The three KILLABLE siblings are caught (ladder_mutant_kills): the `+ 1000`
+#   inflations blow past the `stage.ms <= total_ms` sub-interval invariant
+#   (587 `+`, and the rescue unit's `rescue.ms < 100`), and the TOTAL-scope
+#   `/ 1000` (806:55) drops total below a real stage's ms. A STAGE-scope `/`
+#   has no machine-independent distinguisher: `ms` is a documented wall-clock
+#   field, explicitly excluded from the determinism contract (lib.rs
+#   §Deterministic + the determinism tests skip it), and catching a shrunk-
+#   but-positive elapsed needs a machine-speed LOWER bound ("this stage took
+#   ≥ N ms") — a flaky timing assumption the crate's own doctrine forbids.
+#   Line drift stays SAFE: the mutant resurfaces in the weekly report and gets
+#   re-anchored; no killable sibling is ever hidden (the operator/count is
+#   pinned to the `*`→`/` variant only, never the `*`→`+` twin).
 exclude_re = [
     "replace fuzzing::",
     "replace fuzz_api::",
@@ -74,4 +92,6 @@ exclude_re = [
     "zigzag\\.rs:66:23: replace % with \\+ in mask_bit",
     "zigzag\\.rs:67:37: replace % with \\+ in mask_bit",
     "lib\\.rs:87:9: replace Scanner::builder -> ScannerBuilder with Default::default\\(\\)",
+    "ladder\\.rs:511:49: replace \\* with / in Run",
+    "ladder\\.rs:587:49: replace \\* with / in Run",
 ]

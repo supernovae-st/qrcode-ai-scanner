@@ -1137,3 +1137,576 @@ mod kanji_merge_tests {
         assert_eq!(charset, crate::report::Charset::ShiftJis);
     }
 }
+
+#[cfg(test)]
+mod ladder_mutant_kills {
+    //! Surgical traps for the weekly mutation survivors on the decode ladder
+    //! (the product's critical path). Each test names the mutant(s) it kills
+    //! by `line:col`. The `absorb`/`collect_rescue`/`rescue_stage` merge and
+    //! book-keeping logic is exercised directly (private methods, reachable
+    //! from this in-crate child module); the stage-gating booleans in `run`
+    //! are driven through synthetic in-memory planes with `budget_ms: None`
+    //! so the walk is deterministic — never wall-clock-dependent.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
+
+    use super::*;
+    use crate::input::{ImageInput, Limits};
+    use crate::report::Symbology;
+    use crate::transform::normalize;
+
+    fn fresh_run(cancel: &CancelToken, orig: (u32, u32)) -> Run<'_> {
+        Run {
+            cancel,
+            deadline: None,
+            orig,
+            merged: Vec::new(),
+            rescue_candidates: Vec::new(),
+            panics: 0,
+        }
+    }
+
+    fn qr_detection(
+        raw: &[u8],
+        corners: Option<[Point; 4]>,
+        engine: EngineKind,
+        fnc1: bool,
+    ) -> RawDetection {
+        RawDetection {
+            symbology: Symbology::QrCode,
+            raw: raw.to_vec(),
+            masked_stream: None,
+            corners,
+            version: None,
+            ec: None,
+            mask: None,
+            fnc1,
+            engine,
+        }
+    }
+
+    fn qr_png(content: &str, module: u32) -> Vec<u8> {
+        let code =
+            qrcode::QrCode::with_error_correction_level(content, qrcode::EcLevel::Q).unwrap();
+        let img = code
+            .render::<image::Luma<u8>>()
+            .module_dimensions(module, module)
+            .build();
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageLuma8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        buf
+    }
+
+    fn stage_names(outcome: &LadderOutcome) -> Vec<&str> {
+        outcome
+            .trace
+            .stages
+            .iter()
+            .map(|s| s.stage.as_str())
+            .collect()
+    }
+
+    // ---- Run::absorb ----
+
+    #[test]
+    fn absorb_photometry_travels_with_the_first_corners_only() {
+        // 445:51 `&&` -> `||`. The photometry flag is adopted only when the
+        // EXISTING detection has no corners yet AND the incoming one does.
+        // A second corner-carrying attempt (this one INVERTING) must NOT
+        // overwrite the first geometry source's polarity.
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, (100, 100));
+        let corners_a = Some([Point { x: 1.0, y: 1.0 }; 4]);
+        let corners_b = Some([Point { x: 9.0, y: 9.0 }; 4]);
+        run.absorb(
+            vec![qr_detection(
+                b"same-symbol",
+                corners_a,
+                EngineKind::Rqrr,
+                false,
+            )],
+            false,
+        );
+        run.absorb(
+            vec![qr_detection(
+                b"same-symbol",
+                corners_b,
+                EngineKind::Rqrr,
+                false,
+            )],
+            true,
+        );
+        assert_eq!(run.merged.len(), 1);
+        assert_eq!(run.merged[0].corners, corners_a, "first corners are kept");
+        assert!(
+            !run.merged[0].photometric_inverted,
+            "445: `||` would adopt the second (inverting) attempt's flag"
+        );
+    }
+
+    #[test]
+    fn absorb_fnc1_is_or_accumulated_across_engines() {
+        // 449:35 `|=` -> `&=`. FNC1 is true if ANY contributing engine saw
+        // it; a later engine reporting false must not clear it.
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, (100, 100));
+        run.absorb(
+            vec![qr_detection(b"gs1-data", None, EngineKind::Rxing, true)],
+            false,
+        );
+        run.absorb(
+            vec![qr_detection(b"gs1-data", None, EngineKind::Rqrr, false)],
+            false,
+        );
+        assert_eq!(run.merged.len(), 1);
+        assert!(
+            run.merged[0].fnc1,
+            "449: `&=` would clear fnc1 when a later engine reports false"
+        );
+    }
+
+    #[test]
+    fn absorb_unions_distinct_engines() {
+        // 450:24 delete `!`. A merge appends an engine only when it is NOT
+        // already present; dropping the `!` inverts that and refuses the
+        // second engine.
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, (100, 100));
+        run.absorb(
+            vec![qr_detection(b"payload", None, EngineKind::Rxing, false)],
+            false,
+        );
+        run.absorb(
+            vec![qr_detection(b"payload", None, EngineKind::Rqrr, false)],
+            false,
+        );
+        assert_eq!(run.merged.len(), 1);
+        assert_eq!(
+            run.merged[0].engines,
+            vec![EngineKind::Rxing, EngineKind::Rqrr],
+            "450: dropping `!` refuses to append the second engine"
+        );
+    }
+
+    #[test]
+    fn absorb_caps_distinct_detections_at_max() {
+        // 454:25 match guard `>= MAX_DETECTIONS` -> `false`. The guard drops
+        // NEW symbols once the cap is reached; forcing it false removes the
+        // cap and pushes every distinct symbol.
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, (100, 100));
+        for i in 0..(MAX_DETECTIONS + 4) {
+            let raw = format!("symbol-{i}");
+            run.absorb(
+                vec![qr_detection(raw.as_bytes(), None, EngineKind::Rxing, false)],
+                false,
+            );
+        }
+        assert_eq!(
+            run.merged.len(),
+            MAX_DETECTIONS,
+            "454: `false` removes the cap and keeps every distinct symbol"
+        );
+    }
+
+    #[test]
+    fn absorb_new_upright_detection_is_not_marked_inverted() {
+        // 461:59 `&&` -> `||`. A NEW detection's photometry is
+        // `attempt_inverts && corners.is_some()`. An upright (inverts=false)
+        // attempt with corners must land false, not true.
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, (100, 100));
+        run.absorb(
+            vec![qr_detection(
+                b"upright",
+                Some([Point { x: 2.0, y: 3.0 }; 4]),
+                EngineKind::Rqrr,
+                false,
+            )],
+            false,
+        );
+        assert_eq!(run.merged.len(), 1);
+        assert!(
+            !run.merged[0].photometric_inverted,
+            "461: `||` reads true from corners alone on an upright attempt"
+        );
+    }
+
+    // ---- Run::collect_rescue ----
+
+    #[test]
+    fn collect_rescue_dedupes_by_symbol_identity() {
+        // 533:29 `==` -> `!=` (dedup identity). Two candidates with identical
+        // (version, ec, mask, inverts) collapse to one; `!=` keeps the twin
+        // (its `any(|c| c != candidate)` is false, so nothing dedupes).
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, (100, 100));
+        let twin = || crate::rescue::RescueCandidate {
+            stream: MaskedStream {
+                bits: vec![0u8; 8],
+                bit_len: 64,
+            },
+            corners: [Point { x: 5.0, y: 5.0 }; 4],
+            version: 3,
+            ec: EcLevel::Q,
+            mask: 2,
+            inverted: false,
+        };
+        run.collect_rescue(vec![twin(), twin()], (100, 100), false);
+        assert_eq!(
+            run.rescue_candidates.len(),
+            1,
+            "533: `!=` keeps the duplicate candidate"
+        );
+    }
+
+    #[test]
+    fn collect_rescue_rescales_corners_into_original_space() {
+        // 537:29 `!=` -> `==` gate + 543/544 factor `/` -> `*`/`%` + 547/548
+        // `*=` -> `/=`/`+=`. orig 200x100 over an attempt of 50x50 gives
+        // fx=4, fy=2 (deliberately distinct); a (10,10) corner must land at
+        // (40,20).
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, (200, 100));
+        let candidate = crate::rescue::RescueCandidate {
+            stream: MaskedStream {
+                bits: vec![0u8; 8],
+                bit_len: 64,
+            },
+            corners: [Point { x: 10.0, y: 10.0 }; 4],
+            version: 1,
+            ec: EcLevel::M,
+            mask: 0,
+            inverted: false,
+        };
+        run.collect_rescue(vec![candidate], (50, 50), false);
+        assert_eq!(run.rescue_candidates.len(), 1);
+        let corner = run.rescue_candidates[0].corners[0];
+        assert!(
+            (corner.x - 40.0).abs() < 1e-3,
+            "537/543/547: x scales by orig.0/attempt.0 = 4 -> 40, got {}",
+            corner.x
+        );
+        assert!(
+            (corner.y - 20.0).abs() < 1e-3,
+            "537/544/548: y scales by orig.1/attempt.1 = 2 -> 20, got {}",
+            corner.y
+        );
+    }
+
+    #[test]
+    fn collect_rescue_leaves_full_res_corners_untouched() {
+        // 537:29 `!=` -> `==` companion: when the attempt ran at ORIGINAL
+        // resolution there is nothing to rescale, and `==` would wrongly
+        // scale by a bogus factor. Corners must pass through unchanged.
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, (120, 90));
+        let candidate = crate::rescue::RescueCandidate {
+            stream: MaskedStream {
+                bits: vec![0u8; 8],
+                bit_len: 64,
+            },
+            corners: [Point { x: 12.0, y: 7.0 }; 4],
+            version: 1,
+            ec: EcLevel::M,
+            mask: 0,
+            inverted: false,
+        };
+        run.collect_rescue(vec![candidate], (120, 90), false);
+        let corner = run.rescue_candidates[0].corners[0];
+        assert!((corner.x - 12.0).abs() < 1e-3 && (corner.y - 7.0).abs() < 1e-3);
+    }
+
+    // ---- Run::rescue_stage ----
+
+    #[test]
+    fn rescue_stage_counts_and_times_every_candidate() {
+        // 488:19 `tried += 1` -> `*=` (freezes at 0) + 511:49 `ms * 1000`
+        // -> `+ 1000` (reads ~1000ms). Three version-0 candidates fail
+        // `rescue::attempt` at its 1..=40 range check (no parsing, no panic),
+        // so each is TRIED and none is FOUND.
+        let cancel = CancelToken::new();
+        let luma = LumaImage::new(vec![255u8; 100 * 100], 100, 100);
+        let dud = || crate::rescue::RescueCandidate {
+            stream: MaskedStream {
+                bits: Vec::new(),
+                bit_len: 0,
+            },
+            corners: [Point { x: 0.0, y: 0.0 }; 4],
+            version: 0,
+            ec: EcLevel::M,
+            mask: 0,
+            inverted: false,
+        };
+        let mut run = Run {
+            cancel: &cancel,
+            deadline: None,
+            orig: (100, 100),
+            merged: Vec::new(),
+            rescue_candidates: vec![dud(), dud(), dud()],
+            panics: 0,
+        };
+        let mut stages = Vec::new();
+        run.rescue_stage(&luma, &mut stages).unwrap();
+        let rescue = stages
+            .iter()
+            .find(|s| s.stage == "rescue")
+            .expect("rescue stage pushed");
+        assert_eq!(
+            rescue.transforms_tried, 3,
+            "488: `*=` freezes tried at 0 instead of counting all three"
+        );
+        assert_eq!(rescue.detections_found, 0);
+        assert!(
+            rescue.ms < 100.0,
+            "511: `+ 1000` reads ~1000ms; three no-op candidates take microseconds ({})",
+            rescue.ms
+        );
+    }
+
+    #[test]
+    fn rescue_stage_reports_a_real_recovery() {
+        // 490:23 `found += 1` -> `*=` (freezes at 0). The occluded fixture is
+        // recovered ONLY by S5 rescue; with budget_ms None the walk is fully
+        // deterministic (no wall-clock cut).
+        let bytes = std::fs::read(format!(
+            "{}/../../fixtures/degraded/logo-occluded-rescue.png",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
+        let mut config = ScanConfig::full();
+        config.budget_ms = None;
+        let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
+        assert_eq!(outcome.merged.len(), 1, "S5 recovers the occluded symbol");
+        let rescue = outcome
+            .trace
+            .stages
+            .iter()
+            .find(|s| s.stage == "rescue")
+            .expect("rescue stage ran");
+        assert_eq!(
+            rescue.detections_found, 1,
+            "490: `*=` freezes found at 0 on the successful rescue"
+        );
+        assert!(
+            rescue.transforms_tried >= 1,
+            "488: the winning candidate was tried"
+        );
+    }
+
+    // ---- Run::stage ----
+
+    #[test]
+    fn stage_accumulates_raw_detections_found() {
+        // 580:25 `found_total += absorb(..)` -> `*=` (freezes at 0). A clean
+        // QR decodes, so the deciding stage reports at least one raw hit.
+        let bytes = qr_png("https://qrcode-ai.com/found-count-pin", 6);
+        let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
+        let mut config = ScanConfig::full();
+        config.budget_ms = None;
+        let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
+        assert_eq!(outcome.merged.len(), 1);
+        let found: u32 = outcome
+            .trace
+            .stages
+            .iter()
+            .map(|s| s.detections_found)
+            .sum();
+        assert!(
+            found >= 1,
+            "580: `*=` freezes every stage's detections_found at 0"
+        );
+    }
+
+    #[test]
+    fn stage_ms_stays_within_total_ms() {
+        // 587:49 stage `ms * 1000` -> `+ 1000` (a sub-interval reads ~1000ms)
+        // + 806:55 total `ms * 1000` -> `+ 1000` (reads ~1000ms) / `-> / 1000`
+        // (drops total below a real stage's ms). Structural invariant: every
+        // stage is a sub-interval of the whole run.
+        let data = vec![255u8; 96 * 96];
+        let planes = normalize(&ImageInput::luma8(&data, 96, 96), &Limits::default()).unwrap();
+        let mut config = ScanConfig::full();
+        config.budget_ms = None;
+        let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
+        let total = outcome.trace.total_ms;
+        assert!(
+            (0.0..1_000.0).contains(&total),
+            "806: `+ 1000` reads ~1000ms; a 96px blank scan is microseconds ({total})"
+        );
+        for s in &outcome.trace.stages {
+            assert!(
+                s.ms >= 0.0 && s.ms <= total,
+                "587/806: stage {} ms {} must sit within total {}",
+                s.stage,
+                s.ms,
+                total
+            );
+        }
+    }
+
+    // ---- deep_attempts ----
+
+    #[test]
+    fn deep_attempts_full_res_grid_uses_the_stretch_variant() {
+        // 640:34 delete `!`. The (size=None, stretch=false) grid combo is
+        // SKIPPED (it duplicates the S3 otsu/invert at full res); only
+        // (None, stretch=true) survives. The lone inverting full-res grid
+        // attempt must therefore build invert(contrast_stretch(luma)).
+        // Dropping the `!` keeps (None, stretch=false) instead -> invert(luma).
+        let side = 64u32;
+        let mut data = vec![0u8; (side * side) as usize];
+        for (i, px) in data.iter_mut().enumerate() {
+            *px = if i % 2 == 0 { 60 } else { 190 }; // bimodal, NOT full range
+        }
+        let luma = LumaImage::new(data, side, side);
+        let attempts = deep_attempts(&luma, side);
+        let inverting: Vec<&Attempt<'_>> = attempts.iter().filter(|a| a.inverts).collect();
+        assert_eq!(
+            inverting.len(),
+            1,
+            "one inverting full-res grid combo survives"
+        );
+        let got = (inverting[0].build)();
+        let expected = transform::invert(&transform::contrast_stretch(&luma));
+        assert_eq!(
+            got.data(),
+            expected.data(),
+            "640: dropping `!` builds invert(luma) instead of invert(stretch(luma))"
+        );
+    }
+
+    // ---- run: stage gating + early exit ----
+
+    #[test]
+    fn pyramid_skipped_when_image_not_larger_than_pyramid_side() {
+        // 724:38 `>` -> `==`/`>=`. longest == pyramid_side means downscaling
+        // to pyramid_side is a no-op, so the strict `>` skips the redundant
+        // pyramid rung. Both `==` and `>=` would run it.
+        let data = vec![255u8; 128 * 128];
+        let planes = normalize(&ImageInput::luma8(&data, 128, 128), &Limits::default()).unwrap();
+        let mut config = ScanConfig::full();
+        config.pyramid_side = 128; // == longest
+        config.budget_ms = None;
+        let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
+        assert!(
+            !stage_names(&outcome).contains(&"pyramid"),
+            "724: `==`/`>=` run a redundant pyramid when longest == pyramid_side: {:?}",
+            stage_names(&outcome)
+        );
+    }
+
+    #[test]
+    fn pyramid_runs_when_image_exceeds_pyramid_side() {
+        // 724:63 delete `!` before `out_of_budget()`. With an available
+        // budget the pyramid MUST run on an oversized image; gating it on
+        // being OUT of budget makes it never run.
+        let data = vec![255u8; 700 * 700];
+        let planes = normalize(&ImageInput::luma8(&data, 700, 700), &Limits::default()).unwrap();
+        let mut config = ScanConfig::full(); // pyramid_side = 512
+        config.budget_ms = None;
+        let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
+        assert_eq!(
+            stage_names(&outcome).first().copied(),
+            Some("pyramid"),
+            "724: deleting `!` skips the pyramid stage entirely: {:?}",
+            stage_names(&outcome)
+        );
+    }
+
+    #[test]
+    fn ladder_stops_after_pyramid_finds_a_symbol() {
+        // 732:21 `stop || !merged.is_empty()` -> `&&`. A symbol decoded at
+        // the pyramid downscale must break the ladder before direct.
+        let bytes = qr_png("https://qrcode-ai.com/pyr", 24); // > 512px longest
+        let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
+        let mut config = ScanConfig::full();
+        config.budget_ms = None;
+        let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
+        assert_eq!(outcome.merged.len(), 1, "pyramid decodes the symbol");
+        assert!(
+            !stage_names(&outcome).contains(&"direct"),
+            "732: `&&` keeps walking direct/enhance/deep after a pyramid hit: {:?}",
+            stage_names(&outcome)
+        );
+    }
+
+    #[test]
+    fn ladder_stops_after_direct_finds_a_symbol() {
+        // 745:21 `stop || !merged.is_empty()` -> `&&`. A small QR (pyramid
+        // skipped) decoded by direct must break before enhance.
+        let bytes = qr_png("https://qrcode-ai.com/direct-stop-pin", 6); // < 512px
+        let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
+        let mut config = ScanConfig::full();
+        config.budget_ms = None;
+        let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
+        assert_eq!(outcome.merged.len(), 1);
+        assert!(
+            !stage_names(&outcome).contains(&"pyramid"),
+            "small QR: pyramid must be skipped: {:?}",
+            stage_names(&outcome)
+        );
+        assert!(
+            !stage_names(&outcome).contains(&"enhance"),
+            "745: `&&` keeps walking enhance/deep after a direct hit: {:?}",
+            stage_names(&outcome)
+        );
+    }
+
+    #[test]
+    fn enhance_stage_is_gated_by_its_config_flag() {
+        // 751:27 `config.enhance && !out_of_budget()` -> `||`. With enhance
+        // disabled but budget available, the stage must stay off; `||` opens
+        // it on the budget alone. A blank image reaches every gate.
+        let data = vec![255u8; 64 * 64];
+        let planes = normalize(&ImageInput::luma8(&data, 64, 64), &Limits::default()).unwrap();
+        let mut config = ScanConfig::full();
+        config.enhance = false;
+        config.budget_ms = None;
+        let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
+        assert!(
+            !stage_names(&outcome).contains(&"enhance"),
+            "751: `||` runs enhance despite config.enhance = false: {:?}",
+            stage_names(&outcome)
+        );
+    }
+
+    #[test]
+    fn ladder_stops_after_enhance_finds_a_symbol() {
+        // 770:21 `stop || !merged.is_empty()` -> `&&`. Force the decode into
+        // enhance (pyramid + direct disabled); the ladder must break before
+        // deep.
+        let bytes = qr_png("https://qrcode-ai.com/enhance-stop-pin", 6);
+        let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
+        let mut config = ScanConfig::full();
+        config.pyramid = false;
+        config.direct = false;
+        config.budget_ms = None;
+        let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
+        assert_eq!(outcome.merged.len(), 1, "enhance decodes the symbol");
+        assert!(
+            !stage_names(&outcome).contains(&"deep"),
+            "770: `&&` keeps walking deep after an enhance hit: {:?}",
+            stage_names(&outcome)
+        );
+    }
+
+    #[test]
+    fn deep_stage_is_gated_by_its_config_flag() {
+        // 777:24 `config.deep && !out_of_budget()` -> `||`. With deep disabled
+        // but budget available, the stage must stay off.
+        let data = vec![255u8; 64 * 64];
+        let planes = normalize(&ImageInput::luma8(&data, 64, 64), &Limits::default()).unwrap();
+        let mut config = ScanConfig::full();
+        config.deep = false;
+        config.budget_ms = None;
+        let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
+        assert!(
+            !stage_names(&outcome).contains(&"deep"),
+            "777: `||` runs deep despite config.deep = false: {:?}",
+            stage_names(&outcome)
+        );
+    }
+}
