@@ -93,4 +93,31 @@ mod tests {
         let (_, charset) = resolve(&[0xFF, 0xFF]);
         assert_eq!(charset, Charset::Latin1);
     }
+
+    /// Directly pin the isolation predicate — the heuristic's boolean is the
+    /// load-bearing part and every one of the neighbour-index mutations lives
+    /// here. Column-exact targets on line 22:
+    /// - `22:34 -→+` (`raw[i-1]`→`raw[i+1]`), `22:57 +→*` (`i+1`→`i*1` in the
+    ///   `i + 1 == len` edge guard) and `22:61 ==→!=` all read `raw[i+1]` at the
+    ///   LAST index when the trailing byte is a reached isolated non-ASCII →
+    ///   out-of-bounds panic. The original returns `true` here.
+    /// - `22:51 &&→||` turns "both neighbours ASCII" into "either", so an
+    ///   interior adjacent-non-ASCII pair (which the original rejects) is
+    ///   wrongly accepted.
+    #[test]
+    fn all_non_ascii_isolated_neighbour_logic_is_exact() {
+        // isolated accent that is the FINAL byte, all prior ASCII: the only
+        // input that REACHES the last-index `raw[i+1]` read on a true prefix.
+        // original → true; the -/+/*/== index mutants index raw[len] → panic.
+        assert!(all_non_ascii_isolated(&[0x41, 0xE9])); // "A" + é
+        // and the same fact through the public surface (Windows-1252 → "Aé").
+        assert_eq!(resolve(&[0x41, 0xE9]), ("Aé".to_owned(), Charset::Latin1));
+
+        // interior ADJACENT non-ASCII pair (é ê between ASCII): the left
+        // neighbour of ê is non-ASCII → the `&&` rejects it. `&&→||` would
+        // accept it because each byte still has ONE ASCII neighbour.
+        assert!(!all_non_ascii_isolated(&[0x41, 0xE9, 0xEA, 0x41])); // A é ê A
+        // a truly isolated interior accent stays accepted (control).
+        assert!(all_non_ascii_isolated(&[0x41, 0xE9, 0x41])); // A é A
+    }
 }

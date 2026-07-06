@@ -652,6 +652,56 @@ mod tests {
     }
 
     #[test]
+    fn mecard_any_single_field_alone_still_classifies() {
+        // parse_mecard 272 — the presence gate is
+        // `name.is_some() || tel.is_some() || email.is_some() || url.is_some()`.
+        // 272:38 (`||` before email→`&&`) and 272:57 (`||` before url→`&&`).
+        // Existing tests always had `name` present, short-circuiting the chain.
+        // A MECARD with EXACTLY ONE non-name field present must still classify:
+        //   tel-only     kills 272:38   (name || (tel && email) || url = false)
+        //   email-only   kills 272:38 AND 272:57
+        //   url-only     kills 272:57   (name || tel || (email && url) = false)
+        match classify("MECARD:TEL:555;;") {
+            Payload::MeCard { tel, .. } => assert_eq!(tel.as_deref(), Some("555")),
+            other => panic!("tel-only MECARD must classify, got {other:?}"),
+        }
+        match classify("MECARD:EMAIL:a@b.com;;") {
+            Payload::MeCard { email, .. } => assert_eq!(email.as_deref(), Some("a@b.com")),
+            other => panic!("email-only MECARD must classify, got {other:?}"),
+        }
+        match classify("MECARD:URL:https://x.io;;") {
+            Payload::MeCard { url, .. } => assert_eq!(url.as_deref(), Some("https://x.io")),
+            other => panic!("url-only MECARD must classify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn retail_gtin_guard_boundaries_are_exact() {
+        // classify_retail_gtin 357 — the fall-back guard is
+        // `is_empty() || !all_ascii_digit || len > 14`.
+        // 357:26 (`||`→`&&`) and 357:73 (`||`→`&&`): a SHORT non-digit string
+        // must fall back to Text; under either `&&` mutation the guard goes
+        // false and the string is force-classified as a GTIN.
+        assert_eq!(
+            classify_retail_gtin("12x45", Symbology::Ean13),
+            Payload::Text,
+            "non-digit content must fall back to text"
+        );
+        // 357:89 (`>`→`==` and `>`→`>=`): a 14-digit valid GTIN is IN range
+        // (14 is not > 14) → classified as a conformant retail GTIN. Both
+        // mutants make `len == 14`/`len >= 14` true → wrongly fall back to Text.
+        match classify_retail_gtin("09506000134352", Symbology::Ean13) {
+            Payload::Gs1 {
+                gtin, conformant, ..
+            } => {
+                assert_eq!(gtin.as_deref(), Some("09506000134352"));
+                assert!(conformant, "14-digit GTIN-14 is a valid check-digit GTIN");
+            }
+            other => panic!("14-digit GTIN must classify as retail GTIN, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn bitcoin_bip21_with_amount_and_bare() {
         let p =
             classify("bitcoin:bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq?amount=0.01&label=Tip");

@@ -260,4 +260,35 @@ mod tests {
         let blank = LumaImage::new(vec![255u8; 48 * 48], 48, 48);
         assert!(decode(&blank, FormatFilter::All).is_empty());
     }
+
+    #[test]
+    fn parse_ec_maps_every_level_and_rejects_the_rest() {
+        // parse_ec 47:9 / 48:9 / 50:9 — deleting the "L"/"M"/"H" arms drops the
+        // level to the `_ => None` catch-all. Only "Q" was pinned (the clean-QR
+        // decode uses Q); the other three arms were unexercised.
+        assert_eq!(super::parse_ec("L"), Some(EcLevel::L));
+        assert_eq!(super::parse_ec("M"), Some(EcLevel::M));
+        assert_eq!(super::parse_ec("Q"), Some(EcLevel::Q));
+        assert_eq!(super::parse_ec("H"), Some(EcLevel::H));
+        assert_eq!(super::parse_ec("Z"), None);
+        assert_eq!(super::parse_ec(""), None);
+        assert_eq!(super::parse_ec("l"), None, "case-sensitive: only uppercase");
+    }
+
+    #[test]
+    fn only_filter_actually_excludes_other_symbologies() {
+        // decode 92:55 — `Some(formats_for(sym)).filter(|set| !set.is_empty())`.
+        // Deleting the `!` inverts the filter: the (never-empty) format set is
+        // dropped, so `possible` becomes None → the pass decodes EVERYTHING.
+        // The prior Only(QrCode) test could not catch this (a QR still decodes
+        // unrestricted). Restrict a QR image to a NON-QR format: the original
+        // returns the QR to nobody; the mutant leaks it through.
+        let luma = render(b"only-qr", qrcode::EcLevel::M);
+        let found = decode(&luma, FormatFilter::Only(Symbology::Ean13));
+        assert!(
+            found.iter().all(|d| d.symbology != Symbology::QrCode),
+            "Only(Ean13) must NOT return a QR (mutant drops the restriction): {:?}",
+            found.iter().map(|d| d.symbology).collect::<Vec<_>>()
+        );
+    }
 }

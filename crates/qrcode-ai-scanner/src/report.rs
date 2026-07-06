@@ -720,6 +720,60 @@ mod tests {
     }
 
     #[test]
+    fn is_qr_family_pins_exactly_the_three_qr_symbologies() {
+        // report.rs 91:9 — the `matches!` body was replaced by `-> true` AND
+        // `-> false` stubs, both survived (nothing called the predicate). Pin
+        // both directions: every QR-family symbology is true, every other false.
+        for sym in [
+            Symbology::QrCode,
+            Symbology::MicroQrCode,
+            Symbology::RectangularMicroQrCode,
+        ] {
+            assert!(sym.is_qr_family(), "{sym:?} is QR-family"); // kills `-> false`
+        }
+        for sym in [
+            Symbology::DataMatrix,
+            Symbology::Aztec,
+            Symbology::Pdf417,
+            Symbology::MaxiCode,
+            Symbology::Ean13,
+            Symbology::Ean8,
+            Symbology::UpcA,
+            Symbology::UpcE,
+            Symbology::Code128,
+            Symbology::Code39,
+            Symbology::DataBar,
+            Symbology::Telepen,
+        ] {
+            assert!(!sym.is_qr_family(), "{sym:?} is NOT QR-family"); // kills `-> true`
+        }
+    }
+
+    #[test]
+    fn is_retail_gtin_pins_exactly_the_four_retail_symbologies() {
+        // report.rs 100:9 — the `matches!` body → `-> true` stub survived.
+        // Pin both directions for completeness.
+        for sym in [
+            Symbology::Ean13,
+            Symbology::Ean8,
+            Symbology::UpcA,
+            Symbology::UpcE,
+        ] {
+            assert!(sym.is_retail_gtin(), "{sym:?} is a retail GTIN carrier"); // kills `-> false`
+        }
+        for sym in [
+            Symbology::QrCode,
+            Symbology::DataMatrix,
+            Symbology::Aztec,
+            Symbology::Code128,
+            Symbology::Itf,
+            Symbology::DataBar,
+        ] {
+            assert!(!sym.is_retail_gtin(), "{sym:?} is NOT a retail GTIN"); // kills `-> true`
+        }
+    }
+
+    #[test]
     fn grade_bands_are_pinned() {
         let bands = [
             (100, Grade::Excellent),

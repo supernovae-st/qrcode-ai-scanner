@@ -138,6 +138,22 @@ mod tests {
     )]
 
     use super::*;
+
+    /// A lone LATE syndrome spike — every round quiet until the last — drives
+    /// the flip-branch update fold at maximum `shift` (= round + 1): the
+    /// window `len + 1 - shift` narrows to exactly ONE write. The harvest
+    /// survivor `len + 1 → len - 1` (:52:30) turns that window negative and
+    /// PANICS on usize underflow (len − 1 − shift, shift = len). Degree pin:
+    /// a lone spike at the final round flips degree to round + 1 = len
+    /// (off-exactness regime — pinned behavior, not an ISO guarantee).
+    /// The three sibling survivors at :52/:61 (`+→*`, and `+→-`/`+→*` in the
+    /// else-branch) are census-proven equivalents — see .cargo/mutants.toml.
+    #[test]
+    fn late_spike_syndrome_runs_the_fold_at_maximum_shift() {
+        assert_eq!(error_count(&[0, 1]), 2, "npar=2 lone late spike");
+        assert_eq!(error_count(&[0, 0, 0, 0, 7]), 5, "npar=5 lone late spike");
+    }
+
     use crate::matrix::zigzag::zigzag_positions;
 
     #[test]

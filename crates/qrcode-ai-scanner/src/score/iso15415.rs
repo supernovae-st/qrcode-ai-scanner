@@ -193,12 +193,54 @@ pub(crate) fn compute(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_precision_loss)]
 
     use super::*;
 
     fn p(x: f32, y: f32) -> Point {
         Point { x, y }
+    }
+
+    /// The module count drives the sample grid: `modules = version*4+17`
+    /// (line 151). 151:38 mutates the `*` (`*`→`/` gives `version/4+17`,
+    /// `*`→`+` gives `version+4+17`) and 151:42 the `+` (`+`→`*` gives
+    /// `version*4*17`). A 5-px checkerboard sampled through `compute()` reads
+    /// modulation D at the CORRECT version-1 grid (21 modules, modulation
+    /// 0.255): the module centres sit inside cells, only a fixed boundary-cell
+    /// fraction is mid-gray. Each mutated module count re-phases the grid and
+    /// shifts that fraction, moving modulation off D:
+    ///   *→/  → modules 17 → modulation A (0.937)
+    ///   +→*  → modules 68 → modulation F (0.082)
+    ///   *→+  → modules 22 → modulation F (0.004)
+    /// Fully deterministic (no decode) — same image + corners ⇒ same grade.
+    #[test]
+    fn modules_formula_drives_the_sample_grid() {
+        let side = 210u32;
+        let data: Vec<u8> = (0..side * side)
+            .map(|i| {
+                let (x, y) = (i % side, i / side);
+                if (x / 5 + y / 5) % 2 == 0 { 0 } else { 255 }
+            })
+            .collect();
+        let img = LumaImage::new(data, side, side);
+        let corners = [
+            p(0.0, 0.0),
+            p((side - 1) as f32, 0.0),
+            p((side - 1) as f32, (side - 1) as f32),
+            p(0.0, (side - 1) as f32),
+        ];
+        let structural = StructuralReport {
+            finder_integrity: [1.0, 1.0, 1.0],
+            quiet_zone_ok: true,
+        };
+        let report = compute(&img, corners, 1, &structural, None).expect("gradeable");
+        assert_eq!(report.symbol_contrast.grade, IsoGrade::A, "{report:?}");
+        assert_eq!(
+            report.modulation.grade,
+            IsoGrade::D,
+            "correct modules=21 → modulation D; a mutated version*4+17 re-phases the grid: {:?}",
+            report.modulation
+        );
     }
 
     #[test]
@@ -297,6 +339,32 @@ mod tests {
         // would otherwise let 15 samples through)
         let fifteen: Vec<u8> = (0..15).map(|i| if i % 2 == 0 { 0 } else { 255 }).collect();
         assert!(contrast_and_modulation(&fifteen).is_none());
+    }
+
+    /// The MODULATION 5th-percentile index is `round((mods.len() − 1) · 0.05)`
+    /// (line 97 — a SEPARATE `len − 1` from the `percentile` helper at line 54).
+    /// 97:39 mutates that `−`: `−`→`/` (`len / 1` == `len`) and `−`→`+`
+    /// (`len + 1`). With 30 module means the original index is
+    /// `round(29·0.05) = 1`; both mutants shift it to `round(30·0.05) = 2`
+    /// (and `round(31·0.05) = 2`). Values engineered so mods\[1] is grade D and
+    /// mods\[2] is grade B — the one-index slip flips the modulation grade.
+    #[test]
+    fn modulation_percentile_index_uses_len_minus_one() {
+        // 14×black + 13×white keep span = 255 (contrast A, GT = 127.5). Three
+        // mid-tones give the three smallest MODs, in distinct grade bands:
+        //   103 → MOD 0.192 (F, index 0)   ← never selected
+        //    95 → MOD 0.255 (D, index 1)   ← original 5th-percentile pick
+        //    70 → MOD 0.451 (B, index 2)   ← mutant pick
+        let mut samples = vec![0u8; 14];
+        samples.extend(std::iter::repeat_n(255u8, 13));
+        samples.extend([70u8, 95u8, 103u8]); // total = 30
+        let (sc, modulation) = contrast_and_modulation(&samples).unwrap();
+        assert_eq!(sc.grade, IsoGrade::A, "span 255 → contrast A: {sc:?}");
+        assert_eq!(
+            modulation.grade,
+            IsoGrade::D,
+            "5th-pct index 1 (mods[1]=0.255 → D), not index 2 (mods[2]=0.451 → B): {modulation:?}"
+        );
     }
 
     #[test]

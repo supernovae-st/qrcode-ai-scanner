@@ -796,6 +796,85 @@ mod tests {
         (base, d.text.clone(), probe)
     }
 
+    /// The glare-blob CENTRE is `(base.width()*0.3, base.height()*0.3)`
+    /// (`run_axes` 236:29 and 237:30 — the `*` in each, mutated to `/` and `+`).
+    /// On a full-frame pristine symbol that localized spot lands ON the modules
+    /// and BREAKS the glare cell — the one of five lighting cells that fails
+    /// (shadow×2 + exposure×2 all survive). Every placement mutation moves the
+    /// blob OFF the symbol (`*`→`/` → centre at width/0.3 ≈ 2.9× off-canvas;
+    /// `*`→`+` → width+0.3, off the right edge) so the glare cell RECOVERS and
+    /// lighting.passed rises 4 → 5. Deterministic (no deadline in play).
+    #[test]
+    fn glare_blob_placement_breaks_exactly_one_lighting_cell() {
+        let (base, text, probe) = clean_base_and_probe();
+        let axes = run_axes(
+            &base,
+            &text,
+            ScoreDepth::Full,
+            &CancelToken::new(),
+            None,
+            probe,
+        )
+        .unwrap();
+        let lighting = axes
+            .iter()
+            .find(|a| a.axis == StressAxis::Lighting)
+            .unwrap();
+        assert_eq!(
+            lighting.passed, 4,
+            "glare at (0.3w,0.3h) must break exactly one of the five lighting cells; \
+             a moved centre lets it survive (5): {lighting:?}"
+        );
+    }
+
+    /// The glare-blob RADIUS is `min(w,h)*0.18` (`run_axes` 238:48, the `*`).
+    /// `*`→`/` blows it up to `min/0.18` (~5.6×²), saturating the WHOLE frame
+    /// white. On a symbol placed in the bottom-right of a white canvas — where
+    /// the centred glare MISSES it (all five lighting cells survive, count 5) —
+    /// that catastrophic radius floods the symbol too and drops the count to 4.
+    /// (The `*`→`+` variant, `min+0.18`, is a gentle full-frame wash a robust
+    /// symbol survives at any placement — argued separately, not pinned here.)
+    #[test]
+    fn glare_blob_radius_saturation_breaks_the_glare_cell() {
+        let code =
+            qrcode::QrCode::with_error_correction_level(b"canvas glare pin", qrcode::EcLevel::H)
+                .unwrap();
+        let qr = code
+            .render::<image::Luma<u8>>()
+            .module_dimensions(6, 6)
+            .build();
+        let (qw, qh) = (qr.width(), qr.height());
+        let (cw, ch) = (qw * 2, qh * 2);
+        let mut canvas = vec![255u8; (cw * ch) as usize];
+        for yy in 0..qh {
+            for xx in 0..qw {
+                canvas[((yy + qh) * cw + (xx + qw)) as usize] = qr.get_pixel(xx, yy).0[0];
+            }
+        }
+        let base = LumaImage::new(canvas, cw, ch);
+        let probe =
+            CellProbe::calibrate(&base, "canvas glare pin", crate::report::Symbology::QrCode)
+                .expect("corner symbol calibrates");
+        let axes = run_axes(
+            &base,
+            "canvas glare pin",
+            ScoreDepth::Full,
+            &CancelToken::new(),
+            None,
+            probe,
+        )
+        .unwrap();
+        let lighting = axes
+            .iter()
+            .find(|a| a.axis == StressAxis::Lighting)
+            .unwrap();
+        assert_eq!(
+            lighting.passed, 5,
+            "the 0.18·min glare misses the corner symbol → all five survive; a `/0.18` \
+             radius floods the frame and breaks the glare cell (4): {lighting:?}"
+        );
+    }
+
     /// The lighting set counts survivors with `lighting_passed += 1`; a
     /// `+=`→`*=` swap (:261) would multiply the zero seed forever. A pristine
     /// symbol survives ≥1 of the five lighting cells, so the count must move.

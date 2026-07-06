@@ -281,6 +281,69 @@ mod tests {
         assert_eq!(h.apply(2.0, 5.0), Some((1.0, 2.5)));
     }
 
+    // ---- exact-boundary pins for the three float-epsilon guards -------------
+    // These guards are STRICT `<`, so they only differ from `<=`/`==` when the
+    // magnitude equals the bound EXACTLY. f32 arithmetic is exact on small
+    // integers and powers of two, so an EPSILON / 1e-12 magnitude IS
+    // constructible (a diagonal product X·1·1 leaves X untouched).
+
+    #[test]
+    fn apply_at_exactly_epsilon_w_still_projects() {
+        // sampler 32:20 `w.abs() < f32::EPSILON` — w = m6·x + m7·y + m8. With
+        // m6=m7=0 and m8=EPSILON, w == f32::EPSILON EXACTLY for any (x,y). The
+        // strict `<` treats this as finite (projects); a `<`→`<=` swap returns
+        // None (divide-guard fires).
+        let h = Homography([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, f32::EPSILON]);
+        let got = h.apply(2.0, 4.0);
+        assert!(got.is_some(), "w == EPSILON is finite under strict `<`");
+        assert_eq!(got.unwrap(), (2.0 / f32::EPSILON, 4.0 / f32::EPSILON));
+    }
+
+    #[test]
+    fn inverse_at_exactly_the_determinant_threshold_still_inverts() {
+        // sampler 46:22 `det.abs() < 1e-12` — det = X·(1·1) with X = 1e-12_f32
+        // (same literal the guard uses), so det == 1e-12 EXACTLY. Strict `<`
+        // keeps it non-singular; `<`→`<=` would reject it as singular (None).
+        let h = Homography([1e-12, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+        assert!(
+            h.inverse().is_some(),
+            "det == 1e-12 is non-singular under the strict `<` guard"
+        );
+    }
+
+    #[test]
+    fn unit_square_to_quad_at_exactly_the_den_threshold_still_builds() {
+        // sampler 75:22 `den.abs() < 1e-12`, two mutants: `<`→`<=` and `<`→`==`.
+        // den = dx1·dy2 − dx2·dy1. With x2=y2=0, x1=1e-12,y1=0, x3=0,y3=1:
+        // dx1=1e-12, dy2=1, dx2=0, dy1=0 → den == 1e-12 EXACTLY. Strict `<` is
+        // false → Some; BOTH `<=` (true) and `==` (true) return None.
+        let quad = [(1.0, 1.0), (1e-12, 0.0), (0.0, 0.0), (0.0, 1.0)];
+        assert!(
+            Homography::unit_square_to_quad(quad).is_some(),
+            "den == 1e-12 is non-singular under strict `<`"
+        );
+        // control: a genuinely singular (collinear) quad still returns None —
+        // this also traps `<`→`==` from the other side (0 != 1e-12).
+        let collinear = [(0.0, 0.0), (2.0, 0.0), (4.0, 0.0), (6.0, 0.0)];
+        assert!(Homography::unit_square_to_quad(collinear).is_none());
+    }
+
+    #[test]
+    fn bilinear_bottom_row_read_and_weight_are_load_bearing() {
+        // sampler line 122 (the `bottom` term). All four values distinct and
+        // ≠ 255, so the bottom-row read is discriminated (the checker test hid
+        // it: fetch(0,1)==fetch(0,-1)==255 by coincidence).
+        //   (0,0)=10 (1,0)=20 / (0,1)=30 (1,1)=40
+        let img = LumaImage::new(vec![10, 20, 30, 40], 2, 2);
+        // center = mean of the four = 25 (first-principles bilinear midpoint).
+        //   122:31 `fetch(ix, iy+1)`→`fetch(ix, iy-1)` reads OOB(255) → 81.
+        //   122:73 `fetch(ix+1, iy+1) * fx`→`+ fx` → 35.
+        assert_eq!(sample_bilinear(&img, 0.5, 0.5), 25);
+        // three-quarters down the left column pins fy on the bottom term:
+        // top(10)·0.25 + bottom(30)·0.75 = 25 (mutants → 193 / 55).
+        assert_eq!(sample_bilinear(&img, 0.0, 0.75), 25);
+    }
+
     #[test]
     fn unit_square_to_quad_projects_interior_points_exactly() {
         // A genuinely projective (non-affine) quad — exercises the perspective
