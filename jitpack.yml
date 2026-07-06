@@ -28,14 +28,22 @@ before_install:
   - source "$HOME/.cargo/env"
   - rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
   - cargo install cargo-ndk --version 4.1.2 --locked
-  # Android SDK cmdline-tools + NDK r27 (16 KB page-size safe — §7 gotcha #8).
-  # Licenses FIRST (a pending license makes sdkmanager --install a silent
-  # no-op), output NOT swallowed (the >/dev/null here is what hid the missing
-  # NDK on 9cbe59aa02), and the exact path verified loud before moving on.
-  - yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-  - yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.0.12077973" "platforms;android-34" "build-tools;34.0.0" | tail -5
+  # Android SDK — the JitPack image ships NO cmdline-tools at all (v2 proof
+  # run 18cb85c1a0: ".../cmdline-tools/latest/bin/sdkmanager: No such file"),
+  # so provision our own into $HOME like gradle below. Google's documented
+  # layout: the zip's root `cmdline-tools/` dir must sit at
+  # $SDK/cmdline-tools/latest. Licenses FIRST (a pending license makes
+  # --install a silent no-op), install output visible, exact NDK path
+  # verified loud before anything depends on it (NDK r27 = 16 KB page-safe).
+  - curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o /tmp/clt.zip
+  - mkdir -p "$HOME/android-sdk/cmdline-tools"
+  - unzip -q /tmp/clt.zip -d /tmp/clt
+  - mv /tmp/clt/cmdline-tools "$HOME/android-sdk/cmdline-tools/latest"
+  - export ANDROID_HOME="$HOME/android-sdk"
+  - yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --licenses > /dev/null || true
+  - yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --install "ndk;27.0.12077973" "platforms;android-34" "build-tools;34.0.0" | tail -3
   - ls -d "$ANDROID_HOME/ndk/27.0.12077973"
-  - echo "ndk.dir=$ANDROID_HOME/ndk/27.0.12077973" > bindings/kotlin/local.properties
+  - printf 'sdk.dir=%s\nndk.dir=%s/ndk/27.0.12077973\n' "$ANDROID_HOME" "$ANDROID_HOME" > bindings/kotlin/local.properties
   # Gradle 8.9 (the AGP 8.5 toolchain) — provisioned here so JitPack needs NO committed
   # Gradle wrapper jar. Full path is used in `install` (PATH may not persist across steps).
   # $HOME, not /opt: the v0.5.0 build died exit-127 at the gradle step — /opt is
@@ -46,8 +54,11 @@ before_install:
   - ls "$HOME/gradle-8.9/bin/gradle"
 
 install:
+  # Each yml section runs as its OWN ;-joined shell line — before_install
+  # exports do NOT survive into here. Re-derive both SDK envs.
   - set -e
   - source "$HOME/.cargo/env"
+  - export ANDROID_HOME="$HOME/android-sdk"
   - export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
   # 1. Build the per-ABI .so into the library module's jniLibs (cargo-ndk §4.1).
   - >
