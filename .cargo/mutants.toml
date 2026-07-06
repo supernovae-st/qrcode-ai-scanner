@@ -76,6 +76,23 @@ test_tool = "nextest"
 #   Line drift stays SAFE: the mutant resurfaces in the weekly report and gets
 #   re-anchored; no killable sibling is ever hidden (the operator/count is
 #   pinned to the `*`→`/` variant only, never the `*`→`+` twin).
+# rescue/bitstream.rs
+#   144:53  `|`→`^` in the ECI assembly `(v / 0xC0) << 8 | (v % 0xC0)`: the
+#     operands are bit-disjoint — v % 0xC0 < 0xC0 occupies bits 0-7 only,
+#     (v / 0xC0) << 8 has all low 8 bits zero — so |, ^ and + are numerically
+#     identical for every input. Unkillable by construction.
+# score/uec.rs — census-proven equivalents (125,536-syndrome differential:
+#   exhaustive npar=2 + 60k LCG npar=3..=8, hash-identical on each mutation).
+#   Algebra: the truncated tail writes are gf_mul(coef, prev[k]) with
+#   prev[k] = 0 wherever the written index could later be read — first-flip
+#   prev is pristine [1,0,..], and afterwards the degree bound
+#   ceil((r+1)/2) < len-1 forbids a discrepancy read of locator[len-1..].
+#   The KILLABLE sibling at 52:30 (`+`→`-`, usize underflow at shift = len)
+#   is caught by late_spike_syndrome_runs_the_fold_at_maximum_shift.
+#   52:30  `len + 1 - shift`→`len * 1 - shift` in the flip-branch fold bound
+#   61:30  both `+`→`-` and `+`→`*` in the else-branch fold bound (shift
+#     there never exceeds len-1: it resets to 1 at every flip and the else
+#     branch requires round < 2·degree — no underflow, same zero-tail).
 exclude_re = [
     "replace fuzzing::",
     "replace fuzz_api::",
@@ -94,4 +111,8 @@ exclude_re = [
     "lib\\.rs:87:9: replace Scanner::builder -> ScannerBuilder with Default::default\\(\\)",
     "ladder\\.rs:511:49: replace \\* with / in Run",
     "ladder\\.rs:587:49: replace \\* with / in Run",
+    "bitstream\\.rs:144:53: replace \\| with \\^ in parse",
+    "uec\\.rs:52:30: replace \\+ with \\* in error_count",
+    "uec\\.rs:61:30: replace \\+ with - in error_count",
+    "uec\\.rs:61:30: replace \\+ with \\* in error_count",
 ]

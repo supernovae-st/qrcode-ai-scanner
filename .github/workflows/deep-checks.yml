@@ -9,18 +9,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Sharded: the suite outgrew a single runner (203+ tests × ~1900 mutants —
-  # the un-sharded job hit the 90-min wall on 2026-07-05, and 4 shards STILL
-  # timed out at 90 min while uploading partials). 8 shards ≈ 240 mutants
-  # each. Add shards if the wall returns, never the timeout (a longer wall
-  # just delays the report a week).
+  # Sharded: the suite outgrew a single runner (the un-sharded job hit the
+  # 90-min wall on 2026-07-05; 8 shards then had TWO shards hit it again on
+  # a 284-test suite). 12 shards now. Add shards if the wall returns, never
+  # a longer wall (that just delays the report a week).
+  #
+  # The timeout lives on the WORK STEP, not the job: a job-level timeout
+  # kills the upload-artifact step too — `if: always()` cannot save it —
+  # and a timed-out shard then reports NOTHING (shards 0+5 vanished from
+  # two consecutive runs before this split).
   mutants:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 100
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -29,8 +33,9 @@ jobs:
         with:
           tool: cargo-mutants,cargo-nextest
       - run: >
-          cargo mutants -p qrcode-ai-scanner --shard ${{ matrix.shard }}/8
+          cargo mutants -p qrcode-ai-scanner --shard ${{ matrix.shard }}/12
           --minimum-test-timeout 120 -- --all-features
+        timeout-minutes: 85
         continue-on-error: true
       - uses: actions/upload-artifact@v4
         if: always()
@@ -78,12 +83,13 @@ jobs:
   # The full table uploads as an artifact for trend reading.
   rescue-stress:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: two runs, byte-identical, zero rescue-wrong
+        timeout-minutes: 60
         run: |
           set -euo pipefail
           cargo run --release -p xtask -- rescue-stress > run1.txt
