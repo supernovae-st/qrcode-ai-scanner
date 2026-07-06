@@ -76,6 +76,12 @@ test_tool = "nextest"
 #   Line drift stays SAFE: the mutant resurfaces in the weekly report and gets
 #   re-anchored; no killable sibling is ever hidden (the operator/count is
 #   pinned to the `*`→`/` variant only, never the `*`→`+` twin).
+# gs1.rs
+#   227:15  `cut > 0`→`>=` in split_head's char-boundary down-walk: cut is
+#     usize so `cut >= 0` is vacuously true and the guard collapses to
+#     `!s.is_char_boundary(cut)` — but is_char_boundary(0) is always true
+#     (string start), so both guards stop at the same index for every &str.
+#     Survived per-mutation isolation while its `-=`→`+=` sibling died.
 # rescue/bitstream.rs
 #   144:53  `|`→`^` in the ECI assembly `(v / 0xC0) << 8 | (v % 0xC0)`: the
 #     operands are bit-disjoint — v % 0xC0 < 0xC0 occupies bits 0-7 only,
@@ -111,6 +117,7 @@ exclude_re = [
     "lib\\.rs:87:9: replace Scanner::builder -> ScannerBuilder with Default::default\\(\\)",
     "ladder\\.rs:511:49: replace \\* with / in Run",
     "ladder\\.rs:587:49: replace \\* with / in Run",
+    "gs1\\.rs:227:15: replace > with >= in split_head",
     "bitstream\\.rs:144:53: replace \\| with \\^ in parse",
     "uec\\.rs:52:30: replace \\+ with \\* in error_count",
     "uec\\.rs:61:30: replace \\+ with - in error_count",
