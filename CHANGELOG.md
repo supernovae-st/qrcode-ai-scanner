@@ -38,6 +38,19 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   consolidated into one `run_engine()` helper and pinned deterministically.
   cargo-mutants now runs under nextest (`test_tool` policy) so the wall-clock
   test group serialization applies to mutants baselines too.
+- The full-crate mutation campaign closed: all 127 weekly-run survivors are
+  now killed or individually proven equivalent — the decode ladder
+  (merge/absorb identity, rescue candidate collection, stage gating), the
+  warp stress synthesizers (tilt/rotate/shadow/glare geometry, hand-computed
+  pixel pins), the rescue bitstream parser + the ISO Annex B protection
+  table (pinned against an independent enumeration, never the code's own
+  formula), and a nine-file sweep (charset, engine adapters, GF(256) log
+  table, sampler, payload gates, report predicates, ISO parameters, axis
+  folds, Berlekamp-Massey fold bounds — the last settled by a
+  125,536-syndrome differential census). 19 equivalents are pinned in
+  `.cargo/mutants.toml`, each with its argument inline. The weekly
+  deep-checks missed count is a true zero baseline, enforced across 12
+  step-timed shards.
 
 ## 0.5.0 — 2026-07-05
 
