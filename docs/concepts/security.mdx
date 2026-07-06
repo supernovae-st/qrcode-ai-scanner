@@ -46,7 +46,14 @@ there is no RNG anywhere in the pipeline. Two bounded caveats:
 
 ## Verification surface
 
-181 Rust tests · property tests (proptest) on the RS math and parsers ·
-two fuzz targets (image bytes, decoded text) · mutation testing ·
-golden spec examples validated in CI against both the serde types and the
-published JSON Schema.
+300+ Rust tests · property tests (proptest) on the RS math and parsers ·
+four fuzz targets (encoded images · full-profile ladder · adversarial
+rescue bitstreams · decoded text) running weekly · mutation testing at a
+**zero-missed baseline** — every surviving mutant in the crate is either
+killed by a named test or individually proven equivalent in the committed
+policy, enforced weekly across sharded CI · a 2,304-scan deterministic
+occlusion bench gating the rescue path's zero-miscorrection guarantee ·
+a 522-file external corpus pinned by sha256 with a bidirectional drift
+gate (regressions AND silent capability gains both fail) · golden spec
+examples validated in CI against both the serde types and the published
+JSON Schema.
