@@ -355,3 +355,160 @@ mod differential {
         );
     }
 }
+
+#[cfg(test)]
+mod pins {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation
+    )]
+
+    use super::*;
+
+    // ── protection() · ISO/IEC 18004 Annex B misdecode-protection `p` ──
+
+    /// Independent enumeration of the Annex B `p` codewords — derived from ISO
+    /// 18004 (only version-1 across all EC levels, plus v2-L and v3-L, reserve
+    /// any misdecode-protection codewords), NOT re-derived from the match's own
+    /// arms. Pins every relevant cell, so `protection → 0`, `protection → 1`
+    /// (whole-body replacements) and any single arm deletion move a cell off
+    /// its value.
+    #[test]
+    fn protection_matches_iso_annex_b_table() {
+        let table = [
+            (1u8, EcLevel::L, 3usize),
+            (1, EcLevel::M, 2),
+            (1, EcLevel::Q, 1),
+            (1, EcLevel::H, 1),
+            (2, EcLevel::L, 1),
+            (2, EcLevel::M, 0),
+            (2, EcLevel::Q, 0),
+            (2, EcLevel::H, 0),
+            (3, EcLevel::L, 1),
+            (3, EcLevel::M, 0),
+            (3, EcLevel::H, 0),
+            (4, EcLevel::L, 0), // boundary: v4-L reserves nothing (not in 2|3)
+            (10, EcLevel::L, 0),
+            (40, EcLevel::H, 0),
+        ];
+        for (v, ec, expected) in table {
+            assert_eq!(protection(v, ec), expected, "p for v{v} {ec:?}");
+        }
+    }
+
+    // ── codeword_margins() · percentile threshold + capacity/flat guards ──
+
+    const V1_MODULES: u32 = 21; // version 1 · 21×21
+    const SCALE: u32 = 16;
+    const DIM: u32 = (V1_MODULES + 1) * SCALE; // 22*16 = 352 (sampler denom = N+1)
+
+    /// Build a v1 luma whose 208 data-module CENTERS sample exactly `sampled[i]`
+    /// (in zigzag/stream order). Each center lands at ≈(16x+8, 16y+8) and is
+    /// wrapped in a uniform 15×15 block, so bilinear sampling returns the value
+    /// regardless of sub-pixel rounding. The quad = the full image, so the
+    /// unit→pixel map is a pure scale (module (x,y) → ((x+.5)/22·DIM, …)).
+    fn v1_luma(sampled: &[u8]) -> (LumaImage, RescueCandidate) {
+        let mut data = vec![128u8; (DIM * DIM) as usize];
+        let positions = zigzag_positions(1);
+        for (i, &(y, x)) in positions.iter().take(sampled.len()).enumerate() {
+            let cx = 16 * x as u32 + 8;
+            let cy = 16 * y as u32 + 8;
+            for py in (cy - 7)..=(cy + 7) {
+                for px in (cx - 7)..=(cx + 7) {
+                    data[(py * DIM + px) as usize] = sampled[i];
+                }
+            }
+        }
+        let candidate = RescueCandidate {
+            stream: MaskedStream {
+                bits: Vec::new(),
+                bit_len: 0,
+            },
+            corners: [
+                Point { x: 0.0, y: 0.0 },
+                Point {
+                    x: DIM as f32,
+                    y: 0.0,
+                },
+                Point {
+                    x: DIM as f32,
+                    y: DIM as f32,
+                },
+                Point {
+                    x: 0.0,
+                    y: DIM as f32,
+                },
+            ],
+            version: 1,
+            ec: EcLevel::M,
+            mask: 0,
+            inverted: false,
+        };
+        (LumaImage::new(data, DIM, DIM), candidate)
+    }
+
+    /// Strictly increasing sample set (0..208): `sorted == input`, so the
+    /// p2/p98 picks are pinned literals — lo = sorted[208/50]=sorted[4]=4,
+    /// hi = sorted[208-1-4]=sorted[203]=203. Any percentile-index mutation
+    /// (:90 `/`→`%`, :91 `-`→`/`/`+`, :91 `/`→`%`) shifts lo/hi, moving the
+    /// whole margin vector. Checked against an INDEPENDENT oracle (literal
+    /// threshold/half-span, never `sorted[len/50]`).
+    #[test]
+    fn codeword_margins_pin_percentile_threshold() {
+        assert_eq!(zigzag_positions(1).len(), 208, "v1 data-module count");
+        let sampled: Vec<u8> = (0..208u32).map(|i| i as u8).collect();
+        let (luma, cand) = v1_luma(&sampled);
+        let got = codeword_margins(&luma, &cand, 26).expect("contrasty ⇒ Some");
+        assert_eq!(got.len(), 26);
+
+        let threshold = 103.5_f32; // midpoint(4, 203)
+        let half_span = 99.5_f32; // (203 - 4) / 2
+        for (c, &m) in got.iter().enumerate() {
+            let expected = (0..8)
+                .map(|k| (f32::from(sampled[8 * c + k]) - threshold).abs() / half_span)
+                .fold(f32::INFINITY, f32::min);
+            assert!(
+                (m - expected).abs() < 1e-4,
+                "codeword {c}: got {m}, expected {expected}"
+            );
+        }
+    }
+
+    /// Capacity guard `positions.len() < total_codewords * 8` (:73). v1 yields
+    /// 208 positions; asking for 27 codewords (216 > 208) MUST refuse. `*`→`/`
+    /// (27/8=3) or `*`→`+` (27+8=35) leave 208 ≥ them, so the mutant proceeds
+    /// and returns Some. The exact-fit (26 ⇒ 208) still samples.
+    #[test]
+    fn codeword_margins_refuses_when_positions_too_few() {
+        let sampled: Vec<u8> = (0..208u32).map(|i| i as u8).collect();
+        let (luma, cand) = v1_luma(&sampled);
+        assert!(codeword_margins(&luma, &cand, 27).is_none());
+        assert!(codeword_margins(&luma, &cand, 26).is_some());
+    }
+
+    /// Flat-symbol guard (:92 `hi - lo < 16.0`). A uniform field has span 0 <
+    /// 16 ⇒ None. `<`→`==` (`0 == 16` is false) would proceed and emit margins.
+    #[test]
+    fn codeword_margins_refuses_flat_symbol() {
+        let (luma, cand) = v1_luma(&vec![128u8; 208]);
+        assert!(codeword_margins(&luma, &cand, 26).is_none());
+    }
+
+    /// Boundary of the flat guard: span EXACTLY 16 is NOT flat (`16 < 16` is
+    /// false) ⇒ Some. `<`→`<=` (:92) would reject it. Multiset gives sorted[4]
+    /// = 100 (lo) and sorted[203] = 116 (hi) ⇒ hi − lo = 16.
+    #[test]
+    fn codeword_margins_span_exactly_16_is_not_flat() {
+        let mut sampled = vec![108u8; 208];
+        for s in sampled.iter_mut().take(5) {
+            *s = 100; // sorted[0..5] = 100 ⇒ sorted[4] = lo = 100
+        }
+        for s in sampled.iter_mut().skip(203) {
+            *s = 116; // sorted[203..208] = 116 ⇒ hi = 116
+        }
+        let (luma, cand) = v1_luma(&sampled);
+        assert!(codeword_margins(&luma, &cand, 26).is_some());
+    }
+}
