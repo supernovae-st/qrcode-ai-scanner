@@ -27,13 +27,26 @@ jobs:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     steps:
       - uses: actions/checkout@v4
+      # The runner agent dies silently (no failed step, "shutdown signal")
+      # when the disk fills: 5 consecutive weekly/rerun deaths at consistent
+      # elapsed times (~32 min shard 8 · ~48 min shard 0). Reclaim ~25GB of
+      # preinstalled toolchains we never use, and print the headroom so the
+      # next post-mortem has numbers instead of a vanished log.
+      - name: reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h / && free -m
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants,cargo-nextest
+      # --in-place: skip the scratch tree copy AND its second multi-GB target
+      # dir — halves peak disk. Safe here (ephemeral checkout) and it is the
+      # same mode the repo's local truth-pass doctrine runs.
       - run: >
-          cargo mutants -p qrcode-ai-scanner --shard ${{ matrix.shard }}/12
+          cargo mutants -p qrcode-ai-scanner --in-place
+          --shard ${{ matrix.shard }}/12
           --minimum-test-timeout 120 -- --all-features
         timeout-minutes: 85
         continue-on-error: true
@@ -86,6 +99,12 @@ jobs:
     timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
+      # Same silent runner-death class as the mutant shards (~49 min, no
+      # failed step): reclaim disk + print headroom for the next post-mortem.
+      - name: reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h / && free -m
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: two runs, byte-identical, zero rescue-wrong
