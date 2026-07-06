@@ -248,6 +248,110 @@ mod tests {
     }
 
     #[test]
+    fn fnc1_second_position_consumes_indicator_and_flags() {
+        // mode 1001 · 8-bit application indicator (0x19) · byte 'A' · term.
+        // Deleting the 0b1001 arm (:69) routes the mode to `_ => None`.
+        let data = stream("1001 00011001 0100 00000001 01000001 0000");
+        let (raw, fnc1) = parse(&data, 1).unwrap();
+        assert_eq!(raw, b"A");
+        assert!(fnc1, "FNC1 second position must set the flag");
+    }
+
+    #[test]
+    fn eci_one_byte_designator_consumes_exactly_one_byte() {
+        // 1-byte ECI (first = 5, high bit CLEAR) → NO extra byte, then 'U'.
+        // Deleting the 0b0111 arm (:74) → None. The `&`→`^`/`|` and `!=`→`==`
+        // swaps at :78 all wrongly ENTER the multi-byte branch on a high-bit-
+        // clear designator, swallowing the next segment header → misparse.
+        let data = stream("0111 00000101 0100 00000001 01010101 0000");
+        let (raw, fnc1) = parse(&data, 1).unwrap();
+        assert_eq!(raw, vec![0x55]);
+        assert!(!fnc1);
+    }
+
+    #[test]
+    fn eci_two_byte_designator_consumes_exactly_two_bytes() {
+        // 2-byte ECI (first = 0x80: leading bits 10) → exactly ONE extra byte.
+        // The inner `&`→`^`/`|` and `==`→`!=` swaps at :79 take 16 bits instead
+        // of 8, swallowing the following segment header → misparse.
+        let data = stream("0111 10000000 00000010 0100 00000001 01011010 0000");
+        let (raw, _) = parse(&data, 1).unwrap();
+        assert_eq!(raw, vec![0x5A]);
+    }
+
+    #[test]
+    fn eci_three_byte_designator_consumes_exactly_three_bytes() {
+        // 3-byte ECI (first = 0xC0: leading bits 110) → exactly TWO extra bytes
+        // (the else / take(16) leg). A `==`→`!=` swap at :79 takes only 8 bits.
+        let data = stream("0111 11000000 00000011 00000100 0100 00000001 01111110 0000");
+        let (raw, _) = parse(&data, 1).unwrap();
+        assert_eq!(raw, vec![0x7E]);
+    }
+
+    #[test]
+    fn numeric_single_leftover_digit() {
+        // count 1 → the `left == 1` tail (:103) handles ONE digit (4 bits).
+        // `==`→`!=` skips it (leftover misparses); `>=`→`<` at :105 would
+        // reject this VALID digit (7 < 10) as malformed → None.
+        let data = stream("0001 0000000001 0111 0000");
+        let (raw, _) = parse(&data, 1).unwrap();
+        assert_eq!(raw, b"7");
+    }
+
+    #[test]
+    fn numeric_single_digit_ten_is_malformed() {
+        // a 4-bit leftover ≥ 10 is not a legal digit → refuse (:105 `v >= 10`).
+        // `>=`→`<` would ACCEPT it and emit "10".
+        assert!(parse(&stream("0001 0000000001 1010 0000"), 1).is_none());
+    }
+
+    #[test]
+    fn alphanumeric_even_pair_leaves_no_remainder() {
+        // count 2 (EVEN) → ONE pair, no tail. `-=`→`/=` at :122 leaves left=1
+        // after the pair (2/2), spilling into the 1-char tail → 6 phantom bits.
+        // "AB": A=10 B=11 → 10*45 + 11 = 461.
+        let data = stream("0010 000000010 00111001101 0000");
+        let (raw, _) = parse(&data, 1).unwrap();
+        assert_eq!(raw, b"AB");
+    }
+
+    #[test]
+    fn kanji_upper_block_boundary_at_0x1f00() {
+        // assembled == 0x1F00 is the FIRST value of the upper SJIS block
+        // (ISO §7.4.6): `< 0x1F00` is FALSE → + 0xC140 → 0xE040. The `<`→`<=`
+        // swap (:145) adds 0x8140 → 0xA040; `+`→`-`/`*` (:148) corrupt the
+        // offset. v packing 0x1F00 = 31*0xC0 + 0 = 5952.
+        let value: u32 = 5952;
+        let mut bits_str = String::from("1000 00000001 ");
+        for i in (0..13).rev() {
+            bits_str.push(if value >> i & 1 == 1 { '1' } else { '0' });
+        }
+        bits_str.push_str(" 0000");
+        let (raw, _) = parse(&stream(&bits_str), 1).unwrap();
+        assert_eq!(raw, vec![0xE0, 0x40]);
+    }
+
+    #[test]
+    fn fnc1_does_not_gs_non_percent_alpha() {
+        // FNC1 active + a NON-'%' alpha char must emit the char verbatim; only
+        // '%' becomes GS (:168 `fnc1 && c == b'%'`). `&&`→`||` would GS every
+        // char under FNC1. FNC1-first (0101) · alpha count 1 · 'A' (=10).
+        let data = stream("0101 0010 000000001 001010 0000");
+        let (raw, fnc1) = parse(&data, 1).unwrap();
+        assert!(fnc1);
+        assert_eq!(raw, b"A", "a non-% char must not become GS under FNC1");
+    }
+
+    #[test]
+    fn percent_without_fnc1_stays_literal() {
+        // no FNC1 → '%' stays '%', never GS. `&&`→`||` (:168) would GS it.
+        let data = stream("0010 000000001 100110 0000");
+        let (raw, fnc1) = parse(&data, 1).unwrap();
+        assert!(!fnc1);
+        assert_eq!(raw, b"%");
+    }
+
+    #[test]
     fn malformed_streams_refuse() {
         // numeric triple ≥ 1000 is not a legal encode
         assert!(parse(&stream("0001 0000000011 1111101000"), 1).is_none());
