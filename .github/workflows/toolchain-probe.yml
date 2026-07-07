@@ -1,0 +1,34 @@
+# One-shot diagnostic: does `cargo build --release -p xtask` explode on
+# x86_64-linux stable WITHOUT the shared rust-cache? Discriminates the two
+# remaining theories for the deep-checks runner deaths (run 28862018546
+# died requesting 14 GiB DURING THE BUILD — rustc, not our scan path):
+#   dies here too  → rustc 1.96.x x86_64 regression on this tree
+#                    (fix: pin the CI toolchain until upstream fixes)
+#   passes here    → poisoned Swatinem/rust-cache entry
+#                    (fix: bump the cache key / prime a fresh cache)
+# Dispatch-only. -j1 serializes rustc so the dying crate is unambiguous.
+name: toolchain-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      toolchain:
+        description: "rust toolchain to probe"
+        default: "stable"
+
+jobs:
+  build-no-cache:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.toolchain }}
+      - name: serialized uncached release build under the OOM guard
+        run: |
+          rustc --version --verbose
+          df -h / && free -m
+          ulimit -v 12582912
+          RUST_BACKTRACE=full cargo build --release -p xtask -j 1
+          echo "BUILD OK — cache poisoning confirmed by elimination"

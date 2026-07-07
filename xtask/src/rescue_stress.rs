@@ -130,14 +130,14 @@ struct EcCell {
     tag: &'static str,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Shape {
     Square,
     Disc,
 }
 const SHAPES: &[(Shape, &str)] = &[(Shape::Square, "square"), (Shape::Disc, "disc")];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Fill {
     /// luma 0 — confident-wrong modules ⇒ RS errors (error regime).
     Dark,
@@ -161,7 +161,7 @@ impl Fill {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Position {
     /// Symbol center — the classic centered-logo occlusion.
     Center,
@@ -406,6 +406,20 @@ fn preview(text: &str) -> String {
 }
 
 fn scan_cell(scanner: &Scanner, cell: &Cell) -> (Verdict, Option<WrongRow>) {
+    // NIKA_RESCUE_TRACE=1: per-cell peak-footprint bisect (run with
+    // RAYON_NUM_THREADS=1 so the malloc counter isolates one cell).
+    if std::env::var_os("NIKA_RESCUE_TRACE").is_some() {
+        eprintln!(
+            "[trace] v{} ec={} len{} fill={:?} shape={:?} pos={:?} occ{}",
+            cell.version,
+            cell.ec.tag,
+            cell.truth.len(),
+            cell.fill,
+            cell.shape,
+            cell.position,
+            cell.occ_pct
+        );
+    }
     let png = render_cell(cell);
     let report = scanner
         .scan(ImageInput::encoded(&png))

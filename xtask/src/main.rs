@@ -24,6 +24,34 @@
 mod external;
 mod rescue_stress;
 
+/// Loud allocator — every single allocation request ≥ 1 GiB prints its size
+/// before being served. The CI runner died on a silent 14 GiB request from
+/// the scan path (deep-checks run 28862018546); on 64 GB dev machines that
+/// request SUCCEEDS untouched (no RSS trace), so the only reliable witness
+/// is the request itself. Zero overhead beyond one branch per alloc.
+struct LoudAlloc;
+
+const LOUD_ALLOC_THRESHOLD: usize = 1 << 30;
+
+// SAFETY: delegates verbatim to `System`; the eprintln! never allocates
+// through this allocator's own path (System::alloc already returned).
+unsafe impl std::alloc::GlobalAlloc for LoudAlloc {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        if layout.size() >= LOUD_ALLOC_THRESHOLD {
+            eprintln!("[loud-alloc] single request of {} bytes", layout.size());
+        }
+        // SAFETY: caller upholds GlobalAlloc's contract; layout forwarded as-is.
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        // SAFETY: ptr came from this allocator with the same layout.
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static GLOBAL: LoudAlloc = LoudAlloc;
+
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
