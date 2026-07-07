@@ -33,12 +33,26 @@ struct LoudAlloc;
 
 const LOUD_ALLOC_THRESHOLD: usize = 1 << 30;
 
-// SAFETY: delegates verbatim to `System`; the eprintln! never allocates
-// through this allocator's own path (System::alloc already returned).
+std::thread_local! {
+    /// Re-entrancy guard: capturing a backtrace allocates through this same
+    /// allocator — without the flag the hook would recurse forever.
+    static IN_HOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+// SAFETY: delegates verbatim to `System`; the diagnostics run behind a
+// re-entrancy guard so their own allocations skip the hook.
 unsafe impl std::alloc::GlobalAlloc for LoudAlloc {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-        if layout.size() >= LOUD_ALLOC_THRESHOLD {
+        if layout.size() >= LOUD_ALLOC_THRESHOLD && !IN_HOOK.with(std::cell::Cell::get) {
+            IN_HOOK.with(|f| f.set(true));
             eprintln!("[loud-alloc] single request of {} bytes", layout.size());
+            if layout.size() >= (8 << 30) {
+                eprintln!(
+                    "[loud-alloc] backtrace:\n{}",
+                    std::backtrace::Backtrace::force_capture()
+                );
+            }
+            IN_HOOK.with(|f| f.set(false));
         }
         // SAFETY: caller upholds GlobalAlloc's contract; layout forwarded as-is.
         unsafe { std::alloc::System.alloc(layout) }

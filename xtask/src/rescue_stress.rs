@@ -406,19 +406,36 @@ fn preview(text: &str) -> String {
 }
 
 fn scan_cell(scanner: &Scanner, cell: &Cell) -> (Verdict, Option<WrongRow>) {
-    // NIKA_RESCUE_TRACE=1: per-cell peak-footprint bisect (run with
-    // RAYON_NUM_THREADS=1 so the malloc counter isolates one cell).
-    if std::env::var_os("NIKA_RESCUE_TRACE").is_some() {
-        eprintln!(
-            "[trace] v{} ec={} len{} fill={:?} shape={:?} pos={:?} occ{}",
-            cell.version,
-            cell.ec.tag,
-            cell.truth.len(),
-            cell.fill,
-            cell.shape,
-            cell.position,
-            cell.occ_pct
+    // NIKA_RESCUE_TRACE=1: per-cell bisect trace (run with
+    // RAYON_NUM_THREADS=1 so the loud-alloc lines isolate one cell).
+    // NIKA_RESCUE_CELL=<substring>: scan ONLY cells whose trace line matches
+    // (fast repro of a single pathological cell).
+    let trace_line = format!(
+        "v{} ec={} len{} fill={:?} shape={:?} pos={:?} occ{}",
+        cell.version,
+        cell.ec.tag,
+        cell.truth.len(),
+        cell.fill,
+        cell.shape,
+        cell.position,
+        cell.occ_pct
+    );
+    if let Some(filter) = std::env::var_os("NIKA_RESCUE_CELL")
+        && !trace_line.contains(filter.to_string_lossy().as_ref())
+    {
+        return (
+            Verdict {
+                class: Class::Refused,
+                via_rescue: false,
+                rescue_attempted: false,
+                hint_low_margin: false,
+                spurious_non_qr: false,
+            },
+            None,
         );
+    }
+    if std::env::var_os("NIKA_RESCUE_TRACE").is_some() {
+        eprintln!("[trace] {trace_line}");
     }
     let png = render_cell(cell);
     let report = scanner
