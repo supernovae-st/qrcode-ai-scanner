@@ -11,8 +11,10 @@ env:
 jobs:
   # Sharded: the suite outgrew a single runner (the un-sharded job hit the
   # 90-min wall on 2026-07-05; 8 shards then had TWO shards hit it again on
-  # a 284-test suite). 12 shards now. Add shards if the wall returns, never
-  # a longer wall (that just delays the report a week).
+  # a 284-test suite). 16 shards now (12→16 with NEXTEST_TEST_THREADS=2 —
+  # the OOM fix serializes test pressure, the extra shards buy the time
+  # back). Add shards if the wall returns, never a longer wall (that just
+  # delays the report a week).
   #
   # The timeout lives on the WORK STEP, not the job: a job-level timeout
   # kills the upload-artifact step too — `if: always()` cannot save it —
@@ -24,15 +26,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
       - uses: actions/checkout@v4
-      # The runner agent dies silently (no failed step, "shutdown signal") at
-      # near-constant elapsed times per shard (~33 min shard 8 · ~48 min
-      # shard 0 · 6 runs). Disk was the first theory — REFUTED by the 07-06
-      # telemetry (106G available at death). Leading theory now: a mutation
-      # that turns a loop into an ALLOCATING infinite loop; the OOM killer
-      # takes the runner agent before the 120s test timeout can fire.
+      # Forensic history of the silent runner deaths (6 runs, always the same
+      # shards): disk REFUTED (106G free at death, 07-06 telemetry), the
+      # rescue-stress twin was pinned to an rxing 0.9.1 underflow whose wrap
+      # doubled a Vec to 14 GiB (fixed via overflow-checks, run 28869102448
+      # went green there). The shard deaths that REMAIN happen in a mutant's
+      # Test phase: nextest fans tests across all cores and lazily-zeroed
+      # image buffers (alloc_zeroed) only touch RSS as a mutated loop WRITES
+      # them — several parallel tests can exhaust the 16 GB box while each
+      # process sits far below its own virtual cap. So the cap alone cannot
+      # protect the machine; capping test parallelism is what bounds RSS.
       - name: runner telemetry (headroom + background sampler)
         run: |
           df -h / && free -m
@@ -43,12 +49,15 @@ jobs:
         with:
           tool: cargo-mutants,cargo-nextest
       # --in-place: no scratch tree copy (same mode as the local truth-pass
-      # doctrine). ulimit -v 12GB: a runaway allocation inside a mutant's
-      # test run hits ENOMEM and gets recorded as caught/unviable instead of
-      # OOM-killing the whole runner — rustc builds stay far under the cap.
+      # doctrine). ulimit -v 12GB: a single-process runaway hits ENOMEM and
+      # is recorded caught/unviable. NEXTEST_TEST_THREADS=2: at most two test
+      # processes share the box (2 × ~6 GB peak RSS < 16 GB), closing the
+      # parallel-aggregate OOM hole; 16 shards absorb the serialization.
       - run: |
           ulimit -v 12582912
-          cargo mutants -p qrcode-ai-scanner --in-place --shard ${{ matrix.shard }}/12 --minimum-test-timeout 120 -- --all-features
+          cargo mutants -p qrcode-ai-scanner --in-place --shard ${{ matrix.shard }}/16 --minimum-test-timeout 120 -- --all-features
+        env:
+          NEXTEST_TEST_THREADS: "2"
         timeout-minutes: 85
         continue-on-error: true
       - uses: actions/upload-artifact@v4
