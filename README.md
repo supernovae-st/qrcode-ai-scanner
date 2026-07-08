@@ -38,7 +38,7 @@ Per-surface guides in [`docs/`](docs/) · code examples in the Quick start below
 **📱 Mobile + cross-platform (first registry setup in flight):** Kotlin/Android
 (UniFFI → JitPack), Swift/iOS (UniFFI → SwiftPM), and Flutter/Dart
 (flutter_rust_bridge → pub.dev) bindings are built and CI-green, returning the
-same `ScanReport`. Their registries come online across v0.5.x — the one-time
+same `ScanReport`. Their registries come online across v0.6.x — the one-time
 first-publish steps (pub.dev account claim, SwiftPM xcframework pin) are in
 motion; consult each binding's README for the current install path:
 [`bindings/kotlin/`](bindings/kotlin/), [`bindings/swift/`](bindings/swift/), and
