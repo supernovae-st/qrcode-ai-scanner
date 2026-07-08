@@ -23,9 +23,9 @@
 //! (`payload/**` references most files; `dev-assets/_ASSET_INDEX.txt` maps
 //! the full bucket, e.g. `index/type/<file>` for the index-type group),
 //! download, and sha256-verify against THIS manifest before copying into
-//! place. zxing suites re-clone from the zxing repo. A dated tarball of the
-//! whole tree lives at `~/.olympus/backups/qrcodeai/corpus-external-<date>`
-//! — refresh it whenever `gen-external-manifest` rewrites the pins.
+//! place. zxing suites re-clone from the zxing repo. Keep a dated tarball
+//! of the whole tree somewhere OUTSIDE the repo, and refresh it whenever
+//! `gen-external-manifest` rewrites the pins.
 //!
 //! Scans run budget-free (`budget_ms: None`): the wall-clock cut point is
 //! the one machine-dependent knob in the pipeline (lib contract), and an
@@ -388,7 +388,7 @@ pub(crate) fn generate() {
     );
     print_summary(&rows);
     println!(
-        "\nritual: re-tar corpus-external/ into ~/.olympus/backups/qrcodeai/ and\n\
+        "\nritual: re-tar corpus-external/ into your out-of-repo backup location and\n\
          refresh the README headline table if numbers moved (module doc: procedure)"
     );
 }

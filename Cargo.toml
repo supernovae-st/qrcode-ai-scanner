@@ -67,6 +67,7 @@ clap = { version = "4", features = ["derive"] }
 # dev / test
 qrcode = "0.14"
 insta = { version = "1", features = ["json", "redactions"] }
+jsonschema = { version = "0.47", default-features = false }
 proptest = "1"
 criterion = { version = "0.8", features = ["html_reports"] }
 pretty_assertions = "1"

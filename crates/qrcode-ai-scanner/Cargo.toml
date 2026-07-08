@@ -34,7 +34,7 @@ web-time.workspace = true
 rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
-jsonschema = { version = "0.33", default-features = false }
+jsonschema.workspace = true
 criterion.workspace = true
 qrcode.workspace = true
 insta.workspace = true

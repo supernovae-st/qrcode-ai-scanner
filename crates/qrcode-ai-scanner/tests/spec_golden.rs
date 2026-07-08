@@ -42,7 +42,7 @@ fn golden_examples_deserialize_and_validate() {
         let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let errors: Vec<String> = validator
             .iter_errors(&value)
-            .map(|e| format!("{} @ {}", e, e.instance_path))
+            .map(|e| format!("{} @ {}", e, e.instance_path()))
             .collect();
         assert!(errors.is_empty(), "{path:?} fails the schema: {errors:#?}");
 
@@ -69,7 +69,7 @@ fn fresh_scan_validates_against_the_spec_schema() {
     let value = serde_json::to_value(&report).unwrap();
     let errors: Vec<String> = validator
         .iter_errors(&value)
-        .map(|e| format!("{} @ {}", e, e.instance_path))
+        .map(|e| format!("{} @ {}", e, e.instance_path()))
         .collect();
     assert!(
         errors.is_empty(),
