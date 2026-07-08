@@ -23,6 +23,7 @@ def scan(
     max_dimension: int | None = None,
     max_pixels: int | None = None,
     budget_ms: int | None = None,
+    score_skip_axes: list[str] | None = None,
 ) -> ScanReport:
     """Decode + score an encoded image (PNG, JPEG, WebP, GIF).
 
@@ -32,6 +33,10 @@ def scan(
     budget_ms: overrides the profile's wall-clock budget; ``0`` = unbounded (NOT a
     zero-millisecond budget). With a budget set, where the run cuts is
     machine-dependent — leave unset/0 for strictly reproducible reports (spec/02).
+    score_skip_axes: stress axes excluded from scoring, engine-side (wire names,
+    e.g. ``["perspective", "rotation"]`` for generated previews with no capture
+    geometry) — their cells never run, the composite renormalizes, ``score.axes``
+    omits them; an unknown name raises (spec/04 § skipping axes).
     "No QR found" returns a report with empty ``detections``; raises ``ValueError``
     on invalid input, an oversized image, or an unknown profile.
     """
@@ -45,11 +50,13 @@ def scan_frame(
     max_dimension: int | None = None,
     max_pixels: int | None = None,
     budget_ms: int | None = None,
+    score_skip_axes: list[str] | None = None,
 ) -> ScanReport:
     """Decode + score a raw RGBA frame (e.g. a camera frame) — no image-format roundtrip.
 
     ``rgba`` must be ``width * height * 4`` bytes. max_dimension / max_pixels: optional
     input-size caps (see ``scan``). budget_ms: per-frame wall-clock bound
-    (``0`` = unbounded, see ``scan``). Raises ``ValueError`` on invalid input.
+    (``0`` = unbounded, see ``scan``). score_skip_axes: see ``scan``.
+    Raises ``ValueError`` on invalid input.
     """
     ...

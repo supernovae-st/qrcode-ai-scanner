@@ -228,3 +228,35 @@ fn cli_reports_are_deterministic_across_processes_modulo_wall_clock() {
         assert_eq!(a, b, "{rel}: two binary runs diverged beyond wall-clock");
     }
 }
+
+/// --score-skip-axes threads to the engine (axes absent from the wire) and a
+/// typo'd axis is a loud exit-2, never a silent six-axis score.
+#[test]
+fn score_skip_axes_flag_threads_and_rejects_typos() {
+    let out = qrscan()
+        .args([
+            "--budget-ms",
+            "0",
+            "--score-skip-axes",
+            "perspective,rotation",
+        ])
+        .arg(fixture("clean/gen_v2_l.png"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let axes = report["score"]["axes"].as_array().unwrap();
+    assert_eq!(axes.len(), 4, "six axes minus the two skipped: {axes:?}");
+    assert!(axes.iter().all(|a| {
+        let name = a["axis"].as_str().unwrap();
+        name != "perspective" && name != "rotation"
+    }));
+
+    let out = qrscan()
+        .args(["--score-skip-axes", "perspektive"])
+        .arg(fixture("clean/gen_v2_l.png"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "typo'd axis = usage error");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown stress axis"));
+}

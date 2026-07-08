@@ -7,7 +7,7 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use scanner_core::{ImageInput, Limits, ScanProfile, Scanner};
+use scanner_core::{ImageInput, Limits, ScanProfile, Scanner, StressAxis};
 
 fn parse_profile(profile: &str) -> PyResult<ScanProfile> {
     // Delegate to the library's canonical parser (same path as the Node/WASM
@@ -35,16 +35,37 @@ fn build_limits(max_dimension: Option<u32>, max_pixels: Option<u64>) -> Option<L
 
 /// `budget_ms` overrides the profile's wall-clock budget (0 = unbounded, NOT a
 /// zero-millisecond budget — spec/02): server embedders bound tail latency
-/// without giving up the deep ladder.
-fn with_budget(profile: ScanProfile, budget_ms: Option<u64>) -> ScanProfile {
-    match budget_ms {
-        None => profile,
-        Some(ms) => {
-            let mut config = profile.config();
-            config.budget_ms = (ms > 0).then_some(ms);
-            ScanProfile::Custom(config)
-        }
+/// without giving up the deep ladder. `score_skip_axes` (wire names) excludes
+/// axes from scoring engine-side — the generated-preview integration config
+/// (spec/04 § skipping axes); unknown names raise, never silently score six.
+fn with_config(
+    profile: ScanProfile,
+    budget_ms: Option<u64>,
+    score_skip_axes: Option<Vec<String>>,
+) -> PyResult<ScanProfile> {
+    let skip: Vec<StressAxis> = match &score_skip_axes {
+        None => Vec::new(),
+        Some(names) => names
+            .iter()
+            .map(|n| {
+                StressAxis::from_name(n).ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "unknown stress axis `{n}` — expected resolution | blur | \
+                         contrast | perspective | rotation | lighting"
+                    ))
+                })
+            })
+            .collect::<PyResult<_>>()?,
+    };
+    if budget_ms.is_none() && skip.is_empty() {
+        return Ok(profile);
     }
+    let mut config = profile.config();
+    if let Some(ms) = budget_ms {
+        config.budget_ms = (ms > 0).then_some(ms);
+    }
+    config.score_skip_axes = skip;
+    Ok(ScanProfile::Custom(config))
 }
 
 // Serialize a ScanReport to a Python object via serde_json::Value so Rust tuples /
@@ -63,7 +84,7 @@ fn report_to_py<'py>(
 /// `detections`); a `ValueError` is raised only for invalid input or cancellation.
 /// `budget_ms` overrides the profile's wall-clock budget (0 = unbounded).
 #[pyfunction]
-#[pyo3(signature = (image, profile = "full", max_dimension = None, max_pixels = None, budget_ms = None))]
+#[pyo3(signature = (image, profile = "full", max_dimension = None, max_pixels = None, budget_ms = None, score_skip_axes = None))]
 fn scan<'py>(
     py: Python<'py>,
     image: &[u8],
@@ -71,8 +92,9 @@ fn scan<'py>(
     max_dimension: Option<u32>,
     max_pixels: Option<u64>,
     budget_ms: Option<u64>,
+    score_skip_axes: Option<Vec<String>>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let profile = with_budget(parse_profile(profile)?, budget_ms);
+    let profile = with_config(parse_profile(profile)?, budget_ms, score_skip_axes)?;
     let limits = build_limits(max_dimension, max_pixels);
     let image = image.to_vec(); // own it before releasing the GIL
     let report = py
@@ -93,10 +115,10 @@ fn scan<'py>(
 /// `rgba` must be `width * height * 4` bytes. `budget_ms` overrides the profile's
 /// wall-clock budget (0 = unbounded) — the camera loop's per-frame bound.
 #[pyfunction]
-#[pyo3(signature = (rgba, width, height, profile = "frame", max_dimension = None, max_pixels = None, budget_ms = None))]
+#[pyo3(signature = (rgba, width, height, profile = "frame", max_dimension = None, max_pixels = None, budget_ms = None, score_skip_axes = None))]
 #[expect(
     clippy::too_many_arguments,
-    reason = "the Python signature IS the cross-binding contract (dims + profile + caps + budget)"
+    reason = "the Python signature IS the cross-binding contract (dims + profile + caps + budget + axis skip)"
 )]
 fn scan_frame<'py>(
     py: Python<'py>,
@@ -107,8 +129,9 @@ fn scan_frame<'py>(
     max_dimension: Option<u32>,
     max_pixels: Option<u64>,
     budget_ms: Option<u64>,
+    score_skip_axes: Option<Vec<String>>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let profile = with_budget(parse_profile(profile)?, budget_ms);
+    let profile = with_config(parse_profile(profile)?, budget_ms, score_skip_axes)?;
     let limits = build_limits(max_dimension, max_pixels);
     let rgba = rgba.to_vec(); // own it before releasing the GIL
     let report = py

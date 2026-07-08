@@ -144,3 +144,21 @@ def test_scan_frame_zero_dimension_raises():
 
 def test_all_exported():
     assert set(qr.__all__) == {"scan", "scan_frame", "__version__"}
+
+
+def test_score_skip_axes_thread_through_and_reject_typos():
+    # Skipped axes are absent from the wire (the engine never ran them and
+    # renormalized the composite); a typo'd name raises loudly — never a
+    # silent six-axis score.
+    report = qr.scan(
+        CLEAN[0].read_bytes(),
+        "full",
+        budget_ms=0,
+        score_skip_axes=["perspective", "rotation"],
+    )
+    axes = report["score"]["axes"]
+    assert len(axes) == 4, axes
+    assert all(a["axis"] not in ("perspective", "rotation") for a in axes)
+
+    with pytest.raises(ValueError, match="unknown stress axis"):
+        qr.scan(CLEAN[0].read_bytes(), "full", score_skip_axes=["perspektive"])

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
-use qrcode_ai_scanner::{ImageInput, ScanProfile, ScanReport, Scanner};
+use qrcode_ai_scanner::{ImageInput, ScanProfile, ScanReport, Scanner, StressAxis};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ProfileArg {
@@ -45,6 +45,13 @@ struct Cli {
     /// WHERE the ladder cuts is machine-dependent (spec/02).
     #[arg(long)]
     budget_ms: Option<u32>,
+
+    /// Stress axes to exclude from scoring (comma-separated wire names,
+    /// e.g. `perspective,rotation`). Skipped axes never run and the
+    /// composite renormalizes engine-side — the generated-preview
+    /// integration config (spec/04 § skipping axes).
+    #[arg(long, value_delimiter = ',', value_name = "AXIS,...")]
+    score_skip_axes: Vec<String>,
 
     /// Human-readable summary instead of JSON.
     #[arg(long, short = 'p')]
@@ -150,15 +157,30 @@ fn main() -> ExitCode {
         }
     };
 
+    // --score-skip-axes: wire names, loud on a typo (a silently ignored
+    // axis would score all six and drift the caller's contract).
+    let mut skip = Vec::with_capacity(cli.score_skip_axes.len());
+    for name in &cli.score_skip_axes {
+        let Some(axis) = StressAxis::from_name(name) else {
+            eprintln!(
+                "error: unknown stress axis `{name}` — expected resolution | blur | \
+                 contrast | perspective | rotation | lighting"
+            );
+            return ExitCode::from(2);
+        };
+        skip.push(axis);
+    }
     // --budget-ms overrides the preset's wall-clock budget (0 = unbounded) —
     // the same semantics as Node `budgetMs` / WASM / Python / UniFFI.
-    let profile = match cli.budget_ms {
-        None => cli.profile.into(),
-        Some(ms) => {
-            let mut config = ScanProfile::from(cli.profile).config();
+    let profile = if cli.budget_ms.is_none() && skip.is_empty() {
+        cli.profile.into()
+    } else {
+        let mut config = ScanProfile::from(cli.profile).config();
+        if let Some(ms) = cli.budget_ms {
             config.budget_ms = (ms > 0).then_some(u64::from(ms));
-            ScanProfile::Custom(config)
         }
+        config.score_skip_axes = skip;
+        ScanProfile::Custom(config)
     };
     let scanner = Scanner::builder().profile(profile).build();
     let report = match scanner.scan(ImageInput::encoded(&bytes)) {

@@ -11,7 +11,7 @@
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use qrcode_ai_scanner::{ImageInput, Limits, ScanProfile, Scanner};
+use qrcode_ai_scanner::{ImageInput, Limits, ScanProfile, Scanner, StressAxis};
 
 /// Server deployments SHOULD lower the input caps (the library default —
 /// 10000px / 64MP — is a desktop/CLI posture): pass `maxDimension` /
@@ -29,7 +29,11 @@ fn limits_from(max_dimension: Option<u32>, max_pixels: Option<i64>) -> Limits {
     limits
 }
 
-fn profile_from(name: Option<&str>, budget_ms: Option<u32>) -> Result<ScanProfile> {
+fn profile_from(
+    name: Option<&str>,
+    budget_ms: Option<u32>,
+    score_skip_axes: Option<Vec<String>>,
+) -> Result<ScanProfile> {
     let profile = match name {
         None => ScanProfile::Full,
         Some(name) => ScanProfile::from_name(name).ok_or_else(|| {
@@ -38,16 +42,36 @@ fn profile_from(name: Option<&str>, budget_ms: Option<u32>) -> Result<ScanProfil
             ))
         })?,
     };
+    // scoreSkipAxes: axes excluded from scoring, by wire name — the
+    // generated-preview integration (their stress cells never run, the
+    // composite renormalizes engine-side, the report self-describes).
+    // Unknown names fail LOUD: a typo'd axis silently scoring all six
+    // would be the worst kind of drift.
+    let skip: Vec<StressAxis> = match &score_skip_axes {
+        None => Vec::new(),
+        Some(names) => names
+            .iter()
+            .map(|n| {
+                StressAxis::from_name(n).ok_or_else(|| {
+                    Error::from_reason(format!(
+                        "unknown stress axis `{n}` — expected resolution | blur | \
+                         contrast | perspective | rotation | lighting"
+                    ))
+                })
+            })
+            .collect::<Result<_>>()?,
+    };
     // budgetMs overrides the preset's wall-clock budget (0 = unbounded) —
     // server embedders bound tail latency without giving up the deep ladder.
-    match budget_ms {
-        None => Ok(profile),
-        Some(ms) => {
-            let mut config = profile.config();
-            config.budget_ms = (ms > 0).then_some(u64::from(ms));
-            Ok(ScanProfile::Custom(config))
-        }
+    if budget_ms.is_none() && skip.is_empty() {
+        return Ok(profile);
     }
+    let mut config = profile.config();
+    if let Some(ms) = budget_ms {
+        config.budget_ms = (ms > 0).then_some(u64::from(ms));
+    }
+    config.score_skip_axes = skip;
+    Ok(ScanProfile::Custom(config))
 }
 
 fn to_json(report: &qrcode_ai_scanner::ScanReport) -> Result<String> {
@@ -102,10 +126,11 @@ pub fn scan(
     max_dimension: Option<u32>,
     max_pixels: Option<i64>,
     budget_ms: Option<u32>,
+    score_skip_axes: Option<Vec<String>>,
 ) -> Result<AsyncTask<ScanTask>> {
     let task = ScanTask {
         bytes: image.to_vec(),
-        profile: profile_from(profile.as_deref(), budget_ms)?,
+        profile: profile_from(profile.as_deref(), budget_ms, score_skip_axes)?,
         limits: limits_from(max_dimension, max_pixels),
     };
     Ok(AsyncTask::with_optional_signal(task, signal))
@@ -119,9 +144,14 @@ pub fn scan_sync(
     max_dimension: Option<u32>,
     max_pixels: Option<i64>,
     budget_ms: Option<u32>,
+    score_skip_axes: Option<Vec<String>>,
 ) -> Result<String> {
     let scanner = Scanner::builder()
-        .profile(profile_from(profile.as_deref(), budget_ms)?)
+        .profile(profile_from(
+            profile.as_deref(),
+            budget_ms,
+            score_skip_axes,
+        )?)
         .limits(limits_from(max_dimension, max_pixels))
         .build();
     let report = scanner

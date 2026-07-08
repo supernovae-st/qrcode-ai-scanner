@@ -4,6 +4,21 @@ All notable changes to this workspace. Every surface versions together — the R
 crate + CLI, the npm node + wasm packages, the Python wheel, and the
 Kotlin/Android · Swift/iOS · Flutter bindings.
 
+## Unreleased
+
+### Added
+
+- `score_skip_axes` reaches every binding surface — same name, same
+  semantics, per the `budget_ms` precedent: Node (`scoreSkipAxes` option
+  on `scan`/`scanSync`, typed), CLI (`--score-skip-axes
+  perspective,rotation`), Python (`score_skip_axes=` kwarg on
+  `scan`/`scan_frame`, stub updated), UniFFI/Kotlin/Swift
+  (`score_skip_axes` arg with a typed `UnknownStressAxis` error). v0.7.0
+  had shipped it core + wasm only. Everywhere: unknown axis names fail
+  loud (CLI exit 2, ValueError, typed FFI error) — a typo silently
+  scoring all six axes would be the worst kind of drift. Parity pinned
+  per surface: uniffi unit tests, CLI e2e, node test.mjs, pytest.
+
 ## 0.7.0 — 2026-07-08
 
 ### Added

@@ -2,7 +2,7 @@
 // package — see bindings/report-types.d.ts at the repo root (copied here
 // as ./report-types.d.ts at pack time by scripts/sync-report-types.mjs).
 export * from "./report-types";
-import type { ScanReport } from "./report-types";
+import type { ScanReport, StressAxis } from "./report-types";
 
 /** Scan profiles: quality gate · upload tool · camera frame. */
 export type ScanProfile = "full" | "fast" | "frame";
@@ -24,6 +24,13 @@ export interface ScanOptions {
    * bound tail latency without giving up the deep ladder.
    */
   budgetMs?: number;
+  /**
+   * Stress axes excluded from scoring, engine-side: their cells never run,
+   * the composite renormalizes, `score.axes` omits them, their hints can't
+   * fire. Generated-preview hosts pass `["perspective", "rotation"]`;
+   * photo surfaces omit this. Unknown names reject loudly.
+   */
+  scoreSkipAxes?: StressAxis[];
 }
 
 /** Async scan on the libuv pool — never blocks the event loop. */

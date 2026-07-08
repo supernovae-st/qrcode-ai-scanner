@@ -38,4 +38,17 @@ assert.ok(elapsed < 1500, `1ms budget must cut early, took ${elapsed}ms`);
 const unbounded = scanSync(clean, { profile: "fast", budgetMs: 0 });
 assert.equal(unbounded.detections.length, 1, "budgetMs 0 means unbounded");
 
+// scoreSkipAxes: skipped axes absent from the wire; typos reject loudly
+const skipped = scanSync(clean, { profile: "full", budgetMs: 0, scoreSkipAxes: ["perspective", "rotation"] });
+assert.equal(skipped.score.axes.length, 4, "six axes minus the two skipped");
+assert.ok(
+  skipped.score.axes.every((a) => a.axis !== "perspective" && a.axis !== "rotation"),
+  "skipped axes absent from the wire",
+);
+assert.throws(
+  () => scanSync(clean, { scoreSkipAxes: ["perspektive"] }),
+  /unknown stress axis/,
+  "typo'd axis must reject loudly",
+);
+
 console.log(`node binding OK — native ${version()}`);
