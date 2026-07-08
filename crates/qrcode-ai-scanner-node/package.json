@@ -1,6 +1,6 @@
 {
   "name": "@supernovae-st/qrcode-ai-scanner",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "QR decoding + scannability scoring for artistic and AI-generated QR codes \u2014 async native bindings (Rust)",
   "main": "index.js",
   "types": "index.d.ts",

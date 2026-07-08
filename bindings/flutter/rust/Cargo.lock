@@ -912,7 +912,7 @@ checksum = "e0c5ccf5294c6ccd63a74f1565028353830a9c2f5eb0c682c355c471726a6e3f"
 
 [[package]]
 name = "qrcode-ai-scanner"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "base64",
  "encoding_rs",
@@ -928,7 +928,7 @@ dependencies = [
 
 [[package]]
 name = "qrcode_ai_scanner"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "flutter_rust_bridge",
  "qrcode-ai-scanner",
