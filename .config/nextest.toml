@@ -5,9 +5,13 @@
 # cuts the ladder mid-flight and the decode/score assertions flake (observed
 # at load ≈ 100: they fail at ~4.1 s in a full parallel run, pass serially).
 # The threaded-determinism pin generates exactly that kind of load: four
-# budget-free full-ladder scans at once. Put all four in one serialized
-# group so wall-clock budgets are never starved by our own suite; the
-# determinism test also declares the four scheduler slots it really uses.
+# budget-free full-ladder scans at once. All four share one serialized
+# group AND reserve every scheduler slot (`threads-required = "num-cpus"`):
+# the group alone only serialized them against EACH OTHER while the other
+# ~300 tests kept running beside them and starved the 4 s budget anyway
+# (two different victims across three 2026-07-08 runs, ~4.2–5.2 s vs
+# ~1.3 s solo). Slot reservation closes within-suite starvation; load from
+# OTHER processes on a shared box remains the operator's to manage.
 
 [test-groups]
 wall-clock = { max-threads = 1 }
@@ -15,7 +19,4 @@ wall-clock = { max-threads = 1 }
 [[profile.default.overrides]]
 filter = 'test(artistic_image_that_decodes_must_not_score_zero) + test(blob_style_template_decodes_and_scores) + test(legacy_artistic_image_decodes_within_full_ladder) + test(concurrent_scans_yield_byte_identical_reports)'
 test-group = 'wall-clock'
-
-[[profile.default.overrides]]
-filter = 'test(concurrent_scans_yield_byte_identical_reports)'
-threads-required = 4
+threads-required = "num-cpus"

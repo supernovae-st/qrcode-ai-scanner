@@ -24,7 +24,23 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
 
 ### Fixed
 
-- **A crafted image can no longer OOM the host through rxing**: rxing 0.9.1's
+- **The rotation stress axis measured frame cropping, not rotation
+  tolerance**: `warp::rotate` spun the image within its own canvas, so a
+  full-frame symbol's corners — finder patterns included — left the frame
+  from the very first 10° ramp step (a v10's corner radius is ≈0.62·w
+  against the 0.5·w half-frame). A flawless symbol read `rotation 1/5`
+  and its score carried a phantom −8 penalty for a rotation any phone
+  handles; engines are rotation-invariant on clean symbols, so every one
+  of those deaths was a probe artifact. The canvas now grows to the
+  rotated bounding box (pixel-centre exact; f64 trig with a snap-epsilon
+  so cardinal angles stay pure shape swaps), and out-of-source lookups
+  paint true white background instead of clamp-streaking the source
+  edges — the same fix makes the perspective cells' out-of-trapezoid
+  corners honest. Pinned by a red→green test: a clean v10 must survive
+  the full rotation ramp 5/5. Score VALUES rise for full-frame symbols
+  (the old readings under-reported margin); the contract is unchanged —
+  same axes, weights, ramps, caps, bands (`score_contract` stays 3, the
+  UPC-E wire-value-bugfix precedent).: rxing 0.9.1's
   RSS-14 (1D) reader underflows a subtraction on a real occlusion cell, and
   the release-mode wrap drove a Vec that doubled itself toward a 14 GiB
   request — the root cause of the silent weekly-CI runner deaths, and an
@@ -90,6 +106,18 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   the `fmt::Pointer` impl, reached here via rayon/criterion) cleared across
   all five lockfiles — workspace, fuzz, py, uniffi, flutter/rust — by
   updating to 0.9.20 the day the advisory published.
+- `cargo xtask rotation-sweep` — decode-under-rotation truth on the zxing
+  blackbox corpus at 0°/90°/180°/270°, via exact index-permutation rotations
+  (lossless by construction: a rotated column sitting below its 0° sibling
+  is an engine orientation gap, never image damage). The external gate, the
+  manifest pins and the README headline all measure at 0° only; this closes
+  that blind spot as a non-gating dashboard.
+- The three stock-budget artistic integration tests now reserve every
+  nextest scheduler slot (`threads-required = "num-cpus"`): the wall-clock
+  group only serialized them against each other while the other ~300 tests
+  starved their 4 s budget from the sibling cores — two different victims
+  across three same-day runs, ~4.2–5.2 s under load vs ~1.3 s solo. Proven
+  by three consecutive full-suite green runs.
 
 ## 0.5.0 — 2026-07-05
 
