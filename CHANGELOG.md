@@ -15,17 +15,38 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   deterministic occlusion scans, no RNG, byte-identical reruns) shows the S5
   erasure rescue is refusal-safe — 82/82 rescue decodes correct, 77% refusal
   rate, zero miscorrections. The harness runs weekly in deep-checks with a
-  hard zero-rescue-wrong gate. Separately measured: the base rxing engine
+  hard zero-rescue-wrong gate. (`NIKA_RESCUE_CELL=<substring>` filters the
+  grid to a single cell — the repro tool that pinned the rxing OOM wrap.)
+  Separately measured: the base rxing engine
   wrong-decodes ~1% at format-info-adjacent occlusion and carries no
   bitstream, so `low_correction_margin` structurally cannot flag that class
   (tracked as its own decision).
 
 ### Fixed
 
+- **A crafted image can no longer OOM the host through rxing**: rxing 0.9.1's
+  RSS-14 (1D) reader underflows a subtraction on a real occlusion cell, and
+  the release-mode wrap drove a Vec that doubled itself toward a 14 GiB
+  request — the root cause of the silent weekly-CI runner deaths, and an
+  adversarial-image DoS candidate on the multi-format path. A
+  `[profile.release.package.rxing]` `overflow-checks = true` override turns
+  the wrap into the caught-and-counted panic the engine wrapper already
+  records (`report.trace.engine_panics`). Proof: the pathological cell
+  completes with zero ≥1 GiB allocations and the 2304-cell QD-2 grid stays
+  byte-identical (rescue 82/82, wrong 0).
+- `cargo add qrcode-ai-scanner` no longer serves a stale crate: crates.io was
+  the forgotten fifth registry — nothing ever published to it and nothing
+  gated the drift, so the README's first install surface silently served
+  0.3.0 through two releases. Both 0.5.0 crates are live, and
+  `crates-publish.yml` owns every future tag (existence-probe gated: re-runs
+  resume instead of failing on the already-published half).
 - JitPack (Kotlin/Android) v0.5.0 build died exit-127: `/opt` is not writable
   on the JitPack image and the quiet `unzip` swallowed the gradle-provisioning
-  failure. Gradle now unpacks into `$HOME` with loud failure at every step.
-  First working JitPack build lands with the next tag.
+  failure. Gradle now unpacks into `$HOME` with loud failure at every step,
+  provisions its own Android cmdline-tools (the image ships none), and a
+  native-count gate fails any AAR built without its native libraries instead
+  of shipping a lying artifact. First working JitPack build lands with the
+  next tag.
 
 ### Testing / CI
 
@@ -47,10 +68,28 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   formula), and a nine-file sweep (charset, engine adapters, GF(256) log
   table, sampler, payload gates, report predicates, ISO parameters, axis
   folds, Berlekamp-Massey fold bounds — the last settled by a
-  125,536-syndrome differential census). 19 equivalents are pinned in
-  `.cargo/mutants.toml`, each with its argument inline. The weekly
-  deep-checks missed count is a true zero baseline, enforced across 12
-  step-timed shards.
+  125,536-syndrome differential census). 20 exclusions are pinned in
+  `.cargo/mutants.toml`, each with its argument inline — 18 argued
+  equivalent, plus the wall-clock-shrink pair argued untestable (a
+  machine-speed lower bound is the assertion the determinism doctrine
+  forbids). The weekly deep-checks missed count is a true zero baseline,
+  enforced across 16 step-timed shards.
+- pub.dev publish exchanges OIDC before the Flutter toolchain lands
+  (dart-lang/setup-dart pinned first — the v0.5.0 job hung 2 h on
+  interactive auth) and is capped at 15 min. The FIRST publish stays a
+  manual operator act by pub.dev design: automated publishing arms on an
+  existing package.
+- The weekly mutants runner deaths are closed as a class: disk exhaustion
+  refuted by its own telemetry, the rxing 14 GiB wrap pinned (see Fixed),
+  and the residual hole — two parallel test processes, each under the old
+  12 GB per-process virtual cap, can together write past a 16 GB box —
+  closed by bounding the aggregate instead: 6 GB ulimit ×
+  `NEXTEST_TEST_THREADS=2` across 16 step-timed shards (run 28879086942 is
+  the evidence trail).
+- RUSTSEC-2026-0204 (crossbeam-epoch 0.9.18: invalid pointer dereference in
+  the `fmt::Pointer` impl, reached here via rayon/criterion) cleared across
+  all five lockfiles — workspace, fuzz, py, uniffi, flutter/rust — by
+  updating to 0.9.20 the day the advisory published.
 
 ## 0.5.0 — 2026-07-05
 
