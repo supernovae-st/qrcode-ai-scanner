@@ -100,7 +100,10 @@ stage boundaries.
 ## Versions
 
 ```jsonc
-{ "scanner": "0.3.0", "pipeline": 1, "score_contract": 3 }
+// `scanner` is illustrative — it carries whatever workspace release produced
+// the report. `pipeline` and `score_contract` are the normative compatibility
+// anchors (bumped only on breaking / semantic change).
+{ "scanner": "0.6.0", "pipeline": 1, "score_contract": 3 }
 ```
 
 ## Score — see [04-score.md](04-score.md) for full semantics
