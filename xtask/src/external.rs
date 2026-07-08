@@ -184,20 +184,26 @@ fn scanner() -> Scanner {
         .build()
 }
 
-fn scan_status(scanner: &Scanner, abs: &Path) -> Status {
+/// Decode status + the report's caught-engine-panic count. The count rides
+/// along so `verify` can NAME the panic carriers (visibility only, never a
+/// gate — a caught panic is already the honest accounting the engine wrapper
+/// records in `report.trace.engine_panics`; the anonymous stderr line from
+/// the panic hook names no file, this does).
+fn scan_status(scanner: &Scanner, abs: &Path) -> (Status, u8) {
     let bytes = std::fs::read(abs).unwrap_or_else(|e| panic!("{}: {e}", abs.display()));
     let report = scanner
         .scan(ImageInput::encoded(&bytes))
         .unwrap_or_else(|e| panic!("scan {}: {e}", abs.display()));
+    let engine_panics = report.trace.engine_panics;
     let texts: Vec<&str> = report
         .detections
         .iter()
         .map(|d| d.content.text.as_str())
         .collect();
     if texts.is_empty() {
-        return Status::Blind;
+        return (Status::Blind, engine_panics);
     }
-    match ground_truth(abs) {
+    let status = match ground_truth(abs) {
         Some(truth) => {
             if texts.iter().any(|t| *t == truth) {
                 Status::Match
@@ -206,7 +212,8 @@ fn scan_status(scanner: &Scanner, abs: &Path) -> Status {
             }
         }
         None => Status::Decode,
-    }
+    };
+    (status, engine_panics)
 }
 
 fn parse_manifest(text: &str) -> Result<Vec<Row>, String> {
@@ -336,7 +343,9 @@ pub(crate) fn generate() {
         .map(|rel| {
             let abs = dir.join(rel);
             let status = if is_image(rel) {
-                scan_status(&scanner, &abs)
+                // Pins hold decode truth only — panic counts move with engine
+                // versions and would churn the manifest for zero pin value.
+                scan_status(&scanner, &abs).0
             } else {
                 Status::Aux
             };
@@ -430,6 +439,10 @@ fn classify(
 }
 
 /// `corpus-report --external` — re-measure and compare against the pins.
+/// One pinned row re-measured on disk: live sha + `(status, engine_panics)`
+/// when the pin was scannable (hash matches, image row).
+type Measured<'a> = (&'a Row, String, Option<(Status, u8)>);
+
 pub(crate) fn verify() {
     let root = crate::repo_root();
     let manifest_text = std::fs::read_to_string(root.join(MANIFEST)).unwrap_or_else(|e| {
@@ -473,8 +486,7 @@ pub(crate) fn verify() {
     }
 
     let scanner = scanner();
-    // (row, live sha, live status when re-scanned)
-    let measured: Vec<(&Row, String, Option<Status>)> = pinned
+    let measured: Vec<Measured<'_>> = pinned
         .par_iter()
         .filter(|row| disk_set.contains(row.path.as_str()))
         .map(|row| {
@@ -487,9 +499,32 @@ pub(crate) fn verify() {
         })
         .collect();
 
+    let panic_carriers: Vec<String> = measured
+        .iter()
+        .filter_map(|(row, _, s)| match s {
+            Some((_, n)) if *n > 0 => Some(format!("{} × {n}", row.path)),
+            _ => None,
+        })
+        .collect();
+
+    let measured: Vec<(&Row, String, Option<Status>)> = measured
+        .into_iter()
+        .map(|(row, sha, s)| (row, sha, s.map(|(status, _)| status)))
+        .collect();
+
     let (live_rows, gained, regressed) = classify(measured, &mut problems);
 
     print_summary(&live_rows);
+
+    if !panic_carriers.is_empty() {
+        println!(
+            "\nengine panics caught + counted (report.trace.engine_panics · non-gating): {}",
+            panic_carriers.len()
+        );
+        for c in &panic_carriers {
+            println!("  {c}");
+        }
+    }
 
     for p in &problems {
         eprintln!("problem: {p}");
