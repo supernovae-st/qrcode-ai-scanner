@@ -69,8 +69,7 @@ fn scanner() -> Scanner {
 fn matches_truth(scanner: &Scanner, luma: &[u8], w: u32, h: u32, truth: &str) -> bool {
     scanner
         .scan(ImageInput::luma8(luma, w, h))
-        .map(|report| report.detections.iter().any(|d| d.content.text == truth))
-        .unwrap_or(false)
+        .is_ok_and(|report| report.detections.iter().any(|d| d.content.text == truth))
 }
 
 pub(crate) fn run() {
