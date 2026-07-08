@@ -49,12 +49,16 @@ jobs:
         with:
           tool: cargo-mutants,cargo-nextest
       # --in-place: no scratch tree copy (same mode as the local truth-pass
-      # doctrine). ulimit -v 12GB: a single-process runaway hits ENOMEM and
-      # is recorded caught/unviable. NEXTEST_TEST_THREADS=2: at most two test
-      # processes share the box (2 × ~6 GB peak RSS < 16 GB), closing the
-      # parallel-aggregate OOM hole; 16 shards absorb the serialization.
+      # doctrine). ulimit -v 6GB × NEXTEST_TEST_THREADS=2 ⇒ the test-phase
+      # AGGREGATE is bounded at ~12 GB < the 16 GB box — this is what run
+      # 28879086942 proved necessary (12 GB per-process left 2×12 GB
+      # reachable and shards 0+11 died writing it). A runaway now hits
+      # ENOMEM at reserve time and is recorded caught/unviable; legit tests
+      # peak far below 6 GB (largest fixture ≈ 64 MP ≈ hundreds of MB).
+      # If a BASELINE build ever ENOMEMs under this cap, raise the build
+      # headroom deliberately — never by re-opening the test-phase hole.
       - run: |
-          ulimit -v 12582912
+          ulimit -v 6291456
           cargo mutants -p qrcode-ai-scanner --in-place --shard ${{ matrix.shard }}/16 --minimum-test-timeout 120 -- --all-features
         env:
           NEXTEST_TEST_THREADS: "2"
