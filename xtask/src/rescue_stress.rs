@@ -406,9 +406,9 @@ fn preview(text: &str) -> String {
 }
 
 fn scan_cell(scanner: &Scanner, cell: &Cell) -> (Verdict, Option<WrongRow>) {
-    // NIKA_RESCUE_TRACE=1: per-cell bisect trace (run with
+    // QRS_RESCUE_TRACE=1: per-cell bisect trace (run with
     // RAYON_NUM_THREADS=1 so the loud-alloc lines isolate one cell).
-    // NIKA_RESCUE_CELL=<substring>: scan ONLY cells whose trace line matches
+    // QRS_RESCUE_CELL=<substring>: scan ONLY cells whose trace line matches
     // (fast repro of a single pathological cell).
     let trace_line = format!(
         "v{} ec={} len{} fill={:?} shape={:?} pos={:?} occ{}",
@@ -420,7 +420,7 @@ fn scan_cell(scanner: &Scanner, cell: &Cell) -> (Verdict, Option<WrongRow>) {
         cell.position,
         cell.occ_pct
     );
-    if let Some(filter) = std::env::var_os("NIKA_RESCUE_CELL")
+    if let Some(filter) = std::env::var_os("QRS_RESCUE_CELL")
         && !trace_line.contains(filter.to_string_lossy().as_ref())
     {
         return (
@@ -434,7 +434,7 @@ fn scan_cell(scanner: &Scanner, cell: &Cell) -> (Verdict, Option<WrongRow>) {
             None,
         );
     }
-    if std::env::var_os("NIKA_RESCUE_TRACE").is_some() {
+    if std::env::var_os("QRS_RESCUE_TRACE").is_some() {
         eprintln!("[trace] {trace_line}");
     }
     let png = render_cell(cell);

@@ -15,7 +15,7 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   deterministic occlusion scans, no RNG, byte-identical reruns) shows the S5
   erasure rescue is refusal-safe — 82/82 rescue decodes correct, 77% refusal
   rate, zero miscorrections. The harness runs weekly in deep-checks with a
-  hard zero-rescue-wrong gate. (`NIKA_RESCUE_CELL=<substring>` filters the
+  hard zero-rescue-wrong gate. (`QRS_RESCUE_CELL=<substring>` filters the
   grid to a single cell — the repro tool that pinned the rxing OOM wrap.)
   Separately measured: the base rxing engine
   wrong-decodes ~1% at format-info-adjacent occlusion and carries no
