@@ -22,6 +22,19 @@ Survival is measured **relative to the symbol's own decode class**
 (`CellProbe`): an artistic symbol that only decodes through a deep rung is
 probed with that rung — "fragile" is never conflated with "undecodable".
 
+### Skipping axes (integration config)
+
+A host may exclude axes from scoring (`ScanConfig.score_skip_axes` · wasm
+`score_skip_axes`, wire names): skipped axes never run — their stress cells
+are never built — and the composite **renormalizes over the weights of the
+axes that ran** (with all six, the divisor is the same 100 as ever). The
+report self-describes: `score.axes` carries only the axes that ran, and
+axis-derived hints from skipped axes structurally cannot fire. Skipping ALL
+axes yields no `score` at all — an axis-less value would be fiction. The
+canonical case: a generated preview has no capture geometry, so builder
+integrations skip `perspective` + `rotation`; photo-input surfaces keep the
+full six.
+
 ### Structural caps (applied after the weighted sum)
 
 | Condition | Cap |

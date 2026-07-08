@@ -5,11 +5,15 @@
 //! Both return the full `ScanReport` contract as a JS object (snake_case,
 //! `raw` as base64) — identical shape to the server/CLI surfaces.
 
-use qrcode_ai_scanner::{ImageInput, Limits, ScanConfig, ScanProfile, Scanner};
+use qrcode_ai_scanner::{ImageInput, Limits, ScanConfig, ScanProfile, Scanner, StressAxis};
 use serde::Serialize as _;
 use wasm_bindgen::prelude::*;
 
-fn config_from(name: Option<String>, budget_ms: Option<f64>) -> Result<ScanProfile, JsError> {
+fn config_from(
+    name: Option<String>,
+    budget_ms: Option<f64>,
+    score_skip_axes: Option<Vec<String>>,
+) -> Result<ScanProfile, JsError> {
     let profile = match name.as_deref() {
         None => ScanProfile::Full,
         Some(name) => ScanProfile::from_name(name).ok_or_else(|| {
@@ -18,22 +22,42 @@ fn config_from(name: Option<String>, budget_ms: Option<f64>) -> Result<ScanProfi
             ))
         })?,
     };
+    // Integration config: axes excluded from scoring, by wire name
+    // (`perspective`, `rotation`, …). A generated-preview host skips the
+    // capture-geometry axes — their cells never run (faster verify) and the
+    // composite renormalizes engine-side. Unknown names fail LOUD: a typo'd
+    // axis silently scoring all six would be the worst kind of drift.
+    let skip: Vec<StressAxis> = match &score_skip_axes {
+        None => Vec::new(),
+        Some(names) => names
+            .iter()
+            .map(|n| {
+                StressAxis::from_name(n).ok_or_else(|| {
+                    JsError::new(&format!(
+                        "unknown stress axis `{n}` — expected resolution | blur | \
+                         contrast | perspective | rotation | lighting"
+                    ))
+                })
+            })
+            .collect::<Result<_, _>>()?,
+    };
     // wasm runs the scan ON the caller's thread (browser main thread unless
     // the embedder uses a worker) — budget control is how a verify-while-
     // typing UI keeps the worst case bounded without giving up the deep
     // ladder. 0/negative = unbounded.
-    let Some(ms) = budget_ms else {
+    if budget_ms.is_none() && skip.is_empty() {
         return Ok(profile);
-    };
+    }
     let mut config: ScanConfig = profile.config();
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "JS number → milliseconds; non-positive means unbounded"
     )]
-    {
+    if let Some(ms) = budget_ms {
         config.budget_ms = (ms > 0.0).then_some(ms as u64);
     }
+    config.score_skip_axes = skip;
     Ok(ScanProfile::Custom(config))
 }
 
@@ -78,6 +102,9 @@ fn run_scan(
 /// Scan encoded image bytes (PNG/JPEG/WebP/GIF). Profile: full | fast |
 /// frame. `budget_ms` overrides the profile's wall-clock budget (the scan
 /// runs synchronously on the calling thread — bound it in UI contexts).
+/// `score_skip_axes` (wire names, e.g. `["perspective","rotation"]`)
+/// excludes axes from scoring: their cells never run and the composite
+/// renormalizes engine-side — the generated-preview integration config.
 #[wasm_bindgen]
 pub fn scan_image(
     bytes: &[u8],
@@ -85,10 +112,11 @@ pub fn scan_image(
     max_dimension: Option<u32>,
     max_pixels: Option<f64>,
     budget_ms: Option<f64>,
+    score_skip_axes: Option<Vec<String>>,
 ) -> Result<JsValue, JsError> {
     run_scan(
         ImageInput::encoded(bytes),
-        config_from(profile, budget_ms)?,
+        config_from(profile, budget_ms, score_skip_axes)?,
         max_dimension,
         max_pixels,
     )
@@ -106,8 +134,8 @@ pub fn scan_frame(
     budget_ms: Option<f64>,
 ) -> Result<JsValue, JsError> {
     let profile = match profile {
-        Some(_) => config_from(profile, budget_ms)?,
-        None => config_from(Some("frame".to_owned()), budget_ms)?,
+        Some(_) => config_from(profile, budget_ms, None)?,
+        None => config_from(Some("frame".to_owned()), budget_ms, None)?,
     };
     run_scan(ImageInput::rgba8(data, width, height), profile, None, None)
 }

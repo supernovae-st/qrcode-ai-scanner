@@ -746,3 +746,51 @@ fn qr_family_is_always_the_primary_detection() {
     );
     assert!(report.score.is_some(), "the QR is the scored primary");
 }
+
+#[test]
+fn skip_axes_config_reaches_the_report_and_the_hints() {
+    // The builder integration shape: a generated preview scanned with the
+    // capture-geometry axes skipped. The report self-describes (four axes,
+    // no perspective/rotation entries) and axis-derived hints from skipped
+    // axes structurally cannot fire.
+    use qrcode_ai_scanner::{ScanConfig, ScanProfile, StressAxis};
+    let bytes = fixture("clean/gen_v2_l.png");
+    let mut config: ScanConfig = ScanProfile::Full.config();
+    config.budget_ms = None;
+    config.score_skip_axes = vec![StressAxis::Perspective, StressAxis::Rotation];
+    let report = Scanner::builder()
+        .profile(ScanProfile::Custom(config))
+        .build()
+        .scan(ImageInput::encoded(&bytes))
+        .unwrap();
+    let score = report.score.expect("full profile scores");
+    assert_eq!(score.axes.len(), 4, "six axes minus the two skipped");
+    assert!(
+        score
+            .axes
+            .iter()
+            .all(|a| a.axis != StressAxis::Perspective && a.axis != StressAxis::Rotation),
+        "skipped axes absent from the wire: {:?}",
+        score.axes
+    );
+    assert!(score.value > 0, "renormalized composite still 0-100");
+
+    // All-skipped = no score at all (an axis-less value would be fiction).
+    let mut all_off: ScanConfig = ScanProfile::Full.config();
+    all_off.budget_ms = None;
+    all_off.score_skip_axes = vec![
+        StressAxis::Resolution,
+        StressAxis::Blur,
+        StressAxis::Contrast,
+        StressAxis::Perspective,
+        StressAxis::Rotation,
+        StressAxis::Lighting,
+    ];
+    let report = Scanner::builder()
+        .profile(ScanProfile::Custom(all_off))
+        .build()
+        .scan(ImageInput::encoded(&bytes))
+        .unwrap();
+    assert_eq!(report.detections.len(), 1, "decode unaffected");
+    assert!(report.score.is_none(), "all-skipped scores nothing");
+}

@@ -76,7 +76,7 @@ impl Task for ScanTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         let scanner = Scanner::builder()
-            .profile(self.profile)
+            .profile(self.profile.clone())
             .limits(self.limits)
             .build();
         let report = scanner

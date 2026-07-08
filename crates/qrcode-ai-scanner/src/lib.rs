@@ -122,10 +122,17 @@ impl Scanner {
         let scored = match (outcome.merged.first(), self.config.score_depth) {
             (Some(detection), depth @ (ScoreDepth::Reduced | ScoreDepth::Full)) => {
                 let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    score::evaluate(&planes.luma, detection, depth, cancel, deadline)
+                    score::evaluate(
+                        &planes.luma,
+                        detection,
+                        depth,
+                        &self.config.score_skip_axes,
+                        cancel,
+                        deadline,
+                    )
                 }));
                 match attempt {
-                    Ok(result) => Some(result?),
+                    Ok(result) => result?,
                     Err(_) => None,
                 }
             }

@@ -258,6 +258,24 @@ pub enum StressAxis {
     Lighting,
 }
 
+impl StressAxis {
+    /// Parse the wire name (the `snake_case` serde spelling — what
+    /// `score.axes[].axis` carries). The bindings' string-config seam:
+    /// same shape as [`crate::ScanProfile::from_name`].
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "resolution" => Some(Self::Resolution),
+            "blur" => Some(Self::Blur),
+            "contrast" => Some(Self::Contrast),
+            "perspective" => Some(Self::Perspective),
+            "rotation" => Some(Self::Rotation),
+            "lighting" => Some(Self::Lighting),
+            _ => None,
+        }
+    }
+}
+
 /// Survival result on one stress axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

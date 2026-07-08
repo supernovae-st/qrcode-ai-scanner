@@ -55,8 +55,8 @@ pub enum ScoreDepth {
 
 /// Stage-level scan configuration. Build from a profile preset, then adjust
 /// public fields as needed (the struct is non-exhaustive: presets are the
-/// only constructors).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// only constructors). Clone-not-Copy: the axis-skip list is a collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 #[expect(
     clippy::struct_excessive_bools,
@@ -87,6 +87,17 @@ pub struct ScanConfig {
     pub max_engine_side: u32,
     /// Stress-scoring depth applied after a successful decode.
     pub score_depth: ScoreDepth,
+    /// Stress axes EXCLUDED from scoring — integration config for hosts
+    /// where an axis is meaningless (a generated preview has no capture
+    /// angle: builders skip `perspective` + `rotation`). Skipped axes never
+    /// run (their stress cells are never built — real wall-clock savings)
+    /// and the composite renormalizes over the axes that DID run, so the
+    /// value stays 0-100 on the same contract-v3 weights. The report
+    /// self-describes: `score.axes` carries only the axes that ran. Empty
+    /// (every profile's default) = the full six-axis contract, byte for
+    /// byte. Skipping ALL axes yields no score at all (an axis-less value
+    /// would be fiction) — same outcome as `ScoreDepth::Off`.
+    pub score_skip_axes: Vec<crate::report::StressAxis>,
 }
 
 impl ScanConfig {
@@ -102,6 +113,7 @@ impl ScanConfig {
             pyramid_side: 512,
             max_engine_side: 2_048,
             score_depth: ScoreDepth::Full,
+            score_skip_axes: Vec::new(),
         }
     }
 
@@ -130,7 +142,7 @@ impl ScanConfig {
 }
 
 /// Named scan profiles — the public selector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum ScanProfile {
     /// Full ladder + full stress score (generator quality gate).

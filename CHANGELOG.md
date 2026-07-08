@@ -4,6 +4,24 @@ All notable changes to this workspace. Every surface versions together — the R
 crate + CLI, the npm node + wasm packages, the Python wheel, and the
 Kotlin/Android · Swift/iOS · Flutter bindings.
 
+## Unreleased
+
+### Added
+
+- `ScanConfig.score_skip_axes` (+ wasm `scan_image(...,
+  score_skip_axes)`) — integration config excluding stress axes from
+  scoring. Skipped axes never run (their cells are never built — the
+  builder's verify loop drops the 10 perspective/rotation cells), the
+  composite renormalizes over the weights of the axes that ran, the report
+  self-describes (`score.axes` carries only what ran), and axis-derived
+  hints from skipped axes structurally cannot fire. Skipping all six yields
+  no score at all (an axis-less value would be fiction). The canonical
+  case: a generated preview has no capture geometry — builders skip
+  `perspective` + `rotation`; photo-input surfaces keep the full six.
+  `StressAxis::from_name` joins the string-config seam. Rust API note:
+  `ScanConfig`/`ScanProfile` are `Clone`, no longer `Copy` (the skip list
+  is a collection); both were already `#[non_exhaustive]`.
+
 ## 0.6.0 — 2026-07-08
 
 ### Added

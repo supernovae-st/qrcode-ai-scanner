@@ -183,10 +183,14 @@ fn run_ramp(
 }
 
 /// Run the five ordered ramps + the lighting set at the given depth.
+/// Axes in `skip` never run — their cells are never built (the integration
+/// perf win) and they are absent from the returned list (the report
+/// self-describes what was measured).
 fn run_axes(
     base: &LumaImage,
     expected_text: &str,
     depth: ScoreDepth,
+    skip: &[StressAxis],
     cancel: &CancelToken,
     deadline: Option<Instant>,
     probe: CellProbe,
@@ -218,6 +222,9 @@ fn run_axes(
         }),
     ];
     for (axis, build) in ramps {
+        if skip.contains(&axis) {
+            continue; // never built, never run — absent from the report
+        }
         let (passed, total) =
             run_ramp(base, expected_text, cancel, deadline, probe, indices, build)?;
         axes.push(AxisScore {
@@ -249,23 +256,25 @@ fn run_axes(
         ScoreDepth::Reduced => &[1, 2],
         ScoreDepth::Full => &[0, 1, 2, 3, 4],
     };
-    let mut lighting_passed = 0u8;
-    for &i in lighting_picks {
-        if cancel.is_cancelled() {
-            return Err(crate::error::ScanError::Cancelled);
+    if !skip.contains(&StressAxis::Lighting) {
+        let mut lighting_passed = 0u8;
+        for &i in lighting_picks {
+            if cancel.is_cancelled() {
+                return Err(crate::error::ScanError::Cancelled);
+            }
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                break;
+            }
+            if cell_passes(&lighting_cells[i](base), expected_text, probe) {
+                lighting_passed += 1;
+            }
         }
-        if deadline.is_some_and(|d| Instant::now() >= d) {
-            break;
-        }
-        if cell_passes(&lighting_cells[i](base), expected_text, probe) {
-            lighting_passed += 1;
-        }
+        axes.push(AxisScore {
+            axis: StressAxis::Lighting,
+            passed: lighting_passed,
+            total: u8::try_from(lighting_picks.len()).unwrap_or(u8::MAX),
+        });
     }
-    axes.push(AxisScore {
-        axis: StressAxis::Lighting,
-        passed: lighting_passed,
-        total: u8::try_from(lighting_picks.len()).unwrap_or(u8::MAX),
-    });
     Ok(axes)
 }
 
@@ -277,17 +286,24 @@ fn compose(
     iso15415: Option<crate::report::Iso15415Report>,
     detection: &MergedDetection,
 ) -> (Score, Vec<Hint>) {
+    // Renormalize over the axes that RAN: with the full six this divides by
+    // 100 (Σ contract weights — byte-identical to the fixed divisor it
+    // replaces); with skipped axes the remaining weights re-span 0-100.
+    // run_axes never returns an empty list (evaluate() short-circuits the
+    // all-skipped config before composing), so the divisor is never 0.
     let mut weighted = 0u32;
+    let mut weight_run = 0u32;
     for score in &axes {
         let weight = WEIGHTS
             .iter()
             .find(|(axis, _)| *axis == score.axis)
             .map_or(0, |(_, w)| *w);
+        weight_run += weight;
         if score.total > 0 {
             weighted += weight * u32::from(score.passed) * 100 / u32::from(score.total);
         }
     }
-    let mut value = u8::try_from((weighted / 100).min(100)).unwrap_or(100);
+    let mut value = u8::try_from((weighted / weight_run.max(1)).min(100)).unwrap_or(100);
 
     let mut hints = Vec::new();
     if let Some(s) = &structural {
@@ -376,14 +392,20 @@ fn compose(
     (score, hints)
 }
 
-/// Evaluate score v3 for the primary detection.
+/// Evaluate score v3 for the primary detection. `None` when the skip set
+/// covers every axis — an axis-less composite would be fiction (callers
+/// treat it exactly like `ScoreDepth::Off`).
 pub(crate) fn evaluate(
     luma: &LumaImage,
     detection: &MergedDetection,
     depth: ScoreDepth,
+    skip: &[StressAxis],
     cancel: &CancelToken,
     deadline: Option<Instant>,
-) -> Result<(Score, Vec<Hint>)> {
+) -> Result<Option<(Score, Vec<Hint>)>> {
+    if WEIGHTS.iter().all(|(axis, _)| skip.contains(axis)) {
+        return Ok(None);
+    }
     let base = transform::downscale_to(luma, STRESS_BASE_SIDE);
     // calibrate the cell probe on the unstressed base (its decode class)
     let probe =
@@ -391,7 +413,7 @@ pub(crate) fn evaluate(
             rung: None,
             symbology: detection.symbology,
         });
-    let axes = run_axes(&base, &detection.text, depth, cancel, deadline, probe)?;
+    let axes = run_axes(&base, &detection.text, depth, skip, cancel, deadline, probe)?;
     // Photometric checks sample the ORIGINAL luma — when the geometry came
     // from an INVERTING attempt (light-on-dark symbol), hand them an
     // inverted view or every module's polarity reads flipped (a clean
@@ -421,7 +443,7 @@ pub(crate) fn evaluate(
         }
         _ => None,
     };
-    Ok(compose(axes, structural, uec_report, iso, detection))
+    Ok(Some(compose(axes, structural, uec_report, iso, detection)))
 }
 
 #[cfg(test)]
@@ -811,6 +833,7 @@ mod tests {
             &base,
             &text,
             ScoreDepth::Full,
+            &[],
             &CancelToken::new(),
             None,
             probe,
@@ -855,6 +878,7 @@ mod tests {
             &base,
             text,
             ScoreDepth::Full,
+            &[],
             &CancelToken::new(),
             None,
             probe,
@@ -869,6 +893,69 @@ mod tests {
             "a flawless v10 died on the rotation ramp — the probe is measuring \
              frame cropping, not engine tolerance: {rotation:?}"
         );
+    }
+
+    /// Integration skip: skipped axes never run (their cells are never
+    /// built), the report self-describes (axes[] omits them), the composite
+    /// renormalizes over the run weights, and axis-derived hints from
+    /// skipped axes structurally cannot fire. The builder case: a generated
+    /// preview has no capture angle — perspective + rotation are noise there.
+    #[test]
+    fn skipped_axes_never_run_and_the_composite_renormalizes() {
+        let (base, text, probe) = clean_base_and_probe();
+        let full = run_axes(
+            &base,
+            &text,
+            ScoreDepth::Full,
+            &[],
+            &CancelToken::new(),
+            None,
+            probe,
+        )
+        .unwrap();
+        let skipped = run_axes(
+            &base,
+            &text,
+            ScoreDepth::Full,
+            &[StressAxis::Perspective, StressAxis::Rotation],
+            &CancelToken::new(),
+            None,
+            probe,
+        )
+        .unwrap();
+        assert_eq!(skipped.len(), 4, "six axes minus the two skipped");
+        assert!(
+            skipped
+                .iter()
+                .all(|a| a.axis != StressAxis::Perspective && a.axis != StressAxis::Rotation),
+            "skipped axes are absent from the report: {skipped:?}"
+        );
+        // The four surviving axes measure identically to the full run —
+        // skipping is subtraction, never a change to what still runs.
+        for a in &skipped {
+            let twin = full.iter().find(|f| f.axis == a.axis).unwrap();
+            assert_eq!((a.passed, a.total), (twin.passed, twin.total));
+        }
+        // Renormalized arithmetic, hand-pinned on this fixture (five ramps
+        // 5/5 · lighting 4/5, the glare cell — pinned by the sibling test):
+        //   full  : (22+18+15+20+10)·100 + 15·80 = 9700 / 100 = 97
+        //   skip  : (22+18+15)·100      + 15·80 = 6700 /  70 = 95 (int div)
+        // Both are true statements about different axis sets — the divisor
+        // really is Σ(run weights), not the constant 100.
+        let d = detection_with(Some(EcLevel::H));
+        let (score_full, _) = compose(full, None, None, None, &d);
+        let (score_skip, _) = compose(skipped, None, None, None, &d);
+        assert_eq!(score_full.value, 97, "full six-axis composite");
+        assert_eq!(score_skip.value, 95, "renormalized four-axis composite");
+        // And the renormalization actually renormalizes: a half-passed
+        // lighting axis alone must read 50, not 7 (its weight over 100).
+        let lone = vec![AxisScore {
+            axis: StressAxis::Lighting,
+            passed: 1,
+            total: 2,
+        }];
+        let (score_lone, _) = compose(lone, None, None, None, &d);
+        assert_eq!(score_lone.value, 50, "weights re-span the run set");
     }
 
     /// The glare-blob RADIUS is `min(w,h)*0.18` (`run_axes` 238:48, the `*`).
@@ -903,6 +990,7 @@ mod tests {
             &base,
             "canvas glare pin",
             ScoreDepth::Full,
+            &[],
             &CancelToken::new(),
             None,
             probe,
@@ -929,6 +1017,7 @@ mod tests {
             &base,
             &text,
             ScoreDepth::Full,
+            &[],
             &CancelToken::new(),
             None,
             probe,
@@ -956,6 +1045,7 @@ mod tests {
             &base,
             &text,
             ScoreDepth::Full,
+            &[],
             &CancelToken::new(),
             Some(past),
             probe,
@@ -995,10 +1085,12 @@ mod tests {
             &planes.luma,
             detection,
             ScoreDepth::Full,
+            &[],
             &CancelToken::new(),
             None,
         )
-        .unwrap();
+        .unwrap()
+        .expect("empty skip set always scores");
         // a pristine 8px/module symbol survives the early cells of every
         // axis — raw-keyed matching scored this ZERO on rxing-only cells
         let total_passed: u32 = score.axes.iter().map(|a| u32::from(a.passed)).sum();
