@@ -149,3 +149,18 @@ jobs:
           path: |
             run1.txt
             mem-telemetry.log
+
+  # Advisories move without pushes: RUSTSEC-2026-0204 (crossbeam-epoch)
+  # published on a day nothing changed here and the push-gated deny job only
+  # caught it because pushes happened to land the same day. This weekly sweep
+  # is the floor — a quiet repo learns about a new advisory within a week,
+  # not at the next feature push. Same action + config as ci.yml's hard gate
+  # (workspace graph; the foreign binding trees stay report-only over there).
+  advisories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
