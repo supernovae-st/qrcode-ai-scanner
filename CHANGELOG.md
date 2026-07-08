@@ -4,7 +4,7 @@ All notable changes to this workspace. Every surface versions together — the R
 crate + CLI, the npm node + wasm packages, the Python wheel, and the
 Kotlin/Android · Swift/iOS · Flutter bindings.
 
-## Unreleased
+## 0.6.0 — 2026-07-08
 
 ### Added
 
@@ -40,7 +40,8 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   the full rotation ramp 5/5. Score VALUES rise for full-frame symbols
   (the old readings under-reported margin); the contract is unchanged —
   same axes, weights, ramps, caps, bands (`score_contract` stays 3, the
-  UPC-E wire-value-bugfix precedent).: rxing 0.9.1's
+  UPC-E wire-value-bugfix precedent).
+- **A crafted image can no longer OOM the host through rxing**: rxing 0.9.1's
   RSS-14 (1D) reader underflows a subtraction on a real occlusion cell, and
   the release-mode wrap drove a Vec that doubled itself toward a 14 GiB
   request — the root cause of the silent weekly-CI runner deaths, and an
