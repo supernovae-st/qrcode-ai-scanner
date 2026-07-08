@@ -106,3 +106,125 @@ fn unreadable_input_is_exit_2() {
     let out = qrscan().arg("/nonexistent/nope.png").output().unwrap();
     assert_eq!(out.status.code(), Some(2));
 }
+
+// ---- end-to-end wire contract -----------------------------------------------
+// The type-parity gate holds the TYPE surfaces identical (rust ↔ ts ↔ schema ↔
+// dart); nothing until here validated a real binary's real OUTPUT against the
+// schema — the layer where serde attributes live (a wrong skip_serializing,
+// a rename drift, absent-vs-null) and where the Dart int/double truncation
+// class actually bit. These run the shipped binary end-to-end: encoded image
+// in → JSON out → `spec/scan-report.schema.json` verdict. Budget-free
+// (`--budget-ms 0`) so a loaded machine can never starve the ladder mid-run.
+
+fn wire_schema() -> jsonschema::Validator {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spec/scan-report.schema.json");
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    jsonschema::validator_for(&schema).unwrap()
+}
+
+fn scan_json(rel: &str) -> serde_json::Value {
+    let out = qrscan()
+        .args(["--budget-ms", "0"])
+        .arg(fixture(rel))
+        .output()
+        .unwrap();
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "{rel}: stdout is not JSON ({e}): {}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    })
+}
+
+/// One fixture per corpus category — decode shapes (1D GTIN meta, FNC1
+/// element strings, artistic deep-rung decodes) exercise DIFFERENT report
+/// branches; a schema violation names its exact JSON pointer.
+#[test]
+fn every_category_report_validates_against_the_wire_schema() {
+    let validator = wire_schema();
+    for rel in [
+        "clean/gen_v2_l.png",                   // direct decode + score
+        "degraded/gen_v5_q_tiny.png",           // upscale path
+        "degraded/exif6-rotated-qr.jpg",        // EXIF orientation branch
+        "artistic/OK_1069ms_85_8b6a54b3.png",   // boost-rung decode class
+        "artistic/blob-style-monkey-logo.webp", // morph-rung + webp input
+        "symbology/ean13.png",                  // retail GTIN payload branch
+        "symbology/datamatrix-gs1.png",         // FNC1 element-string branch
+        "symbology/microqr.png",                // micro-QR meta branch
+    ] {
+        let report = scan_json(rel);
+        let errors: Vec<String> = validator
+            .iter_errors(&report)
+            .map(|e| format!("{} @ {}", e, e.instance_path()))
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "{rel}: report violates the wire schema:\n{}",
+            errors.join("\n")
+        );
+        assert_eq!(
+            report["versions"],
+            serde_json::json!({"scanner": env!("CARGO_PKG_VERSION"), "pipeline": 1, "score_contract": 3}),
+            "{rel}: versions block is the wire's compatibility anchor"
+        );
+    }
+}
+
+/// The NOT-FOUND report is a wire shape too (empty detections · no score) —
+/// exactly where absent-vs-null serde drift hides, and never validated
+/// before because every schema-shaped test scanned a decodable image.
+#[test]
+fn not_found_report_also_validates_against_the_wire_schema() {
+    let blank = white_png();
+    let out = qrscan()
+        .args(["--budget-ms", "0"])
+        .arg(&blank)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let validator = wire_schema();
+    let errors: Vec<String> = validator
+        .iter_errors(&report)
+        .map(|e| format!("{} @ {}", e, e.instance_path()))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "not-found report violates the wire schema:\n{}",
+        errors.join("\n")
+    );
+    assert_eq!(report["detections"].as_array().unwrap().len(), 0);
+}
+
+/// Null every wall-clock field (`ms` · `total_ms`) — the ONE documented
+/// nondeterminism (lib contract §Deterministic) — recursively, then the
+/// remaining tree must be byte-identical across runs THROUGH THE BINARY.
+/// The lib pins this in-process; this pins it across process boundaries,
+/// where env, locale, allocator and buffering could all have leaked in.
+fn null_wall_clock(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, val) in map.iter_mut() {
+                if k == "ms" || k == "total_ms" {
+                    *val = serde_json::Value::Null;
+                } else {
+                    null_wall_clock(val);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(null_wall_clock),
+        _ => {}
+    }
+}
+
+#[test]
+fn cli_reports_are_deterministic_across_processes_modulo_wall_clock() {
+    for rel in ["clean/gen_v2_l.png", "artistic/blob-style-monkey-logo.webp"] {
+        let mut a = scan_json(rel);
+        let mut b = scan_json(rel);
+        null_wall_clock(&mut a);
+        null_wall_clock(&mut b);
+        assert_eq!(a, b, "{rel}: two binary runs diverged beyond wall-clock");
+    }
+}
