@@ -387,6 +387,10 @@ pub(crate) fn generate() {
         manifest_path.display()
     );
     print_summary(&rows);
+    println!(
+        "\nritual: re-tar corpus-external/ into ~/.olympus/backups/qrcodeai/ and\n\
+         refresh the README headline table if numbers moved (module doc: procedure)"
+    );
 }
 
 // ----------------------------------------------------------------- verify

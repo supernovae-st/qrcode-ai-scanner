@@ -150,7 +150,7 @@ decode status for every file, generated from a real run, never hand-typed
 |---|---|---|
 | zxing blackbox qrcode-1…6 (179 images, ground truth) | **170/179 exact-text match @ 0°** | beats the zxing reference pass thresholds (153) on **all six suites** |
 | qrcode-ai.com production templates (15 single-symbol styles) | **15/15 decoded** | includes the blob-pixel style no contrast/threshold transform recovers |
-| qrcode-ai.com artistic gallery (single-symbol) | 17/27 | the 10 misses are multi-QR 3D-perspective marketing collages — out of scope |
+| qrcode-ai.com artistic gallery (full pinned set) | **56/161 decoded** | the blind family is multi-QR collages, extreme 3D perspective and busy marketing scenes — six are vendored as `expect = "fail"` frontier fixtures; `corpus-report --external` re-measures this exact number |
 | center-logo occlusion (v5-H, gray disk) | engines die at >20% radius · **rescue decodes through 30%** | errors-and-erasures RS — `engines: ["rescue"]` in the report |
 
 One of the 9 zxing misses is rqrr returning a Reed-Solomon
