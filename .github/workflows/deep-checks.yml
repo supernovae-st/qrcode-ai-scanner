@@ -37,8 +37,11 @@ jobs:
       # Test phase: nextest fans tests across all cores and lazily-zeroed
       # image buffers (alloc_zeroed) only touch RSS as a mutated loop WRITES
       # them — several parallel tests can exhaust the 16 GB box while each
-      # process sits far below its own virtual cap. So the cap alone cannot
-      # protect the machine; capping test parallelism is what bounds RSS.
+      # process sits far below its own virtual cap. Capping test parallelism
+      # bounds the process COUNT, but run 28879086942 (threads=2 already in)
+      # still lost shards 0+11 in phase=Test: two processes under the old
+      # 12 GB per-process cap can together write ~24 GB into a 16 GB box.
+      # The aggregate bound lives on the ulimit (see the work step).
       - name: runner telemetry (headroom + background sampler)
         run: |
           df -h / && free -m
