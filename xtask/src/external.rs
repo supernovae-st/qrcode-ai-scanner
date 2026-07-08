@@ -15,6 +15,18 @@
 //! frontier). A missing `corpus-external/` (CI checkout) skips gracefully
 //! but noisily: it prints exactly how many manifested files went unchecked.
 //!
+//! The files themselves are machine-bound (untracked) and CAN vanish or rot —
+//! 2026-07-08: ten gallery files were found deleted on disk and the gate went
+//! red exactly as designed. Restore procedure, proven that day: every gallery
+//! image is a public CDN object — resolve
+//! `https://assets.qrcode-ai.com/<bucket-path>` via the landing repo
+//! (`payload/**` references most files; `dev-assets/_ASSET_INDEX.txt` maps
+//! the full bucket, e.g. `index/type/<file>` for the index-type group),
+//! download, and sha256-verify against THIS manifest before copying into
+//! place. zxing suites re-clone from the zxing repo. A dated tarball of the
+//! whole tree lives at `~/.olympus/backups/qrcodeai/corpus-external-<date>`
+//! — refresh it whenever `gen-external-manifest` rewrites the pins.
+//!
 //! Scans run budget-free (`budget_ms: None`): the wall-clock cut point is
 //! the one machine-dependent knob in the pipeline (lib contract), and an
 //! offline truth gate must not encode the speed of the machine that

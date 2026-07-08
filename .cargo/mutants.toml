@@ -99,6 +99,18 @@ test_tool = "nextest"
 #   61:30  both `+`→`-` and `+`→`*` in the else-branch fold bound (shift
 #     there never exceeds len-1: it resets to 1 at every flip and the else
 #     branch requires round < 2·degree — no underflow, same zero-tail).
+#
+# Known caught-by-timeout pair (deliberately NOT excluded — a timeout here IS
+# the catch, unlike the equivalents above; cost ≈ 2×120 s in shard 0 weekly):
+#   lib.rs 185:9  `build -> Scanner` with Default::default(): Scanner's own
+#     Default impl calls builder().build(), so the mutant forms a mutual
+#     recursion that LLVM tail-calls into a flat infinite loop — no stack
+#     overflow, no assertion, just the suite timeout. Diverges in every
+#     config-carrying test, given time.
+#   gs1.rs 228:13  `-=` → `/=` in split_head: `cut /= 1` freezes the
+#     char-boundary down-walk into a spin; multi-byte inputs hang the test.
+# Excluding them would hide a real behavioral catch. Line drift stays safe,
+# same direction as the equivalents: they resurface in the weekly report.
 exclude_re = [
     "replace fuzzing::",
     "replace fuzz_api::",
