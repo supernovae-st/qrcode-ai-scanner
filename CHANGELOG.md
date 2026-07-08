@@ -107,11 +107,26 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   all five lockfiles — workspace, fuzz, py, uniffi, flutter/rust — by
   updating to 0.9.20 the day the advisory published.
 - `cargo xtask rotation-sweep` — decode-under-rotation truth on the zxing
-  blackbox corpus at 0°/90°/180°/270°, via exact index-permutation rotations
-  (lossless by construction: a rotated column sitting below its 0° sibling
-  is an engine orientation gap, never image damage). The external gate, the
-  manifest pins and the README headline all measure at 0° only; this closes
-  that blind spot as a non-gating dashboard.
+  blackbox corpus, two tables: cardinal 0°/90°/180°/270° via exact
+  index-permutation rotations (lossless by construction: a rotated column
+  sitting below its 0° sibling is an engine orientation gap, never image
+  damage), and arbitrary 15°/30°/45° via bilinear rotation into the grown
+  canvas (interpolated — a trend line, never a gate). The external gate,
+  the manifest pins and the README headline all measure at 0° only; this
+  closes that blind spot as a non-gating dashboard. First cardinal table:
+  170/171/170/171 of 179 — flat; the engines have no cardinal orientation
+  gap on real photos.
+- CLI end-to-end wire-contract tests: the shipped binary's real JSON output
+  now validates against `spec/scan-report.schema.json` (jsonschema dev-dep)
+  across eight decode branches — direct, upscale, EXIF-rotated, boost-rung
+  artistic, morph-rung webp, retail GTIN, FNC1 element string, micro-QR —
+  plus the NOT-FOUND report (empty detections is a wire shape too, exactly
+  where absent-vs-null serde drift hides). The type-parity gate holds the
+  TYPE surfaces identical; this is the first gate on a real binary's real
+  OUTPUT, the layer where serde attributes live and where the Dart
+  int/double truncation class actually bit. Cross-process determinism is
+  pinned the same way: two binary runs must agree byte-for-byte modulo the
+  documented wall-clock fields.
 - The three stock-budget artistic integration tests now reserve every
   nextest scheduler slot (`threads-required = "num-cpus"`): the wall-clock
   group only serialized them against each other while the other ~300 tests
