@@ -837,6 +837,47 @@ mod tests {
         assert_eq!(ScanProfile::default(), ScanProfile::Full);
     }
 
+    /// Arbitrary-angle robustness is a measured engine CAPABILITY — pin it.
+    /// The 2026-07-08 H-12 probes could not construct a failing synthetic:
+    /// clean and degraded renders decode at every angle down to 2 px
+    /// modules (the real-photo qrcode-5 losses at 15–45° need photo noise
+    /// our synthesis cannot reproduce, and a derotate rung was REFUTED as
+    /// untestable). This test freezes that capability against engine bumps:
+    /// if an rqrr/rxing upgrade breaks diagonal detection, this is the
+    /// tripwire — not a corpus re-run six weeks later.
+    #[test]
+    fn rotated_synthetic_decodes_at_arbitrary_angles() {
+        let text = "arbitrary-angle capability pin";
+        let code = qrcode::QrCode::with_version(
+            text.as_bytes(),
+            qrcode::Version::Normal(5),
+            qrcode::EcLevel::M,
+        )
+        .unwrap();
+        let img = code
+            .render::<image::Luma<u8>>()
+            .module_dimensions(3, 3)
+            .build();
+        let base = LumaImage::new(img.to_vec(), img.width(), img.height());
+        for angle in [15.0_f32, 30.0, 45.0] {
+            let rotated = crate::score::warp::rotate(&base, angle);
+            let planes = normalize(
+                &ImageInput::luma8(rotated.data(), rotated.width(), rotated.height()),
+                &Limits::default(),
+            )
+            .unwrap();
+            // budget-free: capability, not latency, is what this pins
+            let mut config = ScanConfig::full();
+            config.budget_ms = None;
+            let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
+            assert!(
+                outcome.merged.iter().any(|m| m.text == text),
+                "{angle}°: engines lost arbitrary-angle detection — an engine \
+                 regression, not an image problem (rotation is synthetic-clean)"
+            );
+        }
+    }
+
     #[test]
     fn precancelled_token_short_circuits() {
         let data = vec![255u8; 64 * 64];
