@@ -7,28 +7,44 @@
 use crate::input::LumaImage;
 use crate::matrix::sampler::{Homography, sample_bilinear};
 
-/// Warp an image through the inverse of `h_fwd` (destination ← source
-/// lookup), bilinear, white background.
-pub(crate) fn warp(img: &LumaImage, h_fwd: &Homography) -> LumaImage {
+/// Warp `img` through the inverse of `h_fwd` into an `(out_w, out_h)` canvas
+/// (destination ← source lookup), bilinear, white background. Lookups more
+/// than half a pixel outside the source rect paint background: affine maps
+/// never hit the projective-horizon `None` arm, so without this guard a
+/// rotation's out-of-frame corners clamp-streak the source edges instead of
+/// showing the white a real backdrop provides.
+pub(crate) fn warp_into(img: &LumaImage, h_fwd: &Homography, out_w: u32, out_h: u32) -> LumaImage {
     let Some(h_inv) = h_fwd.inverse() else {
         return img.clone();
     };
-    let (w, h) = (img.width(), img.height());
-    let mut data = Vec::with_capacity((w * h) as usize);
     #[expect(
         clippy::cast_precision_loss,
         reason = "pixel coordinates bounded by Limits::max_dimension — exact in f32"
     )]
-    for y in 0..h {
-        for x in 0..w {
+    let (sw, sh) = (img.width() as f32 - 1.0, img.height() as f32 - 1.0);
+    let mut data = Vec::with_capacity((out_w * out_h) as usize);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "pixel coordinates bounded by Limits::max_dimension — exact in f32"
+    )]
+    for y in 0..out_h {
+        for x in 0..out_w {
             let sampled = match h_inv.apply(x as f32, y as f32) {
-                Some((sx, sy)) => sample_bilinear(img, sx, sy),
-                None => 255,
+                Some((sx, sy)) if sx >= -0.5 && sx <= sw + 0.5 && sy >= -0.5 && sy <= sh + 0.5 => {
+                    sample_bilinear(img, sx, sy)
+                }
+                _ => 255,
             };
             data.push(sampled);
         }
     }
-    LumaImage::new(data, w, h)
+    LumaImage::new(data, out_w, out_h)
+}
+
+/// Warp within the SAME canvas — for maps that keep content inside the
+/// frame (perspective tilt contracts inward; identity).
+pub(crate) fn warp(img: &LumaImage, h_fwd: &Homography) -> LumaImage {
+    warp_into(img, h_fwd, img.width(), img.height())
 }
 
 /// Perspective tilt: the top edge contracts by `sin(angle)·0.5` per side,
@@ -51,31 +67,50 @@ pub(crate) fn perspective_tilt(img: &LumaImage, angle_deg: f32) -> LumaImage {
     warp(img, &fwd)
 }
 
-/// Rotation around the image center, white background.
+/// Rotation around the image centre INTO the rotated bounding box, white
+/// background. The canvas GROWS (`w·|cos| + h·|sin|` per side): rotating
+/// within the source frame amputates the corners — a v10's corner radius
+/// (≈0.62·w against a 0.5·w half-frame) leaves a square frame by the second
+/// 10° ramp step — and the rotation axis then measures frame cropping
+/// instead of engine tolerance. A camera reframes; it never crops the
+/// subject out of existence.
 pub(crate) fn rotate(img: &LumaImage, angle_deg: f32) -> LumaImage {
     #[expect(
         clippy::cast_precision_loss,
-        reason = "dimensions bounded by Limits::max_dimension"
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "dimensions bounded by Limits::max_dimension; ceil of a non-negative bound"
     )]
-    // pixel-center convention: the grid rotates around ((w-1)/2, (h-1)/2)
-    let (cx, cy) = (
-        (img.width() as f32 - 1.0) / 2.0,
-        (img.height() as f32 - 1.0) / 2.0,
-    );
-    let (sin, cos) = angle_deg.to_radians().sin_cos();
-    // forward: translate(-c) → rotate → translate(+c)
-    let fwd = Homography([
-        cos,
-        -sin,
-        cx - cos * cx + sin * cy,
-        sin,
-        cos,
-        cy - sin * cx - cos * cy,
-        0.0,
-        0.0,
-        1.0,
-    ]);
-    warp(img, &fwd)
+    {
+        let (w, h) = (img.width() as f32, img.height() as f32);
+        let (sin, cos) = angle_deg.to_radians().sin_cos();
+        // Bounding box in f64 with a snap-epsilon before ceil: cardinal
+        // angles are not exact in floating trig (f32 cos 90° ≈ −4.4e-8,
+        // f64 sin 180° ≈ 1.2e-16) and would bump a pure shape swap one
+        // pixel up. 1e-6 dwarfs the trig noise at any Limits-legal size
+        // while no non-cardinal angle can land that close to an integer.
+        let (sin64, cos64) = f64::from(angle_deg).to_radians().sin_cos();
+        let (w64, h64) = (f64::from(img.width()), f64::from(img.height()));
+        let out_w = (w64 * cos64.abs() + h64 * sin64.abs() - 1e-6).ceil() as u32;
+        let out_h = (w64 * sin64.abs() + h64 * cos64.abs() - 1e-6).ceil() as u32;
+        // pixel-centre convention: the source grid spins around
+        // ((w-1)/2, (h-1)/2) and lands centred on ((out-1)/2, (out-1)/2).
+        let (cx, cy) = ((w - 1.0) / 2.0, (h - 1.0) / 2.0);
+        let (dx, dy) = ((out_w as f32 - 1.0) / 2.0, (out_h as f32 - 1.0) / 2.0);
+        // forward: translate(-c_src) → rotate → translate(+c_dst)
+        let fwd = Homography([
+            cos,
+            -sin,
+            dx - cos * cx + sin * cy,
+            sin,
+            cos,
+            dy - sin * cx - cos * cy,
+            0.0,
+            0.0,
+            1.0,
+        ]);
+        warp_into(img, &fwd, out_w, out_h)
+    }
 }
 
 /// Matrix product `a ∘ b` (apply `b` first).
@@ -188,13 +223,33 @@ mod tests {
         data[0] = 0; // black px at (0,0)
         let img = LumaImage::new(data, 9, 9);
         let out = rotate(&img, 90.0);
-        // (0,0) rotates around (4.5,4.5) to (9,0) — clamped sampling lands at (8,0)
+        // pixel-centre convention: (0,0) rotates around (4,4) exactly onto
+        // (8,0) — the w−1 edge, in-bounds, no clamping involved
         assert!(
             out.data()[8] < 128,
             "rotated corner dark: {:?}",
             &out.data()[..9]
         );
         assert!(out.data()[0] > 128, "origin now white");
+    }
+
+    #[test]
+    fn rotate_expands_the_canvas_to_the_rotated_bounding_box() {
+        // Same-canvas rotation amputates whatever lives near the corners —
+        // a camera reframes, it never crops the subject out of existence.
+        // The canvas must grow to the rotated bounding box:
+        // 15·(cos40° + sin40°) = 15·1.40883… ≈ 21.13 → 22.
+        let img = checker(15);
+        let out = rotate(&img, 40.0);
+        assert_eq!((out.width(), out.height()), (22, 22));
+        // Cardinal 90° of a square is a pure shape swap — no growth.
+        let out90 = rotate(&img, 90.0);
+        assert_eq!((out90.width(), out90.height()), (15, 15));
+        // Non-square discriminates w·|cos|+h·|sin| from its swapped twin:
+        // 15×9 @ 40° → (ceil(11.49+5.79), ceil(9.64+6.89)) = (18, 17).
+        let rect = LumaImage::new(vec![255u8; 15 * 9], 15, 9);
+        let out_r = rotate(&rect, 40.0);
+        assert_eq!((out_r.width(), out_r.height()), (18, 17));
     }
 
     #[test]
@@ -320,7 +375,10 @@ mod tests {
     fn rotate_matrix_terms_are_pinned() {
         // 15×15 white with a solid 7×7 black block at [2..=8]². A 40° rotation
         // (cos and sin both large — unlike the 90° test where cos≈0 hides the
-        // cos-terms) carries the block up-and-right around centre (7,7).
+        // cos-terms) lands in a ceil(15·(cos40°+sin40°)) = 22×22 canvas:
+        // src centre (7,7) → dst (10.5,10.5), block centre (5,5) → ≈(10.25,7.68).
+        // Hand-derived: cos40 = 0.766, sin40 = 0.643, tx = dx−cos·cx+sin·cy
+        // = 10.5−5.362+4.500 = 9.638, ty = dy−sin·cx−cos·cy = 0.638.
         let mut data = vec![255u8; 15 * 15];
         for y in 2..9 {
             for x in 2..9 {
@@ -329,28 +387,45 @@ mod tests {
         }
         let img = LumaImage::new(data, 15, 15);
         let out = rotate(&img, 40.0);
-        let px = |c: usize, r: usize| out.data()[r * 15 + c];
+        assert_eq!((out.width(), out.height()), (22, 22));
+        let px = |c: usize, r: usize| out.data()[r * 22 + c];
         // Deep interior of the rotated block. Every tx/ty sign-or-factor slip —
         // and the −sin→sin flip — displaces the whole block off these cells,
-        // leaving white background. Primary trap for 69:9 (delete −sin) and
-        // 70:12 (cx − cos·cx → cx + cos·cx), which have no distinct intrusion.
-        assert!(px(6, 3) < 64, "block interior dark: {}", px(6, 3));
-        assert!(px(7, 4) < 64, "block interior dark: {}", px(7, 4));
-        // Background cells each cos-scaled mutant drags the block INTO:
-        //   70:18 (cos·cx → cos/cx) shifts the block's tx → intrudes (13,3).
+        // leaving white background.
+        assert!(px(10, 7) < 64, "block interior dark: {}", px(10, 7));
+        assert!(px(10, 8) < 64, "block interior dark: {}", px(10, 8));
+        // Background cells each mutant variant drags the block INTO (true
+        // geometry keeps every one of them ≥1.5px outside the block):
+        //   −sin → sin (the m[1] flip): block centre x 10.25 → 16.68.
         assert!(
-            px(13, 3) > 200,
-            "70:18 cell stays background: {}",
-            px(13, 3)
+            px(17, 8) > 200,
+            "sin-flip cell stays background: {}",
+            px(17, 8)
         );
-        //   73:23 (cx − cos·cy → cx + cos·cy) shifts ty → intrudes (7,13).
+        //   tx: dx − cos·cx → dx + cos·cx: centre x → 20.97.
         assert!(
-            px(7, 13) > 200,
-            "73:23 cell stays background: {}",
-            px(7, 13)
+            px(21, 8) > 200,
+            "tx-sign cell stays background: {}",
+            px(21, 8)
         );
-        //   73:29 (cos·cy → cos/cy) shifts ty → intrudes (5,9).
-        assert!(px(5, 9) > 200, "73:29 cell stays background: {}", px(5, 9));
+        //   tx: cos·cx → cos/cx: centre x → 15.51.
+        assert!(
+            px(16, 8) > 200,
+            "tx-ratio cell stays background: {}",
+            px(16, 8)
+        );
+        //   ty: dy − sin·cx → dy + sin·cx: centre y 7.68 → 16.68.
+        assert!(
+            px(10, 17) > 200,
+            "ty-sign cell stays background: {}",
+            px(10, 17)
+        );
+        //   ty: cos·cy → cos/cy: centre y → 12.94.
+        assert!(
+            px(10, 13) > 200,
+            "ty-ratio cell stays background: {}",
+            px(10, 13)
+        );
     }
 
     #[test]

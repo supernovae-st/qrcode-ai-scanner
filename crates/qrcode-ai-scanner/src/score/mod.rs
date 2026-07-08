@@ -827,6 +827,50 @@ mod tests {
         );
     }
 
+    /// A flawless high-version symbol with the renderer's standard 4-module
+    /// quiet zone. Engines are rotation-invariant on clean symbols (finder
+    /// geometry is angle-free), so every death on this ramp is a PROBE
+    /// artifact. The same-canvas rotate amputated the corners — a v10's
+    /// corner radius (≈0.62·w) leaves the frame at the very first 10° step —
+    /// and the axis read "fragile at 10°" for a symbol any phone rotates
+    /// through happily: the probe measured the frame, not the engine.
+    #[test]
+    fn rotation_ramp_measures_engine_tolerance_not_frame_cropping() {
+        let code = qrcode::QrCode::with_version(
+            b"rotation probe: the frame must never eat the finders",
+            qrcode::Version::Normal(10),
+            qrcode::EcLevel::Q,
+        )
+        .unwrap();
+        let img = code
+            .render::<image::Luma<u8>>()
+            .module_dimensions(4, 4)
+            .build();
+        let (w, h) = (img.width(), img.height());
+        let base = LumaImage::new(img.into_raw(), w, h);
+        let text = "rotation probe: the frame must never eat the finders";
+        let probe = CellProbe::calibrate(&base, text, crate::report::Symbology::QrCode)
+            .expect("flawless base calibrates");
+        let axes = run_axes(
+            &base,
+            text,
+            ScoreDepth::Full,
+            &CancelToken::new(),
+            None,
+            probe,
+        )
+        .unwrap();
+        let rotation = axes
+            .iter()
+            .find(|a| a.axis == StressAxis::Rotation)
+            .unwrap();
+        assert_eq!(
+            rotation.passed, 5,
+            "a flawless v10 died on the rotation ramp — the probe is measuring \
+             frame cropping, not engine tolerance: {rotation:?}"
+        );
+    }
+
     /// The glare-blob RADIUS is `min(w,h)*0.18` (`run_axes` 238:48, the `*`).
     /// `*`→`/` blows it up to `min/0.18` (~5.6×²), saturating the WHOLE frame
     /// white. On a symbol placed in the bottom-right of a white canvas — where
