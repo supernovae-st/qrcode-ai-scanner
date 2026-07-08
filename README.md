@@ -35,12 +35,13 @@ One Rust core, **five published surfaces** — all return the same versioned
 
 Per-surface guides in [`docs/`](docs/) · code examples in the Quick start below.
 
-**📱 Mobile + cross-platform (first registry setup in flight):** Kotlin/Android
-(UniFFI → JitPack), Swift/iOS (UniFFI → SwiftPM), and Flutter/Dart
-(flutter_rust_bridge → pub.dev) bindings are built and CI-green, returning the
-same `ScanReport`. Their registries come online across v0.6.x — the one-time
+**📱 Mobile + cross-platform:** Kotlin/Android is **live on JitPack**
+(`com.github.supernovae-st:qrcode-ai-scanner:v0.6.0` — first tag build
+verified green). Swift/iOS (UniFFI → SwiftPM) and Flutter/Dart
+(flutter_rust_bridge → pub.dev) are built and CI-green, returning the same
+`ScanReport`; their registries land across v0.6.x — the one-time
 first-publish steps (pub.dev account claim, SwiftPM xcframework pin) are in
-motion; consult each binding's README for the current install path:
+motion. Consult each binding's README for the current install path:
 [`bindings/kotlin/`](bindings/kotlin/), [`bindings/swift/`](bindings/swift/), and
 [`bindings/flutter/`](bindings/flutter/).
 
