@@ -8,8 +8,15 @@ allow = [
   "ISC",
   "Zlib",
   "Unicode-3.0",
+  # MPL-2.0 is NOT in the workspace graph — deny warns license-not-encountered
+  # on the workspace scan. It covers the nine uniffi crates in the
+  # workspace-EXCLUDED mobile tree, which ci.yml scans report-only against
+  # this same config. Keep it; don't "fix" the warning by pruning. Same class
+  # for the other unmatched allowances (LLVM-exception → the fuzz tree's
+  # libfuzzer-sys; Unicode-3.0 → dual-licensed crates that deny satisfies via
+  # MIT/Apache): an allowance is prunable ONLY once proven absent from ALL
+  # five lockfile trees — CDLA-Permissive-2.0 died exactly that way, 2026-07-08.
   "MPL-2.0",
-  "CDLA-Permissive-2.0",
   "AGPL-3.0-or-later",
 ]
 
