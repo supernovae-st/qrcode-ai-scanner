@@ -11,6 +11,9 @@
 //! - `rescue-stress` — QD-2 adversarial miscorrection measurement: a
 //!   deterministic synthetic-occlusion sweep reporting the S5 rescue's
 //!   wrong-vs-refuse rate under rising occlusion (see `rescue_stress.rs`).
+//! - `rotation-sweep` — decode-under-rotation truth on the zxing blackbox
+//!   corpus at 0°/90°/180°/270° via exact index-permutation rotations
+//!   (see `rotation_sweep.rs`). Non-gating dashboard.
 //! - `baseline` — run the corpus through a v0.2 CLI binary (`--bin <path>`)
 //!   and write `docs/baseline-v02.json` (the Phase A exit-gate comparator).
 
@@ -23,6 +26,7 @@
 
 mod external;
 mod rescue_stress;
+mod rotation_sweep;
 
 /// Loud allocator — every single allocation request ≥ 1 GiB prints its size
 /// before being served. The CI runner died on a silent 14 GiB request from
@@ -102,6 +106,7 @@ fn main() {
         Some("gen-symbology-fixtures") => gen_symbology_fixtures(),
         Some("gen-external-manifest") => external::generate(),
         Some("rescue-stress") => rescue_stress::run(),
+        Some("rotation-sweep") => rotation_sweep::run(),
         Some("corpus-report") => {
             let flags: Vec<String> = args.collect();
             let write = flags.iter().any(|f| f == "--write");
