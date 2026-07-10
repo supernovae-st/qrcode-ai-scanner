@@ -83,7 +83,13 @@ export interface Detection {
   engines: EngineKind[];
 }
 
-export interface AxisScore { axis: StressAxis; passed: number; total: number }
+export interface AxisScore {
+  axis: StressAxis;
+  passed: number;
+  total: number;
+  /** Wire label of the first failed cell ("blur 2.5", "glare", "128px"…) — null when every cell passed. */
+  failed_at: string | null;
+}
 export interface StructuralReport { finder_integrity: [number, number, number]; quiet_zone_ok: boolean }
 export interface UecReport {
   margin: number;

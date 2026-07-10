@@ -554,7 +554,8 @@
       "required": [
         "axis",
         "passed",
-        "total"
+        "total",
+        "failed_at"
       ],
       "properties": {
         "axis": {
@@ -567,6 +568,17 @@
         "total": {
           "type": "integer",
           "minimum": 0
+        },
+        "failed_at": {
+          "description": "Wire label of the first failed cell — why this axis lost points (e.g. 'blur 2.5', 'glare', '128px'). Null when every cell passed.",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },

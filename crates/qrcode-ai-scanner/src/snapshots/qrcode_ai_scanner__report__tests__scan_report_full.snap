@@ -52,12 +52,14 @@ expression: full_report()
       {
         "axis": "resolution",
         "passed": 4,
-        "total": 5
+        "total": 5,
+        "failed_at": null
       },
       {
         "axis": "perspective",
         "passed": 3,
-        "total": 5
+        "total": 5,
+        "failed_at": null
       }
     ],
     "structural": {

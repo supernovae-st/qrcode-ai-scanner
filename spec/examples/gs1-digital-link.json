@@ -66,32 +66,38 @@
       {
         "axis": "resolution",
         "passed": 5,
-        "total": 5
+        "total": 5,
+        "failed_at": null
       },
       {
         "axis": "blur",
         "passed": 5,
-        "total": 5
+        "total": 5,
+        "failed_at": null
       },
       {
         "axis": "contrast",
         "passed": 5,
-        "total": 5
+        "total": 5,
+        "failed_at": null
       },
       {
         "axis": "perspective",
         "passed": 5,
-        "total": 5
+        "total": 5,
+        "failed_at": null
       },
       {
         "axis": "rotation",
         "passed": 1,
-        "total": 5
+        "total": 5,
+        "failed_at": "30°"
       },
       {
         "axis": "lighting",
         "passed": 5,
-        "total": 5
+        "total": 5,
+        "failed_at": null
       }
     ],
     "structural": {

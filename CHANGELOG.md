@@ -4,6 +4,31 @@ All notable changes to this workspace. Every surface versions together — the R
 crate + CLI, the npm node + wasm packages, the Python wheel, and the
 Kotlin/Android · Swift/iOS · Flutter bindings.
 
+## Unreleased
+
+### Changed
+
+- **A perfect render now reaches 100** — the glare stress cell moves onto
+  the DATA region (symbol centre). Its old placement (0.3w, 0.3h) saturated
+  the top-left finder: a structural kill no design survives, silently
+  capping every pristine render at 4/5 lighting (the universal 95/97
+  ceiling — the axis measured the instrument, not the symbol; same class as
+  the 0.6.0 rotation-cropping fix). Centred, the error-correction budget
+  decides: absorbable on healthy symbols, lethal where a finder sits or the
+  margin is thin. Pinned by real product fixtures: the builder's default
+  render scores exactly 100; a pale styled template keeps real, explained
+  losses.
+
+### Added
+
+- `AxisScore.failed_at` (wire, all surfaces) — the label of the first
+  failed stress cell ("blur 2.5", "glare", "128px"…), `null` when every
+  cell passed. A lost point always names its cell; panels render the
+  reason, not just the count. Schema + TS + Dart types updated in lockstep
+  (type-parity gate green). `AxisScore` loses `Copy` in the Rust API
+  (String field) — the 0.x-breaking bump, per the 0.7.0 `ScanConfig`
+  precedent.
+
 ## 0.7.2 — 2026-07-10
 
 ### Added

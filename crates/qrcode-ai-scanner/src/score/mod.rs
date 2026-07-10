@@ -163,8 +163,9 @@ fn run_ramp(
     probe: CellProbe,
     indices: &[usize],
     build: impl Fn(&LumaImage, usize) -> LumaImage,
-) -> Result<(u8, u8)> {
+) -> Result<(u8, u8, Option<usize>)> {
     let mut passed = 0u8;
+    let mut knee = None;
     for &i in indices {
         if cancel.is_cancelled() {
             return Err(crate::error::ScanError::Cancelled);
@@ -176,10 +177,37 @@ fn run_ramp(
         if cell_passes(&cell, expected_text, probe) {
             passed += 1;
         } else {
-            break; // knee — ordered intensities, later cells only get harder
+            knee = Some(i); // knee — ordered intensities, later cells only get harder
+            break;
         }
     }
-    Ok((passed, u8::try_from(indices.len()).unwrap_or(u8::MAX)))
+    Ok((passed, u8::try_from(indices.len()).unwrap_or(u8::MAX), knee))
+}
+
+/// Wire label of one stress cell — what `AxisScore.failed_at` carries. Human-
+/// readable, stable (the panel prints it verbatim): the intensity that killed
+/// the ramp, or the lighting defect that failed. Indexes the FULL ramp.
+fn cell_label(axis: StressAxis, i: usize) -> &'static str {
+    match axis {
+        StressAxis::Resolution => ["358px", "256px", "179px", "128px", "90px"][i.min(4)],
+        StressAxis::Blur => ["blur 0.5", "blur 1.0", "blur 1.5", "blur 2.0", "blur 2.5"][i.min(4)],
+        StressAxis::Contrast => [
+            "contrast 70%",
+            "contrast 55%",
+            "contrast 40%",
+            "contrast 30%",
+            "contrast 20%",
+        ][i.min(4)],
+        StressAxis::Perspective => ["10°", "18°", "26°", "34°", "42°"][i.min(4)],
+        StressAxis::Rotation => ["10°", "20°", "30°", "40°", "50°"][i.min(4)],
+        StressAxis::Lighting => [
+            "soft shadow",
+            "hard shadow",
+            "glare",
+            "overexposure",
+            "underexposure",
+        ][i.min(4)],
+    }
 }
 
 /// Run the five ordered ramps + the lighting set at the given depth.
@@ -225,12 +253,13 @@ fn run_axes(
         if skip.contains(&axis) {
             continue; // never built, never run — absent from the report
         }
-        let (passed, total) =
+        let (passed, total, knee) =
             run_ramp(base, expected_text, cancel, deadline, probe, indices, build)?;
         axes.push(AxisScore {
             axis,
             passed,
             total,
+            failed_at: knee.map(|i| cell_label(axis, i).to_owned()),
         });
     }
 
@@ -239,9 +268,15 @@ fn run_axes(
         clippy::cast_precision_loss,
         reason = "image dimensions bounded by Limits::max_dimension (lint presence varies by build shape)"
     )]
+    // Glare lands on the DATA region (the symbol centre), never a finder:
+    // at the old (0.3w, 0.3h) placement the saturated spot erased the
+    // top-left finder — a structural kill NO design survives (a pristine
+    // black-on-white symbol capped at 4/5 lighting forever, the 95-ceiling
+    // class). Centred, the error-correction budget decides: weak ECC dies,
+    // healthy ECC recovers — measurable, actionable (raise ECC), honest.
     let (cx, cy, radius) = (
-        base.width() as f32 * 0.3,
-        base.height() as f32 * 0.3,
+        base.width() as f32 * 0.5,
+        base.height() as f32 * 0.5,
         base.width().min(base.height()) as f32 * 0.18,
     );
     let lighting_cells: [&dyn Fn(&LumaImage) -> LumaImage; 5] = [
@@ -258,6 +293,7 @@ fn run_axes(
     };
     if !skip.contains(&StressAxis::Lighting) {
         let mut lighting_passed = 0u8;
+        let mut first_failed = None;
         for &i in lighting_picks {
             if cancel.is_cancelled() {
                 return Err(crate::error::ScanError::Cancelled);
@@ -267,12 +303,15 @@ fn run_axes(
             }
             if cell_passes(&lighting_cells[i](base), expected_text, probe) {
                 lighting_passed += 1;
+            } else if first_failed.is_none() {
+                first_failed = Some(i);
             }
         }
         axes.push(AxisScore {
             axis: StressAxis::Lighting,
             passed: lighting_passed,
             total: u8::try_from(lighting_picks.len()).unwrap_or(u8::MAX),
+            failed_at: first_failed.map(|i| cell_label(StressAxis::Lighting, i).to_owned()),
         });
     }
     Ok(axes)
@@ -494,6 +533,7 @@ mod tests {
                 axis,
                 passed: 5,
                 total: 5,
+                failed_at: None,
             })
             .collect();
         for &(axis, passed, total) in overrides {
@@ -833,16 +873,17 @@ mod tests {
         (base, d.text.clone(), probe)
     }
 
-    /// The glare-blob CENTRE is `(base.width()*0.3, base.height()*0.3)`
-    /// (`run_axes` 236:29 and 237:30 — the `*` in each, mutated to `/` and `+`).
-    /// On a full-frame pristine symbol that localized spot lands ON the modules
-    /// and BREAKS the glare cell — the one of five lighting cells that fails
-    /// (shadow×2 + exposure×2 all survive). Every placement mutation moves the
-    /// blob OFF the symbol (`*`→`/` → centre at width/0.3 ≈ 2.9× off-canvas;
-    /// `*`→`+` → width+0.3, off the right edge) so the glare cell RECOVERS and
-    /// lighting.passed rises 4 → 5. Deterministic (no deadline in play).
+    /// THE 100-IS-REACHABLE INVARIANT (operator lock 2026-07-10). A pristine
+    /// full-frame symbol survives ALL five lighting cells — the glare blob
+    /// lands on the DATA region (symbol centre), where the error-correction
+    /// budget absorbs it. The old (0.3w, 0.3h) placement saturated the
+    /// top-left finder: a structural kill NO design survives, capping every
+    /// perfect render at 4/5 lighting (the 95-ceiling class — the axis
+    /// measured the instrument, not the symbol; same class as the W8
+    /// rotation-cropping fix). This pin also catches the flood-mutant
+    /// (`radius/0.18` whites the whole frame → the cell fails → 4/5 here).
     #[test]
-    fn glare_blob_placement_breaks_exactly_one_lighting_cell() {
+    fn pristine_symbol_survives_all_lighting_cells() {
         let (base, text, probe) = clean_base_and_probe();
         let axes = run_axes(
             &base,
@@ -859,9 +900,76 @@ mod tests {
             .find(|a| a.axis == StressAxis::Lighting)
             .unwrap();
         assert_eq!(
-            lighting.passed, 4,
-            "glare at (0.3w,0.3h) must break exactly one of the five lighting cells; \
-             a moved centre lets it survive (5): {lighting:?}"
+            lighting.passed, 5,
+            "a pristine full-frame symbol must survive every lighting cell \
+             (glare sits on the data region, not a finder): {lighting:?}"
+        );
+        assert!(
+            lighting.failed_at.is_none(),
+            "all-passed carries no failed_at: {lighting:?}"
+        );
+    }
+
+    /// THE PRODUCT PINS — the builder's real rendered pixels, committed as
+    /// fixtures. (a) The default render (black rounded modules on white,
+    /// ECC M) reaches the full 100: every lost point below this is caused by
+    /// the USER's design, never by the instrument. (b) A real styled
+    /// template (pale-pink hearts + centre logo) loses lighting cells and
+    /// the wire NAMES the first failed cell — the explainability contract
+    /// the panel renders ("Light 3/5 · hard shadow"). Also the guard for
+    /// glare placement/radius mutants: an off-canvas or flooding blob flips
+    /// (a) or (b).
+    #[test]
+    fn builder_default_render_reaches_100_and_styled_explains_its_losses() {
+        let score_of = |rel: &str| {
+            let path = format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"));
+            let bytes = std::fs::read(&path).expect("builder fixture present");
+            let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
+            let outcome =
+                ladder::run(&planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
+            let detection = &outcome.merged[0];
+            evaluate(
+                &planes.luma,
+                detection,
+                ScoreDepth::Full,
+                &[],
+                &[],
+                &CancelToken::new(),
+                None,
+            )
+            .unwrap()
+            .expect("builder renders always score")
+        };
+
+        // (a) the default render: a perfect score is REACHABLE.
+        let (default_score, _) = score_of("fixtures/clean/builder-default-rounded-1024.png");
+        assert_eq!(
+            default_score.value, 100,
+            "the pristine default render must reach 100 — a ceiling below that \
+             measures the instrument, not the design: {:?}",
+            default_score.axes
+        );
+
+        // (b) the styled template: losses exist AND name their cell.
+        let (styled_score, _) = score_of("fixtures/artistic/builder-template-hearts-web-1024.png");
+        assert!(
+            styled_score.value < 100,
+            "the pale styled template keeps real, explained losses: {}",
+            styled_score.value
+        );
+        let lighting = styled_score
+            .axes
+            .iter()
+            .find(|a| a.axis == StressAxis::Lighting)
+            .unwrap();
+        assert!(
+            lighting.passed < lighting.total,
+            "the styled template loses lighting cells: {lighting:?}"
+        );
+        assert_eq!(
+            lighting.failed_at.as_deref(),
+            Some("hard shadow"),
+            "the first failed cell is named on the wire: {lighting:?}"
         );
     }
 
@@ -951,37 +1059,40 @@ mod tests {
             let twin = full.iter().find(|f| f.axis == a.axis).unwrap();
             assert_eq!((a.passed, a.total), (twin.passed, twin.total));
         }
-        // Renormalized arithmetic, hand-pinned on this fixture (five ramps
-        // 5/5 · lighting 4/5, the glare cell — pinned by the sibling test):
-        //   full  : (22+18+15+20+10)·100 + 15·80 = 9700 / 100 = 97
-        //   skip  : (22+18+15)·100      + 15·80 = 6700 /  70 = 95 (int div)
-        // Both are true statements about different axis sets — the divisor
-        // really is Σ(run weights), not the constant 100.
+        // Renormalized arithmetic on this pristine fixture (every cell
+        // passes since the glare cell moved onto the data region — the
+        // 100-is-reachable invariant, pinned by the sibling tests): both
+        // sums are all-100s, so full AND skip read exactly 100. The divisor
+        // truth (Σ run weights, not the constant 100) is pinned just below
+        // by the lone half-passed lighting axis reading 50, never 7.
         let d = detection_with(Some(EcLevel::H));
         let (score_full, _) = compose(full, None, None, None, &d);
         let (score_skip, _) = compose(skipped, None, None, None, &d);
-        assert_eq!(score_full.value, 97, "full six-axis composite");
-        assert_eq!(score_skip.value, 95, "renormalized four-axis composite");
+        assert_eq!(score_full.value, 100, "full six-axis composite");
+        assert_eq!(score_skip.value, 100, "renormalized four-axis composite");
         // And the renormalization actually renormalizes: a half-passed
         // lighting axis alone must read 50, not 7 (its weight over 100).
         let lone = vec![AxisScore {
             axis: StressAxis::Lighting,
             passed: 1,
             total: 2,
+            failed_at: None,
         }];
         let (score_lone, _) = compose(lone, None, None, None, &d);
         assert_eq!(score_lone.value, 50, "weights re-span the run set");
     }
 
-    /// The glare-blob RADIUS is `min(w,h)*0.18` (`run_axes` 238:48, the `*`).
-    /// `*`→`/` blows it up to `min/0.18` (~5.6×²), saturating the WHOLE frame
-    /// white. On a symbol placed in the bottom-right of a white canvas — where
-    /// the centred glare MISSES it (all five lighting cells survive, count 5) —
-    /// that catastrophic radius floods the symbol too and drops the count to 4.
-    /// (The `*`→`+` variant, `min+0.18`, is a gentle full-frame wash a robust
-    /// symbol survives at any placement — argued separately, not pinned here.)
+    /// The glare cell ACTS — the anti-no-op / placement / radius guard. A
+    /// symbol parked in the bottom-right quadrant of a 2× canvas puts the
+    /// canvas centre exactly on its top-left finder: the centred blob kills
+    /// it (4/5 + `failed_at` "glare"). Mutants all flip this: a no-op glare
+    /// reads 5/5; an off-canvas centre (`0.5`→`/0.5`) reads 5/5; a flooding
+    /// radius (`/0.18`) takes more cells down (≤3). The pristine-full-frame
+    /// sibling pins the other side: centred glare on the DATA region is
+    /// survivable — together they hold the cell to "lethal exactly where a
+    /// finder sits, absorbable where the ECC budget rules".
     #[test]
-    fn glare_blob_radius_saturation_breaks_the_glare_cell() {
+    fn glare_cell_stays_lethal_on_a_finder_and_names_itself() {
         let code =
             qrcode::QrCode::with_error_correction_level(b"canvas glare pin", qrcode::EcLevel::H)
                 .unwrap();
@@ -1016,9 +1127,14 @@ mod tests {
             .find(|a| a.axis == StressAxis::Lighting)
             .unwrap();
         assert_eq!(
-            lighting.passed, 5,
-            "the 0.18·min glare misses the corner symbol → all five survive; a `/0.18` \
-             radius floods the frame and breaks the glare cell (4): {lighting:?}"
+            lighting.passed, 4,
+            "the canvas-centre blob sits on the corner symbol's TL finder and \
+             must kill exactly the glare cell: {lighting:?}"
+        );
+        assert_eq!(
+            lighting.failed_at.as_deref(),
+            Some("glare"),
+            "the kill names itself on the wire: {lighting:?}"
         );
     }
 

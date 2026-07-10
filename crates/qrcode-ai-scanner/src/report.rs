@@ -277,7 +277,7 @@ impl StressAxis {
 }
 
 /// Survival result on one stress axis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct AxisScore {
@@ -289,6 +289,10 @@ pub struct AxisScore {
     pub passed: u8,
     /// Cells in the ramp at this depth.
     pub total: u8,
+    /// Wire label of the first failed cell — WHY this axis lost points
+    /// ("blur 2.5", "glare", "128px"…). `null` when every cell passed.
+    /// The panel's explainability seam: a lost point always names its cell.
+    pub failed_at: Option<String>,
 }
 
 /// ISO 15415 UEC grade bands.
@@ -619,11 +623,13 @@ mod tests {
                         axis: StressAxis::Resolution,
                         passed: 4,
                         total: 5,
+                        failed_at: None,
                     },
                     AxisScore {
                         axis: StressAxis::Perspective,
                         passed: 3,
                         total: 5,
+                        failed_at: None,
                     },
                 ],
                 structural: Some(StructuralReport {

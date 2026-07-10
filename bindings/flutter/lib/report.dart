@@ -450,9 +450,16 @@ class Detection {
 class AxisScore {
   final StressAxis axis;
   final int passed, total;
-  const AxisScore(this.axis, this.passed, this.total);
+
+  /// Wire label of the first failed cell ("blur 2.5", "glare", "128px"…) —
+  /// null when every cell passed.
+  final String? failedAt;
+  const AxisScore(this.axis, this.passed, this.total, this.failedAt);
   factory AxisScore.fromJson(Map<String, dynamic> j) => AxisScore(
-      StressAxis.from(j['axis']), _int(j['passed']) ?? 0, _int(j['total']) ?? 0);
+      StressAxis.from(j['axis']),
+      _int(j['passed']) ?? 0,
+      _int(j['total']) ?? 0,
+      j['failed_at'] as String?);
 }
 
 class StructuralReport {

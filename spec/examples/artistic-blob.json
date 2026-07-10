@@ -31,32 +31,38 @@
       {
         "axis": "resolution",
         "passed": 1,
-        "total": 5
+        "total": 5,
+        "failed_at": "128px"
       },
       {
         "axis": "blur",
         "passed": 4,
-        "total": 5
+        "total": 5,
+        "failed_at": "blur 2.0"
       },
       {
         "axis": "contrast",
         "passed": 1,
-        "total": 5
+        "total": 5,
+        "failed_at": "contrast 30%"
       },
       {
         "axis": "perspective",
         "passed": 2,
-        "total": 5
+        "total": 5,
+        "failed_at": "26°"
       },
       {
         "axis": "rotation",
         "passed": 1,
-        "total": 5
+        "total": 5,
+        "failed_at": "30°"
       },
       {
         "axis": "lighting",
         "passed": 4,
-        "total": 5
+        "total": 5,
+        "failed_at": "hard shadow"
       }
     ],
     "structural": null,

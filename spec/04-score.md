@@ -16,7 +16,12 @@ cell (the knee). Weights are contract constants:
 | `contrast` | 15 | multiplicative crush ×0.7 · 0.55 · 0.4 · 0.3 · 0.2 |
 | `perspective` | 20 | tilt 10° · 18° · 26° · 34° · 42° |
 | `rotation` | 10 | 10° · 20° · 30° · 40° · 50° |
-| `lighting` | 15 | defect SET (shadow · glare · exposure …) — unordered: no knee-exit; depth still picks the cell subset |
+| `lighting` | 15 | defect SET (soft/hard shadow · glare · over/under-exposure) — unordered: no knee-exit; depth still picks the cell subset. The glare blob lands on the DATA region (symbol centre), never a finder: a finder-kill is unsurvivable by design (the pre-0.8 placement capped every perfect render at 4/5), while a data-region glare is absorbed or not by the error-correction budget — measurable and actionable |
+
+Every `score.axes[]` entry carries `failed_at` — the wire label of the first
+failed cell (`"blur 2.5"`, `"glare"`, `"128px"`…), `null` when every cell
+passed. A lost point always names its cell: surfaces render the reason, not
+just the count.
 
 Survival is measured **relative to the symbol's own decode class**
 (`CellProbe`): an artistic symbol that only decodes through a deep rung is
