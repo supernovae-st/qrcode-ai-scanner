@@ -162,3 +162,17 @@ def test_score_skip_axes_thread_through_and_reject_typos():
 
     with pytest.raises(ValueError, match="unknown stress axis"):
         qr.scan(CLEAN[0].read_bytes(), "full", score_skip_axes=["perspektive"])
+
+
+def test_score_skip_checks_null_sections_and_reject_typos():
+    report = qr.scan(
+        CLEAN[0].read_bytes(),
+        "full",
+        score_skip_checks=["uec", "iso15415"],
+    )
+    assert report["score"]["uec"] is None
+    assert report["score"]["iso15415"] is None
+    assert isinstance(report["score"]["value"], int)
+    with pytest.raises(ValueError, match="unknown score check"):
+        qr.scan(CLEAN[0].read_bytes(), "full", score_skip_checks=["margin"])
+

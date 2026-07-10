@@ -24,6 +24,7 @@ def scan(
     max_pixels: int | None = None,
     budget_ms: int | None = None,
     score_skip_axes: list[str] | None = None,
+    score_skip_checks: list[str] | None = None,
 ) -> ScanReport:
     """Decode + score an encoded image (PNG, JPEG, WebP, GIF).
 
@@ -37,6 +38,9 @@ def scan(
     e.g. ``["perspective", "rotation"]`` for generated previews with no capture
     geometry) — their cells never run, the composite renormalizes, ``score.axes``
     omits them; an unknown name raises (spec/04 § skipping axes).
+    score_skip_checks: report sections excluded at the source (``["uec", "iso15415"]``) —
+    never computed, the wire carries ``None``, the UEC-driven hints never fire; the
+    composite value does not move; an unknown name raises (spec/04 § skipping checks).
     "No QR found" returns a report with empty ``detections``; raises ``ValueError``
     on invalid input, an oversized image, or an unknown profile.
     """
@@ -51,12 +55,13 @@ def scan_frame(
     max_pixels: int | None = None,
     budget_ms: int | None = None,
     score_skip_axes: list[str] | None = None,
+    score_skip_checks: list[str] | None = None,
 ) -> ScanReport:
     """Decode + score a raw RGBA frame (e.g. a camera frame) — no image-format roundtrip.
 
     ``rgba`` must be ``width * height * 4`` bytes. max_dimension / max_pixels: optional
     input-size caps (see ``scan``). budget_ms: per-frame wall-clock bound
-    (``0`` = unbounded, see ``scan``). score_skip_axes: see ``scan``.
+    (``0`` = unbounded, see ``scan``). score_skip_axes / score_skip_checks: see ``scan``.
     Raises ``ValueError`` on invalid input.
     """
     ...

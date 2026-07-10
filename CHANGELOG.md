@@ -4,6 +4,30 @@ All notable changes to this workspace. Every surface versions together — the R
 crate + CLI, the npm node + wasm packages, the Python wheel, and the
 Kotlin/Android · Swift/iOS · Flutter bindings.
 
+## Unreleased
+
+### Added
+
+- `ScanConfig.score_skip_checks` on every surface — the section-level
+  sibling of `score_skip_axes`, same seam, same posture: Node
+  (`scoreSkipChecks` option, typed `ScoreCheck = "uec" | "iso15415"`),
+  wasm (`score_skip_checks` positional arg on `scan_image`), CLI
+  (`--score-skip-checks uec,iso15415`), Python (`score_skip_checks=`
+  kwarg on `scan`/`scan_frame`, stub updated), UniFFI/Kotlin/Swift
+  (`score_skip_checks` arg with a typed `UnknownScoreCheck` error). A
+  skipped section is never computed (no UEC bitstream replay · no ISO
+  parameter sweep), the wire carries `null`, and the UEC-driven hints
+  (`low_correction_margin`, the thin-margin priority of
+  `raise_error_correction`) structurally cannot fire. The composite
+  `score.value` is axis-based and does not move — surface truth, never
+  score surgery (spec/04 § skipping checks). Canonical host: the builder
+  panel displays neither the margin nor the ISO parameters — it skips
+  both and the report stops carrying what the product never shows.
+  Unknown names fail loud on every surface. Parity pinned per surface:
+  core unit (sections null · hints silent · value byte-identical ·
+  UEC-skip nulls the ISO `unused_error_correction` parameter), uniffi
+  unit, CLI e2e, node test.mjs, pytest.
+
 ## 0.7.1 — 2026-07-08
 
 ### Added

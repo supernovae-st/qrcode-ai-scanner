@@ -400,6 +400,7 @@ pub(crate) fn evaluate(
     detection: &MergedDetection,
     depth: ScoreDepth,
     skip: &[StressAxis],
+    skip_checks: &[crate::ladder::ScoreCheck],
     cancel: &CancelToken,
     deadline: Option<Instant>,
 ) -> Result<Option<(Score, Vec<Hint>)>> {
@@ -426,22 +427,36 @@ pub(crate) fn evaluate(
         (Some(corners), Some(version)) => structural::check(sample_luma, corners, version),
         _ => None,
     };
-    let uec_report = match (
-        &detection.masked_stream,
-        detection.version,
-        detection.ec,
-        detection.mask,
-    ) {
-        (Some(stream), Some(version), Some(ec), Some(mask)) => {
-            uec::compute(&stream.bits, stream.bit_len, version, ec, mask)
+    // Skipped checks never run — no UEC bitstream walk, no ISO parameter
+    // sweep. Their absence cascades honestly: no uec → its hints can't fire
+    // (compose reads the Options) and a still-present ISO block nulls its
+    // unused_error_correction parameter.
+    let skip_uec = skip_checks.contains(&crate::ladder::ScoreCheck::Uec);
+    let skip_iso = skip_checks.contains(&crate::ladder::ScoreCheck::Iso15415);
+    let uec_report = if skip_uec {
+        None
+    } else {
+        match (
+            &detection.masked_stream,
+            detection.version,
+            detection.ec,
+            detection.mask,
+        ) {
+            (Some(stream), Some(version), Some(ec), Some(mask)) => {
+                uec::compute(&stream.bits, stream.bit_len, version, ec, mask)
+            }
+            _ => None,
         }
-        _ => None,
     };
-    let iso = match (detection.corners, detection.version, &structural) {
-        (Some(corners), Some(version), Some(s)) => {
-            iso15415::compute(sample_luma, corners, version, s, uec_report.as_ref())
+    let iso = if skip_iso {
+        None
+    } else {
+        match (detection.corners, detection.version, &structural) {
+            (Some(corners), Some(version), Some(s)) => {
+                iso15415::compute(sample_luma, corners, version, s, uec_report.as_ref())
+            }
+            _ => None,
         }
-        _ => None,
     };
     Ok(Some(compose(axes, structural, uec_report, iso, detection)))
 }
@@ -1086,6 +1101,7 @@ mod tests {
             detection,
             ScoreDepth::Full,
             &[],
+            &[],
             &CancelToken::new(),
             None,
         )
@@ -1100,5 +1116,71 @@ mod tests {
             score.axes
         );
         assert!(score.value >= 50, "score {}", score.value);
+    }
+
+    /// The section-skip seam: `score_skip_checks` nulls exactly the skipped
+    /// blocks, silences the UEC-driven hints with them, and leaves the
+    /// axis-based composite untouched — while the empty default stays
+    /// byte-identical (uec + iso present on a clean rqrr decode).
+    #[test]
+    fn skip_checks_null_their_sections_and_leave_value_alone() {
+        use crate::ladder::ScoreCheck;
+        let code =
+            qrcode::QrCode::with_error_correction_level(b"https://example.com", qrcode::EcLevel::Q)
+                .unwrap();
+        let img = code
+            .render::<image::Luma<u8>>()
+            .module_dimensions(8, 8)
+            .build();
+        let mut png = Vec::new();
+        image::DynamicImage::ImageLuma8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let planes = normalize(&ImageInput::encoded(&png), &Limits::default()).unwrap();
+        let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
+        let detection = &outcome.merged[0];
+
+        let run = |checks: &[crate::ladder::ScoreCheck]| {
+            evaluate(
+                &planes.luma,
+                detection,
+                ScoreDepth::Full,
+                &[],
+                checks,
+                &CancelToken::new(),
+                None,
+            )
+            .unwrap()
+            .expect("axes always run here")
+        };
+
+        // Default: every section present on a clean bitstream decode.
+        let (full, _) = run(&[]);
+        assert!(full.uec.is_some(), "clean rqrr decode must measure UEC");
+        assert!(full.iso15415.is_some(), "corners + version must yield ISO");
+
+        // Both skipped: sections null, hints silent, composite unchanged.
+        let (skipped, hints) = run(&[ScoreCheck::Uec, ScoreCheck::Iso15415]);
+        assert!(skipped.uec.is_none());
+        assert!(skipped.iso15415.is_none());
+        assert!(
+            !hints
+                .iter()
+                .any(|h| matches!(h, Hint::LowCorrectionMargin { .. })),
+            "no uec → its miscorrection hint cannot fire"
+        );
+        assert_eq!(
+            skipped.value, full.value,
+            "checks are surface truth — the axis composite never moves"
+        );
+
+        // UEC alone: ISO still present, its UEC parameter honestly null.
+        let (uec_only, _) = run(&[ScoreCheck::Uec]);
+        assert!(uec_only.uec.is_none());
+        let iso = uec_only.iso15415.expect("iso block still runs");
+        assert!(
+            iso.unused_error_correction.is_none(),
+            "no uec input → the ISO parameter reads null, never faked"
+        );
     }
 }

@@ -260,3 +260,30 @@ fn score_skip_axes_flag_threads_and_rejects_typos() {
     assert_eq!(out.status.code(), Some(2), "typo'd axis = usage error");
     assert!(String::from_utf8_lossy(&out.stderr).contains("unknown stress axis"));
 }
+
+/// --score-skip-checks nulls the skipped sections on the wire (composite
+/// untouched) and a typo'd check is a loud exit-2.
+#[test]
+fn score_skip_checks_flag_threads_and_rejects_typos() {
+    let out = qrscan()
+        .args(["--budget-ms", "0", "--score-skip-checks", "uec,iso15415"])
+        .arg(fixture("clean/gen_v2_l.png"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(report["score"]["uec"].is_null(), "skipped uec must be null");
+    assert!(
+        report["score"]["iso15415"].is_null(),
+        "skipped iso15415 must be null"
+    );
+    assert!(report["score"]["value"].is_number(), "composite still scores");
+
+    let out = qrscan()
+        .args(["--score-skip-checks", "margin"])
+        .arg(fixture("clean/gen_v2_l.png"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "typo'd check = usage error");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown score check"));
+}

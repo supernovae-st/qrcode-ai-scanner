@@ -15,6 +15,7 @@ async function scan(image, options = {}) {
     options.maxPixels,
     options.budgetMs,
     options.scoreSkipAxes,
+    options.scoreSkipChecks,
   );
   return JSON.parse(json);
 }
@@ -28,6 +29,7 @@ function scanSync(image, options = {}) {
       options.maxPixels,
       options.budgetMs,
       options.scoreSkipAxes,
+      options.scoreSkipChecks,
     ),
   );
 }

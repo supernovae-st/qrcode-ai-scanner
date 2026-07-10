@@ -11,7 +11,7 @@
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use qrcode_ai_scanner::{ImageInput, Limits, ScanProfile, Scanner, StressAxis};
+use qrcode_ai_scanner::{ImageInput, Limits, ScanProfile, Scanner, ScoreCheck, StressAxis};
 
 /// Server deployments SHOULD lower the input caps (the library default —
 /// 10000px / 64MP — is a desktop/CLI posture): pass `maxDimension` /
@@ -33,6 +33,7 @@ fn profile_from(
     name: Option<&str>,
     budget_ms: Option<u32>,
     score_skip_axes: Option<Vec<String>>,
+    score_skip_checks: Option<Vec<String>>,
 ) -> Result<ScanProfile> {
     let profile = match name {
         None => ScanProfile::Full,
@@ -61,9 +62,25 @@ fn profile_from(
             })
             .collect::<Result<_>>()?,
     };
+    // scoreSkipChecks: report SECTIONS excluded at the source (`uec` /
+    // `iso15415`) — never computed, wire carries null, UEC-driven hints
+    // silent, composite untouched. Same loud-typo posture as the axes.
+    let checks: Vec<ScoreCheck> = match &score_skip_checks {
+        None => Vec::new(),
+        Some(names) => names
+            .iter()
+            .map(|n| {
+                ScoreCheck::from_name(n).ok_or_else(|| {
+                    Error::from_reason(format!(
+                        "unknown score check `{n}` — expected uec | iso15415"
+                    ))
+                })
+            })
+            .collect::<Result<_>>()?,
+    };
     // budgetMs overrides the preset's wall-clock budget (0 = unbounded) —
     // server embedders bound tail latency without giving up the deep ladder.
-    if budget_ms.is_none() && skip.is_empty() {
+    if budget_ms.is_none() && skip.is_empty() && checks.is_empty() {
         return Ok(profile);
     }
     let mut config = profile.config();
@@ -71,6 +88,7 @@ fn profile_from(
         config.budget_ms = (ms > 0).then_some(u64::from(ms));
     }
     config.score_skip_axes = skip;
+    config.score_skip_checks = checks;
     Ok(ScanProfile::Custom(config))
 }
 
@@ -118,6 +136,12 @@ impl Task for ScanTask {
 /// event loop). Returns the ScanReport as a JSON string (index.js parses).
 /// `profile`: full | fast | frame (default full). The promise rejects with
 /// `[QRS-xxx]`-tagged errors; "no QR found" RESOLVES with empty detections.
+// allow, not expect: the napi macro re-emits the fn, breaking #[expect]
+// fulfillment tracking — the lint fires on the generated item.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the napi signature IS the cross-binding contract (profile + signal + caps + budget + skips)"
+)]
 #[napi(js_name = "scanJson")]
 pub fn scan(
     image: Buffer,
@@ -127,10 +151,16 @@ pub fn scan(
     max_pixels: Option<i64>,
     budget_ms: Option<u32>,
     score_skip_axes: Option<Vec<String>>,
+    score_skip_checks: Option<Vec<String>>,
 ) -> Result<AsyncTask<ScanTask>> {
     let task = ScanTask {
         bytes: image.to_vec(),
-        profile: profile_from(profile.as_deref(), budget_ms, score_skip_axes)?,
+        profile: profile_from(
+            profile.as_deref(),
+            budget_ms,
+            score_skip_axes,
+            score_skip_checks,
+        )?,
         limits: limits_from(max_dimension, max_pixels),
     };
     Ok(AsyncTask::with_optional_signal(task, signal))
@@ -145,12 +175,14 @@ pub fn scan_sync(
     max_pixels: Option<i64>,
     budget_ms: Option<u32>,
     score_skip_axes: Option<Vec<String>>,
+    score_skip_checks: Option<Vec<String>>,
 ) -> Result<String> {
     let scanner = Scanner::builder()
         .profile(profile_from(
             profile.as_deref(),
             budget_ms,
             score_skip_axes,
+            score_skip_checks,
         )?)
         .limits(limits_from(max_dimension, max_pixels))
         .build();

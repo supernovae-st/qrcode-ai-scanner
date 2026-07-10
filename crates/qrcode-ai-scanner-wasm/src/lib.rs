@@ -5,7 +5,9 @@
 //! Both return the full `ScanReport` contract as a JS object (snake_case,
 //! `raw` as base64) — identical shape to the server/CLI surfaces.
 
-use qrcode_ai_scanner::{ImageInput, Limits, ScanConfig, ScanProfile, Scanner, StressAxis};
+use qrcode_ai_scanner::{
+    ImageInput, Limits, ScanConfig, ScanProfile, Scanner, ScoreCheck, StressAxis,
+};
 use serde::Serialize as _;
 use wasm_bindgen::prelude::*;
 
@@ -13,6 +15,7 @@ fn config_from(
     name: Option<String>,
     budget_ms: Option<f64>,
     score_skip_axes: Option<Vec<String>>,
+    score_skip_checks: Option<Vec<String>>,
 ) -> Result<ScanProfile, JsError> {
     let profile = match name.as_deref() {
         None => ScanProfile::Full,
@@ -41,11 +44,27 @@ fn config_from(
             })
             .collect::<Result<_, _>>()?,
     };
+    // Section skips (`uec` / `iso15415`) ride the same seam: a host that
+    // displays neither block skips them at the source — never computed,
+    // wire carries null, UEC-driven hints silent. Same loud-typo posture.
+    let checks: Vec<ScoreCheck> = match &score_skip_checks {
+        None => Vec::new(),
+        Some(names) => names
+            .iter()
+            .map(|n| {
+                ScoreCheck::from_name(n).ok_or_else(|| {
+                    JsError::new(&format!(
+                        "unknown score check `{n}` — expected uec | iso15415"
+                    ))
+                })
+            })
+            .collect::<Result<_, _>>()?,
+    };
     // wasm runs the scan ON the caller's thread (browser main thread unless
     // the embedder uses a worker) — budget control is how a verify-while-
     // typing UI keeps the worst case bounded without giving up the deep
     // ladder. 0/negative = unbounded.
-    if budget_ms.is_none() && skip.is_empty() {
+    if budget_ms.is_none() && skip.is_empty() && checks.is_empty() {
         return Ok(profile);
     }
     let mut config: ScanConfig = profile.config();
@@ -58,6 +77,7 @@ fn config_from(
         config.budget_ms = (ms > 0.0).then_some(ms as u64);
     }
     config.score_skip_axes = skip;
+    config.score_skip_checks = checks;
     Ok(ScanProfile::Custom(config))
 }
 
@@ -105,6 +125,9 @@ fn run_scan(
 /// `score_skip_axes` (wire names, e.g. `["perspective","rotation"]`)
 /// excludes axes from scoring: their cells never run and the composite
 /// renormalizes engine-side — the generated-preview integration config.
+/// `score_skip_checks` (`["uec","iso15415"]`) excludes report SECTIONS the
+/// host does not display: never computed, wire carries null, and the
+/// UEC-driven hints never fire. The composite value does not move.
 #[wasm_bindgen]
 pub fn scan_image(
     bytes: &[u8],
@@ -113,10 +136,11 @@ pub fn scan_image(
     max_pixels: Option<f64>,
     budget_ms: Option<f64>,
     score_skip_axes: Option<Vec<String>>,
+    score_skip_checks: Option<Vec<String>>,
 ) -> Result<JsValue, JsError> {
     run_scan(
         ImageInput::encoded(bytes),
-        config_from(profile, budget_ms, score_skip_axes)?,
+        config_from(profile, budget_ms, score_skip_axes, score_skip_checks)?,
         max_dimension,
         max_pixels,
     )
@@ -134,8 +158,8 @@ pub fn scan_frame(
     budget_ms: Option<f64>,
 ) -> Result<JsValue, JsError> {
     let profile = match profile {
-        Some(_) => config_from(profile, budget_ms, None)?,
-        None => config_from(Some("frame".to_owned()), budget_ms, None)?,
+        Some(_) => config_from(profile, budget_ms, None, None)?,
+        None => config_from(Some("frame".to_owned()), budget_ms, None, None)?,
     };
     run_scan(ImageInput::rgba8(data, width, height), profile, None, None)
 }

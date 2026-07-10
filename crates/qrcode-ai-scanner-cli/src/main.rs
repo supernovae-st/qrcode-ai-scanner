@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
-use qrcode_ai_scanner::{ImageInput, ScanProfile, ScanReport, Scanner, StressAxis};
+use qrcode_ai_scanner::{ImageInput, ScanProfile, ScanReport, Scanner, ScoreCheck, StressAxis};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ProfileArg {
@@ -52,6 +52,13 @@ struct Cli {
     /// integration config (spec/04 § skipping axes).
     #[arg(long, value_delimiter = ',', value_name = "AXIS,...")]
     score_skip_axes: Vec<String>,
+
+    /// Report SECTIONS to exclude at the source (comma-separated: `uec`,
+    /// `iso15415`). Never computed, the wire carries null, the UEC-driven
+    /// hints never fire — the composite value does not move (spec/04
+    /// § skipping checks).
+    #[arg(long, value_delimiter = ',', value_name = "CHECK,...")]
+    score_skip_checks: Vec<String>,
 
     /// Human-readable summary instead of JSON.
     #[arg(long, short = 'p')]
@@ -170,9 +177,18 @@ fn main() -> ExitCode {
         };
         skip.push(axis);
     }
+    // --score-skip-checks: same loud-typo posture for report sections.
+    let mut checks = Vec::with_capacity(cli.score_skip_checks.len());
+    for name in &cli.score_skip_checks {
+        let Some(check) = ScoreCheck::from_name(name) else {
+            eprintln!("error: unknown score check `{name}` — expected uec | iso15415");
+            return ExitCode::from(2);
+        };
+        checks.push(check);
+    }
     // --budget-ms overrides the preset's wall-clock budget (0 = unbounded) —
     // the same semantics as Node `budgetMs` / WASM / Python / UniFFI.
-    let profile = if cli.budget_ms.is_none() && skip.is_empty() {
+    let profile = if cli.budget_ms.is_none() && skip.is_empty() && checks.is_empty() {
         cli.profile.into()
     } else {
         let mut config = ScanProfile::from(cli.profile).config();
@@ -180,6 +196,7 @@ fn main() -> ExitCode {
             config.budget_ms = (ms > 0).then_some(u64::from(ms));
         }
         config.score_skip_axes = skip;
+        config.score_skip_checks = checks;
         ScanProfile::Custom(config)
     };
     let scanner = Scanner::builder().profile(profile).build();

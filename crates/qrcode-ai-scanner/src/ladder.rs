@@ -98,6 +98,48 @@ pub struct ScanConfig {
     /// byte. Skipping ALL axes yields no score at all (an axis-less value
     /// would be fiction) — same outcome as `ScoreDepth::Off`.
     pub score_skip_axes: Vec<crate::report::StressAxis>,
+    /// Score SECTIONS excluded from the report — the same integration seam
+    /// as `score_skip_axes`, for report blocks instead of stress axes. A
+    /// host that displays neither the correction margin nor the ISO
+    /// parameters skips `uec` + `iso15415`: the sections are never computed
+    /// (no UEC bitstream walk · no ISO parameter sweep), the wire carries
+    /// `null`, and the UEC-driven hints never fire. The composite
+    /// `score.value` is axis-based and does NOT move — skipping checks is
+    /// surface truth, never score surgery. Empty (every profile's default)
+    /// = every section runs, byte for byte.
+    pub score_skip_checks: Vec<ScoreCheck>,
+}
+
+/// A skippable score SECTION — the same integration seam as
+/// [`crate::report::StressAxis`]-skipping, for report blocks instead of stress axes. A host
+/// that displays neither the correction margin nor the ISO parameters skips
+/// them at scan time: the sections are never computed, the wire carries
+/// `null`, and the UEC-driven hints never fire. Config-only (never
+/// serialized) — the report self-describes through the absent sections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoreCheck {
+    /// Unused-error-correction margin (`score.uec`) — skipping it also
+    /// silences the two hints it drives (the thin-margin priority path of
+    /// `raise_error_correction`, and `low_correction_margin`).
+    Uec,
+    /// ISO 15415-informed parameters (`score.iso15415`). Independent of
+    /// [`ScoreCheck::Uec`]: skipping UEC alone nulls only the
+    /// `unused_error_correction` parameter inside a still-present block.
+    Iso15415,
+}
+
+impl ScoreCheck {
+    /// Parse the wire name of the section (`uec` / `iso15415` — the
+    /// `score.*` field spellings). Same shape as [`crate::report::StressAxis::from_name`]:
+    /// `None` on anything else, so bindings can fail LOUD on a typo.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "uec" => Some(Self::Uec),
+            "iso15415" => Some(Self::Iso15415),
+            _ => None,
+        }
+    }
 }
 
 impl ScanConfig {
@@ -114,6 +156,7 @@ impl ScanConfig {
             max_engine_side: 2_048,
             score_depth: ScoreDepth::Full,
             score_skip_axes: Vec::new(),
+            score_skip_checks: Vec::new(),
         }
     }
 

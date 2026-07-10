@@ -4,6 +4,9 @@
 export * from "./report-types";
 import type { ScanReport, StressAxis } from "./report-types";
 
+/** A skippable report section (`score.uec` / `score.iso15415`) — config-only, never serialized. */
+export type ScoreCheck = "uec" | "iso15415";
+
 /** Scan profiles: quality gate · upload tool · camera frame. */
 export type ScanProfile = "full" | "fast" | "frame";
 
@@ -31,6 +34,14 @@ export interface ScanOptions {
    * photo surfaces omit this. Unknown names reject loudly.
    */
   scoreSkipAxes?: StressAxis[];
+  /**
+   * Report SECTIONS excluded at the source: never computed, the wire
+   * carries `null`, and the UEC-driven hints never fire. The composite
+   * value does not move — this is surface truth, not score surgery. Hosts
+   * that display neither the correction margin nor the ISO parameters pass
+   * `["uec", "iso15415"]`. Unknown names reject loudly.
+   */
+  scoreSkipChecks?: ScoreCheck[];
 }
 
 /** Async scan on the libuv pool — never blocks the event loop. */

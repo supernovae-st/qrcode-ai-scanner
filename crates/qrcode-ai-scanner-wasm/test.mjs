@@ -39,6 +39,20 @@ assert.equal(
   "budget 0 means unbounded",
 );
 
+// score_skip_axes (#6) + score_skip_checks (#7) positional contract: skipped
+// axes absent, skipped sections null, composite still scores, typos throw
+const cleanBytes = new Uint8Array(fixture("clean/gen_v2_l.png"));
+const skipped = scan_image(cleanBytes, "full", undefined, undefined, 0, ["perspective", "rotation"], ["uec", "iso15415"]);
+assert.equal(skipped.score.axes.length, 4, "six axes minus the two skipped");
+assert.equal(skipped.score.uec, null, "skipped uec must be null");
+assert.equal(skipped.score.iso15415, null, "skipped iso15415 must be null");
+assert.ok(Number.isInteger(skipped.score.value), "composite still scores");
+assert.throws(
+  () => scan_image(cleanBytes, "full", undefined, undefined, undefined, undefined, ["margin"]),
+  /unknown score check/,
+  "typo'd check must throw loudly",
+);
+
 // scan_frame: raw RGBA path (browser ImageData shape) — default frame profile
 const { side, rgba } = (() => {
   // decode the clean PNG via scan_image's own engine? No — build a trivial

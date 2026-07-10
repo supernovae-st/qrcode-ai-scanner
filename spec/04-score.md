@@ -35,6 +35,21 @@ canonical case: a generated preview has no capture geometry, so builder
 integrations skip `perspective` + `rotation`; photo-input surfaces keep the
 full six.
 
+### Skipping checks (integration config)
+
+The same seam exists for report SECTIONS (`ScanConfig.score_skip_checks` ·
+bindings `score_skip_checks` / `scoreSkipChecks`, section names `uec` |
+`iso15415`): a skipped section is never computed — no UEC bitstream replay,
+no ISO parameter sweep — and the wire carries `null` for it. Absence
+cascades honestly: without `uec`, the two UEC-driven hints (`thin-margin`
+priority of `raise_error_correction`, and `low_correction_margin`)
+structurally cannot fire, and a still-present `iso15415` block reports its
+`unused_error_correction` parameter as `null`, never a faked value. The
+composite `score.value` is axis-based and **does not move** — skipping
+checks is surface truth, not score surgery. The canonical case: a host that
+displays neither the correction margin nor the ISO parameters (the builder
+panel) skips both; verifier-style surfaces keep them.
+
 ### Structural caps (applied after the weighted sum)
 
 | Condition | Cap |

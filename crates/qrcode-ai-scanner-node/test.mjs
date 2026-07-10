@@ -51,4 +51,15 @@ assert.throws(
   "typo'd axis must reject loudly",
 );
 
+// scoreSkipChecks: skipped sections null on the wire; composite untouched; typos reject
+const noChecks = scanSync(clean, { profile: "full", budgetMs: 0, scoreSkipChecks: ["uec", "iso15415"] });
+assert.equal(noChecks.score.uec, null, "skipped uec must be null");
+assert.equal(noChecks.score.iso15415, null, "skipped iso15415 must be null");
+assert.ok(Number.isInteger(noChecks.score.value), "composite still scores");
+assert.throws(
+  () => scanSync(clean, { scoreSkipChecks: ["margin"] }),
+  /unknown score check/,
+  "typo'd check must reject loudly",
+);
+
 console.log(`node binding OK — native ${version()}`);

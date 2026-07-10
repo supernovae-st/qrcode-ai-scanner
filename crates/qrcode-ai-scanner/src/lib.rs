@@ -38,7 +38,7 @@ mod transform;
 pub use error::{Result, ScanError};
 pub use gs1::Gs1Element;
 pub use input::{ImageInput, Limits};
-pub use ladder::{CancelToken, ScanConfig, ScanProfile, ScoreDepth};
+pub use ladder::{CancelToken, ScanConfig, ScanProfile, ScoreCheck, ScoreDepth};
 pub use payload::Payload;
 pub use report::{
     AxisScore, Charset, DecodedContent, Detection, EcLevel, EngineKind, Grade, Hint,
@@ -127,6 +127,7 @@ impl Scanner {
                         detection,
                         depth,
                         &self.config.score_skip_axes,
+                        &self.config.score_skip_checks,
                         cancel,
                         deadline,
                     )
