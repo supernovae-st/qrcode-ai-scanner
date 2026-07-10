@@ -36,7 +36,7 @@ One Rust core, **five published surfaces** — all return the same versioned
 Per-surface guides in [`docs/`](docs/) · code examples in the Quick start below.
 
 **📱 Mobile + cross-platform:** Kotlin/Android is **live on JitPack**
-(`com.github.supernovae-st:qrcode-ai-scanner:v0.7.2` — use the latest tag).
+(`com.github.supernovae-st:qrcode-ai-scanner:v0.8.0` — use the latest tag).
 Swift/iOS (UniFFI → SwiftPM) and Flutter/Dart (flutter_rust_bridge →
 pub.dev) are built and CI-green, returning the same `ScanReport`; their
 registries land across v0.7.x — the one-time first-publish steps (pub.dev
