@@ -277,7 +277,10 @@ fn score_skip_checks_flag_threads_and_rejects_typos() {
         report["score"]["iso15415"].is_null(),
         "skipped iso15415 must be null"
     );
-    assert!(report["score"]["value"].is_number(), "composite still scores");
+    assert!(
+        report["score"]["value"].is_number(),
+        "composite still scores"
+    );
 
     let out = qrscan()
         .args(["--score-skip-checks", "margin"])

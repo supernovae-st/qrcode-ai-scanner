@@ -4,7 +4,7 @@ All notable changes to this workspace. Every surface versions together — the R
 crate + CLI, the npm node + wasm packages, the Python wheel, and the
 Kotlin/Android · Swift/iOS · Flutter bindings.
 
-## Unreleased
+## 0.7.2 — 2026-07-10
 
 ### Added
 

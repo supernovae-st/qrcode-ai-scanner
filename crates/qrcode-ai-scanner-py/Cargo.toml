@@ -3,7 +3,7 @@
 # inherit `workspace = true`.
 [package]
 name = "qrcode-ai-scanner-py"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 rust-version = "1.88"
 license = "AGPL-3.0-or-later"

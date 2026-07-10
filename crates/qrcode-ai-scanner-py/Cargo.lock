@@ -628,7 +628,7 @@ dependencies = [
 
 [[package]]
 name = "qrcode-ai-scanner"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "base64",
  "encoding_rs",
@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "qrcode-ai-scanner-py"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "pyo3",
  "pythonize",
