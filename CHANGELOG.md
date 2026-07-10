@@ -4,6 +4,20 @@ All notable changes to this workspace. Every surface versions together — the R
 crate + CLI, the npm node + wasm packages, the Python wheel, and the
 Kotlin/Android · Swift/iOS · Flutter bindings.
 
+## 0.8.1 — 2026-07-10
+
+### Fixed
+
+- **The npm native package ships its loader** — `native.js`/`native.d.ts`
+  are napi-generated and were gitignored; the publish job checks out fresh
+  and never regenerates them, and npm silently drops missing `files`
+  entries, so every fresh `npm i @supernovae-st/qrcode-ai-scanner` since
+  0.5.0 failed at require time (`Cannot find module './native.js'`) — the
+  per-platform binaries were fine, the 300-byte loader was the hole. Caught
+  by the first true fresh-consumer smoke. The generated pair is now
+  committed (stable: it derives from binaryName+targets, not code) and
+  `npm pack` proves the tarball. The wasm package was never affected.
+
 ## 0.8.0 — 2026-07-10
 
 ### Changed

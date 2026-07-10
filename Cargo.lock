@@ -1496,7 +1496,7 @@ dependencies = [
 
 [[package]]
 name = "qrcode-ai-scanner"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "base64",
  "criterion",
@@ -1519,7 +1519,7 @@ dependencies = [
 
 [[package]]
 name = "qrcode-ai-scanner-cli"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "clap",
  "image",
@@ -1530,7 +1530,7 @@ dependencies = [
 
 [[package]]
 name = "qrcode-ai-scanner-node"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "napi",
  "napi-build",
@@ -1541,7 +1541,7 @@ dependencies = [
 
 [[package]]
 name = "qrcode-ai-scanner-wasm"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "qrcode-ai-scanner",
  "rxing",
@@ -2342,7 +2342,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "image",
  "qrcode",
