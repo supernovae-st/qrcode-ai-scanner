@@ -9,6 +9,8 @@ use std::process::ExitCode;
 use clap::{Parser, ValueEnum};
 use qrcode_ai_scanner::{ImageInput, ScanProfile, ScanReport, Scanner, ScoreCheck, StressAxis};
 
+mod term;
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ProfileArg {
     /// Full ladder + full stress score (default).
@@ -31,7 +33,7 @@ impl From<ProfileArg> for ScanProfile {
 
 /// Scan a QR code image: decode + scannability score + hints.
 #[derive(Parser, Debug)]
-#[command(name = "qrscan", version, about)]
+#[command(name = "qrscan", version, about, styles = term::clap_styles())]
 struct Cli {
     /// Image file (PNG, JPEG, WebP, GIF).
     image: PathBuf,
@@ -94,6 +96,7 @@ fn sanitize_terminal(text: &str) -> String {
 }
 
 fn render_pretty(report: &ScanReport) {
+    let th = term::Theme::auto();
     match report.detections.first() {
         Some(d) => {
             println!("content   {}", sanitize_terminal(&d.content.text));
@@ -111,10 +114,15 @@ fn render_pretty(report: &ScanReport) {
                     .join("+")
             );
         }
-        None => println!("no QR code found"),
+        None => println!("{}", th.warn("no QR code found")),
     }
     if let Some(score) = &report.score {
-        println!("score     {}/100 ({:?})", score.value, score.grade);
+        let grade = format!("{:?}", score.grade);
+        println!(
+            "score     {} ({})",
+            th.grade_text(&grade, &format!("{}/100", score.value)),
+            grade
+        );
         for axis in &score.axes {
             println!(
                 "  {:12} {}/{}",
@@ -150,7 +158,10 @@ fn render_pretty(report: &ScanReport) {
     for hint in &report.hints {
         println!("hint      {hint:?}");
     }
-    println!("took      {:.0}ms", report.trace.total_ms);
+    println!(
+        "{}",
+        th.dim(&format!("took      {:.0}ms", report.trace.total_ms))
+    );
 }
 
 fn main() -> ExitCode {
@@ -159,7 +170,12 @@ fn main() -> ExitCode {
     let bytes = match std::fs::read(&cli.image) {
         Ok(bytes) => bytes,
         Err(error) => {
-            eprintln!("error: cannot read {}: {error}", cli.image.display());
+            let th = term::Theme::auto_stderr();
+            eprintln!(
+                "{} cannot read {}: {error}",
+                th.err_strong("✖"),
+                cli.image.display()
+            );
             return ExitCode::from(2);
         }
     };
@@ -169,9 +185,11 @@ fn main() -> ExitCode {
     let mut skip = Vec::with_capacity(cli.score_skip_axes.len());
     for name in &cli.score_skip_axes {
         let Some(axis) = StressAxis::from_name(name) else {
+            let th = term::Theme::auto_stderr();
             eprintln!(
-                "error: unknown stress axis `{name}` — expected resolution | blur | \
-                 contrast | perspective | rotation | lighting"
+                "{} unknown stress axis `{name}` — expected resolution | blur | \
+                 contrast | perspective | rotation | lighting",
+                th.err_strong("✖")
             );
             return ExitCode::from(2);
         };
@@ -181,7 +199,11 @@ fn main() -> ExitCode {
     let mut checks = Vec::with_capacity(cli.score_skip_checks.len());
     for name in &cli.score_skip_checks {
         let Some(check) = ScoreCheck::from_name(name) else {
-            eprintln!("error: unknown score check `{name}` — expected uec | iso15415");
+            let th = term::Theme::auto_stderr();
+            eprintln!(
+                "{} unknown score check `{name}` — expected uec | iso15415",
+                th.err_strong("✖")
+            );
             return ExitCode::from(2);
         };
         checks.push(check);
@@ -203,7 +225,8 @@ fn main() -> ExitCode {
     let report = match scanner.scan(ImageInput::encoded(&bytes)) {
         Ok(report) => report,
         Err(error) => {
-            eprintln!("error: {} [{}]", error, error.code());
+            let th = term::Theme::auto_stderr();
+            eprintln!("{} {} [{}]", th.err_strong("✖"), error, error.code());
             return ExitCode::from(2);
         }
     };
@@ -217,7 +240,11 @@ fn main() -> ExitCode {
                 eprintln!("no QR code found — no score");
                 return ExitCode::from(1);
             }
-            eprintln!("error: the frame profile computes no score (use --profile full|fast)");
+            let th = term::Theme::auto_stderr();
+            eprintln!(
+                "{} the frame profile computes no score (use --profile full|fast)",
+                th.err_strong("✖")
+            );
             return ExitCode::from(2);
         };
         println!("{}", score.value);
@@ -227,7 +254,8 @@ fn main() -> ExitCode {
         match serde_json::to_string_pretty(&report) {
             Ok(json) => println!("{json}"),
             Err(error) => {
-                eprintln!("error: serialization failed: {error}");
+                let th = term::Theme::auto_stderr();
+                eprintln!("{} serialization failed: {error}", th.err_strong("✖"));
                 return ExitCode::from(2);
             }
         }
