@@ -12,20 +12,21 @@ the dates in parentheses point at the incident.
 - The wire report itself is additive-only forever; semantic score changes
   bump `score_contract` inside the report, not just the crate version.
 
-## 1 · Bump — 8 surfaces, one commit
+## 1 · Bump — one command, one commit
 
-`version = "X.Y.Z"` in: workspace `Cargo.toml` · `bindings/flutter/rust/Cargo.toml`
-· `crates/qrcode-ai-scanner-py/Cargo.toml` · `crates/qrcode-ai-scanner-uniffi/Cargo.toml`
-· the core pin inside `crates/qrcode-ai-scanner-cli/Cargo.toml` ·
-`bindings/flutter/pubspec.yaml` (`version:`) ·
-`bindings/kotlin/qrcodeaiscanner/build.gradle.kts` ·
-`crates/qrcode-ai-scanner-node/package.json`.
+Bump the workspace `Cargo.toml` version, then:
 
-Then regenerate the FIVE lockfiles (workspace, py, uniffi, flutter/rust,
-fuzz): `cargo update -w --manifest-path <m> --offline` each. A forgotten
-mirror is caught by the mobile.yml version gate at tag time — but catching
-it locally saves a round trip (replicate: the `v()` one-liners in
-mobile.yml's "versions agree" step).
+```bash
+cargo run -p xtask -- sync-version    # mirrors every publish surface + doc pins
+```
+
+It rewrites the 8 hand-spelled surfaces (`bindings/flutter/rust/Cargo.toml`
+· py · uniffi · the cli core pin · `pubspec.yaml` · `build.gradle.kts` ·
+`package.json`) **and** the version-pinned doc coordinates (JitPack lines
+in `bindings/kotlin/README.md` + root `README.md`), then prints the
+five-lockfile regeneration loop (workspace, py, uniffi, flutter/rust,
+fuzz). `--check` verifies without writing (exit 1 on drift) — the local
+twin of the mobile.yml version gate, which stays the CI enforcement.
 
 **Version-pinned docs ride the same commit**: the JitPack coordinate in
 `bindings/kotlin/README.md` AND the root `README.md` mobile paragraph

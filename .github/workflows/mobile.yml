@@ -43,7 +43,8 @@ jobs:
       # The uniffi + py crates are workspace-EXCLUDED, so they can't inherit
       # `version.workspace = true` — their versions (and the Kotlin module's) are
       # hand-spelled and silently drift from the workspace SSOT. Catch it here on
-      # every PR (the `xtask sync-version` the plan references doesn't exist yet).
+      # every PR (`cargo run -p xtask -- sync-version` rewrites the surfaces
+      # locally; this gate stays the CI enforcement — belt and braces).
       - name: versions agree across all publish surfaces
         run: |
           v() { grep -m1 -E '^version' "$1" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'; }

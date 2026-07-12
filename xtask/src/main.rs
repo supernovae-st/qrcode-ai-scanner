@@ -27,6 +27,7 @@
 mod external;
 mod rescue_stress;
 mod rotation_sweep;
+mod sync_version;
 
 /// Loud allocator — every single allocation request ≥ 1 GiB prints its size
 /// before being served. The CI runner died on a silent 14 GiB request from
@@ -107,6 +108,15 @@ fn main() {
         Some("gen-external-manifest") => external::generate(),
         Some("rescue-stress") => rescue_stress::run(),
         Some("rotation-sweep") => rotation_sweep::run(),
+        Some("sync-version") => {
+            let flags: Vec<String> = args.collect();
+            let check = flags.iter().any(|f| f == "--check");
+            if flags.iter().any(|f| f != "--check") {
+                eprintln!("usage: xtask sync-version [--check]");
+                std::process::exit(2);
+            }
+            sync_version::run(check);
+        }
         Some("corpus-report") => {
             let flags: Vec<String> = args.collect();
             let write = flags.iter().any(|f| f == "--write");
@@ -131,7 +141,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: xtask <gen-fixtures | gen-external-manifest | corpus-report [--write | --external] | rescue-stress | baseline --bin <p>>"
+                "usage: xtask <gen-fixtures | gen-external-manifest | corpus-report [--write | --external] | rescue-stress | sync-version [--check] | baseline --bin <p>>"
             );
             std::process::exit(2);
         }
