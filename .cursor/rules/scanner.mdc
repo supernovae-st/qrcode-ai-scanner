@@ -1,0 +1,26 @@
+---
+description: qrcode-ai-scanner laws — additive wire, determinism, the judge role
+alwaysApply: true
+---
+
+# Scanner laws (full brief: AGENTS.md)
+
+- PUBLIC engine on six registries: the `ScanReport` wire is
+  additive-only forever; score semantic changes bump `score_contract`;
+  public enums stay `#[non_exhaustive]`.
+- "No QR found" is `Ok` with empty detections — `Err` = `QRS-001..005`
+  only (stable registry, never reused).
+- Determinism: `budget_ms: None` must stay strictly reproducible —
+  no RNG, no clocks in the scan path.
+- Zero `unwrap`/`expect`/`panic!` in production (lint-denied); engine
+  panics degrade to no-score at the boundary, never a crash.
+- Decoded text is attacker-controlled — strip terminal controls on any
+  human echo; colour only via the CLI's term.rs seam.
+- Gates: `cargo nextest run --workspace` + doc tests + clippy
+  all-features -D warnings + `scripts/check-type-parity.py` +
+  `cargo +1.88 check --locked` + `xtask corpus-report`.
+- Release = bump workspace + `xtask sync-version` (9 surfaces) + tag;
+  RELEASING.md is the ritual. Downstream repos pin this version as
+  "the judge" — score honesty is a contract.
+- Commits: `type(scope): lowercase` + `Co-Authored-By: Nika 🦋
+  <nika@supernovae.studio>`.

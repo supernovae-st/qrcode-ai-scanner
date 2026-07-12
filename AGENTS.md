@@ -1,13 +1,16 @@
 # AGENTS.md — qrcode-ai-scanner
 
-Instructions for AI coding agents (Claude Code, Cursor, …) working in this
-repo. Humans: start at [README.md](README.md).
+Instructions for AI coding agents (Codex · Cursor · opencode · any
+harness) working in this repo. Humans: start at [README.md](README.md);
+releases follow [RELEASING.md](RELEASING.md) to the letter. Cursor also
+loads `.cursor/rules/scanner.mdc` (condensed always-on laws).
 
 ## What this is
 
-A Rust workspace producing FOUR artifacts off one core — QR/barcode
-decoding + scannability scoring, specialty: artistic/AI-generated codes.
-Everything runs **locally** (no network calls anywhere in the library).
+A Rust workspace producing EIGHT publish surfaces off one core —
+QR/barcode decoding + scannability scoring, specialty: artistic/
+AI-generated codes. Everything runs **locally** (no network calls
+anywhere in the library).
 
 | Path | Artifact | Registry |
 |---|---|---|
@@ -15,6 +18,16 @@ Everything runs **locally** (no network calls anywhere in the library).
 | `crates/qrcode-ai-scanner-cli` | `qrscan` binary | crates.io |
 | `crates/qrcode-ai-scanner-node` | `@supernovae-st/qrcode-ai-scanner` (napi) | npm |
 | `crates/qrcode-ai-scanner-wasm` | `@supernovae-st/qrcode-ai-scanner-wasm` | npm |
+| `crates/qrcode-ai-scanner-py` | `qrcode-ai-scanner` (PyO3, workspace-excluded) | PyPI |
+| `bindings/flutter` | `qrcode_ai_scanner` (FRB + cargokit) | pub.dev |
+| `bindings/kotlin` | `com.github.supernovae-st:qrcode-ai-scanner` | JitPack |
+| `bindings/swift` | `QrcodeAiScanner` (xcframework, tag-pinned) | SwiftPM |
+
+**Downstream, this crate is "the judge"**: the generator's e2e floors,
+the qrt templates layer and the 306-template factory all score through
+the published version (pinned as `doctor::JUDGE_VERSION` in
+qrcode-ai-templates). A release here makes those repos re-measure —
+score honesty is a cross-repo contract.
 
 ## Ground truth, in priority order
 
@@ -33,13 +46,19 @@ Everything runs **locally** (no network calls anywhere in the library).
 cargo nextest run --workspace        # the test suite (count = whatever it prints)
 cargo clippy --workspace --all-targets   # MUST stay at 0 warnings (pedantic)
 cargo fmt --all
+cargo +1.88 check --locked           # MSRV floor
 python3 scripts/check-type-parity.py # Rust ↔ TS ↔ JSON-Schema drift gate
 cargo run -p xtask -- corpus-report  # decode-rate table from corpus.toml
+cargo run -p xtask -- sync-version [--check]  # one source → all 9 version surfaces (incl. doc pins)
 cargo run -p xtask -- gen-fixtures   # regenerate deterministic fixtures
 ./scripts/build-wasm.sh              # wasm pkg (NEEDS binaryen ≥130 on PATH)
 node crates/qrcode-ai-scanner-node/test.mjs   # node smoke (build first: npm run build)
 node crates/qrcode-ai-scanner-wasm/test.mjs   # wasm smoke (build first)
 ```
+
+Deep checks (weekly CI + judge-bump moments): `xtask corpus-report
+--external` (533-line external truth) · cargo-mutants · fuzz ×4 ·
+rescue-stress (`rescue_wrong == 0` is a hard gate).
 
 ## Hard invariants (breaking these fails CI or review)
 
@@ -59,7 +78,11 @@ node crates/qrcode-ai-scanner-wasm/test.mjs   # wasm smoke (build first)
   symbologies must never fabricate those fields.
 - Decoded QR text is **attacker-controlled**: any new parser over it must
   be boundary-safe (see `gs1.rs` `split_head`) and fuzz-covered
-  (`fuzz/fuzz_targets/fuzz_classify_text.rs`).
+  (`fuzz/fuzz_targets/fuzz_classify_text.rs`); any human-facing echo
+  strips terminal controls (`sanitize_terminal` in the CLI).
+- Colour only through `crates/qrcode-ai-scanner-cli/src/term.rs` (one
+  seam per binary · `NO_COLOR > CLICOLOR_FORCE > TTY` · JSON and
+  `--score-only` never carry an escape).
 
 ## Gotchas that have bitten before
 
