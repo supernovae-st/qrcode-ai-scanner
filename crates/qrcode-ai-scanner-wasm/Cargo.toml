@@ -13,9 +13,9 @@ authors.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# rqrr-only core: rxing's unconditional chrono dep needs wasm_support wiring
-# and doubles the bundle — rqrr alone covers the editor verify path; revisit
-# with size numbers if artistic-decode rates in-browser demand the dual build.
+# dual-engine build: rxing rides along since the artistic-decode rates
+# demanded it (the wasm_support wiring landed); SIMD128 is enabled at
+# publish time by scripts/build-wasm.sh.
 qrcode-ai-scanner = { path = "../qrcode-ai-scanner", default-features = false, features = [
   "engine-rqrr",
   "engine-rxing",

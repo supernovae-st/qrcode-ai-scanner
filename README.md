@@ -38,10 +38,8 @@ Per-surface guides in [`docs/`](docs/) · code examples in the Quick start below
 **📱 Mobile + cross-platform:** Kotlin/Android is **live on JitPack**
 (`com.github.supernovae-st:qrcode-ai-scanner:v0.8.1` — use the latest tag).
 Swift/iOS (UniFFI → SwiftPM) and Flutter/Dart (flutter_rust_bridge →
-pub.dev) are built and CI-green, returning the same `ScanReport`; their
-registries land across v0.7.x — the one-time first-publish steps (pub.dev
-account claim, SwiftPM xcframework pin) are in motion. Consult each
-binding's README for the current install path:
+pub.dev) are built and CI-green, returning the same `ScanReport`.
+Consult each binding's README for the current install path:
 [`bindings/kotlin/`](bindings/kotlin/), [`bindings/swift/`](bindings/swift/), and
 [`bindings/flutter/`](bindings/flutter/).
 
@@ -139,7 +137,7 @@ hand-typed.
 | symbology | 12 | 12 | 100% | 3 |
 <!-- corpus-report:end -->
 
-### Measured accuracy — external corpora (2026-06-11, v0.3.0)
+### Measured accuracy — external corpora (`corpus-external.tsv` is the living truth)
 
 Measured against public ground truth and production data. The corpora are
 not vendored (30 MB of third-party/production images) — the measured state

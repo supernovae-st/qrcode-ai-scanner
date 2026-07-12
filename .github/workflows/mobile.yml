@@ -58,6 +58,7 @@ jobs:
             [kotlin]="$(v bindings/kotlin/qrcodeaiscanner/build.gradle.kts)"
             [node]="$(vq crates/qrcode-ai-scanner-node/package.json)"
             [flutter]="$(v bindings/flutter/pubspec.yaml)"
+            [flutter-rust]="$(v bindings/flutter/rust/Cargo.toml)"
           )
           fail=0
           for k in "${!got[@]}"; do
