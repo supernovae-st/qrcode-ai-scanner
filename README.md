@@ -22,8 +22,9 @@ photo-captured QR codes. Deterministic, sovereign, pure Rust.
 
 ## Install · pick your surface
 
-One Rust core, **five published surfaces** · all return the same versioned
-[`ScanReport`](spec/) contract (mobile bindings ship next, below).
+One Rust core, **six published surfaces** · the five below plus Kotlin/Android
+live on JitPack (mobile paragraph under the table) · all return the same
+versioned [`ScanReport`](spec/) contract.
 
 | Surface | Package | Install | One-liner |
 |---|---|---|---|
