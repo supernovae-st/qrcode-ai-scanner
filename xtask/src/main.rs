@@ -7,6 +7,8 @@
 //!   never hand-typed).
 //! - `baseline` — run the corpus through a v0.2 CLI binary (`--bin <path>`)
 //!   and write `docs/baseline-v02.json` (the Phase A exit-gate comparator).
+//! - `advisor` — logo-placement margin lab: does margin-aware placement beat
+//!   the center default (QD-9 proto). Prints a deterministic report to stdout.
 
 #![allow(
     clippy::unwrap_used,
@@ -21,6 +23,8 @@ use std::path::{Path, PathBuf};
 
 use qrcode_ai_scanner::{ImageInput, ScanProfile, Scanner};
 use serde::Deserialize;
+
+mod advisor;
 
 #[derive(Debug, Deserialize)]
 struct Corpus {
@@ -56,8 +60,16 @@ fn main() {
                 .expect("usage: xtask baseline --bin <path-to-v02-cli>");
             baseline(&bin);
         }
+        Some("advisor") => {
+            if let Err(e) = advisor::run() {
+                eprintln!("advisor failed: {e}");
+                std::process::exit(1);
+            }
+        }
         _ => {
-            eprintln!("usage: xtask <gen-fixtures | corpus-report [--write] | baseline --bin <p>>");
+            eprintln!(
+                "usage: xtask <gen-fixtures | corpus-report [--write] | baseline --bin <p> | advisor>"
+            );
             std::process::exit(2);
         }
     }
