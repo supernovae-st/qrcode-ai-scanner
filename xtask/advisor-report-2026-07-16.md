@@ -1,5 +1,12 @@
 # advisor QD-9 · first real grid run · 2026-07-16
 
+**Judge versions (the law: measured numbers carry their judge)** ·
+first run = scanner **0.4.0** (the worktree's pre-rebase base 7f4d258) ·
+replication run same day = scanner **0.8.1** (rebased onto main 35e832f) ·
+**every summary number byte-identical across both judges** (84/180 · median
+margin gain 0.125 · grade gain 0.00 · center suboptimal 14/15 · decode 12/20
+vs 15/20): the verdict is judge-version-robust across the 0.4→0.8 arc.
+
 ```
 | text | M | 12 | quad-tr | 33 | no | — | — | — | — |
 | text | M | 12 | quad-bl | 33 | yes | 31 | 0.111 | F | Poor |
