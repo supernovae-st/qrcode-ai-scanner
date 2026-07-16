@@ -491,6 +491,7 @@ fn analyze(cells: &[Cell]) -> Analysis {
         total_cases: cases.len(),
         decoded_cells: cells.iter().filter(|c| c.m.decoded).count(),
         total_cells: cells.len(),
+        marginless_decoded,
         cases,
     }
 }
