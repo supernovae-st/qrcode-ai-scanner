@@ -131,11 +131,11 @@ hand-typed.
 <!-- corpus-report:begin -->
 | category | pass | total | rate | avg ms |
 |---|---|---|---|---|
-| artistic | 2 | 2 | 100% | 1103 |
-| clean | 13 | 13 | 100% | 7 |
-| degraded | 6 | 6 | 100% | 209 |
-| frontier | 6 | 6 | held | 1296 |
-| symbology | 12 | 12 | 100% | 3 |
+| artistic | 2 | 2 | 100% | 682 |
+| clean | 13 | 13 | 100% | 4 |
+| degraded | 8 | 8 | 100% | 101 |
+| frontier | 6 | 6 | held | 727 |
+| symbology | 12 | 12 | 100% | 1 |
 <!-- corpus-report:end -->
 
 ### Measured accuracy · external corpora (`corpus-external.tsv` is the living truth)

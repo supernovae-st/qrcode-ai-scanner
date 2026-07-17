@@ -253,3 +253,15 @@ path = "fixtures/frontier/scene-photo-overlay.webp"
 category = "frontier"
 expect = "fail"
 source = "qrcode-ai product output — QR over a busy photographic scene with icon overlay"
+
+[[entry]]
+path = "fixtures/degraded/quiet-ring-phase-1015.png"
+category = "degraded"
+expected = "https://qrcode-ai.com"
+source = "styled square render (gradient ink, 35px modules) — the bare 1015px frame; twin of quiet-ring-phase-1023"
+
+[[entry]]
+path = "fixtures/degraded/quiet-ring-phase-1023.png"
+category = "degraded"
+expected = "https://qrcode-ai.com"
+source = "the SAME symbol pixels + a 4px white ring — the perspective 26° cell flips near the resolution knee (score contract sensitivity, scan_integration.rs)"

@@ -794,3 +794,41 @@ fn skip_axes_config_reaches_the_report_and_the_hints() {
     assert_eq!(report.detections.len(), 1, "decode unaffected");
     assert!(report.score.is_none(), "all-skipped scores nothing");
 }
+
+// ---- quiet-ring phase sensitivity (characterized 2026-07-17) ----
+
+/// The composite is NOT invariant to the quiet ring around a symbol:
+/// the perspective cells warp the WHOLE frame, so the ring size changes
+/// the warp geometry and the effective module size it samples. A styled
+/// symbol living near the resolution knee can flip perspective cells
+/// with a ±4px ring change while decoding identically everywhere.
+///
+/// The committed pair proves it: identical symbol pixels (35px modules,
+/// dark-gradient ink), bare 1015px frame vs +4px white ring. Today the
+/// bare frame scores 100 (perspective 5/5) and the ringed one 88
+/// (perspective 2/5, knee 26°; axis weight 20 × 3/5 = the 12 points).
+/// Pure-black 6px/module symbols sit far from the knee and do not move.
+///
+/// This test is the finding's sentinel, not a floor: it asserts the
+/// sensitivity EXISTS (spread ≥ 8) and decode never flips. If a future
+/// score-contract change stabilizes the perspective sampling and this
+/// fails, retire it deliberately and note the band is closed.
+#[test]
+fn quiet_ring_shifts_perspective_cells_near_the_knee() {
+    let expected = "https://qrcode-ai.com";
+    let mut scores = Vec::new();
+    for name in ["quiet-ring-phase-1015.png", "quiet-ring-phase-1023.png"] {
+        let bytes = fixture(&format!("degraded/{name}"));
+        let report = Scanner::default()
+            .scan(ImageInput::encoded(&bytes))
+            .unwrap();
+        let d = report.detections.first().expect("decodes");
+        assert_eq!(d.content.text, expected, "{name}: decode never flips");
+        scores.push(report.score.expect("Full profile scores").value);
+    }
+    let spread = scores[0].abs_diff(scores[1]);
+    assert!(
+        spread >= 8,
+        "the quiet-ring sensitivity is characterized at ≥8 composite          points (measured 12 on 2026-07-17); got {scores:?} — if a score          contract change closed the band, retire this sentinel deliberately"
+    );
+}

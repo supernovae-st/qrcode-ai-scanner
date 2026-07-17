@@ -111,3 +111,26 @@ Same input + same depth ⇒ same score, always — modulo two documented
 bounds: a wall-clock budget can cut cells (machine-dependent), and
 cross-platform libm transcendentals may differ in the last ulp (a cell
 sitting exactly on a knee can flip between platforms).
+
+## Frame sensitivity (characterized, not hidden)
+
+The composite is a property of the FRAME, not of the symbol alone. Two
+documented consequences:
+
+- **Dilution** — a small symbol in a large frame scores lower (the stress
+  base downscales the whole frame to ≤512px, shrinking the symbol's
+  effective module size). Monotone and intended: a QR occupying 20% of a
+  poster IS harder to scan from afar.
+- **Quiet-ring phase** — near the resolution knee, the perspective cells
+  (which warp the whole frame) can flip with small quiet-ring changes:
+  identical styled symbol pixels measured 100 bare vs 88 with a +4px white
+  ring (perspective 5/5 → 2/5 at the 26° cell · axis weight 20 × 3/5 = 12
+  composite points), while pure-black comfortable-margin symbols do not
+  move. Sentinel: `quiet_ring_shifts_perspective_cells_near_the_knee`
+  (`scan_integration.rs`) over the committed
+  `fixtures/degraded/quiet-ring-phase-*.png` pair.
+
+Comparing two renders honestly therefore means comparing at equal frame:
+same canvas, same ring. Cross-engine parity batteries that deliver
+different canvas sizes for the same content are comparing two frames, not
+two symbols.
