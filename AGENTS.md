@@ -109,6 +109,5 @@ Conventional commits, lowercase descriptions.
 ## Consumers — don't break them
 
 - qrcode-ai.com landing (Nuxt): verify flow + import flow consume the
-  wasm package — integration pattern in `docs/guides/nuxt-verify.mdx`,
-  live PR: supernovae-studio/qrcode-ai_landing #11.
+  wasm package — integration pattern in `docs/guides/nuxt-verify.mdx`.
 - Future: Nika vision workflows consume the core crate.
