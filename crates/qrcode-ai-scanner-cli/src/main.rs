@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
-use qrcode_ai_scanner::{ImageInput, ScanProfile, ScanReport, Scanner, ScoreCheck, StressAxis};
+use qrcode_ai_scanner::{
+    AlphaBackground, ImageInput, ScanProfile, ScanReport, Scanner, ScoreCheck, StressAxis,
+};
 
 mod term;
 
@@ -56,11 +58,19 @@ struct Cli {
     score_skip_axes: Vec<String>,
 
     /// Report SECTIONS to exclude at the source (comma-separated: `uec`,
-    /// `iso15415`). Never computed, the wire carries null, the UEC-driven
-    /// hints never fire — the composite value does not move (spec/04
-    /// § skipping checks).
+    /// `iso15415`, `alpha_envelope`). Never computed, the wire carries
+    /// null, the section-driven hints never fire — the composite value
+    /// does not move (spec/04 § skipping checks).
     #[arg(long, value_delimiter = ',', value_name = "CHECK,...")]
     score_skip_checks: Vec<String>,
+
+    /// Background flattened under transparent pixels: `auto` (default —
+    /// the design's own content picks it, with an opposite-background
+    /// retry on zero detections), `white`, `black`, `#rrggbb` (the real
+    /// placement surface), or `none` (pre-0.9 drop-the-channel behavior).
+    /// Opaque inputs are untouched (spec/01 § alpha).
+    #[arg(long, value_name = "MODE")]
+    alpha_background: Option<String>,
 
     /// Human-readable summary instead of JSON.
     #[arg(long, short = 'p')]
@@ -93,6 +103,49 @@ fn sanitize_terminal(text: &str) -> String {
             }
         })
         .collect()
+}
+
+/// The alpha block of the pretty view: the flatten verdict line + the
+/// placement-envelope strip (every probe a tested background).
+fn render_alpha(alpha: &qrcode_ai_scanner::AlphaReport) {
+    println!(
+        "alpha     over {} · {:?} · coverage {:.0}% · content luma {}{}",
+        alpha.background,
+        alpha.mode,
+        alpha.coverage * 100.0,
+        alpha.content_luma,
+        if alpha.fallback_used {
+            " · rescued by the opposite background"
+        } else {
+            ""
+        }
+    );
+    if let Some(envelope) = &alpha.envelope {
+        let strip = envelope
+            .probes
+            .iter()
+            .map(|p| {
+                let mark = if p.decoded { '✓' } else { '✕' };
+                format!("{mark}{}", p.background_luma)
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let bands = envelope
+            .safe_luma
+            .iter()
+            .map(|b| format!("{}-{}", b[0], b[1]))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "  placement {:?} · safe luma {} · probes {strip}",
+            envelope.placement,
+            if bands.is_empty() {
+                "none".to_owned()
+            } else {
+                bands
+            },
+        );
+    }
 }
 
 fn render_pretty(report: &ScanReport) {
@@ -155,6 +208,9 @@ fn render_pretty(report: &ScanReport) {
             );
         }
     }
+    if let Some(alpha) = &report.alpha {
+        render_alpha(alpha);
+    }
     for hint in &report.hints {
         println!("hint      {hint:?}");
     }
@@ -162,6 +218,22 @@ fn render_pretty(report: &ScanReport) {
         "{}",
         th.dim(&format!("took      {:.0}ms", report.trace.total_ms))
     );
+}
+
+/// Parse `--alpha-background` with the CLI's loud-typo posture.
+fn parse_alpha_arg(arg: Option<&str>) -> Result<Option<AlphaBackground>, ExitCode> {
+    let Some(name) = arg else {
+        return Ok(None);
+    };
+    if let Some(mode) = AlphaBackground::from_name(name) {
+        return Ok(Some(mode));
+    }
+    let th = term::Theme::auto_stderr();
+    eprintln!(
+        "{} unknown alpha background `{name}` — expected auto | white | black | none | #rrggbb",
+        th.err_strong("✖")
+    );
+    Err(ExitCode::from(2))
 }
 
 fn main() -> ExitCode {
@@ -201,26 +273,36 @@ fn main() -> ExitCode {
         let Some(check) = ScoreCheck::from_name(name) else {
             let th = term::Theme::auto_stderr();
             eprintln!(
-                "{} unknown score check `{name}` — expected uec | iso15415",
+                "{} unknown score check `{name}` — expected uec | iso15415 | alpha_envelope",
                 th.err_strong("✖")
             );
             return ExitCode::from(2);
         };
         checks.push(check);
     }
+    // --alpha-background: same loud posture — a silently-defaulted typo
+    // would flip which image the whole ladder sees.
+    let alpha = match parse_alpha_arg(cli.alpha_background.as_deref()) {
+        Ok(alpha) => alpha,
+        Err(code) => return code,
+    };
     // --budget-ms overrides the preset's wall-clock budget (0 = unbounded) —
     // the same semantics as Node `budgetMs` / WASM / Python / UniFFI.
-    let profile = if cli.budget_ms.is_none() && skip.is_empty() && checks.is_empty() {
-        cli.profile.into()
-    } else {
-        let mut config = ScanProfile::from(cli.profile).config();
-        if let Some(ms) = cli.budget_ms {
-            config.budget_ms = (ms > 0).then_some(u64::from(ms));
-        }
-        config.score_skip_axes = skip;
-        config.score_skip_checks = checks;
-        ScanProfile::Custom(config)
-    };
+    let profile =
+        if cli.budget_ms.is_none() && skip.is_empty() && checks.is_empty() && alpha.is_none() {
+            cli.profile.into()
+        } else {
+            let mut config = ScanProfile::from(cli.profile).config();
+            if let Some(ms) = cli.budget_ms {
+                config.budget_ms = (ms > 0).then_some(u64::from(ms));
+            }
+            config.score_skip_axes = skip;
+            config.score_skip_checks = checks;
+            if let Some(alpha) = alpha {
+                config.alpha_background = alpha;
+            }
+            ScanProfile::Custom(config)
+        };
     let scanner = Scanner::builder().profile(profile).build();
     let report = match scanner.scan(ImageInput::encoded(&bytes)) {
         Ok(report) => report,

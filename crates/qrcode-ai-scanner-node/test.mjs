@@ -12,7 +12,7 @@ assert.equal(report.detections[0].payload.kind, "url");
 assert.equal(report.detections[0].symbology, "qr_code");
 assert.ok(report.score.value >= 70, `score ${report.score.value}`);
 assert.equal(report.score.uec.grade, "a");
-assert.equal(report.versions.score_contract, 3);
+assert.equal(report.versions.score_contract, 4);
 
 const sync = scanSync(clean, { profile: "frame" });
 assert.equal(sync.score, null, "frame profile skips scoring");
@@ -60,6 +60,23 @@ assert.throws(
   () => scanSync(clean, { scoreSkipChecks: ["margin"] }),
   /unknown score check/,
   "typo'd check must reject loudly",
+);
+
+// alphaBackground: a transparent input carries the alpha block (auto default);
+// an opaque input NEVER does; "none" restores the drop-the-channel path; typos reject
+const transparent = readFileSync(new URL("../../playground/public/samples/transparent.png", import.meta.url));
+const flat = scanSync(transparent, { profile: "full", budgetMs: 0 });
+assert.equal(flat.detections.length, 1, "the flatten rescues the canvas-export class");
+assert.equal(flat.alpha.background, "white", "dark content flattens over white");
+assert.equal(flat.alpha.envelope.placement, "light_only");
+assert.ok(!("alpha" in report), "opaque reports omit the key entirely");
+const dropped = scanSync(transparent, { profile: "full", budgetMs: 0, alphaBackground: "none" });
+assert.equal(dropped.detections.length, 0, "none = the pre-0.9 exporter-dependent path");
+assert.ok(!("alpha" in dropped), "none carries no block");
+assert.throws(
+  () => scanSync(clean, { alphaBackground: "transparent" }),
+  /unknown alpha background/,
+  "typo'd alpha background must reject loudly",
 );
 
 console.log(`node binding OK — native ${version()}`);

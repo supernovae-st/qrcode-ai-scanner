@@ -108,6 +108,12 @@ pub struct ScanConfig {
     /// surface truth, never score surgery. Empty (every profile's default)
     /// = every section runs, byte for byte.
     pub score_skip_checks: Vec<ScoreCheck>,
+    /// Background handling for inputs that carry transparent pixels — the
+    /// flatten runs BEFORE luma conversion and RGB extraction, so every
+    /// downstream stage (ladder · score · UEC · ISO) sees the composited
+    /// image. Opaque inputs never enter this path: their reports stay
+    /// byte-identical whatever this is set to.
+    pub alpha_background: AlphaBackground,
 }
 
 /// A skippable score SECTION — the same integration seam as
@@ -126,18 +132,81 @@ pub enum ScoreCheck {
     /// [`ScoreCheck::Uec`]: skipping UEC alone nulls only the
     /// `unused_error_correction` parameter inside a still-present block.
     Iso15415,
+    /// The alpha placement envelope (`alpha.envelope`) — the neutral-
+    /// background decode sweep for transparent inputs. Skipping it never
+    /// touches the flatten itself (the verdict keeps its declared
+    /// background); it only drops the sweep and silences the
+    /// `alpha_background_dependent` hint.
+    AlphaEnvelope,
 }
 
 impl ScoreCheck {
-    /// Parse the wire name of the section (`uec` / `iso15415` — the
-    /// `score.*` field spellings). Same shape as [`crate::report::StressAxis::from_name`]:
-    /// `None` on anything else, so bindings can fail LOUD on a typo.
+    /// Parse the wire name of the section (`uec` / `iso15415` /
+    /// `alpha_envelope` — the report field spellings). Same shape as
+    /// [`crate::report::StressAxis::from_name`]: `None` on anything else,
+    /// so bindings can fail LOUD on a typo.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "uec" => Some(Self::Uec),
             "iso15415" => Some(Self::Iso15415),
+            "alpha_envelope" => Some(Self::AlphaEnvelope),
             _ => None,
+        }
+    }
+}
+
+/// Background applied under transparent pixels BEFORE luma conversion and
+/// RGB extraction — the config side of the report's `alpha` block. A
+/// transparent asset has no one background: 0.8.x read the STORED RGB
+/// under the transparency, an exporter-dependent verdict (canvas exports
+/// store black under full transparency, image editors often white — the
+/// same visual design scored 100, 74 or "no detection" depending on which
+/// tool exported it). Config-only, never serialized; the report echoes the
+/// requested mode and the resolved background.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlphaBackground {
+    /// Resolve the maximum-contrast background from the design's own
+    /// visible pixels: dark content (alpha-weighted mean luma < 128)
+    /// flattens over white, light content over black — the code is
+    /// measured on its intended placement. A zero-detection scan retries
+    /// once over the opposite background (`alpha.fallback_used`), so a
+    /// mis-called mean can never turn a decodable design into a false
+    /// "no detection".
+    Auto,
+    /// Force a white background.
+    White,
+    /// Force a black background.
+    Black,
+    /// Force the host's real placement background (sRGB) — the truest
+    /// verdict when the embedder knows the surface the code will sit on.
+    Custom([u8; 3]),
+    /// Drop the alpha channel (the pre-0.9 behavior) and carry no `alpha`
+    /// block at all. Escape hatch for byte-parity with 0.8.x — never the
+    /// default, because the verdict depends on invisible stored RGB.
+    None,
+}
+
+impl AlphaBackground {
+    /// Parse the cross-language wire name (`auto` · `white` · `black` ·
+    /// `none` · `#rrggbb`) — the ONE mapping every binding reuses. `None`
+    /// on anything else, so bindings fail LOUD on a typo.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "auto" => Some(Self::Auto),
+            "white" => Some(Self::White),
+            "black" => Some(Self::Black),
+            "none" => Some(Self::None),
+            _ => {
+                let hex = name.strip_prefix('#')?;
+                // from_str_radix alone would admit signs ("+a") — hexdigit-gate first.
+                if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return None;
+                }
+                let channel = |i: usize| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok();
+                Some(Self::Custom([channel(0)?, channel(2)?, channel(4)?]))
+            }
         }
     }
 }
@@ -157,6 +226,7 @@ impl ScanConfig {
             score_depth: ScoreDepth::Full,
             score_skip_axes: Vec::new(),
             score_skip_checks: Vec::new(),
+            alpha_background: AlphaBackground::Auto,
         }
     }
 

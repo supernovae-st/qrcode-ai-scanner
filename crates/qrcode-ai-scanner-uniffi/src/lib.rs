@@ -7,7 +7,9 @@
 //! Python / Node / WASM bindings. The scan itself is synchronous (the core is
 //! sync by design); callers move it off the main thread on their side.
 
-use scanner_core::{ImageInput, Limits, ScanProfile, Scanner, ScoreCheck, StressAxis};
+use scanner_core::{
+    AlphaBackground, ImageInput, Limits, ScanProfile, Scanner, ScoreCheck, StressAxis,
+};
 
 uniffi::setup_scaffolding!();
 
@@ -25,8 +27,11 @@ pub enum ScanBindingError {
     )]
     UnknownStressAxis(String),
     /// Unknown score-check wire name in `score_skip_checks`.
-    #[error("unknown score check: {0} — expected uec | iso15415")]
+    #[error("unknown score check: {0} — expected uec | iso15415 | alpha_envelope")]
     UnknownScoreCheck(String),
+    /// Unknown alpha-background value in `alpha_background`.
+    #[error("unknown alpha background: {0} — expected auto | white | black | none | #rrggbb")]
+    UnknownAlphaBackground(String),
     /// A real scan fault (invalid/oversized buffer, cancellation).
     #[error("scan failed: {0}")]
     ScanFailed(String),
@@ -43,6 +48,7 @@ fn profile_from(
     budget_ms: Option<u64>,
     score_skip_axes: Option<Vec<String>>,
     score_skip_checks: Option<Vec<String>>,
+    alpha_background: Option<String>,
 ) -> Result<ScanProfile, ScanBindingError> {
     let profile = parse_profile(profile)?;
     // score_skip_axes: axes excluded from scoring, by wire name — the
@@ -73,10 +79,20 @@ fn profile_from(
             })
             .collect::<Result<_, _>>()?,
     };
+    // alpha_background: the flatten under transparent pixels (`auto` |
+    // `white` | `black` | `none` | `#rrggbb` — spec/01 § alpha) —
+    // engine-side, uniform across bindings; opaque inputs untouched.
+    let alpha = match &alpha_background {
+        None => None,
+        Some(name) => Some(
+            AlphaBackground::from_name(name)
+                .ok_or_else(|| ScanBindingError::UnknownAlphaBackground(name.clone()))?,
+        ),
+    };
     // budget_ms overrides the preset's wall-clock budget (0 = unbounded, NOT a
     // zero-millisecond budget — spec/02) — mobile embedders bound tail latency
     // on their scan thread without giving up the deep ladder.
-    if budget_ms.is_none() && skip.is_empty() && checks.is_empty() {
+    if budget_ms.is_none() && skip.is_empty() && checks.is_empty() && alpha.is_none() {
         return Ok(profile);
     }
     let mut config = profile.config();
@@ -85,6 +101,9 @@ fn profile_from(
     }
     config.score_skip_axes = skip;
     config.score_skip_checks = checks;
+    if let Some(alpha) = alpha {
+        config.alpha_background = alpha;
+    }
     Ok(ScanProfile::Custom(config))
 }
 
@@ -112,10 +131,10 @@ fn limits_from(max_dimension: Option<u32>, max_pixels: Option<u64>) -> Limits {
 /// (defaults 10000 px / 64 MP — lower them on server/mobile hardening paths).
 /// `budget_ms` overrides the profile's wall-clock budget (0 = unbounded); the
 /// scan is synchronous, so a UI embedder bounds its scan thread with it.
-#[uniffi::export(default(profile = "full", max_dimension = None, max_pixels = None, budget_ms = None, score_skip_axes = None, score_skip_checks = None))]
+#[uniffi::export(default(profile = "full", max_dimension = None, max_pixels = None, budget_ms = None, score_skip_axes = None, score_skip_checks = None, alpha_background = None))]
 #[expect(
     clippy::too_many_arguments,
-    reason = "the FFI signature IS the cross-binding contract (profile + caps + budget + skips)"
+    reason = "the FFI signature IS the cross-binding contract (profile + caps + budget + skips + alpha)"
 )]
 pub fn scan(
     image: Vec<u8>,
@@ -125,6 +144,7 @@ pub fn scan(
     budget_ms: Option<u64>,
     score_skip_axes: Option<Vec<String>>,
     score_skip_checks: Option<Vec<String>>,
+    alpha_background: Option<String>,
 ) -> Result<String, ScanBindingError> {
     let report = Scanner::builder()
         .profile(profile_from(
@@ -132,6 +152,7 @@ pub fn scan(
             budget_ms,
             score_skip_axes,
             score_skip_checks,
+            alpha_background,
         )?)
         .limits(limits_from(max_dimension, max_pixels))
         .build()
@@ -146,10 +167,10 @@ pub fn scan(
 /// cap attacker-controlled dimensions before any pixel work; `budget_ms`
 /// overrides the profile's wall-clock budget (0 = unbounded) — the camera
 /// loop's per-frame bound.
-#[uniffi::export(default(profile = "frame", max_dimension = None, max_pixels = None, budget_ms = None, score_skip_axes = None, score_skip_checks = None))]
+#[uniffi::export(default(profile = "frame", max_dimension = None, max_pixels = None, budget_ms = None, score_skip_axes = None, score_skip_checks = None, alpha_background = None))]
 #[expect(
     clippy::too_many_arguments,
-    reason = "the FFI signature IS the cross-binding contract (dims + profile + caps + budget + axis skip)"
+    reason = "the FFI signature IS the cross-binding contract (dims + profile + caps + budget + skips + alpha)"
 )]
 pub fn scan_frame(
     rgba: Vec<u8>,
@@ -161,6 +182,7 @@ pub fn scan_frame(
     budget_ms: Option<u64>,
     score_skip_axes: Option<Vec<String>>,
     score_skip_checks: Option<Vec<String>>,
+    alpha_background: Option<String>,
 ) -> Result<String, ScanBindingError> {
     let report = Scanner::builder()
         .profile(profile_from(
@@ -168,6 +190,7 @@ pub fn scan_frame(
             budget_ms,
             score_skip_axes,
             score_skip_checks,
+            alpha_background,
         )?)
         .limits(limits_from(max_dimension, max_pixels))
         .build()
@@ -212,7 +235,7 @@ mod tests {
     #[test]
     fn scan_clean_fixture_decodes_to_envelope_with_text() {
         let v = assert_envelope(
-            &scan(clean_qr(), "full".into(), None, None, None, None, None).unwrap(),
+            &scan(clean_qr(), "full".into(), None, None, None, None, None, None).unwrap(),
         );
         let dets = v["detections"].as_array().unwrap();
         assert_eq!(dets.len(), 1, "single-QR fixture → exactly one detection");
@@ -230,7 +253,7 @@ mod tests {
         // valid names, and all three emit the 5-key envelope (frame → score:null,
         // which the schema's anyOf allows).
         for profile in ["full", "fast", "frame"] {
-            let out = scan(clean_qr(), profile.into(), None, None, None, None, None)
+            let out = scan(clean_qr(), profile.into(), None, None, None, None, None, None)
                 .unwrap_or_else(|e| panic!("profile `{profile}` should scan: {e}"));
             assert_envelope(&out);
         }
@@ -238,7 +261,7 @@ mod tests {
 
     #[test]
     fn unknown_profile_is_a_typed_error_not_a_scan() {
-        let err = scan(clean_qr(), "turbo".into(), None, None, None, None, None).unwrap_err();
+        let err = scan(clean_qr(), "turbo".into(), None, None, None, None, None, None).unwrap_err();
         match err {
             ScanBindingError::UnknownProfile(name) => assert_eq!(name, "turbo"),
             other => panic!("expected UnknownProfile, got {other:?}"),
@@ -259,6 +282,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+        
         )
         .unwrap_err();
         let ScanBindingError::ScanFailed(msg) = err else {
@@ -284,6 +309,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+        
         )
         .unwrap_err();
         assert!(
@@ -304,6 +331,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+        
         )
         .unwrap_err();
         assert!(
@@ -326,6 +355,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+        
         )
         .expect("a valid blank frame is not an error");
         let v = assert_envelope(&out);
@@ -339,7 +370,7 @@ mod tests {
     fn tight_dimension_cap_rejects_with_qrs_002() {
         // The clean fixture is far larger than 16 px — the cap must reject
         // BEFORE any pixel work, with the dimension-limit wire code.
-        let err = scan(clean_qr(), "full".into(), Some(16), None, None, None, None).unwrap_err();
+        let err = scan(clean_qr(), "full".into(), Some(16), None, None, None, None, None).unwrap_err();
         let ScanBindingError::ScanFailed(msg) = err else {
             panic!("expected ScanFailed, got {err:?}");
         };
@@ -351,7 +382,7 @@ mod tests {
 
     #[test]
     fn tight_pixel_cap_rejects_with_qrs_003() {
-        let err = scan(clean_qr(), "full".into(), None, Some(64), None, None, None).unwrap_err();
+        let err = scan(clean_qr(), "full".into(), None, Some(64), None, None, None, None).unwrap_err();
         let ScanBindingError::ScanFailed(msg) = err else {
             panic!("expected ScanFailed, got {err:?}");
         };
@@ -366,7 +397,7 @@ mod tests {
         // 0 = unbounded (NOT a zero-millisecond budget) — the cross-binding
         // convention from spec/02. Deterministic: no wall-clock dependence.
         let v = assert_envelope(
-            &scan(clean_qr(), "full".into(), None, None, Some(0), None, None).unwrap(),
+            &scan(clean_qr(), "full".into(), None, None, Some(0), None, None, None).unwrap(),
         );
         assert_eq!(v["detections"].as_array().unwrap().len(), 1);
         assert!(
@@ -387,6 +418,8 @@ mod tests {
             Some(600_000),
             None,
             None,
+            None,
+        
         )
         .unwrap();
         let v = assert_envelope(&json);
@@ -409,6 +442,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+        
         )
         .unwrap_err();
         let ScanBindingError::ScanFailed(msg) = err else {
@@ -430,6 +465,8 @@ mod tests {
                 None,
                 Some(vec!["perspective".into(), "rotation".into()]),
                 None,
+                None,
+            
             )
             .unwrap(),
         );
@@ -450,6 +487,8 @@ mod tests {
             None,
             Some(vec!["perspektive".into()]),
             None,
+            None,
+        
         )
         .unwrap_err();
         assert!(
@@ -471,6 +510,8 @@ mod tests {
                 None,
                 None,
                 Some(vec!["uec".into(), "iso15415".into()]),
+                None,
+            
             )
             .unwrap(),
         );
@@ -488,10 +529,51 @@ mod tests {
             None,
             None,
             Some(vec!["margin".into()]),
+            None,
+        
         )
         .unwrap_err();
         assert!(
             matches!(err, ScanBindingError::UnknownScoreCheck(ref n) if n == "margin"),
+            "typo must be the typed loud error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn alpha_background_threads_and_rejects_typos() {
+        // The clean fixture is OPAQUE: a forced background must leave the
+        // report untouched (no `alpha` key at all) — the flatten only ever
+        // fires on transparent pixels.
+        let v = assert_envelope(
+            &scan(
+                clean_qr(),
+                "full".into(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("white".into()),
+            )
+            .unwrap(),
+        );
+        assert!(
+            v.get("alpha").is_none(),
+            "opaque input carries no alpha block, even under a forced mode"
+        );
+        let err = scan(
+            clean_qr(),
+            "full".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("transparent".into()),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ScanBindingError::UnknownAlphaBackground(ref n) if n == "transparent"),
             "typo must be the typed loud error, got {err:?}"
         );
     }

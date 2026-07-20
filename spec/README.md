@@ -7,8 +7,8 @@ versioned by the markers every report carries:
 | Marker | Current | Bumped when |
 |---|---|---|
 | `versions.scanner` | crate semver | every release |
-| `versions.pipeline` | `1` | the decode ladder's observable behavior changes |
-| `versions.score_contract` | `3` | any score semantic changes (weights, axes, caps, bands) |
+| `versions.pipeline` | `2` | the decode ladder's observable behavior changes (v2: transparent inputs flatten before decode — 01-report § Alpha) |
+| `versions.score_contract` | `4` | any score semantic changes (weights, axes, caps, bands; v4: alpha inputs score their flattened image) |
 
 ## Layout
 

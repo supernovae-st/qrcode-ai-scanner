@@ -23,6 +23,7 @@ compile_error!(
     "qrcode-ai-scanner requires at least one engine feature: `engine-rxing` or `engine-rqrr`"
 );
 
+mod alpha;
 mod engine;
 mod error;
 mod gs1;
@@ -38,12 +39,13 @@ mod transform;
 pub use error::{Result, ScanError};
 pub use gs1::Gs1Element;
 pub use input::{ImageInput, Limits};
-pub use ladder::{CancelToken, ScanConfig, ScanProfile, ScoreCheck, ScoreDepth};
+pub use ladder::{AlphaBackground, CancelToken, ScanConfig, ScanProfile, ScoreCheck, ScoreDepth};
 pub use payload::Payload;
 pub use report::{
-    AxisScore, Charset, DecodedContent, Detection, EcLevel, EngineKind, Grade, Hint,
-    Iso15415Report, IsoGrade, IsoParameter, PipelineTrace, Point, QrMeta, ScanReport, Score,
-    StageTrace, StressAxis, StructuralReport, Symbology, UecGrade, UecReport, Versions,
+    AlphaEnvelope, AlphaMode, AlphaPlacement, AlphaProbe, AlphaReport, AxisScore, Charset,
+    DecodedContent, Detection, EcLevel, EngineKind, Grade, Hint, Iso15415Report, IsoGrade,
+    IsoParameter, PipelineTrace, Point, QrMeta, ScanReport, Score, StageTrace, StressAxis,
+    StructuralReport, Symbology, UecGrade, UecReport, Versions,
 };
 
 /// Fuzz-only entry points — cargo-fuzz builds the whole graph with
@@ -106,7 +108,10 @@ impl Scanner {
         input: ImageInput<'_>,
         cancel: &CancelToken,
     ) -> Result<ScanReport> {
-        let planes = transform::normalize(&input, &self.limits)?;
+        let normalized =
+            transform::normalize_with(&input, &self.limits, self.config.alpha_background)?;
+        let mut planes = normalized.planes;
+        let mut alpha_context = normalized.alpha;
         // ONE wall-clock budget for the whole scan — decode ladder AND
         // scoring share it (attempt/cell-granular: an in-flight engine call
         // is not interruptible, which is why engine inputs are size-capped).
@@ -114,7 +119,32 @@ impl Scanner {
             .config
             .budget_ms
             .map(|ms| web_time::Instant::now() + std::time::Duration::from_millis(ms));
-        let outcome = ladder::run(&planes, &self.config, cancel, deadline)?;
+        let mut outcome = ladder::run(&planes, &self.config, cancel, deadline)?;
+        // Alpha `auto` retry: a zero-detection scan re-flattens over the
+        // OPPOSITE background and walks the ladder once more (within the
+        // same budget) — a mis-called content mean must never turn a
+        // decodable design into a false "no detection". Both walks stay in
+        // the trace; `fallback_used` marks a RESCUE, not an attempt.
+        let mut fallback_used = false;
+        if outcome.merged.is_empty()
+            && let Some(context) = &mut alpha_context
+            && let Some((alt_planes, alt_background)) = context.opposite_planes()
+        {
+            let alt_outcome = ladder::run(&alt_planes, &self.config, cancel, deadline)?;
+            let rescued = !alt_outcome.merged.is_empty();
+            outcome.trace.stages.extend(alt_outcome.trace.stages);
+            outcome.trace.engine_panics = outcome
+                .trace
+                .engine_panics
+                .saturating_add(alt_outcome.trace.engine_panics);
+            outcome.trace.total_ms += alt_outcome.trace.total_ms;
+            if rescued {
+                outcome.merged = alt_outcome.merged;
+                planes = alt_planes;
+                context.adopt_background(alt_background);
+                fallback_used = true;
+            }
+        }
         // Score the primary (first) detection when the profile asks for it.
         // The scoring stage shares the engine panic posture: a panic in the
         // math path degrades to "no score", never a crash (native unwind;
@@ -139,7 +169,24 @@ impl Scanner {
             }
             _ => None,
         };
-        Ok(build_report(outcome, scored))
+        // The placement envelope — Full depth only (the sweep is a quality-
+        // gate diagnostic), skippable through the same seam as every other
+        // report section.
+        let envelope = match (&alpha_context, outcome.merged.first()) {
+            (Some(context), Some(primary))
+                if self.config.score_depth == ScoreDepth::Full
+                    && !self
+                        .config
+                        .score_skip_checks
+                        .contains(&ScoreCheck::AlphaEnvelope) =>
+            {
+                context.envelope(&primary.text, primary.symbology, cancel, deadline)?
+            }
+            _ => None,
+        };
+        let alpha_report =
+            alpha_context.map(|context| context.into_report(fallback_used, envelope));
+        Ok(build_report(outcome, scored, alpha_report))
     }
 
     /// Scan a batch — the generator best-of-N gate. Parallel under the
@@ -200,11 +247,25 @@ impl ScannerBuilder {
 /// Assemble the public report from ladder output. Text + charset always come
 /// from our own resolution over raw bytes (consistent pair; exotic ECIs are a
 /// documented limit — `raw` preserves the truth for consumers).
-fn build_report(outcome: ladder::LadderOutcome, scored: Option<(Score, Vec<Hint>)>) -> ScanReport {
-    let (score, hints) = match scored {
+fn build_report(
+    outcome: ladder::LadderOutcome,
+    scored: Option<(Score, Vec<Hint>)>,
+    alpha: Option<report::AlphaReport>,
+) -> ScanReport {
+    let (score, mut hints) = match scored {
         Some((score, hints)) => (Some(score), hints),
         None => (None, Vec::new()),
     };
+    // A background-dependent envelope is generator-actionable exactly like
+    // a low-contrast finding: pin a background layer, or constrain the
+    // placement to the safe bands.
+    if let Some(envelope) = alpha.as_ref().and_then(|a| a.envelope.as_ref())
+        && envelope.placement != report::AlphaPlacement::Any
+    {
+        hints.push(Hint::AlphaBackgroundDependent {
+            placement: envelope.placement,
+        });
+    }
     let detections = outcome
         .merged
         .into_iter()
@@ -244,6 +305,7 @@ fn build_report(outcome: ladder::LadderOutcome, scored: Option<(Score, Vec<Hint>
         detections,
         score,
         hints,
+        alpha,
         trace: outcome.trace,
         versions: Versions::current(),
     }

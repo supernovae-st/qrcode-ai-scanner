@@ -446,6 +446,97 @@ pub struct Score {
     pub iso15415: Option<Iso15415Report>,
 }
 
+/// The requested alpha-background handling (config echo on the wire).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
+pub enum AlphaMode {
+    /// Adaptive: the content's own luma picked the background.
+    Auto,
+    /// Forced white.
+    White,
+    /// Forced black.
+    Black,
+    /// Forced host background (`alpha.background` carries the hex).
+    Custom,
+}
+
+/// Placement verdict spelled by the envelope's decoded ranges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
+pub enum AlphaPlacement {
+    /// Every tested background decoded — place it anywhere.
+    Any,
+    /// Only light backgrounds decoded (dark-module designs).
+    LightOnly,
+    /// Only dark backgrounds decoded (light-module designs).
+    DarkOnly,
+    /// A narrower or split range — read `safe_luma` for the exact bands.
+    Mixed,
+    /// No tested background decoded.
+    None,
+}
+
+/// One neutral-background decode probe of the placement envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
+pub struct AlphaProbe {
+    /// Neutral background luma composited under the content.
+    pub background_luma: u8,
+    /// The composite still decoded to the primary symbol's text.
+    pub decoded: bool,
+}
+
+/// The placement envelope — "over which backgrounds does this transparent
+/// design keep decoding". Probes are quick decodes in the primary symbol's
+/// own decode class (never the full ladder's recovery power): the envelope
+/// measures COMFORTABLE placement, the primary verdict measures full
+/// margin on its declared background.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
+pub struct AlphaEnvelope {
+    /// Decode probes ordered by background luma — the five fixed rungs
+    /// (0 · 64 · 128 · 192 · 255) plus one bisection probe per
+    /// decoded/undecoded boundary.
+    pub probes: Vec<AlphaProbe>,
+    /// Contiguous decoded bands `[lo, hi]` — every endpoint is a TESTED
+    /// background, never interpolation.
+    pub safe_luma: Vec<[u8; 2]>,
+    /// The verdict the bands spell.
+    pub placement: AlphaPlacement,
+}
+
+/// How transparency was handled for this scan. Present ONLY when the input
+/// actually carried transparent pixels AND `alpha_background` was not
+/// `none` — opaque inputs stay byte-identical to pre-0.9 reports.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
+pub struct AlphaReport {
+    /// Fraction of pixels with alpha < 255, rounded to 3 decimals.
+    pub coverage: f32,
+    /// Alpha-weighted mean BT.601 luma of the visible content — what the
+    /// `auto` decision reads (< 128 → white, else black).
+    pub content_luma: u8,
+    /// The requested handling mode (config echo).
+    pub mode: AlphaMode,
+    /// Background the verdict was measured over — `"white"` · `"black"` ·
+    /// `"#rrggbb"`.
+    pub background: String,
+    /// The declared flatten found nothing and the opposite background
+    /// produced the detections (`auto` only).
+    pub fallback_used: bool,
+    /// The placement envelope — Full profile only; `None` when skipped
+    /// (`score_skip_checks: ["alpha_envelope"]`), budget-exhausted, or
+    /// nothing decoded.
+    pub envelope: Option<AlphaEnvelope>,
+}
+
 /// Machine-actionable improvement hint — the generator/agent feedback loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -479,6 +570,14 @@ pub enum Hint {
         errors: u8,
         /// EC codeword capacity of that block.
         capacity: u8,
+    },
+    /// The transparent design only survives on part of the background
+    /// range (`alpha.envelope` narrower than `any`): pin a background
+    /// layer in the artwork, or place it only on surfaces inside
+    /// `alpha.envelope.safe_luma`.
+    AlphaBackgroundDependent {
+        /// The envelope's placement verdict.
+        placement: AlphaPlacement,
     },
 }
 
@@ -540,8 +639,10 @@ impl Versions {
     pub fn current() -> Self {
         Self {
             scanner: env!("CARGO_PKG_VERSION").to_owned(),
-            pipeline: 1,
-            score_contract: 3,
+            // pipeline 2: transparent inputs flatten before decode (0.9.0)
+            pipeline: 2,
+            // score contract 4: alpha inputs score their flattened image
+            score_contract: 4,
         }
     }
 }
@@ -563,6 +664,14 @@ pub struct ScanReport {
     pub score: Option<Score>,
     /// Machine-actionable improvement hints.
     pub hints: Vec<Hint>,
+    /// Alpha-transparency handling — absent (not `null`) for opaque
+    /// inputs and under `alpha_background: none`, so pre-0.9 consumers
+    /// and opaque reports keep their exact bytes.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub alpha: Option<AlphaReport>,
     /// Pipeline execution trace.
     pub trace: PipelineTrace,
     /// Contract version markers.
@@ -577,6 +686,7 @@ impl ScanReport {
             detections: Vec::new(),
             score: None,
             hints: Vec::new(),
+            alpha: None,
             trace: PipelineTrace::default(),
             versions: Versions::current(),
         }
@@ -589,6 +699,88 @@ mod tests {
 
     use super::*;
     use crate::payload::Payload;
+
+    fn full_alpha() -> AlphaReport {
+        AlphaReport {
+            coverage: 0.612,
+            content_luma: 34,
+            mode: AlphaMode::Auto,
+            background: "white".into(),
+            fallback_used: false,
+            envelope: Some(AlphaEnvelope {
+                probes: [
+                    (0, false),
+                    (64, false),
+                    (96, false),
+                    (128, true),
+                    (192, true),
+                    (255, true),
+                ]
+                .into_iter()
+                .map(|(background_luma, decoded)| AlphaProbe {
+                    background_luma,
+                    decoded,
+                })
+                .collect(),
+                safe_luma: vec![[128, 255]],
+                placement: AlphaPlacement::LightOnly,
+            }),
+        }
+    }
+
+    fn full_score() -> Score {
+        Score {
+            value: 87,
+            grade: Grade::Excellent,
+            axes: vec![
+                AxisScore {
+                    axis: StressAxis::Resolution,
+                    passed: 4,
+                    total: 5,
+                    failed_at: None,
+                },
+                AxisScore {
+                    axis: StressAxis::Perspective,
+                    passed: 3,
+                    total: 5,
+                    failed_at: None,
+                },
+            ],
+            structural: Some(StructuralReport {
+                finder_integrity: [1.0, 0.96, 0.88],
+                quiet_zone_ok: true,
+            }),
+            uec: Some(UecReport {
+                margin: 0.85,
+                grade: UecGrade::A,
+                worst_block_errors: 1,
+                worst_block_capacity: 18,
+            }),
+            iso15415: Some(Iso15415Report {
+                symbol_contrast: IsoParameter {
+                    value: 0.82,
+                    grade: IsoGrade::A,
+                },
+                modulation: IsoParameter {
+                    value: 0.46,
+                    grade: IsoGrade::B,
+                },
+                axial_nonuniformity: IsoParameter {
+                    value: 0.03,
+                    grade: IsoGrade::A,
+                },
+                fixed_pattern_damage: IsoParameter {
+                    value: 0.88,
+                    grade: IsoGrade::C,
+                },
+                unused_error_correction: Some(IsoParameter {
+                    value: 0.85,
+                    grade: IsoGrade::A,
+                }),
+                overall: IsoGrade::C,
+            }),
+        }
+    }
 
     fn full_report() -> ScanReport {
         ScanReport {
@@ -615,57 +807,7 @@ mod tests {
                 },
                 engines: vec![EngineKind::Rxing, EngineKind::Rqrr],
             }],
-            score: Some(Score {
-                value: 87,
-                grade: Grade::Excellent,
-                axes: vec![
-                    AxisScore {
-                        axis: StressAxis::Resolution,
-                        passed: 4,
-                        total: 5,
-                        failed_at: None,
-                    },
-                    AxisScore {
-                        axis: StressAxis::Perspective,
-                        passed: 3,
-                        total: 5,
-                        failed_at: None,
-                    },
-                ],
-                structural: Some(StructuralReport {
-                    finder_integrity: [1.0, 0.96, 0.88],
-                    quiet_zone_ok: true,
-                }),
-                uec: Some(UecReport {
-                    margin: 0.85,
-                    grade: UecGrade::A,
-                    worst_block_errors: 1,
-                    worst_block_capacity: 18,
-                }),
-                iso15415: Some(Iso15415Report {
-                    symbol_contrast: IsoParameter {
-                        value: 0.82,
-                        grade: IsoGrade::A,
-                    },
-                    modulation: IsoParameter {
-                        value: 0.46,
-                        grade: IsoGrade::B,
-                    },
-                    axial_nonuniformity: IsoParameter {
-                        value: 0.03,
-                        grade: IsoGrade::A,
-                    },
-                    fixed_pattern_damage: IsoParameter {
-                        value: 0.88,
-                        grade: IsoGrade::C,
-                    },
-                    unused_error_correction: Some(IsoParameter {
-                        value: 0.85,
-                        grade: IsoGrade::A,
-                    }),
-                    overall: IsoGrade::C,
-                }),
-            }),
+            score: Some(full_score()),
             hints: vec![
                 Hint::RaiseErrorCorrection {
                     current: EcLevel::Q,
@@ -675,7 +817,11 @@ mod tests {
                     errors: 12,
                     capacity: 24,
                 },
+                Hint::AlphaBackgroundDependent {
+                    placement: AlphaPlacement::LightOnly,
+                },
             ],
+            alpha: Some(full_alpha()),
             trace: PipelineTrace {
                 stages: vec![StageTrace {
                     stage: "direct".into(),
@@ -727,10 +873,13 @@ mod tests {
     fn versions_pin_the_contract() {
         let v = Versions::current();
         assert_eq!(v.scanner, env!("CARGO_PKG_VERSION"));
-        assert_eq!(v.pipeline, 1, "pipeline version bump must be deliberate");
         assert_eq!(
-            v.score_contract, 3,
-            "score contract v3 is the published one"
+            v.pipeline, 2,
+            "pipeline v2 = alpha flatten before decode; a bump must be deliberate"
+        );
+        assert_eq!(
+            v.score_contract, 4,
+            "score contract v4 = alpha inputs score their flattened image"
         );
     }
 

@@ -2,7 +2,11 @@
 
 ```
 ImageInput (Encoded | Rgba8 | Luma8)
-  → validate Limits → BT.601 luma (+ lazy RGB planes)
+  → validate Limits
+  → alpha flatten (pipeline v2 — 01-report § Alpha): transparent pixels
+    composite over the declared background BEFORE luma/RGB extraction;
+    opaque inputs take the historical path bit for bit
+  → BT.601 luma (+ lazy RGB planes)
   → cap to max_engine_side (engines never see larger; corners rescale back)
   → S1 pyramid   ≤512px downscale (cheapest, often best on artistic)
   → S2 direct    full-resolution luma
@@ -10,8 +14,12 @@ ImageInput (Encoded | Rgba8 | Luma8)
   → S4 deep      15 rungs (12 contrast boosts + 3 morphological closes)
                  + size × stretch × {otsu, invert} grid
   → S5 rescue    errors-and-erasures RS over undecoded grids (below)
+  → (alpha auto only, zero detections) re-flatten over the OPPOSITE
+    background → one more ladder walk within the same budget — both
+    walks stay in the trace; `alpha.fallback_used` marks a rescue
   → merge        text-keyed, cross-engine consensus
-  → score        contract v3 (04-score.md) — Full/Fast only
+  → score        contract v4 (04-score.md) — Full/Fast only
+  → alpha placement envelope (Full only) — 01-report § Alpha
   → ScanReport
 ```
 

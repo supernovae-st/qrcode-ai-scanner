@@ -4,8 +4,17 @@
 export * from "./report-types";
 import type { ScanReport, StressAxis } from "./report-types";
 
-/** A skippable report section (`score.uec` / `score.iso15415`) — config-only, never serialized. */
-export type ScoreCheck = "uec" | "iso15415";
+/** A skippable report section (`score.uec` / `score.iso15415` / `alpha.envelope`) — config-only, never serialized. */
+export type ScoreCheck = "uec" | "iso15415" | "alpha_envelope";
+
+/**
+ * Background flattened under transparent pixels (config-only). `auto`
+ * resolves the maximum-contrast background from the design's own content
+ * and retries the opposite on a zero-detection scan; `#rrggbb` is the
+ * host's real placement surface; `none` restores the pre-0.9 drop-the-
+ * channel behavior (exporter-dependent verdicts — escape hatch only).
+ */
+export type AlphaBackgroundOption = "auto" | "white" | "black" | "none" | `#${string}`;
 
 /** Scan profiles: quality gate · upload tool · camera frame. */
 export type ScanProfile = "full" | "fast" | "frame";
@@ -42,6 +51,13 @@ export interface ScanOptions {
    * `["uec", "iso15415"]`. Unknown names reject loudly.
    */
   scoreSkipChecks?: ScoreCheck[];
+  /**
+   * Background flattened under transparent pixels (default "auto").
+   * Opaque inputs are untouched whatever this is set to; transparent
+   * inputs report the resolved background + placement envelope in
+   * `report.alpha`. Unknown values reject loudly.
+   */
+  alphaBackground?: AlphaBackgroundOption;
 }
 
 /** Async scan on the libuv pool — never blocks the event loop. */

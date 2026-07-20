@@ -28,7 +28,7 @@
   },
   "versions": {
     "scanner": "0.3.0",
-    "pipeline": 1,
-    "score_contract": 3
+    "pipeline": 2,
+    "score_contract": 4
   }
 }

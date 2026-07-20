@@ -25,6 +25,7 @@ def scan(
     budget_ms: int | None = None,
     score_skip_axes: list[str] | None = None,
     score_skip_checks: list[str] | None = None,
+    alpha_background: str | None = None,
 ) -> ScanReport:
     """Decode + score an encoded image (PNG, JPEG, WebP, GIF).
 
@@ -38,9 +39,17 @@ def scan(
     e.g. ``["perspective", "rotation"]`` for generated previews with no capture
     geometry) — their cells never run, the composite renormalizes, ``score.axes``
     omits them; an unknown name raises (spec/04 § skipping axes).
-    score_skip_checks: report sections excluded at the source (``["uec", "iso15415"]``) —
-    never computed, the wire carries ``None``, the UEC-driven hints never fire; the
-    composite value does not move; an unknown name raises (spec/04 § skipping checks).
+    score_skip_checks: report sections excluded at the source (``["uec", "iso15415",
+    "alpha_envelope"]``) — never computed, the wire carries ``None``, the
+    section-driven hints never fire; the composite value does not move; an unknown
+    name raises (spec/04 § skipping checks).
+    alpha_background: the background flattened under transparent pixels —
+    ``"auto"`` (default: the design's own content picks it, with an opposite-
+    background retry on zero detections) | ``"white"`` | ``"black"`` |
+    ``"#rrggbb"`` (the host's real placement surface) | ``"none"`` (pre-0.9
+    drop-the-channel behavior). Opaque inputs are untouched; transparent inputs
+    report the resolved background + placement envelope in ``report["alpha"]``.
+    An unknown value raises (spec/01 § alpha).
     "No QR found" returns a report with empty ``detections``; raises ``ValueError``
     on invalid input, an oversized image, or an unknown profile.
     """
@@ -56,12 +65,14 @@ def scan_frame(
     budget_ms: int | None = None,
     score_skip_axes: list[str] | None = None,
     score_skip_checks: list[str] | None = None,
+    alpha_background: str | None = None,
 ) -> ScanReport:
     """Decode + score a raw RGBA frame (e.g. a camera frame) — no image-format roundtrip.
 
     ``rgba`` must be ``width * height * 4`` bytes. max_dimension / max_pixels: optional
     input-size caps (see ``scan``). budget_ms: per-frame wall-clock bound
-    (``0`` = unbounded, see ``scan``). score_skip_axes / score_skip_checks: see ``scan``.
+    (``0`` = unbounded, see ``scan``). score_skip_axes / score_skip_checks /
+    alpha_background: see ``scan``.
     Raises ``ValueError`` on invalid input.
     """
     ...

@@ -7,7 +7,9 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use scanner_core::{ImageInput, Limits, ScanProfile, Scanner, ScoreCheck, StressAxis};
+use scanner_core::{
+    AlphaBackground, ImageInput, Limits, ScanProfile, Scanner, ScoreCheck, StressAxis,
+};
 
 fn parse_profile(profile: &str) -> PyResult<ScanProfile> {
     // Delegate to the library's canonical parser (same path as the Node/WASM
@@ -43,6 +45,7 @@ fn with_config(
     budget_ms: Option<u64>,
     score_skip_axes: Option<Vec<String>>,
     score_skip_checks: Option<Vec<String>>,
+    alpha_background: Option<String>,
 ) -> PyResult<ScanProfile> {
     let skip: Vec<StressAxis> = match &score_skip_axes {
         None => Vec::new(),
@@ -74,7 +77,18 @@ fn with_config(
             })
             .collect::<PyResult<_>>()?,
     };
-    if budget_ms.is_none() && skip.is_empty() && checks.is_empty() {
+    // alpha_background: the flatten under transparent pixels (`auto` |
+    // `white` | `black` | `none` | `#rrggbb`) — engine-side, uniform
+    // across bindings; opaque inputs untouched (spec/01 § alpha).
+    let alpha = match &alpha_background {
+        None => None,
+        Some(name) => Some(AlphaBackground::from_name(name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "unknown alpha background `{name}` — expected auto | white | black | none | #rrggbb"
+            ))
+        })?),
+    };
+    if budget_ms.is_none() && skip.is_empty() && checks.is_empty() && alpha.is_none() {
         return Ok(profile);
     }
     let mut config = profile.config();
@@ -83,6 +97,9 @@ fn with_config(
     }
     config.score_skip_axes = skip;
     config.score_skip_checks = checks;
+    if let Some(alpha) = alpha {
+        config.alpha_background = alpha;
+    }
     Ok(ScanProfile::Custom(config))
 }
 
@@ -102,7 +119,11 @@ fn report_to_py<'py>(
 /// `detections`); a `ValueError` is raised only for invalid input or cancellation.
 /// `budget_ms` overrides the profile's wall-clock budget (0 = unbounded).
 #[pyfunction]
-#[pyo3(signature = (image, profile = "full", max_dimension = None, max_pixels = None, budget_ms = None, score_skip_axes = None, score_skip_checks = None))]
+#[pyo3(signature = (image, profile = "full", max_dimension = None, max_pixels = None, budget_ms = None, score_skip_axes = None, score_skip_checks = None, alpha_background = None))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the Python signature IS the cross-binding contract (profile + caps + budget + skips + alpha)"
+)]
 fn scan<'py>(
     py: Python<'py>,
     image: &[u8],
@@ -112,12 +133,14 @@ fn scan<'py>(
     budget_ms: Option<u64>,
     score_skip_axes: Option<Vec<String>>,
     score_skip_checks: Option<Vec<String>>,
+    alpha_background: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let profile = with_config(
         parse_profile(profile)?,
         budget_ms,
         score_skip_axes,
         score_skip_checks,
+        alpha_background,
     )?;
     let limits = build_limits(max_dimension, max_pixels);
     let image = image.to_vec(); // own it before releasing the GIL
@@ -139,10 +162,10 @@ fn scan<'py>(
 /// `rgba` must be `width * height * 4` bytes. `budget_ms` overrides the profile's
 /// wall-clock budget (0 = unbounded) — the camera loop's per-frame bound.
 #[pyfunction]
-#[pyo3(signature = (rgba, width, height, profile = "frame", max_dimension = None, max_pixels = None, budget_ms = None, score_skip_axes = None, score_skip_checks = None))]
+#[pyo3(signature = (rgba, width, height, profile = "frame", max_dimension = None, max_pixels = None, budget_ms = None, score_skip_axes = None, score_skip_checks = None, alpha_background = None))]
 #[expect(
     clippy::too_many_arguments,
-    reason = "the Python signature IS the cross-binding contract (dims + profile + caps + budget + skips)"
+    reason = "the Python signature IS the cross-binding contract (dims + profile + caps + budget + skips + alpha)"
 )]
 fn scan_frame<'py>(
     py: Python<'py>,
@@ -155,12 +178,14 @@ fn scan_frame<'py>(
     budget_ms: Option<u64>,
     score_skip_axes: Option<Vec<String>>,
     score_skip_checks: Option<Vec<String>>,
+    alpha_background: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let profile = with_config(
         parse_profile(profile)?,
         budget_ms,
         score_skip_axes,
         score_skip_checks,
+        alpha_background,
     )?;
     let limits = build_limits(max_dimension, max_pixels);
     let rgba = rgba.to_vec(); // own it before releasing the GIL

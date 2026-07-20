@@ -3,54 +3,37 @@
     {
       "symbology": "qr_code",
       "content": {
-        "text": "https://id.gs1.org/01/09506000134352/10/LOT1?17=271231",
-        "raw": "aHR0cHM6Ly9pZC5nczEub3JnLzAxLzA5NTA2MDAwMTM0MzUyLzEwL0xPVDE/MTc9MjcxMjMx",
+        "text": "https://qrc-ai.com/76xMa",
+        "raw": "aHR0cHM6Ly9xcmMtYWkuY29tLzc2eE1h",
         "charset": "utf8"
       },
       "payload": {
-        "kind": "gs1_digital_link",
-        "url": "https://id.gs1.org/01/09506000134352/10/LOT1?17=271231",
-        "elements": [
-          {
-            "ai": "01",
-            "value": "09506000134352"
-          },
-          {
-            "ai": "10",
-            "value": "LOT1"
-          },
-          {
-            "ai": "17",
-            "value": "271231"
-          }
-        ],
-        "gtin": "09506000134352",
-        "conformant": true,
-        "issues": []
+        "kind": "url",
+        "url": "https://qrc-ai.com/76xMa"
       },
       "corners": [
         {
-          "x": 24.0,
-          "y": 24.0
+          "x": 76.0,
+          "y": 70.0
         },
         {
-          "x": 252.0,
-          "y": 24.0
+          "x": 968.0,
+          "y": 68.0
         },
         {
-          "x": 252.0,
-          "y": 252.0
+          "x": 990.0,
+          "y": 994.0
         },
         {
-          "x": 24.0,
-          "y": 252.0
+          "x": 64.0,
+          "y": 988.0
         }
       ],
       "meta": {
-        "version": 5,
-        "ec_level": "q",
-        "mask": 4,
-        "modules": 37,
+        "version": 2,
+        "ec_level": "m",
+        "mask": 6,
+        "modules": 25,
         "inverted": false
       },
       "engines": [
@@ -60,7 +43,7 @@
     }
   ],
   "score": {
-    "value": 92,
+    "value": 100,
     "grade": "excellent",
     "axes": [
       {
@@ -89,9 +72,9 @@
       },
       {
         "axis": "rotation",
-        "passed": 1,
+        "passed": 5,
         "total": 5,
-        "failed_at": "30°"
+        "failed_at": null
       },
       {
         "axis": "lighting",
@@ -112,7 +95,7 @@
       "margin": 1.0,
       "grade": "a",
       "worst_block_errors": 0,
-      "worst_block_capacity": 18
+      "worst_block_capacity": 16
     },
     "iso15415": {
       "symbol_contrast": {
@@ -124,7 +107,7 @@
         "grade": "a"
       },
       "axial_nonuniformity": {
-        "value": 0.0,
+        "value": 0.014372145,
         "grade": "a"
       },
       "fixed_pattern_damage": {
@@ -138,21 +121,68 @@
       "overall": "a"
     }
   },
-  "hints": [],
+  "hints": [
+    {
+      "hint": "alpha_background_dependent",
+      "placement": "light_only"
+    }
+  ],
+  "alpha": {
+    "coverage": 0.612,
+    "content_luma": 2,
+    "mode": "auto",
+    "background": "white",
+    "fallback_used": false,
+    "envelope": {
+      "probes": [
+        {
+          "background_luma": 0,
+          "decoded": false
+        },
+        {
+          "background_luma": 32,
+          "decoded": true
+        },
+        {
+          "background_luma": 64,
+          "decoded": true
+        },
+        {
+          "background_luma": 128,
+          "decoded": true
+        },
+        {
+          "background_luma": 192,
+          "decoded": true
+        },
+        {
+          "background_luma": 255,
+          "decoded": true
+        }
+      ],
+      "safe_luma": [
+        [
+          32,
+          255
+        ]
+      ],
+      "placement": "light_only"
+    }
+  },
   "trace": {
     "stages": [
       {
-        "stage": "direct",
+        "stage": "pyramid",
         "transforms_tried": 1,
-        "ms": 5.3159160000000005,
+        "ms": 8.862125,
         "detections_found": 2
       }
     ],
     "engine_panics": 0,
-    "total_ms": 5.3335
+    "total_ms": 8.947167
   },
   "versions": {
-    "scanner": "0.3.0",
+    "scanner": "0.8.1",
     "pipeline": 2,
     "score_contract": 4
   }

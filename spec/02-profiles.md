@@ -12,6 +12,7 @@
 | S4 deep (15 rungs + grid) | ✓ | — | — |
 | S5 rescue (errors-and-erasures) | ✓ | ✓¹ | ✓¹ |
 | Scoring depth | Full (5 cells/axis) | Reduced (2 cells/axis) | Off (`score: null`) |
+| Alpha placement envelope (01-report § Alpha) | ✓ | — | — |
 
 Format coverage per stage: S1-S3 decode ALL symbologies; S4 (the
 QR-calibrated deep rungs) and S5 restrict to the QR family — paying the

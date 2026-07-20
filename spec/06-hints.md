@@ -13,6 +13,7 @@ tagged (`"hint"` discriminator). Parse leniently — new hints may appear.
 | `reduce_art_texture` | — | blur-axis survival = 0 (dies at the mildest blur) | lighten texture over the data zone |
 | `raise_error_correction` | `current` (`"l"`/`"m"`/`"q"`) | score < 70 **or** UEC grade d/f, when EC < H | regenerate at a higher EC level |
 | `low_correction_margin` | `errors`, `capacity` | UEC margin = 0 — the worst RS block consumed its ENTIRE budget | **distrust signal**: the decode may be a miscorrection; verify content out-of-band / regenerate |
+| `alpha_background_dependent` | `placement` (`light_only` · `dark_only` · `mixed` · `none`) | a transparent design's placement envelope is narrower than `any` (01-report § Alpha) | pin a background layer in the artwork, or constrain placement to `alpha.envelope.safe_luma` |
 
 ## Consumer patterns
 

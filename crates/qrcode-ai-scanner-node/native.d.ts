@@ -6,10 +6,10 @@
  * `profile`: full | fast | frame (default full). The promise rejects with
  * `[QRS-xxx]`-tagged errors; "no QR found" RESOLVES with empty detections.
  */
-export declare function scanJson(image: Buffer, profile?: string | undefined | null, signal?: AbortSignal | undefined | null, maxDimension?: number | undefined | null, maxPixels?: number | undefined | null, budgetMs?: number | undefined | null, scoreSkipAxes?: Array<string> | undefined | null, scoreSkipChecks?: Array<string> | undefined | null): Promise<string>
+export declare function scanJson(image: Buffer, profile?: string | undefined | null, signal?: AbortSignal | undefined | null, maxDimension?: number | undefined | null, maxPixels?: number | undefined | null, budgetMs?: number | undefined | null, scoreSkipAxes?: Array<string> | undefined | null, scoreSkipChecks?: Array<string> | undefined | null, alphaBackground?: string | undefined | null): Promise<string>
 
 /** Synchronous scan returning the report JSON — scripts only. */
-export declare function scanSyncJson(image: Buffer, profile?: string | undefined | null, maxDimension?: number | undefined | null, maxPixels?: number | undefined | null, budgetMs?: number | undefined | null, scoreSkipAxes?: Array<string> | undefined | null, scoreSkipChecks?: Array<string> | undefined | null): string
+export declare function scanSyncJson(image: Buffer, profile?: string | undefined | null, maxDimension?: number | undefined | null, maxPixels?: number | undefined | null, budgetMs?: number | undefined | null, scoreSkipAxes?: Array<string> | undefined | null, scoreSkipChecks?: Array<string> | undefined | null, alphaBackground?: string | undefined | null): string
 
 /** Native crate version. */
 export declare function version(): string

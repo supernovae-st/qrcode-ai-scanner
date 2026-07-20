@@ -4,6 +4,66 @@ All notable changes to this workspace. Every surface versions together — the R
 crate + CLI, the npm node + wasm packages, the Python wheel, and the
 Kotlin/Android · Swift/iOS · Flutter bindings.
 
+## Unreleased
+
+### Changed
+
+- **Transparent inputs flatten before decode** (`pipeline` 1→2,
+  `score_contract` 3→4) — the engine used to read the RGB *stored under*
+  the transparency (alpha was dropped at the input seam), which made the
+  verdict exporter-dependent: the same visual design scored 100
+  (white-under-alpha exports), 74 (canvas-style black-under-alpha) or
+  "no detection" (dark modules over canvas transparency) depending on
+  which tool wrote the PNG. Since this release the input composites over
+  a DECLARED background before luma conversion and RGB extraction —
+  every stage (ladder · score · UEC · ISO) sees the flattened image, and
+  the stored under-alpha RGB can never influence the report
+  (exporter-invariance is pinned by test). `auto` (the default) measures
+  the design on its intended placement: dark content over white, light
+  content over black, with an opposite-background retry on a
+  zero-detection scan (`alpha.fallback_used`) so a mis-called mean can
+  never produce a false "no detection". Opaque inputs are untouched —
+  their reports stay byte-identical (the `alpha` key is omitted
+  entirely, not `null`). Spec: 01-report § Alpha · 07-pipeline.
+
+### Added
+
+- `ScanConfig.alpha_background` on every surface, per the
+  `score_skip_axes` precedent — core (`AlphaBackground` +
+  `from_name`), wasm (`scan_image(..., alpha_background)`), Node
+  (`alphaBackground` option, typed
+  `"auto" | "white" | "black" | "none" |` hex), CLI
+  (`--alpha-background`), Python (`alpha_background=` kwarg, stub
+  updated), UniFFI/Kotlin/Swift (`alpha_background` arg with a typed
+  `UnknownAlphaBackground` error). `#rrggbb` forces the host's real
+  placement surface — the truest verdict when the embedder knows where
+  the code will sit; `none` restores the drop-the-channel behavior as
+  an escape hatch. Unknown values fail loud on every surface. (The
+  Flutter facade parses the new block; its option arg lands with the
+  facade's next options pass — it exposes neither budget nor skips
+  today.)
+- **The placement envelope** (`alpha.envelope`, Full profile) — the
+  transparent-design question is not "does it scan" but "over which
+  backgrounds does it keep scanning": five fixed neutral rungs
+  (luma 0 · 64 · 128 · 192 · 255) plus one bisection probe per verdict
+  boundary, each a quick decode in the primary symbol's own decode
+  class. The report carries the probes (every endpoint a TESTED
+  background, never interpolation), the contiguous `safe_luma` bands,
+  and a `placement` verdict (`any` · `light_only` · `dark_only` ·
+  `mixed` · `none`). Informational by contract: it never moves
+  `score.value`. Skippable through the standard seam
+  (`score_skip_checks: ["alpha_envelope"]` — `ScoreCheck` gains the
+  variant on every surface).
+- `Hint::AlphaBackgroundDependent { placement }` — fires when the
+  envelope is narrower than `any`: pin a background layer in the
+  artwork, or constrain placement to the safe bands. The generator/UI
+  loop's alpha feedback.
+- `report.alpha` block: `coverage` · `content_luma` · `mode` ·
+  `background` (`"white"` / `"black"` / `"#rrggbb"`) · `fallback_used`
+  · `envelope`. Schema, TS types, Dart mirror and the type-parity gate
+  updated in lockstep; `qrscan --pretty` renders the flatten verdict
+  and the envelope strip.
+
 ## 0.8.1 — 2026-07-10
 
 ### Fixed

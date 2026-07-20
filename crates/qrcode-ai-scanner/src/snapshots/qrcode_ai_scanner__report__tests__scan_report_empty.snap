@@ -13,7 +13,7 @@ expression: "ScanReport::empty()"
   },
   "versions": {
     "scanner": "[crate-version]",
-    "pipeline": 1,
-    "score_contract": 3
+    "pipeline": 2,
+    "score_contract": 4
   }
 }

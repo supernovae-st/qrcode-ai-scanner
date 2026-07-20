@@ -7,6 +7,7 @@
 
 use crate::error::{Result, ScanError};
 use crate::input::{ImageInput, Limits, LumaImage, bt601, validate_buffer, validate_dims};
+use crate::ladder::AlphaBackground;
 
 /// Color channel selector for per-channel decode attempts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +31,12 @@ pub(crate) struct SourcePlanes {
 }
 
 impl SourcePlanes {
+    /// Luma-only planes (no color retained) — the alpha fallback's
+    /// re-flatten seam.
+    pub(crate) fn luma_only(luma: LumaImage) -> Self {
+        Self { luma, rgb: None }
+    }
+
     /// Whether the source carried color (channel planes available) —
     /// presence check only, no extraction.
     pub(crate) fn has_color(&self) -> bool {
@@ -49,12 +56,38 @@ impl SourcePlanes {
     }
 }
 
+/// Alpha-aware normalization result — the planes the ladder consumes plus
+/// the retained alpha context when the input carried transparent pixels
+/// under a flattening mode.
+pub(crate) struct NormalizedInput {
+    /// Scan planes (flattened when transparency was handled).
+    pub planes: SourcePlanes,
+    /// Alpha context for the fallback + envelope + report block.
+    pub alpha: Option<crate::alpha::AlphaContext>,
+}
+
+/// Validate an [`ImageInput`] and normalize it into scan planes under the
+/// default alpha handling — the historical two-arg seam the unit tests
+/// exercise (every opaque input is untouched by the alpha path).
+#[cfg(test)]
+pub(crate) fn normalize(input: &ImageInput<'_>, limits: &Limits) -> Result<SourcePlanes> {
+    normalize_with(input, limits, AlphaBackground::Auto).map(|normalized| normalized.planes)
+}
+
 /// Validate an [`ImageInput`] and normalize it into scan planes.
 ///
 /// The single decode point of the crate: encoded bytes are dimension-probed
 /// BEFORE full decode (decompression-bomb guard), raw buffers are
-/// length-checked, and color is retained for the enhance stage.
-pub(crate) fn normalize(input: &ImageInput<'_>, limits: &Limits) -> Result<SourcePlanes> {
+/// length-checked, and color is retained for the enhance stage. Inputs
+/// carrying transparent pixels flatten over the configured background
+/// BEFORE luma conversion and RGB extraction — every downstream stage sees
+/// the composited image. Fully opaque inputs (and every input under
+/// `alpha_background: none`) take the historical path, bit for bit.
+pub(crate) fn normalize_with(
+    input: &ImageInput<'_>,
+    limits: &Limits,
+    alpha_background: AlphaBackground,
+) -> Result<NormalizedInput> {
     match *input {
         ImageInput::Luma8 {
             data,
@@ -63,9 +96,12 @@ pub(crate) fn normalize(input: &ImageInput<'_>, limits: &Limits) -> Result<Sourc
         } => {
             let pixels = validate_dims(width, height, limits)?;
             validate_buffer(data.len(), pixels)?;
-            Ok(SourcePlanes {
-                luma: LumaImage::new(data.to_vec(), width, height),
-                rgb: None,
+            Ok(NormalizedInput {
+                planes: SourcePlanes {
+                    luma: LumaImage::new(data.to_vec(), width, height),
+                    rgb: None,
+                },
+                alpha: None,
             })
         }
         ImageInput::Rgba8 {
@@ -75,16 +111,8 @@ pub(crate) fn normalize(input: &ImageInput<'_>, limits: &Limits) -> Result<Sourc
         } => {
             let pixels = validate_dims(width, height, limits)?;
             validate_buffer(data.len(), pixels * 4)?;
-            let mut luma = Vec::with_capacity(data.len() / 4);
-            let mut rgb = Vec::with_capacity(data.len() / 4 * 3);
-            for px in data.chunks_exact(4) {
-                luma.push(bt601(px[0], px[1], px[2]));
-                rgb.extend_from_slice(&px[..3]);
-            }
-            Ok(SourcePlanes {
-                luma: LumaImage::new(luma, width, height),
-                rgb: Some(rgb),
-            })
+            // browser ImageData is color by contract — RGB always retained
+            Ok(flatten_or_drop(data, width, height, alpha_background, true))
         }
         ImageInput::Encoded(bytes) => {
             let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
@@ -114,14 +142,116 @@ pub(crate) fn normalize(input: &ImageInput<'_>, limits: &Limits) -> Result<Sourc
             let img = reader.decode().map_err(|e| ScanError::InvalidImage {
                 details: e.to_string(),
             })?;
+            if alpha_background != AlphaBackground::None && img.color().has_alpha() {
+                // to_rgba8 COPIES so the original stays available for the
+                // opaque fall-through — routing a fully-opaque LumaA8/RGBA
+                // through an RGBA round-trip could drift luma by ±1 vs the
+                // historical conversion, and opaque bit-parity is contract.
+                let colored = img.color().has_color();
+                let rgba = img.to_rgba8();
+                let stats = crate::alpha::content_stats(rgba.as_raw());
+                if stats.transparent > 0 {
+                    let (w, h) = (rgba.width(), rgba.height());
+                    return Ok(flatten(
+                        rgba.as_raw(),
+                        w,
+                        h,
+                        alpha_background,
+                        colored,
+                        &stats,
+                    ));
+                }
+            }
             let rgb = img.color().has_color().then(|| img.to_rgb8().into_raw());
             let luma = img.into_luma8();
             let (w, h) = (luma.width(), luma.height());
-            Ok(SourcePlanes {
-                luma: LumaImage::new(luma.into_raw(), w, h),
-                rgb,
+            Ok(NormalizedInput {
+                planes: SourcePlanes {
+                    luma: LumaImage::new(luma.into_raw(), w, h),
+                    rgb,
+                },
+                alpha: None,
             })
         }
+    }
+}
+
+/// Raw-RGBA seam: flatten when transparent pixels exist under a flattening
+/// mode, otherwise the historical drop-the-alpha loop (bit for bit).
+fn flatten_or_drop(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    mode: AlphaBackground,
+    colored: bool,
+) -> NormalizedInput {
+    if mode != AlphaBackground::None {
+        let stats = crate::alpha::content_stats(data);
+        if stats.transparent > 0 {
+            return flatten(data, width, height, mode, colored, &stats);
+        }
+    }
+    let mut luma = Vec::with_capacity(data.len() / 4);
+    let mut rgb = Vec::with_capacity(data.len() / 4 * 3);
+    for px in data.chunks_exact(4) {
+        luma.push(bt601(px[0], px[1], px[2]));
+        rgb.extend_from_slice(&px[..3]);
+    }
+    NormalizedInput {
+        planes: SourcePlanes {
+            luma: LumaImage::new(luma, width, height),
+            rgb: Some(rgb),
+        },
+        alpha: None,
+    }
+}
+
+/// Composite straight RGBA over the resolved background in ONE fused pass —
+/// flattened planes for the ladder + the retained context for the
+/// fallback/envelope/report.
+fn flatten(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    mode: AlphaBackground,
+    colored: bool,
+    stats: &crate::alpha::ContentStats,
+) -> NormalizedInput {
+    let bg = match mode {
+        AlphaBackground::Auto => crate::alpha::auto_background(stats.content_luma),
+        // both callers gate `none` out before flattening — the arm exists
+        // only to keep the match total
+        AlphaBackground::White | AlphaBackground::None => [255; 3],
+        AlphaBackground::Black => [0; 3],
+        AlphaBackground::Custom(custom) => custom,
+    };
+    let pixels = data.len() / 4;
+    let mut luma = Vec::with_capacity(pixels);
+    let mut rgb = colored.then(|| Vec::with_capacity(pixels * 3));
+    let mut fg_luma = Vec::with_capacity(pixels);
+    let mut alpha_plane = Vec::with_capacity(pixels);
+    for px in data.chunks_exact(4) {
+        let a = px[3];
+        let (r, g, b) = (
+            crate::alpha::composite(px[0], bg[0], a),
+            crate::alpha::composite(px[1], bg[1], a),
+            crate::alpha::composite(px[2], bg[2], a),
+        );
+        luma.push(bt601(r, g, b));
+        if let Some(rgb) = rgb.as_mut() {
+            rgb.extend_from_slice(&[r, g, b]);
+        }
+        fg_luma.push(bt601(px[0], px[1], px[2]));
+        alpha_plane.push(a);
+    }
+    let context =
+        crate::alpha::AlphaContext::new(alpha_plane, fg_luma, width, height, stats, mode, bg);
+    NormalizedInput {
+        planes: SourcePlanes {
+            luma: LumaImage::new(luma, width, height),
+            rgb,
+        },
+        alpha: Some(context),
     }
 }
 

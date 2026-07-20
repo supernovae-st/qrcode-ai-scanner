@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/supernovae-st/qrcode-ai-scanner/spec/scan-report.schema.json",
   "title": "ScanReport",
-  "description": "qrcode-ai-scanner wire contract (versions.pipeline=1, score_contract=3). Additive evolution: consumers must tolerate unknown fields and unknown enum/tag values.",
+  "description": "qrcode-ai-scanner wire contract (versions.pipeline=2, score_contract=4). Additive evolution: consumers must tolerate unknown fields and unknown enum/tag values.",
   "type": "object",
   "required": [
     "detections",
@@ -40,6 +40,10 @@
     },
     "versions": {
       "$ref": "#/$defs/Versions"
+    },
+    "alpha": {
+      "description": "Alpha-transparency handling — ABSENT (not null) for opaque inputs and under alphaBackground:none.",
+      "$ref": "#/$defs/AlphaReport"
     }
   },
   "$defs": {
@@ -816,6 +820,25 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "hint": {
+                "const": "alpha_background_dependent"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "placement"
+            ],
+            "properties": {
+              "placement": {
+                "$ref": "#/$defs/AlphaPlacement"
+              }
+            }
+          }
         }
       ]
     },
@@ -882,11 +905,11 @@
         },
         "pipeline": {
           "type": "integer",
-          "const": 1
+          "const": 2
         },
         "score_contract": {
           "type": "integer",
-          "const": 3
+          "const": 4
         }
       }
     },
@@ -912,6 +935,114 @@
         "data_bar_expanded",
         "telepen"
       ]
+    },
+    "AlphaMode": {
+      "enum": [
+        "auto",
+        "white",
+        "black",
+        "custom"
+      ]
+    },
+    "AlphaPlacement": {
+      "enum": [
+        "any",
+        "light_only",
+        "dark_only",
+        "mixed",
+        "none"
+      ]
+    },
+    "AlphaProbe": {
+      "type": "object",
+      "required": [
+        "background_luma",
+        "decoded"
+      ],
+      "properties": {
+        "background_luma": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "decoded": {
+          "type": "boolean"
+        }
+      }
+    },
+    "AlphaEnvelope": {
+      "type": "object",
+      "required": [
+        "probes",
+        "safe_luma",
+        "placement"
+      ],
+      "properties": {
+        "probes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AlphaProbe"
+          }
+        },
+        "safe_luma": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "minItems": 2,
+            "maxItems": 2
+          }
+        },
+        "placement": {
+          "$ref": "#/$defs/AlphaPlacement"
+        }
+      }
+    },
+    "AlphaReport": {
+      "type": "object",
+      "required": [
+        "coverage",
+        "content_luma",
+        "mode",
+        "background",
+        "fallback_used",
+        "envelope"
+      ],
+      "properties": {
+        "coverage": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "content_luma": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "mode": {
+          "$ref": "#/$defs/AlphaMode"
+        },
+        "background": {
+          "type": "string"
+        },
+        "fallback_used": {
+          "type": "boolean"
+        },
+        "envelope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlphaEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
     }
   }
 }

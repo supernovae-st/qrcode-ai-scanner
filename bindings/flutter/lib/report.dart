@@ -550,6 +550,107 @@ class Score {
       );
 }
 
+// ─────────────────────────── alpha handling ───────────────────────────
+
+/// The requested alpha-background handling (config echo).
+enum AlphaMode {
+  auto,
+  white,
+  black,
+  custom,
+  unknown;
+
+  static AlphaMode from(Object? v) => switch (v) {
+        'auto' => auto,
+        'white' => white,
+        'black' => black,
+        'custom' => custom,
+        _ => unknown,
+      };
+}
+
+/// Placement verdict spelled by the envelope's decoded bands.
+enum AlphaPlacement {
+  any,
+  lightOnly,
+  darkOnly,
+  mixed,
+  none,
+  unknown;
+
+  static AlphaPlacement from(Object? v) => switch (v) {
+        'any' => any,
+        'light_only' => lightOnly,
+        'dark_only' => darkOnly,
+        'mixed' => mixed,
+        'none' => none,
+        _ => unknown,
+      };
+}
+
+/// One neutral-background decode probe of the placement envelope.
+class AlphaProbe {
+  /// Neutral background luma composited under the content (0-255).
+  final int backgroundLuma;
+
+  /// The composite still decoded to the primary symbol's text.
+  final bool decoded;
+  const AlphaProbe(this.backgroundLuma, this.decoded);
+  factory AlphaProbe.fromJson(Map<String, dynamic> j) => AlphaProbe(
+        _int(j['background_luma']) ?? 0,
+        j['decoded'] == true,
+      );
+}
+
+/// The placement envelope — over which backgrounds the transparent design
+/// keeps decoding. Every reported endpoint is a TESTED background.
+class AlphaEnvelope {
+  final List<AlphaProbe> probes;
+
+  /// Contiguous decoded bands `[lo, hi]`.
+  final List<List<int>> safeLuma;
+  final AlphaPlacement placement;
+  const AlphaEnvelope(this.probes, this.safeLuma, this.placement);
+  factory AlphaEnvelope.fromJson(Map<String, dynamic> j) => AlphaEnvelope(
+        _objList(j['probes']).map(AlphaProbe.fromJson).toList(),
+        [
+          for (final band in (j['safe_luma'] is List ? j['safe_luma'] as List : const []))
+            [for (final v in (band is List ? band : const [])) _int(v) ?? 0]
+        ],
+        AlphaPlacement.from(j['placement']),
+      );
+}
+
+/// How transparency was handled — absent for opaque inputs and under
+/// `alphaBackground: "none"` (the report then carries no block at all).
+class AlphaReport {
+  /// Fraction of pixels with alpha < 255, rounded to 3 decimals.
+  final double coverage;
+
+  /// Alpha-weighted mean BT.601 luma of the visible content.
+  final int contentLuma;
+  final AlphaMode mode;
+
+  /// `"white"` · `"black"` · `"#rrggbb"`.
+  final String background;
+
+  /// The opposite background rescued a zero-detection scan (auto only).
+  final bool fallbackUsed;
+
+  /// Full profile only; null when skipped or budget-exhausted.
+  final AlphaEnvelope? envelope;
+  const AlphaReport(this.coverage, this.contentLuma, this.mode,
+      this.background, this.fallbackUsed, this.envelope);
+  factory AlphaReport.fromJson(Map<String, dynamic> j) => AlphaReport(
+        _double(j['coverage']),
+        _int(j['content_luma']) ?? 0,
+        AlphaMode.from(j['mode']),
+        _str(j['background']),
+        j['fallback_used'] == true,
+        j['envelope'] == null ? null : AlphaEnvelope.fromJson(_obj(j['envelope'])),
+      );
+}
+
 // ─────────────────────────── Hint (tagged union) ───────────────────────────
 
 /// A machine-actionable improvement hint. Unknown hints decode to [HintUnknown].
@@ -567,6 +668,8 @@ sealed class Hint {
       'reduce_art_texture' => const HintReduceArtTexture(),
       'low_correction_margin' => HintLowCorrectionMargin(
           errors: _int(j['errors']) ?? 0, capacity: _int(j['capacity']) ?? 0),
+      'alpha_background_dependent' =>
+        HintAlphaBackgroundDependent(AlphaPlacement.from(j['placement'])),
       _ => HintUnknown(h, j),
     };
   }
@@ -615,6 +718,13 @@ class HintLowCorrectionMargin implements Hint {
   String get hint => 'low_correction_margin';
   final int errors, capacity;
   const HintLowCorrectionMargin({required this.errors, required this.capacity});
+}
+
+class HintAlphaBackgroundDependent implements Hint {
+  @override
+  String get hint => 'alpha_background_dependent';
+  final AlphaPlacement placement;
+  const HintAlphaBackgroundDependent(this.placement);
 }
 
 class HintUnknown implements Hint {
@@ -672,6 +782,10 @@ class ScanReport {
   /// null in the `frame` profile.
   final Score? score;
   final List<Hint> hints;
+
+  /// null for opaque inputs (the wire omits the key entirely) and under
+  /// `alphaBackground: "none"`.
+  final AlphaReport? alpha;
   final PipelineTrace trace;
   final Versions versions;
 
@@ -679,13 +793,14 @@ class ScanReport {
   /// view does not yet model.
   final Map<String, dynamic> raw;
 
-  const ScanReport(this.detections, this.score, this.hints, this.trace,
-      this.versions, this.raw);
+  const ScanReport(this.detections, this.score, this.hints, this.alpha,
+      this.trace, this.versions, this.raw);
 
   factory ScanReport.fromJson(Map<String, dynamic> j) => ScanReport(
         _objList(j['detections']).map(Detection.fromJson).toList(),
         j['score'] == null ? null : Score.fromJson(_obj(j['score'])),
         _objList(j['hints']).map(Hint.fromJson).toList(),
+        j['alpha'] == null ? null : AlphaReport.fromJson(_obj(j['alpha'])),
         PipelineTrace.fromJson(_obj(j['trace'])),
         Versions.fromJson(_obj(j['versions'])),
         j,

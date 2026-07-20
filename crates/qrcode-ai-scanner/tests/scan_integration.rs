@@ -60,7 +60,7 @@ fn generated_url_qr_end_to_end() {
     assert!(d.corners.is_some());
     let version = d.meta.version.expect("version measured");
     assert_eq!(d.meta.modules, Some(version * 4 + 17));
-    assert_eq!(report.versions.score_contract, 3);
+    assert_eq!(report.versions.score_contract, 4);
 }
 
 #[test]

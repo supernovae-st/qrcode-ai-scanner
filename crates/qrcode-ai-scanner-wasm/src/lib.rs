@@ -6,7 +6,7 @@
 //! `raw` as base64) — identical shape to the server/CLI surfaces.
 
 use qrcode_ai_scanner::{
-    ImageInput, Limits, ScanConfig, ScanProfile, Scanner, ScoreCheck, StressAxis,
+    AlphaBackground, ImageInput, Limits, ScanConfig, ScanProfile, Scanner, ScoreCheck, StressAxis,
 };
 use serde::Serialize as _;
 use wasm_bindgen::prelude::*;
@@ -16,6 +16,7 @@ fn config_from(
     budget_ms: Option<f64>,
     score_skip_axes: Option<Vec<String>>,
     score_skip_checks: Option<Vec<String>>,
+    alpha_background: Option<String>,
 ) -> Result<ScanProfile, JsError> {
     let profile = match name.as_deref() {
         None => ScanProfile::Full,
@@ -60,11 +61,21 @@ fn config_from(
             })
             .collect::<Result<_, _>>()?,
     };
+    // Transparent-input handling (`auto` default): the flatten runs before
+    // luma conversion, uniform across every binding. Same loud-typo posture.
+    let alpha = match &alpha_background {
+        None => None,
+        Some(name) => Some(AlphaBackground::from_name(name).ok_or_else(|| {
+            JsError::new(&format!(
+                "unknown alpha background `{name}` — expected auto | white | black | none | #rrggbb"
+            ))
+        })?),
+    };
     // wasm runs the scan ON the caller's thread (browser main thread unless
     // the embedder uses a worker) — budget control is how a verify-while-
     // typing UI keeps the worst case bounded without giving up the deep
     // ladder. 0/negative = unbounded.
-    if budget_ms.is_none() && skip.is_empty() && checks.is_empty() {
+    if budget_ms.is_none() && skip.is_empty() && checks.is_empty() && alpha.is_none() {
         return Ok(profile);
     }
     let mut config: ScanConfig = profile.config();
@@ -78,6 +89,9 @@ fn config_from(
     }
     config.score_skip_axes = skip;
     config.score_skip_checks = checks;
+    if let Some(alpha) = alpha {
+        config.alpha_background = alpha;
+    }
     Ok(ScanProfile::Custom(config))
 }
 
@@ -125,9 +139,19 @@ fn run_scan(
 /// `score_skip_axes` (wire names, e.g. `["perspective","rotation"]`)
 /// excludes axes from scoring: their cells never run and the composite
 /// renormalizes engine-side — the generated-preview integration config.
-/// `score_skip_checks` (`["uec","iso15415"]`) excludes report SECTIONS the
-/// host does not display: never computed, wire carries null, and the
-/// UEC-driven hints never fire. The composite value does not move.
+/// `score_skip_checks` (`["uec","iso15415","alpha_envelope"]`) excludes
+/// report SECTIONS the host does not display: never computed, wire carries
+/// null, and the section-driven hints never fire. The composite value does
+/// not move. `alpha_background` (`auto` | `white` | `black` | `none` |
+/// `#rrggbb`) picks the background flattened under transparent pixels —
+/// `auto` (default) reads the design's own content and retries the
+/// opposite on a zero-detection scan; opaque inputs are untouched.
+// allow, not expect: wasm_bindgen re-emits the fn — the lint fires on the
+// generated item, breaking #[expect] fulfillment tracking (napi precedent).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the wasm signature IS the cross-binding contract (profile + caps + budget + skips + alpha)"
+)]
 #[wasm_bindgen]
 pub fn scan_image(
     bytes: &[u8],
@@ -137,10 +161,17 @@ pub fn scan_image(
     budget_ms: Option<f64>,
     score_skip_axes: Option<Vec<String>>,
     score_skip_checks: Option<Vec<String>>,
+    alpha_background: Option<String>,
 ) -> Result<JsValue, JsError> {
     run_scan(
         ImageInput::encoded(bytes),
-        config_from(profile, budget_ms, score_skip_axes, score_skip_checks)?,
+        config_from(
+            profile,
+            budget_ms,
+            score_skip_axes,
+            score_skip_checks,
+            alpha_background,
+        )?,
         max_dimension,
         max_pixels,
     )
@@ -158,8 +189,8 @@ pub fn scan_frame(
     budget_ms: Option<f64>,
 ) -> Result<JsValue, JsError> {
     let profile = match profile {
-        Some(_) => config_from(profile, budget_ms, None, None)?,
-        None => config_from(Some("frame".to_owned()), budget_ms, None, None)?,
+        Some(_) => config_from(profile, budget_ms, None, None, None)?,
+        None => config_from(Some("frame".to_owned()), budget_ms, None, None, None)?,
     };
     run_scan(ImageInput::rgba8(data, width, height), profile, None, None)
 }

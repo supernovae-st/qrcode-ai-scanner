@@ -112,8 +112,54 @@ expression: full_report()
       "hint": "low_correction_margin",
       "errors": 12,
       "capacity": 24
+    },
+    {
+      "hint": "alpha_background_dependent",
+      "placement": "light_only"
     }
   ],
+  "alpha": {
+    "coverage": 0.612,
+    "content_luma": 34,
+    "mode": "auto",
+    "background": "white",
+    "fallback_used": false,
+    "envelope": {
+      "probes": [
+        {
+          "background_luma": 0,
+          "decoded": false
+        },
+        {
+          "background_luma": 64,
+          "decoded": false
+        },
+        {
+          "background_luma": 96,
+          "decoded": false
+        },
+        {
+          "background_luma": 128,
+          "decoded": true
+        },
+        {
+          "background_luma": 192,
+          "decoded": true
+        },
+        {
+          "background_luma": 255,
+          "decoded": true
+        }
+      ],
+      "safe_luma": [
+        [
+          128,
+          255
+        ]
+      ],
+      "placement": "light_only"
+    }
+  },
   "trace": {
     "stages": [
       {
@@ -128,7 +174,7 @@ expression: full_report()
   },
   "versions": {
     "scanner": "[crate-version]",
-    "pipeline": 1,
-    "score_contract": 3
+    "pipeline": 2,
+    "score_contract": 4
   }
 }

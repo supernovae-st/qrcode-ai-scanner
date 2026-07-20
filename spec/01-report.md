@@ -11,10 +11,16 @@ serializer is configured `serialize_missing_as_null` to match serde_json).
   "detections": [Detection],   // empty = no QR found (a RESULT, not an error)
   "score":      Score | null,  // null in the frame profile / no detection
   "hints":      [Hint],        // machine-actionable, stable order (06-hints.md)
+  "alpha":      AlphaReport,   // § Alpha — ABSENT (not null) for opaque inputs
   "trace":      PipelineTrace, // why the scan succeeded or came back empty
   "versions":   Versions       // contract markers (spec/README.md)
 }
 ```
+
+`alpha` is the ONE deliberate exception to the `None`-serializes-as-`null`
+rule: the key is OMITTED entirely for opaque inputs (and under
+`alpha_background: "none"`), so every pre-alpha report keeps its exact
+bytes. Parse it as an optional key.
 
 ## Detection
 
@@ -103,7 +109,7 @@ stage boundaries.
 // `scanner` is illustrative — it carries whatever workspace release produced
 // the report. `pipeline` and `score_contract` are the normative compatibility
 // anchors (bumped only on breaking / semantic change).
-{ "scanner": "0.6.0", "pipeline": 1, "score_contract": 3 }
+{ "scanner": "0.9.0", "pipeline": 2, "score_contract": 4 }
 ```
 
 ## Score — see [04-score.md](04-score.md) for full semantics
@@ -121,6 +127,59 @@ stage boundaries.
 ```
 
 `score` evaluates the PRIMARY detection (the first-discovered symbol).
+
+## Alpha — transparent-input handling
+
+Present ONLY when the input carried at least one pixel with alpha < 255
+AND `alpha_background` was not `"none"`. A transparent asset has no one
+background — before v0.9 the engine read the RGB *stored under* the
+transparency, an exporter-dependent verdict (canvas exports store black
+under full transparency, editors often white: the same visual design
+scored 100, 74 or nothing depending on the exporting tool). Since
+pipeline v2 the input is composited over a DECLARED background before
+luma conversion and RGB extraction; every downstream stage (ladder ·
+score · UEC · ISO) sees the flattened image.
+
+```jsonc
+{
+  "coverage":     0.612,    // fraction of pixels with alpha < 255 (3 decimals)
+  "content_luma": 34,       // alpha-weighted mean BT.601 luma of the content
+  "mode":         "auto" | "white" | "black" | "custom",   // config echo
+  "background":   "white" | "black" | "#rrggbb",  // what the verdict used
+  "fallback_used": false,   // auto only: the opposite background rescued
+                            // a zero-detection scan (both walks in trace)
+  "envelope": {             // Full profile only; null when skipped
+                            // (score_skip_checks: ["alpha_envelope"]),
+                            // budget-exhausted, or nothing decoded
+    "probes": [             // ordered by luma: 5 fixed rungs (0·64·128·192·255)
+      { "background_luma": 0,   "decoded": false },   // + one bisection probe
+      { "background_luma": 255, "decoded": true }     //   per verdict boundary
+    ],
+    "safe_luma": [[160, 255]], // contiguous decoded bands — every endpoint
+                               // is a TESTED background, never interpolation
+    "placement": "any" | "light_only" | "dark_only" | "mixed" | "none"
+  }
+}
+```
+
+Semantics, normative:
+
+- **`auto`** (the default): content with alpha-weighted mean luma < 128
+  flattens over white, else over black — the design is measured on its
+  intended placement. A zero-detection scan re-flattens over the opposite
+  background and walks the ladder once more within the same budget
+  (`fallback_used: true` when that walk produced the detections). Forced
+  modes (`white` · `black` · `#rrggbb`) never retry: the host's declared
+  surface is the truth being measured.
+- **The envelope** answers "over which backgrounds does this design keep
+  decoding": quick decode probes (the primary symbol's own decode class,
+  never the full ladder's recovery power) on neutral backgrounds. It is
+  informational — it never moves `score.value` (surface truth, not score
+  surgery) — and drives the `alpha_background_dependent` hint.
+- **Exporter invariance**: the RGB stored under fully transparent pixels
+  never influences the report.
+- **Opaque inputs** (or `"none"`): the historical path bit for bit, no
+  `alpha` key.
 
 ## Machine-readable mirrors
 

@@ -147,7 +147,59 @@ export type Hint =
    * (UEC margin 0) — the classic miscorrection signature. Treat the
    * decoded content as unverified.
    */
-  | { hint: "low_correction_margin"; errors: number; capacity: number };
+  | { hint: "low_correction_margin"; errors: number; capacity: number }
+  /**
+   * The transparent design only survives on part of the background range
+   * (`alpha.envelope` narrower than "any"): pin a background layer in the
+   * artwork, or constrain placement to `alpha.envelope.safe_luma`.
+   */
+  | { hint: "alpha_background_dependent"; placement: AlphaPlacement };
+
+/** The requested alpha-background handling (config echo). */
+export type AlphaMode = "auto" | "white" | "black" | "custom";
+/** Placement verdict spelled by the envelope's decoded bands. */
+export type AlphaPlacement = "any" | "light_only" | "dark_only" | "mixed" | "none";
+
+/** One neutral-background decode probe of the placement envelope. */
+export interface AlphaProbe {
+  /** Neutral background luma composited under the content (0-255). */
+  background_luma: number;
+  /** The composite still decoded to the primary symbol's text. */
+  decoded: boolean;
+}
+
+/**
+ * The placement envelope — "over which backgrounds does this transparent
+ * design keep decoding". Probes are quick decodes in the primary symbol's
+ * own decode class; every reported endpoint is a TESTED background, never
+ * interpolation.
+ */
+export interface AlphaEnvelope {
+  /** Probes ordered by background luma (5 fixed rungs + bisection refinements). */
+  probes: AlphaProbe[];
+  /** Contiguous decoded bands [lo, hi]. */
+  safe_luma: [number, number][];
+  placement: AlphaPlacement;
+}
+
+/**
+ * How transparency was handled. Present ONLY when the input carried
+ * transparent pixels AND `alphaBackground` was not "none" — opaque inputs
+ * keep their exact pre-0.9 report bytes.
+ */
+export interface AlphaReport {
+  /** Fraction of pixels with alpha < 255, rounded to 3 decimals. */
+  coverage: number;
+  /** Alpha-weighted mean BT.601 luma of the visible content. */
+  content_luma: number;
+  mode: AlphaMode;
+  /** Background the verdict was measured over — "white" · "black" · "#rrggbb". */
+  background: string;
+  /** The declared flatten found nothing; the opposite background rescued the scan (auto only). */
+  fallback_used: boolean;
+  /** Full profile only; null when skipped, budget-exhausted, or nothing decoded. */
+  envelope: AlphaEnvelope | null;
+}
 
 export interface StageTrace { stage: string; transforms_tried: number; ms: number; detections_found: number }
 export interface PipelineTrace { stages: StageTrace[]; engine_panics: number; total_ms: number }
@@ -159,6 +211,8 @@ export interface ScanReport {
   /** null in the frame profile. */
   score: Score | null;
   hints: Hint[];
+  /** ABSENT (not null) for opaque inputs and under alphaBackground "none". */
+  alpha?: AlphaReport;
   trace: PipelineTrace;
   versions: Versions;
 }

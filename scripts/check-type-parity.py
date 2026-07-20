@@ -59,18 +59,45 @@ CONTRACT_STRUCTS = [
     (REPORT_RS, "IsoParameter"),
     (REPORT_RS, "Iso15415Report"),
     (REPORT_RS, "Score"),
+    (REPORT_RS, "AlphaProbe"),
+    (REPORT_RS, "AlphaEnvelope"),
+    (REPORT_RS, "AlphaReport"),
     (REPORT_RS, "StageTrace"),
     (REPORT_RS, "PipelineTrace"),
     (REPORT_RS, "Versions"),
     (REPORT_RS, "ScanReport"),
 ]
 
+# Fields the wire OMITS entirely when None (serde skip_serializing_if):
+# present in the Rust struct + TS (`?:`) + Dart reads, ABSENT from the
+# schema's `required` (but its `properties` must still describe them).
+OPTIONAL_FIELDS: dict[str, set[str]] = {"ScanReport": {"alpha"}}
+
 # Flat enums with a same-named schema $def (rust ↔ ts ↔ schema).
-FLAT_ENUMS = ["Symbology", "EngineKind", "EcLevel", "Charset", "Grade", "IsoGrade", "StressAxis"]
+FLAT_ENUMS = [
+    "Symbology",
+    "EngineKind",
+    "EcLevel",
+    "Charset",
+    "Grade",
+    "IsoGrade",
+    "StressAxis",
+    "AlphaMode",
+    "AlphaPlacement",
+]
 
 # Dart enums whose wire values mirror a same-named Rust enum. UecGrade/IsoGrade
 # are handled apart: Dart folds them into one `LetterGrade` (see main()).
-DART_ENUMS = ["Symbology", "EngineKind", "EcLevel", "Charset", "Grade", "StressAxis"]
+DART_ENUMS = [
+    "Symbology",
+    "EngineKind",
+    "EcLevel",
+    "Charset",
+    "Grade",
+    "StressAxis",
+    "AlphaMode",
+    "AlphaPlacement",
+]
 
 
 def snake(name: str) -> str:
@@ -251,7 +278,12 @@ def main() -> None:
     for cond in doc["$defs"]["Hint"]["allOf"]:
         tag = cond["if"]["properties"]["hint"]
         hint_conds.update([tag["const"]] if "const" in tag else tag["enum"])
-    fielded = {"raise_error_correction", "fix_finder_pattern", "low_correction_margin"}
+    fielded = {
+        "raise_error_correction",
+        "fix_finder_pattern",
+        "low_correction_margin",
+        "alpha_background_dependent",
+    }
     if fielded - hint_conds:
         fail("fielded hints missing a schema conditional", fielded - hint_conds)
     eq("hint rust↔dart", rust_h, dart_union_tags("Hint"))
@@ -274,7 +306,11 @@ def main() -> None:
         rf = rust_struct_fields(path, name)
         eq(f"{name} fields rust↔ts", rf, ts_interface_fields(name))
         required = set(doc["required"] if name == "ScanReport" else doc["$defs"][name]["required"])
-        eq(f"{name} fields rust↔schema", rf, required)
+        optional = OPTIONAL_FIELDS.get(name, set())
+        props = doc["properties"] if name == "ScanReport" else doc["$defs"][name]["properties"]
+        if optional - set(props):
+            fail(f"{name} optional fields missing from schema properties", optional - set(props))
+        eq(f"{name} fields rust↔schema", rf - optional, required)
 
     # ---- Dart mirror: enum wire values (KNOWN set == Rust exactly) ----
     for enum_name in DART_ENUMS:
@@ -288,7 +324,7 @@ def main() -> None:
         eq(f"{name} fields rust↔dart", rust_struct_fields(path, name), dart_fromjson_keys(name))
 
     print(
-        "type parity OK: 8 enums · payloads · hints · "
+        f"type parity OK: {len(FLAT_ENUMS) + 1} enums · payloads · hints · "
         f"{len(CONTRACT_STRUCTS)} structs — across rust · ts · schema · dart"
     )
 
