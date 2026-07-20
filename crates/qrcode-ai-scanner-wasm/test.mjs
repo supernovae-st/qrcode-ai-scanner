@@ -103,6 +103,16 @@ assert.throws(
   "modes are not colors — throw loudly",
 );
 
+// score_preset (#10) positional contract: design = 4 axes, the wire declares 70
+const designed = scan_image(cleanBytes, "full", undefined, undefined, 0, undefined, undefined, undefined, undefined, "design");
+assert.equal(designed.score.axes.length, 4, "design skips perspective+rotation");
+assert.equal(designed.score.weights_run, 70, "the honesty integer declares the partial contract");
+assert.throws(
+  () => scan_image(cleanBytes, "full", undefined, undefined, 0, ["blur"], undefined, undefined, undefined, "design"),
+  /mutually exclusive/,
+  "preset + explicit list must throw loudly",
+);
+
 // invalid bytes → typed throw, not a crash
 assert.throws(() => scan_image(new Uint8Array([1, 2, 3])), /QRS-001/);
 

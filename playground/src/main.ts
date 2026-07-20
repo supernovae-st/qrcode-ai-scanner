@@ -198,6 +198,9 @@ function scoreModule(s: Score): HTMLElement {
     h('span', { class: 'score-num' }, String(s.value)),
     h('span', { class: 'score-den' }, '/ 100'),
     h('span', { class: `grade-chip ${lvl(letter)}` }, h('span', { class: 'dot' }), `${cap(s.grade)} · ${letter.toUpperCase()}`),
+    s.weights_run && s.weights_run < 100
+      ? h('span', { class: 'badge muted' }, `${s.weights_run}% of contract`)
+      : null,
   );
   const axes = h('div', { class: 'axes' }, ...s.axes.map(axisRow));
   return h('section', { class: 'module' }, h('h2', {}, 'Scannability score'), head, axes);
@@ -212,10 +215,13 @@ function axisRow(a: AxisScore): HTMLElement {
     if (i < a.passed) cell.style.background = color;
     bar.append(cell);
   }
+  // the knee, tightest tested first — the explainability seam made visible
+  const knee = a.refined_failed_at ?? a.failed_at;
   return h('div', { class: 'axis' },
     h('span', { class: 'axis-name' }, a.axis),
     bar,
     h('span', { class: 'axis-val' }, `${a.passed}/${a.total}`),
+    knee ? h('span', { class: 'axis-knee' }, `✕ ${knee}`) : null,
   );
 }
 
