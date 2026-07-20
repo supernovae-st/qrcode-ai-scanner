@@ -373,3 +373,4 @@ details.raw pre {
 .alpha-tile.ok { outline: 2px solid var(--g-a); outline-offset: -2px; }
 .alpha-tile.ko { outline: 2px solid var(--g-f); outline-offset: -2px; opacity: .75; }
 .alpha-tile-wrap figcaption { font-size: 11px; letter-spacing: .02em; }
+.palette-row input { font-family: "JetBrains Mono", monospace; font-size: 12.5px; width: 100%; }

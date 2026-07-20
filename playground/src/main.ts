@@ -50,10 +50,15 @@ const alphaMode = (): string | undefined => {
   const v = ($('input[name=alphamode]:checked') as HTMLInputElement)?.value ?? 'auto';
   return v === 'auto' ? undefined : v;
 };
-// The host-palette demo: two theme colors probed inside the same scan —
-// their per-color verdicts land in alpha.envelope.palette (transparent
-// inputs only; opaque scans ignore the whole alpha config).
-const DEMO_PALETTE = ['#f5f5f4', '#1c1917'];
+// The host-palette input: theme colors probed inside the same scan —
+// per-color verdicts land in alpha.envelope.palette (transparent inputs
+// only; opaque scans ignore the whole alpha config). Empty → undefined,
+// so the default path matches a host that passes nothing.
+const alphaPalette = (): string[] | undefined => {
+  const raw = ($('#palette') as HTMLInputElement)?.value ?? '';
+  const colors = raw.split(',').map((c) => c.trim()).filter(Boolean);
+  return colors.length ? colors : undefined;
+};
 
 const GRADE_LETTER: Record<Grade, string> = {
   excellent: 'a', good: 'b', acceptable: 'c', fair: 'd', poor: 'f',
@@ -109,7 +114,7 @@ function scanBytes(bytes: Uint8Array, label: string) {
     const t0 = performance.now();
     const report = scan_image(
       bytes, profile(), undefined, undefined, budget(), undefined, undefined, alphaMode(),
-      DEMO_PALETTE,
+      alphaPalette(),
     ) as ScanReport;
     const wall = performance.now() - t0;
     lastDetection = report.detections[0] ?? null;
@@ -479,6 +484,7 @@ document.querySelectorAll<HTMLButtonElement>('[data-sample]').forEach((btn) =>
 $('#profile').addEventListener('change', () => { if (lastBytes && !cameraOn) scanBytes(lastBytes, 'rescan'); });
 $('#budget').addEventListener('change', () => { if (lastBytes && !cameraOn) scanBytes(lastBytes, 'rescan'); });
 $('#alphamode').addEventListener('change', () => { if (lastBytes && !cameraOn) scanBytes(lastBytes, 'rescan'); });
+$('#palette').addEventListener('change', () => { if (lastBytes && !cameraOn) scanBytes(lastBytes, 'rescan'); });
 
 /* ---------- live camera (scan_frame) ---------- */
 let cameraOn = false;
