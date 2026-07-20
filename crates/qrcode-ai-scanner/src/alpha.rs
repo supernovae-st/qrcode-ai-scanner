@@ -13,7 +13,6 @@
 
 use web_time::Instant;
 
-use crate::engine;
 use crate::error::{Result, ScanError};
 use crate::input::{LumaImage, bt601};
 use crate::ladder::{AlphaBackground, CancelToken};
@@ -40,6 +39,13 @@ pub(crate) fn composite(fg: u8, bg: u8, a: u8) -> u8 {
 /// light content over black — measured on the design's own visible pixels.
 pub(crate) fn auto_background(content_luma: u8) -> [u8; 3] {
     if content_luma < 128 { [255; 3] } else { [0; 3] }
+}
+
+/// Cheap routing test — does the buffer carry ANY transparency? Early-exits
+/// on the first non-opaque byte, so the common fully-opaque RGBA input pays
+/// one alpha-byte compare per pixel and nothing else.
+pub(crate) fn has_transparency(rgba: &[u8]) -> bool {
+    rgba.chunks_exact(4).any(|px| px[3] < 255)
 }
 
 /// One-pass content statistics over straight RGBA.
@@ -174,6 +180,12 @@ impl AlphaContext {
     /// premultiplied space — box-averaging straight alpha would bleed
     /// background into half-covered edge pixels).
     ///
+    /// Probes measure in the symbol's OWN decode class — the score's
+    /// stress-cell philosophy (direct → otsu → the deep rung the base
+    /// needed), calibrated on the design over its PRIMARY background. A
+    /// raw direct-only decode would read an all-fail envelope for an
+    /// artistic design that legitimately decodes through a boost rung.
+    ///
     /// `Ok(None)` when the budget ran out mid-sweep — a partial envelope
     /// would read as a verdict about backgrounds that were never tested.
     ///
@@ -187,6 +199,12 @@ impl AlphaContext {
         cancel: &CancelToken,
         deadline: Option<Instant>,
     ) -> Result<Option<AlphaEnvelope>> {
+        if cancel.is_cancelled() {
+            return Err(ScanError::Cancelled);
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Ok(None);
+        }
         let premultiplied: Vec<u8> = self
             .fg_luma
             .iter()
@@ -201,6 +219,30 @@ impl AlphaContext {
             &LumaImage::new(self.alpha.clone(), self.width, self.height),
             ENVELOPE_BASE_SIDE,
         );
+        let over = |bg: u8| -> LumaImage {
+            let luma: Vec<u8> = pm
+                .data()
+                .iter()
+                .zip(alpha.data())
+                .map(|(&p, &a)| p.saturating_add(composite(0, bg, a)))
+                .collect();
+            LumaImage::new(luma, pm.width(), pm.height())
+        };
+        // Calibrate once on the design over its primary background (the
+        // image the verdict stands on, at probe scale) — colored custom
+        // backgrounds calibrate at their BT.601 luma (probes are a luma-
+        // space sweep by construction).
+        let base = over(bt601(
+            self.background[0],
+            self.background[1],
+            self.background[2],
+        ));
+        let cell = crate::score::CellProbe::calibrate(&base, expected_text, symbology).unwrap_or(
+            crate::score::CellProbe {
+                rung: None,
+                symbology,
+            },
+        );
 
         let probe = |bg: u8| -> Result<Option<bool>> {
             if cancel.is_cancelled() {
@@ -209,19 +251,11 @@ impl AlphaContext {
             if deadline.is_some_and(|d| Instant::now() >= d) {
                 return Ok(None);
             }
-            let luma: Vec<u8> = pm
-                .data()
-                .iter()
-                .zip(alpha.data())
-                .map(|(&p, &a)| p.saturating_add(composite(0, bg, a)))
-                .collect();
-            let img = LumaImage::new(luma, pm.width(), pm.height());
-            let outcome = engine::decode_filtered(&img, engine::FormatFilter::Only(symbology));
-            let hit = outcome
-                .detections
-                .iter()
-                .any(|d| engine::charset::resolve(&d.raw).0 == expected_text);
-            Ok(Some(hit))
+            Ok(Some(crate::score::cell_passes(
+                &over(bg),
+                expected_text,
+                cell,
+            )))
         };
 
         let mut probes: Vec<(u8, bool)> = Vec::with_capacity(ENVELOPE_RUNGS.len() + 4);
@@ -297,16 +331,18 @@ fn background_name(bg: [u8; 3]) -> String {
 
 /// Contiguous decoded bands + the placement verdict they spell.
 fn classify(probes: &[(u8, bool)]) -> (Vec<[u8; 2]>, AlphaPlacement) {
+    // probes are sorted by background luma, so contiguity IS adjacency: a
+    // band extends exactly while consecutive probes keep decoding
     let mut bands: Vec<[u8; 2]> = Vec::new();
+    let mut previous_decoded = false;
     for &(bg, decoded) in probes {
-        if !decoded {
-            continue;
+        if decoded {
+            match bands.last_mut() {
+                Some(band) if previous_decoded => band[1] = bg,
+                _ => bands.push([bg, bg]),
+            }
         }
-        match bands.last_mut() {
-            // extend the open band when no failing probe interrupted it
-            Some(band) if is_open(band[1], bg, probes) => band[1] = bg,
-            _ => bands.push([bg, bg]),
-        }
+        previous_decoded = decoded;
     }
     let placement = if bands.is_empty() {
         AlphaPlacement::None
@@ -320,15 +356,6 @@ fn classify(probes: &[(u8, bool)]) -> (Vec<[u8; 2]>, AlphaPlacement) {
         AlphaPlacement::Mixed
     };
     (bands, placement)
-}
-
-/// A band stays open between two decoded probes when no probe between
-/// them failed (probes are sorted by background luma).
-fn is_open(band_end: u8, next: u8, probes: &[(u8, bool)]) -> bool {
-    probes
-        .iter()
-        .filter(|&&(bg, _)| bg > band_end && bg < next)
-        .all(|&(_, decoded)| decoded)
 }
 
 #[cfg(test)]

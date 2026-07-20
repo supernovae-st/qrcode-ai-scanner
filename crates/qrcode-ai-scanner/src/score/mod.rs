@@ -64,18 +64,18 @@ fn cell_decode(img: &LumaImage, symbology: crate::report::Symbology) -> engine::
 /// boost rung would otherwise read margin-zero on every cell (direct+otsu
 /// fail even unstressed), conflating "fragile" with "undecodable".
 #[derive(Clone, Copy)]
-struct CellProbe {
+pub(crate) struct CellProbe {
     /// The deep rung the baseline needed, if any.
-    rung: Option<crate::ladder::Rung>,
+    pub(crate) rung: Option<crate::ladder::Rung>,
     /// The symbology being scored — every cell decode filters on it.
-    symbology: crate::report::Symbology,
+    pub(crate) symbology: crate::report::Symbology,
 }
 
 impl CellProbe {
     /// Calibrate on the unstressed base: direct → otsu → first decoding
     /// deep rung. `None` = the base does not decode at stress scale at
     /// all (score legitimately reads zero margin).
-    fn calibrate(
+    pub(crate) fn calibrate(
         base: &LumaImage,
         expected_text: &str,
         symbology: crate::report::Symbology,
@@ -118,7 +118,7 @@ impl CellProbe {
 /// Probe = direct + otsu + the baseline's deep rung when it needed one —
 /// the margin is measured RELATIVE to the symbol's own decode class, never
 /// with the full ladder's recovery power (that asymmetry is the point).
-fn cell_passes(img: &LumaImage, expected_text: &str, probe: CellProbe) -> bool {
+pub(crate) fn cell_passes(img: &LumaImage, expected_text: &str, probe: CellProbe) -> bool {
     if detections_match(&cell_decode(img, probe.symbology).detections, expected_text) {
         return true;
     }

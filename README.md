@@ -52,12 +52,12 @@ is built specifically for them · and it doesn't just say *"decoded"*, it
 tells you **how much margin** the code has before it stops scanning in the
 real world.
 
-Five things no other pure-Rust library ships together:
+Six things no other pure-Rust library ships together:
 
 1. **A deterministic multi-engine decode ladder** tuned on artistic
    corpora (rxing + rqrr, curated preprocessing rungs · no RNG anywhere:
    same input, same result, always).
-2. **Score contract v3** · survival ramps across six stress axes
+2. **Score contract v4** · survival ramps across six stress axes
    (resolution · blur · contrast · **perspective** · **rotation** ·
    **lighting** · the documented blind spots of naive scorers), with
    structural caps on finder damage and quiet-zone violations.
@@ -77,6 +77,17 @@ Five things no other pure-Rust library ships together:
    texture) become half-price erasures (`e + 2t ≤ d − p`). Measured: center
    occlusion tolerance grows from 20% to **30% radius** (2.2× the area) on
    v5-H · exactly the artistic logo-over-center class.
+
+6. **Alpha-aware scanning + the placement envelope** · a transparent PNG
+   has no one background, and naive scanners read whatever RGB the export
+   tool left under the alpha (the same design decodes or dies depending on
+   the exporter). Transparent inputs flatten over a declared background
+   (`auto` picks the design's intended placement; `#rrggbb` forces the
+   host's real surface), and the report answers the actual product
+   question — *over which backgrounds does this design keep decoding* —
+   with tested probes (`alpha.envelope`: safe luma bands + a
+   `light_only`/`dark_only`/`any` placement verdict, every endpoint a
+   measured background, never interpolation).
 
 Plus machine-actionable **hints** (`raise_error_correction`,
 `fix_finder_pattern`, `low_correction_margin`, …) · the feedback loop for

@@ -143,14 +143,25 @@ pub(crate) fn normalize_with(
                 details: e.to_string(),
             })?;
             if alpha_background != AlphaBackground::None && img.color().has_alpha() {
-                // to_rgba8 COPIES so the original stays available for the
-                // opaque fall-through — routing a fully-opaque LumaA8/RGBA
-                // through an RGBA round-trip could drift luma by ±1 vs the
-                // historical conversion, and opaque bit-parity is contract.
+                // Borrow when the decoded image is already RGBA8 (the
+                // dominant PNG class) — only exotic variants (Rgba16,
+                // LumaA…) pay a conversion copy. The original `img` stays
+                // intact for the opaque fall-through: routing a fully-
+                // opaque input through an RGBA round-trip could drift luma
+                // by ±1 vs the historical conversion, and opaque bit-parity
+                // is contract.
                 let colored = img.color().has_color();
-                let rgba = img.to_rgba8();
-                let stats = crate::alpha::content_stats(rgba.as_raw());
-                if stats.transparent > 0 {
+                let converted;
+                let rgba = if let Some(borrowed) = img.as_rgba8() {
+                    borrowed
+                } else {
+                    converted = img.to_rgba8();
+                    &converted
+                };
+                // early-exit routing test first: fully-opaque inputs (the
+                // common case) pay one alpha-byte scan, never the stats
+                if crate::alpha::has_transparency(rgba.as_raw()) {
+                    let stats = crate::alpha::content_stats(rgba.as_raw());
                     let (w, h) = (rgba.width(), rgba.height());
                     return Ok(flatten(
                         rgba.as_raw(),
@@ -185,11 +196,11 @@ fn flatten_or_drop(
     mode: AlphaBackground,
     colored: bool,
 ) -> NormalizedInput {
-    if mode != AlphaBackground::None {
+    // early-exit routing test first: fully-opaque frames (every real
+    // camera frame) pay one alpha-byte scan, never the stats pass
+    if mode != AlphaBackground::None && crate::alpha::has_transparency(data) {
         let stats = crate::alpha::content_stats(data);
-        if stats.transparent > 0 {
-            return flatten(data, width, height, mode, colored, &stats);
-        }
+        return flatten(data, width, height, mode, colored, &stats);
     }
     let mut luma = Vec::with_capacity(data.len() / 4);
     let mut rgb = Vec::with_capacity(data.len() / 4 * 3);

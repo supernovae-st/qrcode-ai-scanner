@@ -328,6 +328,66 @@ fn auto_fallback_rescues_a_mis_called_mean() {
     );
 }
 
+/// A fully transparent input (every pixel alpha 0) is a valid scan, not a
+/// crash: flattens to a blank plane, decodes nothing, reports coverage 1.
+#[test]
+fn fully_transparent_input_is_a_calm_empty_report() {
+    let img = image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 10, 90, 0]));
+    let bytes = png(&img);
+    let report = Scanner::default()
+        .scan(ImageInput::encoded(&bytes))
+        .unwrap();
+    assert!(report.detections.is_empty());
+    let alpha = report.alpha.as_ref().unwrap();
+    assert_eq!(alpha.coverage, 1.0);
+    assert_eq!(
+        alpha.content_luma, 0,
+        "no visible mass reads a deterministic 0"
+    );
+}
+
+/// The one cross-binding parser: canonical names, uppercase hex tolerated,
+/// junk rejected — every binding fails loud through this single seam.
+#[test]
+fn alpha_background_from_name_is_the_single_parsing_seam() {
+    assert_eq!(
+        AlphaBackground::from_name("auto"),
+        Some(AlphaBackground::Auto)
+    );
+    assert_eq!(
+        AlphaBackground::from_name("white"),
+        Some(AlphaBackground::White)
+    );
+    assert_eq!(
+        AlphaBackground::from_name("black"),
+        Some(AlphaBackground::Black)
+    );
+    assert_eq!(
+        AlphaBackground::from_name("none"),
+        Some(AlphaBackground::None)
+    );
+    assert_eq!(
+        AlphaBackground::from_name("#1A2b3C"),
+        Some(AlphaBackground::Custom([0x1a, 0x2b, 0x3c])),
+        "hex is case-insensitive"
+    );
+    for junk in [
+        "AUTO",
+        "",
+        "#12345",
+        "#1234567",
+        "#+a+b+c",
+        "#gg0011",
+        "transparent",
+    ] {
+        assert_eq!(
+            AlphaBackground::from_name(junk),
+            None,
+            "{junk:?} must reject"
+        );
+    }
+}
+
 /// Raw `Rgba8` inputs (browser `ImageData`) walk the same flatten as encoded
 /// PNGs — one seam, every binding.
 #[test]
