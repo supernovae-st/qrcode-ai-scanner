@@ -37,7 +37,7 @@ versioned [`ScanReport`](spec/) contract.
 Per-surface guides in [`docs/`](docs/) · code examples in the Quick start below.
 
 **📱 Mobile + cross-platform:** Kotlin/Android is **live on JitPack**
-(`com.github.supernovae-st:qrcode-ai-scanner:v0.8.1` · use the latest tag).
+(`com.github.supernovae-st:qrcode-ai-scanner:v0.9.0` — use the latest tag).
 Swift/iOS (UniFFI → SwiftPM) and Flutter/Dart (flutter_rust_bridge →
 pub.dev) are built and CI-green, returning the same `ScanReport`.
 Consult each binding's README for the current install path:

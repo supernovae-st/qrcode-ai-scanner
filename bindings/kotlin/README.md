@@ -26,7 +26,7 @@ repositories {
 
 // app/build.gradle.kts
 dependencies {
-    implementation("com.github.supernovae-st:qrcode-ai-scanner:v0.8.1")
+    implementation("com.github.supernovae-st:qrcode-ai-scanner:v0.9.0")
 }
 ```
 
