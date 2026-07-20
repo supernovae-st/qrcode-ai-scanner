@@ -4,6 +4,17 @@ All notable changes to this workspace. Every surface versions together — the R
 crate + CLI, the npm node + wasm packages, the Python wheel, and the
 Kotlin/Android · Swift/iOS · Flutter bindings.
 
+## Unreleased
+
+### CI
+
+- **The release tooling pins exact** — the v0.9.0 npm-publish legs died
+  mid-train because the unpinned napi CLI caret (`^3.7.1`) resolved to
+  3.7.3, which hard-errors `--use-napi-cross` on mac/windows hosts and on
+  musl targets. The flag is now a per-row matrix field (Linux-gnu rows
+  only), musl rides zig (`-x` + setup-zig + cargo-zigbuild, the official
+  napi-rs template recipe), and `@napi-rs/cli` pins `3.7.3` exact.
+
 ## 0.9.0 — 2026-07-20
 
 ### Changed

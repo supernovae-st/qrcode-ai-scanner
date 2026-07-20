@@ -73,6 +73,14 @@ Annotated tag `vX.Y.Z` (headline + expected-red note), `git push origin vX.Y.Z`.
 
 ## 6 · What fires, and what to expect (state: 2026-07-08)
 
+Every publish leg is **idempotent** (skips versions already on the
+registry): if a leg dies, fix the workflow on main and re-run it with
+`gh workflow run <name>` — nothing double-publishes. And the release
+tooling itself is **pinned exact** (`@napi-rs/cli`): the v0.9.0 train
+lost its first two npm-publish runs to an unpinned caret resolving a
+new CLI whose host validation rejected `--use-napi-cross` outside
+Linux-gnu (2026-07-20) — a toolchain must never move under a tag.
+
 | Leg | Expectation |
 |---|---|
 | crates-publish · npm-publish · python | green; registries live in ~10-15 min |
