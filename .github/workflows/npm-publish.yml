@@ -16,13 +16,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # --use-napi-cross is Linux-host-only (napi CLI >=3.7.3 hard-errors on
+        # mac/windows hosts); darwin/windows rows build their targets natively.
         settings:
-          - { host: macos-latest, target: aarch64-apple-darwin }
-          - { host: macos-latest, target: x86_64-apple-darwin }
-          - { host: ubuntu-latest, target: x86_64-unknown-linux-gnu }
-          - { host: ubuntu-latest, target: aarch64-unknown-linux-gnu }
-          - { host: ubuntu-latest, target: x86_64-unknown-linux-musl }
-          - { host: windows-latest, target: x86_64-pc-windows-msvc }
+          - { host: macos-latest, target: aarch64-apple-darwin, cross: "" }
+          - { host: macos-latest, target: x86_64-apple-darwin, cross: "" }
+          - { host: ubuntu-latest, target: x86_64-unknown-linux-gnu, cross: "--use-napi-cross" }
+          - { host: ubuntu-latest, target: aarch64-unknown-linux-gnu, cross: "--use-napi-cross" }
+          - { host: ubuntu-latest, target: x86_64-unknown-linux-musl, cross: "--use-napi-cross" }
+          - { host: windows-latest, target: x86_64-pc-windows-msvc, cross: "" }
     runs-on: ${{ matrix.settings.host }}
     defaults:
       run:
@@ -40,7 +42,7 @@ jobs:
           node-version: 22
       - uses: Swatinem/rust-cache@v2
       - run: pnpm install --frozen-lockfile=false
-      - run: pnpm exec napi build --platform --release --target ${{ matrix.settings.target }} --js native.js --dts native.d.ts --use-napi-cross
+      - run: pnpm exec napi build --platform --release --target ${{ matrix.settings.target }} --js native.js --dts native.d.ts ${{ matrix.settings.cross }}
       - uses: actions/upload-artifact@v4
         with:
           name: binding-${{ matrix.settings.target }}

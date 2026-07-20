@@ -47,7 +47,7 @@
     "prepack": "node ../../scripts/sync-report-types.mjs"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.7.1"
+    "@napi-rs/cli": "3.7.3"
   },
   "publishConfig": {
     "access": "public"
