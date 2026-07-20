@@ -42,10 +42,10 @@ pub use input::{ImageInput, Limits};
 pub use ladder::{AlphaBackground, CancelToken, ScanConfig, ScanProfile, ScoreCheck, ScoreDepth};
 pub use payload::Payload;
 pub use report::{
-    AlphaEnvelope, AlphaMode, AlphaPlacement, AlphaProbe, AlphaReport, AxisScore, Charset,
-    DecodedContent, Detection, EcLevel, EngineKind, Grade, Hint, Iso15415Report, IsoGrade,
-    IsoParameter, PipelineTrace, Point, QrMeta, ScanReport, Score, StageTrace, StressAxis,
-    StructuralReport, Symbology, UecGrade, UecReport, Versions,
+    AlphaEnvelope, AlphaMode, AlphaPaletteProbe, AlphaPlacement, AlphaProbe, AlphaReport,
+    AxisScore, Charset, DecodedContent, Detection, EcLevel, EngineKind, Grade, Hint,
+    Iso15415Report, IsoGrade, IsoParameter, PipelineTrace, PlateColor, Point, QrMeta, ScanReport,
+    Score, StageTrace, StressAxis, StructuralReport, Symbology, UecGrade, UecReport, Versions,
 };
 
 /// Fuzz-only entry points — cargo-fuzz builds the whole graph with
@@ -183,7 +183,13 @@ impl Scanner {
                         .contains(&ScoreCheck::AlphaEnvelope) =>
             {
                 let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    context.envelope(&primary.text, primary.symbology, cancel, deadline)
+                    context.envelope(
+                        &primary.text,
+                        primary.symbology,
+                        &self.config.alpha_palette,
+                        cancel,
+                        deadline,
+                    )
                 }));
                 match attempt {
                     Ok(result) => result?,
@@ -267,11 +273,21 @@ fn build_report(
     // A background-dependent envelope is generator-actionable exactly like
     // a low-contrast finding: pin a background layer, or constrain the
     // placement to the safe bands.
-    if let Some(envelope) = alpha.as_ref().and_then(|a| a.envelope.as_ref())
+    if let Some(a) = alpha.as_ref()
+        && let Some(envelope) = a.envelope.as_ref()
         && envelope.placement != report::AlphaPlacement::Any
     {
         hints.push(Hint::AlphaBackgroundDependent {
             placement: envelope.placement,
+        });
+        // …and the canonical remedy: an opaque plate behind the symbol —
+        // robust everywhere, transparent look preserved around it.
+        hints.push(Hint::AddBackgroundPlate {
+            color: if a.content_luma < 128 {
+                report::PlateColor::White
+            } else {
+                report::PlateColor::Black
+            },
         });
     }
     let detections = outcome

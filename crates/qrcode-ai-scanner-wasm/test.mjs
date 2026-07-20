@@ -92,6 +92,16 @@ assert.throws(
   /unknown alpha background/,
   "typo'd alpha background must throw loudly",
 );
+// alpha_palette (#9): per-color verdicts inside one scan
+const themed = scan_image(transparent, "full", undefined, undefined, 0, undefined, undefined, undefined, ["#f3f4f6", "black"]);
+assert.equal(themed.alpha.envelope.palette.length, 2);
+assert.equal(themed.alpha.envelope.palette[0].decoded, true);
+assert.equal(themed.alpha.envelope.palette[1].decoded, false);
+assert.throws(
+  () => scan_image(cleanBytes, "full", undefined, undefined, undefined, undefined, undefined, undefined, ["auto"]),
+  /unknown palette color/,
+  "modes are not colors — throw loudly",
+);
 
 // invalid bytes → typed throw, not a crash
 assert.throws(() => scan_image(new Uint8Array([1, 2, 3])), /QRS-001/);

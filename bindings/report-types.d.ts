@@ -153,7 +153,13 @@ export type Hint =
    * (`alpha.envelope` narrower than "any"): pin a background layer in the
    * artwork, or constrain placement to `alpha.envelope.safe_luma`.
    */
-  | { hint: "alpha_background_dependent"; placement: AlphaPlacement };
+  | { hint: "alpha_background_dependent"; placement: AlphaPlacement }
+  /**
+   * The canonical remedy: add an opaque plate (rounded rectangle +
+   * quiet-zone margin) behind the symbol — robust everywhere, transparent
+   * look preserved around it. Fires alongside alpha_background_dependent.
+   */
+  | { hint: "add_background_plate"; color: "white" | "black" };
 
 /** The requested alpha-background handling (config echo). */
 export type AlphaMode = "auto" | "white" | "black" | "custom";
@@ -165,6 +171,15 @@ export interface AlphaProbe {
   /** Neutral background luma composited under the content (0-255). */
   background_luma: number;
   /** The composite still decoded to the primary symbol's text. */
+  decoded: boolean;
+}
+
+/** One HOST-requested palette probe (`alphaPalette` option). */
+export interface AlphaPaletteProbe {
+  /** The requested color — "white" · "black" · "#rrggbb". */
+  background: string;
+  /** Its BT.601 luma (the sweep is luma-space by construction). */
+  background_luma: number;
   decoded: boolean;
 }
 
@@ -180,6 +195,8 @@ export interface AlphaEnvelope {
   /** Contiguous decoded bands [lo, hi]. */
   safe_luma: [number, number][];
   placement: AlphaPlacement;
+  /** HOST palette verdicts, request order — [] when none requested. */
+  palette: AlphaPaletteProbe[];
 }
 
 /**

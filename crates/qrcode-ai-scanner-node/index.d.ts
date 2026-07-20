@@ -58,6 +58,13 @@ export interface ScanOptions {
    * `report.alpha`. Unknown values reject loudly.
    */
   alphaBackground?: AlphaBackgroundOption;
+  /**
+   * Theme/brand colors probed by the placement envelope inside the same
+   * scan — per-color verdicts land in `report.alpha.envelope.palette`
+   * (request order). "white" | "black" | "#rrggbb"; unknown values
+   * reject loudly.
+   */
+  alphaPalette?: ("white" | "black" | `#${string}`)[];
 }
 
 /** Async scan on the libuv pool — never blocks the event loop. */

@@ -491,6 +491,20 @@ pub struct AlphaProbe {
     pub decoded: bool,
 }
 
+/// One HOST-requested palette probe (`alpha_palette` config) — "does the
+/// design survive on this specific theme/brand color".
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
+pub struct AlphaPaletteProbe {
+    /// The requested color — `"white"` · `"black"` · `"#rrggbb"`.
+    pub background: String,
+    /// Its BT.601 luma (the sweep is luma-space by construction).
+    pub background_luma: u8,
+    /// The composite still decoded to the primary symbol's text.
+    pub decoded: bool,
+}
+
 /// The placement envelope — "over which backgrounds does this transparent
 /// design keep decoding". Probes are quick decodes in the primary symbol's
 /// own decode class (never the full ladder's recovery power): the envelope
@@ -509,6 +523,10 @@ pub struct AlphaEnvelope {
     pub safe_luma: Vec<[u8; 2]>,
     /// The verdict the bands spell.
     pub placement: AlphaPlacement,
+    /// HOST-requested palette verdicts (`alpha_palette` config), in
+    /// request order — empty when none were requested. Palette colors
+    /// never distort the neutral `probes`/`safe_luma`/`placement`.
+    pub palette: Vec<AlphaPaletteProbe>,
 }
 
 /// How transparency was handled for this scan. Present ONLY when the input
@@ -579,6 +597,26 @@ pub enum Hint {
         /// The envelope's placement verdict.
         placement: AlphaPlacement,
     },
+    /// The canonical REMEDY for a background-dependent transparent design:
+    /// add an opaque plate (rounded rectangle + quiet-zone margin) behind
+    /// the symbol in the artwork — robust everywhere, transparent look
+    /// preserved around it. Fires alongside `alpha_background_dependent`.
+    AddBackgroundPlate {
+        /// Plate color that maximizes contrast with the design's content.
+        color: PlateColor,
+    },
+}
+
+/// Recommended plate color for [`Hint::AddBackgroundPlate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
+pub enum PlateColor {
+    /// Dark content — plate white.
+    White,
+    /// Light content — plate black.
+    Black,
 }
 
 /// Per-stage pipeline trace entry.
@@ -724,6 +762,11 @@ mod tests {
                 .collect(),
                 safe_luma: vec![[128, 255]],
                 placement: AlphaPlacement::LightOnly,
+                palette: vec![AlphaPaletteProbe {
+                    background: "#1a1a2e".into(),
+                    background_luma: 28,
+                    decoded: false,
+                }],
             }),
         }
     }
@@ -819,6 +862,9 @@ mod tests {
                 },
                 Hint::AlphaBackgroundDependent {
                     placement: AlphaPlacement::LightOnly,
+                },
+                Hint::AddBackgroundPlate {
+                    color: PlateColor::White,
                 },
             ],
             alpha: Some(full_alpha()),

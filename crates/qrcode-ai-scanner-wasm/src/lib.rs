@@ -17,6 +17,7 @@ fn config_from(
     score_skip_axes: Option<Vec<String>>,
     score_skip_checks: Option<Vec<String>>,
     alpha_background: Option<String>,
+    alpha_palette: Option<Vec<String>>,
 ) -> Result<ScanProfile, JsError> {
     let profile = match name.as_deref() {
         None => ScanProfile::Full,
@@ -71,11 +72,31 @@ fn config_from(
             ))
         })?),
     };
+    // alpha_palette: HOST theme/brand colors probed by the envelope in one
+    // scan (`alpha.envelope.palette`) — same loud posture on a bad color.
+    let palette: Vec<[u8; 3]> = match &alpha_palette {
+        None => Vec::new(),
+        Some(names) => names
+            .iter()
+            .map(|n| {
+                AlphaBackground::palette_color(n).ok_or_else(|| {
+                    JsError::new(&format!(
+                        "unknown palette color `{n}` — expected white | black | #rrggbb"
+                    ))
+                })
+            })
+            .collect::<Result<_, _>>()?,
+    };
     // wasm runs the scan ON the caller's thread (browser main thread unless
     // the embedder uses a worker) — budget control is how a verify-while-
     // typing UI keeps the worst case bounded without giving up the deep
     // ladder. 0/negative = unbounded.
-    if budget_ms.is_none() && skip.is_empty() && checks.is_empty() && alpha.is_none() {
+    if budget_ms.is_none()
+        && skip.is_empty()
+        && checks.is_empty()
+        && alpha.is_none()
+        && palette.is_empty()
+    {
         return Ok(profile);
     }
     let mut config: ScanConfig = profile.config();
@@ -92,6 +113,7 @@ fn config_from(
     if let Some(alpha) = alpha {
         config.alpha_background = alpha;
     }
+    config.alpha_palette = palette;
     Ok(ScanProfile::Custom(config))
 }
 
@@ -162,6 +184,7 @@ pub fn scan_image(
     score_skip_axes: Option<Vec<String>>,
     score_skip_checks: Option<Vec<String>>,
     alpha_background: Option<String>,
+    alpha_palette: Option<Vec<String>>,
 ) -> Result<JsValue, JsError> {
     run_scan(
         ImageInput::encoded(bytes),
@@ -171,6 +194,7 @@ pub fn scan_image(
             score_skip_axes,
             score_skip_checks,
             alpha_background,
+            alpha_palette,
         )?,
         max_dimension,
         max_pixels,
@@ -189,8 +213,8 @@ pub fn scan_frame(
     budget_ms: Option<f64>,
 ) -> Result<JsValue, JsError> {
     let profile = match profile {
-        Some(_) => config_from(profile, budget_ms, None, None, None)?,
-        None => config_from(Some("frame".to_owned()), budget_ms, None, None, None)?,
+        Some(_) => config_from(profile, budget_ms, None, None, None, None)?,
+        None => config_from(Some("frame".to_owned()), budget_ms, None, None, None, None)?,
     };
     run_scan(ImageInput::rgba8(data, width, height), profile, None, None)
 }

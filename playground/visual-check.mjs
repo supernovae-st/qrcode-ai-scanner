@@ -52,6 +52,7 @@ const read = () => page.evaluate(() => {
     rawJson: !!document.querySelector('details.raw'),
     alphaPlacement: txt('.alpha-placement'),
     alphaProbes: document.querySelectorAll('.alpha-probe').length,
+    alphaTiles: document.querySelectorAll('.alpha-tile').length,
   };
 });
 
@@ -68,7 +69,7 @@ for (const s of SAMPLES) {
   const ok =
     got.verdict?.includes(s.expect) && got.symbology === s.sym && got.kind === s.kind &&
     (!s.rescue || (got.rescueBadge && got.uecDanger && got.critHint)) &&
-    (!s.alpha || (got.alphaPlacement === s.alpha && got.alphaProbes >= 5 && got.hints >= 1));
+    (!s.alpha || (got.alphaPlacement === s.alpha && got.alphaProbes >= 5 && got.alphaTiles >= 7 && got.hints >= 2));
   results.push({ sample: s.name, ok, got });
 }
 

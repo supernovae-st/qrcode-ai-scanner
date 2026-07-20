@@ -16,7 +16,9 @@ use web_time::Instant;
 use crate::error::{Result, ScanError};
 use crate::input::{LumaImage, bt601};
 use crate::ladder::{AlphaBackground, CancelToken};
-use crate::report::{AlphaEnvelope, AlphaMode, AlphaPlacement, AlphaProbe, AlphaReport, Symbology};
+use crate::report::{
+    AlphaEnvelope, AlphaMode, AlphaPaletteProbe, AlphaPlacement, AlphaProbe, AlphaReport, Symbology,
+};
 use crate::transform::{self, SourcePlanes};
 
 /// Envelope probes run on a ≤512px premultiplied base — one probe costs
@@ -196,6 +198,7 @@ impl AlphaContext {
         &self,
         expected_text: &str,
         symbology: Symbology,
+        palette: &[[u8; 3]],
         cancel: &CancelToken,
         deadline: Option<Instant>,
     ) -> Result<Option<AlphaEnvelope>> {
@@ -285,6 +288,21 @@ impl AlphaContext {
         probes.extend(refinements);
         probes.sort_unstable_by_key(|&(bg, _)| bg);
 
+        // HOST palette verdicts, in request order — same probe class, same
+        // budget posture; they never feed the neutral bands or placement.
+        let mut palette_probes = Vec::with_capacity(palette.len());
+        for &color in palette {
+            let luma = bt601(color[0], color[1], color[2]);
+            match probe(luma)? {
+                Some(decoded) => palette_probes.push(AlphaPaletteProbe {
+                    background: background_name(color),
+                    background_luma: luma,
+                    decoded,
+                }),
+                None => return Ok(None),
+            }
+        }
+
         let (safe_luma, placement) = classify(&probes);
         Ok(Some(AlphaEnvelope {
             probes: probes
@@ -296,6 +314,7 @@ impl AlphaContext {
                 .collect(),
             safe_luma,
             placement,
+            palette: palette_probes,
         }))
     }
 

@@ -63,6 +63,19 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   · `envelope`. Schema, TS types, Dart mirror and the type-parity gate
   updated in lockstep; `qrscan --pretty` renders the flatten verdict
   and the envelope strip.
+- `alpha_palette` on every option surface (`alphaPalette` /
+  `--alpha-palette`) — the host's theme/brand colors probed by the
+  envelope inside the SAME scan: per-color verdicts land in
+  `alpha.envelope.palette` (request order, each at its BT.601 luma),
+  instead of one full scan per candidate background. Palette colors
+  never distort the neutral probes/bands/placement. Unknown colors fail
+  loud (`white` · `black` · `#rrggbb` only — the flatten keywords are
+  modes, not colors).
+- `Hint::AddBackgroundPlate { color }` — the canonical REMEDY riding
+  with the `alpha_background_dependent` diagnosis: add an opaque plate
+  (rounded rectangle + quiet-zone margin) behind the symbol; `color`
+  (`white` for dark content, `black` for light) maximizes contrast.
+  Maps 1:1 to an editor's one-click fix.
 
 ## 0.8.1 — 2026-07-10
 

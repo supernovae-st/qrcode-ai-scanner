@@ -81,5 +81,20 @@ assert.throws(
   /unknown alpha background/,
   "typo'd alpha background must reject loudly",
 );
+// alphaPalette: per-color verdicts inside one scan, request order
+const themed = scanSync(transparent, { profile: "full", budgetMs: 0, alphaPalette: ["#f3f4f6", "black"] });
+assert.equal(themed.alpha.envelope.palette.length, 2);
+assert.equal(themed.alpha.envelope.palette[0].background, "#f3f4f6");
+assert.equal(themed.alpha.envelope.palette[0].decoded, true, "light theme carries the dark design");
+assert.equal(themed.alpha.envelope.palette[1].decoded, false, "black-on-black cannot decode");
+assert.ok(
+  themed.hints.some((h) => h.hint === "add_background_plate" && h.color === "white"),
+  "the remedy hint rides with the diagnosis",
+);
+assert.throws(
+  () => scanSync(clean, { alphaPalette: ["auto"] }),
+  /unknown palette color/,
+  "modes are not colors — reject loudly",
+);
 
 console.log(`node binding OK — native ${version()}`);

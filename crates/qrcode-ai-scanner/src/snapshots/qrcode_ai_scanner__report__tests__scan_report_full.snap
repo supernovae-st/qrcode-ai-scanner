@@ -116,6 +116,10 @@ expression: full_report()
     {
       "hint": "alpha_background_dependent",
       "placement": "light_only"
+    },
+    {
+      "hint": "add_background_plate",
+      "color": "white"
     }
   ],
   "alpha": {
@@ -157,7 +161,14 @@ expression: full_report()
           255
         ]
       ],
-      "placement": "light_only"
+      "placement": "light_only",
+      "palette": [
+        {
+          "background": "#1a1a2e",
+          "background_luma": 28,
+          "decoded": false
+        }
+      ]
     }
   },
   "trace": {

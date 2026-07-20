@@ -7,7 +7,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
 
 use qrcode_ai_scanner::{
-    AlphaBackground, AlphaPlacement, Hint, ImageInput, ScanConfig, ScanProfile, Scanner, ScoreCheck,
+    AlphaBackground, AlphaPlacement, Hint, ImageInput, PlateColor, ScanConfig, ScanProfile,
+    Scanner, ScoreCheck,
 };
 
 /// Rendered luma plane of a clean generated QR (includes its quiet zone).
@@ -326,6 +327,62 @@ fn auto_fallback_rescues_a_mis_called_mean() {
         alpha.background, "black",
         "the report names the rescuing background"
     );
+}
+
+/// Palette probes: per-color verdicts inside ONE scan, request order —
+/// and they never distort the neutral bands or placement.
+#[test]
+fn palette_probes_answer_per_color_verdicts() {
+    let luma = qr_luma(URL);
+    let transparent = qr_rgba(&luma, [0, 0, 0, 255], [0, 0, 0, 0]);
+    let bytes = png(&transparent);
+
+    let mut config = ScanConfig::full();
+    config.alpha_palette = vec![
+        AlphaBackground::palette_color("#f3f4f6").unwrap(),
+        AlphaBackground::palette_color("black").unwrap(),
+    ];
+    let report = Scanner::builder()
+        .profile(ScanProfile::Custom(config))
+        .build()
+        .scan(ImageInput::encoded(&bytes))
+        .unwrap();
+    let envelope = report.alpha.as_ref().unwrap().envelope.as_ref().unwrap();
+    assert_eq!(envelope.palette.len(), 2, "request order, one verdict each");
+    assert_eq!(envelope.palette[0].background, "#f3f4f6");
+    assert!(
+        envelope.palette[0].decoded,
+        "a light theme color carries the dark design"
+    );
+    assert_eq!(envelope.palette[1].background, "black");
+    assert!(!envelope.palette[1].decoded, "black-on-black cannot decode");
+    assert_eq!(
+        envelope.placement,
+        AlphaPlacement::LightOnly,
+        "palette never distorts the neutral verdict"
+    );
+    // the remedy hint rides with the diagnosis, plate color from content
+    assert!(report.hints.iter().any(|h| matches!(
+        h,
+        Hint::AddBackgroundPlate {
+            color: PlateColor::White
+        }
+    )));
+}
+
+/// The palette parser is the single seam: colors only — the flatten
+/// keywords are modes, not colors.
+#[test]
+fn palette_color_rejects_modes_and_junk() {
+    assert_eq!(AlphaBackground::palette_color("white"), Some([255; 3]));
+    assert_eq!(AlphaBackground::palette_color("black"), Some([0; 3]));
+    assert_eq!(
+        AlphaBackground::palette_color("#1A2b3C"),
+        Some([0x1a, 0x2b, 0x3c])
+    );
+    for junk in ["auto", "none", "", "#12345", "gray"] {
+        assert_eq!(AlphaBackground::palette_color(junk), None, "{junk:?}");
+    }
 }
 
 /// Large transparent artwork (>512px — the real AI-art class) exercises

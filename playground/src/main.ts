@@ -1,7 +1,7 @@
 import init, { scan_image, scan_frame, version } from '@supernovae-st/qrcode-ai-scanner-wasm';
 import type {
   ScanReport, Score, AxisScore, Detection, Payload, Hint,
-  Iso15415Report, IsoParameter, UecReport, Grade, AlphaReport,
+  Iso15415Report, IsoParameter, UecReport, Grade, AlphaReport, AlphaEnvelope,
 } from '@supernovae-st/qrcode-ai-scanner-wasm';
 import './style.css';
 
@@ -50,6 +50,10 @@ const alphaMode = (): string | undefined => {
   const v = ($('input[name=alphamode]:checked') as HTMLInputElement)?.value ?? 'auto';
   return v === 'auto' ? undefined : v;
 };
+// The host-palette demo: two theme colors probed inside the same scan —
+// their per-color verdicts land in alpha.envelope.palette (transparent
+// inputs only; opaque scans ignore the whole alpha config).
+const DEMO_PALETTE = ['#f5f5f4', '#1c1917'];
 
 const GRADE_LETTER: Record<Grade, string> = {
   excellent: 'a', good: 'b', acceptable: 'c', fair: 'd', poor: 'f',
@@ -105,6 +109,7 @@ function scanBytes(bytes: Uint8Array, label: string) {
     const t0 = performance.now();
     const report = scan_image(
       bytes, profile(), undefined, undefined, budget(), undefined, undefined, alphaMode(),
+      DEMO_PALETTE,
     ) as ScanReport;
     const wall = performance.now() - t0;
     lastDetection = report.detections[0] ?? null;
@@ -274,10 +279,63 @@ function alphaModule(a: AlphaReport): HTMLElement {
       h('span', { class: `alpha-placement pl-${a.envelope.placement}` }, a.envelope.placement),
       h('span', {}, `safe background luma ${bands}`),
     ));
+    const carousel = placementCarousel(a.envelope);
+    if (carousel) mod.append(carousel);
   } else {
     mod.append(h('p', { class: 'hints-empty' }, 'envelope not swept (full profile only / skipped)'));
   }
   return mod;
+}
+
+/* The placement carousel: the user's ACTUAL design composited over each
+   probed background (canvas fill + drawImage — the PNG's alpha composites
+   naturally), verdict-bordered. Neutral rungs first, then the host
+   palette verdicts. Tiles decode their OWN copy of the scanned bytes —
+   never previewImg (its load races the render, and a slow load would
+   paint the PREVIOUS design onto this report's tiles). */
+function placementCarousel(env: AlphaEnvelope): HTMLElement | null {
+  if (!lastBytes) return null;
+  const NEUTRAL = [0, 64, 128, 192, 255];
+  const tiles = [
+    ...env.probes
+      .filter((p) => NEUTRAL.includes(p.background_luma))
+      .map((p) => ({
+        fill: `rgb(${p.background_luma},${p.background_luma},${p.background_luma})`,
+        decoded: p.decoded,
+        label: `luma ${p.background_luma}`,
+      })),
+    ...env.palette.map((p) => ({
+      fill: p.background === 'white' ? '#ffffff' : p.background === 'black' ? '#000000' : p.background,
+      decoded: p.decoded,
+      label: p.background,
+    })),
+  ];
+  const row = h('div', { class: 'alpha-carousel' });
+  const canvases: { canvas: HTMLCanvasElement; fill: string }[] = [];
+  for (const t of tiles) {
+    const canvas = h('canvas', {
+      class: `alpha-tile ${t.decoded ? 'ok' : 'ko'}`, width: '112', height: '112',
+    }) as unknown as HTMLCanvasElement;
+    const ctx = canvas.getContext('2d');
+    if (ctx) { ctx.fillStyle = t.fill; ctx.fillRect(0, 0, 112, 112); }
+    canvases.push({ canvas, fill: t.fill });
+    row.append(h('figure', { class: 'alpha-tile-wrap' },
+      canvas,
+      h('figcaption', {}, `${t.decoded ? '✓' : '✕'} ${t.label}`),
+    ));
+  }
+  // swatches show instantly; the design lands as soon as ITS bytes decode
+  const img = new Image();
+  const url = URL.createObjectURL(new Blob([lastBytes]));
+  img.onload = () => {
+    for (const { canvas } of canvases) {
+      canvas.getContext('2d')?.drawImage(img, 8, 8, 96, 96);
+    }
+    URL.revokeObjectURL(url);
+  };
+  img.onerror = () => URL.revokeObjectURL(url);
+  img.src = url;
+  return row;
 }
 
 const HINT_INFO: Record<string, { glyph: string; act: (x: any) => string; crit?: boolean }> = {
@@ -289,6 +347,7 @@ const HINT_INFO: Record<string, { glyph: string; act: (x: any) => string; crit?:
   raise_error_correction: { glyph: '↑', act: (x) => `Regenerate at a higher EC level (current: ${String(x.current).toUpperCase()}).` },
   low_correction_margin:  { glyph: '⚠', crit: true, act: (x) => `Decode at the RS limit (${x.errors}/${x.capacity}) — possible miscorrection. Verify out-of-band / regenerate.` },
   alpha_background_dependent: { glyph: '▞', act: (x) => `Only survives ${String(x.placement).replace('_', ' ')} backgrounds — pin a background layer, or place it inside the safe luma bands.` },
+  add_background_plate: { glyph: '▣', act: (x) => `Add a ${x.color} plate (rounded rectangle + quiet-zone margin) behind the symbol — robust everywhere, transparent look preserved around it.` },
 };
 
 function hintsModule(hints: Hint[]): HTMLElement {

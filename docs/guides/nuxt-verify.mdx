@@ -81,5 +81,37 @@ const onVerify = async () => {
   </Card>
 </CardGroup>
 
+## Transparent designs — the placement flow
+
+A transparent PNG has no one background: the verdict depends on where it
+lands. The engine flattens transparent inputs before scanning (`auto`
+default) and reports the placement story in `report.alpha` — wire it into
+the editor:
+
+1. **Ask where the code will live** (once, softly). Known background →
+   pass it: `alpha_background: "#1a1a2e"` — the score becomes THE score on
+   the user's real surface. Unknown → keep `auto` and render the
+   **safety strip** from `alpha.envelope` ("works on light backgrounds ·
+   safe luma 160-255") plus a placement carousel: composite the design
+   over each probed background client-side (canvas fill + `drawImage` —
+   the PNG's alpha composites naturally) with the probe's ✓/✕.
+2. **Probe your theme palette in the same scan** —
+   `alpha_palette: ["#f5f5f4", "#1c1917"]` returns per-color verdicts in
+   `alpha.envelope.palette`, instead of one full scan per candidate.
+3. **Map the two alpha hints**: `alpha_background_dependent` → "this
+   design only survives {placement} backgrounds" ·
+   `add_background_plate` → a one-click "add a {color} plate" action
+   (rounded rectangle + quiet-zone margin behind the symbol — the
+   canonical designer fix).
+
+<Warning>
+**The JPG trap.** JPEG has no alpha channel, and a `<canvas>` exported to
+JPEG silently flattens transparency onto **black** — a dark-modules design
+becomes an unscannable file. Never flatten silently at export: offer an
+explicit background choice (then verify with that exact
+`alpha_background`), or steer the user to PNG. And always score **the
+exact bytes you ship**: re-scan the exported file, not the preview.
+</Warning>
+
 Don't forget the Vite exclude
 (`optimizeDeps.exclude: ["@supernovae-st/qrcode-ai-scanner-wasm"]`).

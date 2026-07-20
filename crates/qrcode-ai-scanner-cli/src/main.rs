@@ -72,6 +72,12 @@ struct Cli {
     #[arg(long, value_name = "MODE")]
     alpha_background: Option<String>,
 
+    /// Theme/brand colors probed by the placement envelope in the SAME
+    /// scan (comma-separated: `white`, `black`, `#rrggbb`) — per-color
+    /// verdicts land in `alpha.envelope.palette`.
+    #[arg(long, value_delimiter = ',', value_name = "COLOR,...")]
+    alpha_palette: Vec<String>,
+
     /// Human-readable summary instead of JSON.
     #[arg(long, short = 'p')]
     pretty: bool,
@@ -145,6 +151,18 @@ fn render_alpha(alpha: &qrcode_ai_scanner::AlphaReport) {
                 bands
             },
         );
+        if !envelope.palette.is_empty() {
+            let verdicts = envelope
+                .palette
+                .iter()
+                .map(|p| {
+                    let mark = if p.decoded { '✓' } else { '✕' };
+                    format!("{mark}{}", p.background)
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!("  palette   {verdicts}");
+        }
     }
 }
 
@@ -220,6 +238,58 @@ fn render_pretty(report: &ScanReport) {
     );
 }
 
+/// Parse `--score-skip-axes` names with the CLI's loud-typo posture.
+fn parse_skip_axes(args: &[String]) -> Result<Vec<StressAxis>, ExitCode> {
+    let mut skip = Vec::with_capacity(args.len());
+    for name in args {
+        let Some(axis) = StressAxis::from_name(name) else {
+            let th = term::Theme::auto_stderr();
+            eprintln!(
+                "{} unknown stress axis `{name}` — expected resolution | blur | \
+                 contrast | perspective | rotation | lighting",
+                th.err_strong("✖")
+            );
+            return Err(ExitCode::from(2));
+        };
+        skip.push(axis);
+    }
+    Ok(skip)
+}
+
+/// Parse `--score-skip-checks` names with the CLI's loud-typo posture.
+fn parse_skip_checks(args: &[String]) -> Result<Vec<ScoreCheck>, ExitCode> {
+    let mut checks = Vec::with_capacity(args.len());
+    for name in args {
+        let Some(check) = ScoreCheck::from_name(name) else {
+            let th = term::Theme::auto_stderr();
+            eprintln!(
+                "{} unknown score check `{name}` — expected uec | iso15415 | alpha_envelope",
+                th.err_strong("✖")
+            );
+            return Err(ExitCode::from(2));
+        };
+        checks.push(check);
+    }
+    Ok(checks)
+}
+
+/// Parse `--alpha-palette` colors with the CLI's loud-typo posture.
+fn parse_palette_args(args: &[String]) -> Result<Vec<[u8; 3]>, ExitCode> {
+    let mut palette = Vec::with_capacity(args.len());
+    for name in args {
+        let Some(color) = AlphaBackground::palette_color(name) else {
+            let th = term::Theme::auto_stderr();
+            eprintln!(
+                "{} unknown palette color `{name}` — expected white | black | #rrggbb",
+                th.err_strong("✖")
+            );
+            return Err(ExitCode::from(2));
+        };
+        palette.push(color);
+    }
+    Ok(palette)
+}
+
 /// Parse `--alpha-background` with the CLI's loud-typo posture.
 fn parse_alpha_arg(arg: Option<&str>) -> Result<Option<AlphaBackground>, ExitCode> {
     let Some(name) = arg else {
@@ -254,55 +324,48 @@ fn main() -> ExitCode {
 
     // --score-skip-axes: wire names, loud on a typo (a silently ignored
     // axis would score all six and drift the caller's contract).
-    let mut skip = Vec::with_capacity(cli.score_skip_axes.len());
-    for name in &cli.score_skip_axes {
-        let Some(axis) = StressAxis::from_name(name) else {
-            let th = term::Theme::auto_stderr();
-            eprintln!(
-                "{} unknown stress axis `{name}` — expected resolution | blur | \
-                 contrast | perspective | rotation | lighting",
-                th.err_strong("✖")
-            );
-            return ExitCode::from(2);
-        };
-        skip.push(axis);
-    }
+    let skip = match parse_skip_axes(&cli.score_skip_axes) {
+        Ok(skip) => skip,
+        Err(code) => return code,
+    };
     // --score-skip-checks: same loud-typo posture for report sections.
-    let mut checks = Vec::with_capacity(cli.score_skip_checks.len());
-    for name in &cli.score_skip_checks {
-        let Some(check) = ScoreCheck::from_name(name) else {
-            let th = term::Theme::auto_stderr();
-            eprintln!(
-                "{} unknown score check `{name}` — expected uec | iso15415 | alpha_envelope",
-                th.err_strong("✖")
-            );
-            return ExitCode::from(2);
-        };
-        checks.push(check);
-    }
+    let checks = match parse_skip_checks(&cli.score_skip_checks) {
+        Ok(checks) => checks,
+        Err(code) => return code,
+    };
     // --alpha-background: same loud posture — a silently-defaulted typo
     // would flip which image the whole ladder sees.
     let alpha = match parse_alpha_arg(cli.alpha_background.as_deref()) {
         Ok(alpha) => alpha,
         Err(code) => return code,
     };
+    // --alpha-palette: per-color envelope verdicts, loud on a bad color.
+    let palette = match parse_palette_args(&cli.alpha_palette) {
+        Ok(palette) => palette,
+        Err(code) => return code,
+    };
     // --budget-ms overrides the preset's wall-clock budget (0 = unbounded) —
     // the same semantics as Node `budgetMs` / WASM / Python / UniFFI.
-    let profile =
-        if cli.budget_ms.is_none() && skip.is_empty() && checks.is_empty() && alpha.is_none() {
-            cli.profile.into()
-        } else {
-            let mut config = ScanProfile::from(cli.profile).config();
-            if let Some(ms) = cli.budget_ms {
-                config.budget_ms = (ms > 0).then_some(u64::from(ms));
-            }
-            config.score_skip_axes = skip;
-            config.score_skip_checks = checks;
-            if let Some(alpha) = alpha {
-                config.alpha_background = alpha;
-            }
-            ScanProfile::Custom(config)
-        };
+    let profile = if cli.budget_ms.is_none()
+        && skip.is_empty()
+        && checks.is_empty()
+        && alpha.is_none()
+        && palette.is_empty()
+    {
+        cli.profile.into()
+    } else {
+        let mut config = ScanProfile::from(cli.profile).config();
+        if let Some(ms) = cli.budget_ms {
+            config.budget_ms = (ms > 0).then_some(u64::from(ms));
+        }
+        config.score_skip_axes = skip;
+        config.score_skip_checks = checks;
+        if let Some(alpha) = alpha {
+            config.alpha_background = alpha;
+        }
+        config.alpha_palette = palette;
+        ScanProfile::Custom(config)
+    };
     let scanner = Scanner::builder().profile(profile).build();
     let report = match scanner.scan(ImageInput::encoded(&bytes)) {
         Ok(report) => report,

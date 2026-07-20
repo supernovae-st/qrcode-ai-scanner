@@ -37,6 +37,7 @@ fn profile_from(
     score_skip_axes: Option<Vec<String>>,
     score_skip_checks: Option<Vec<String>>,
     alpha_background: Option<String>,
+    alpha_palette: Option<Vec<String>>,
 ) -> Result<ScanProfile> {
     let profile = match name {
         None => ScanProfile::Full,
@@ -92,9 +93,29 @@ fn profile_from(
             ))
         })?),
     };
+    // alphaPalette: HOST theme/brand colors probed by the envelope in one
+    // scan (`alpha.envelope.palette`) — same loud posture on a bad color.
+    let palette: Vec<[u8; 3]> = match &alpha_palette {
+        None => Vec::new(),
+        Some(names) => names
+            .iter()
+            .map(|n| {
+                AlphaBackground::palette_color(n).ok_or_else(|| {
+                    Error::from_reason(format!(
+                        "unknown palette color `{n}` — expected white | black | #rrggbb"
+                    ))
+                })
+            })
+            .collect::<Result<_>>()?,
+    };
     // budgetMs overrides the preset's wall-clock budget (0 = unbounded) —
     // server embedders bound tail latency without giving up the deep ladder.
-    if budget_ms.is_none() && skip.is_empty() && checks.is_empty() && alpha.is_none() {
+    if budget_ms.is_none()
+        && skip.is_empty()
+        && checks.is_empty()
+        && alpha.is_none()
+        && palette.is_empty()
+    {
         return Ok(profile);
     }
     let mut config = profile.config();
@@ -106,6 +127,7 @@ fn profile_from(
     if let Some(alpha) = alpha {
         config.alpha_background = alpha;
     }
+    config.alpha_palette = palette;
     Ok(ScanProfile::Custom(config))
 }
 
@@ -170,6 +192,7 @@ pub fn scan(
     score_skip_axes: Option<Vec<String>>,
     score_skip_checks: Option<Vec<String>>,
     alpha_background: Option<String>,
+    alpha_palette: Option<Vec<String>>,
 ) -> Result<AsyncTask<ScanTask>> {
     let task = ScanTask {
         bytes: image.to_vec(),
@@ -179,6 +202,7 @@ pub fn scan(
             score_skip_axes,
             score_skip_checks,
             alpha_background,
+            alpha_palette,
         )?,
         limits: limits_from(max_dimension, max_pixels),
     };
@@ -202,6 +226,7 @@ pub fn scan_sync(
     score_skip_axes: Option<Vec<String>>,
     score_skip_checks: Option<Vec<String>>,
     alpha_background: Option<String>,
+    alpha_palette: Option<Vec<String>>,
 ) -> Result<String> {
     let scanner = Scanner::builder()
         .profile(profile_from(
@@ -210,6 +235,7 @@ pub fn scan_sync(
             score_skip_axes,
             score_skip_checks,
             alpha_background,
+            alpha_palette,
         )?)
         .limits(limits_from(max_dimension, max_pixels))
         .build();

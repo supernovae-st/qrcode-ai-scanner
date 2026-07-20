@@ -839,6 +839,28 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "hint": {
+                "const": "add_background_plate"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "color"
+            ],
+            "properties": {
+              "color": {
+                "enum": [
+                  "white",
+                  "black"
+                ]
+              }
+            }
+          }
         }
       ]
     },
@@ -975,7 +997,8 @@
       "required": [
         "probes",
         "safe_luma",
-        "placement"
+        "placement",
+        "palette"
       ],
       "properties": {
         "probes": {
@@ -999,6 +1022,12 @@
         },
         "placement": {
           "$ref": "#/$defs/AlphaPlacement"
+        },
+        "palette": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AlphaPaletteProbe"
+          }
         }
       }
     },
@@ -1041,6 +1070,27 @@
               "type": "null"
             }
           ]
+        }
+      }
+    },
+    "AlphaPaletteProbe": {
+      "type": "object",
+      "required": [
+        "background",
+        "background_luma",
+        "decoded"
+      ],
+      "properties": {
+        "background": {
+          "type": "string"
+        },
+        "background_luma": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "decoded": {
+          "type": "boolean"
         }
       }
     }

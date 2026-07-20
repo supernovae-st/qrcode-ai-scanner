@@ -114,6 +114,14 @@ pub struct ScanConfig {
     /// image. Opaque inputs never enter this path: their reports stay
     /// byte-identical whatever this is set to.
     pub alpha_background: AlphaBackground,
+    /// HOST palette colors probed by the placement envelope, on top of the
+    /// neutral sweep — "does my design survive on MY theme/brand colors",
+    /// answered inside one scan instead of one full scan per color
+    /// (`alpha.envelope.palette`). Probes are luma-space like the rest of
+    /// the sweep, budget-bounded per probe (the budget IS the cap — a long
+    /// palette burns it honestly and the envelope reports absent). Empty
+    /// (every profile's default) = the neutral sweep only.
+    pub alpha_palette: Vec<[u8; 3]>,
 }
 
 /// A skippable score SECTION — the same integration seam as
@@ -188,6 +196,22 @@ pub enum AlphaBackground {
 }
 
 impl AlphaBackground {
+    /// Parse one PALETTE color for the envelope's palette probes —
+    /// `white` · `black` · `#rrggbb`. The flatten keywords `auto`/`none`
+    /// are modes, not colors, and are rejected here. Same loud-typo seam
+    /// as [`AlphaBackground::from_name`].
+    #[must_use]
+    pub fn palette_color(name: &str) -> Option<[u8; 3]> {
+        match name {
+            "white" => Some([255; 3]),
+            "black" => Some([0; 3]),
+            _ => match Self::from_name(name) {
+                Some(Self::Custom(rgb)) => Some(rgb),
+                _ => None,
+            },
+        }
+    }
+
     /// Parse the cross-language wire name (`auto` · `white` · `black` ·
     /// `none` · `#rrggbb`) — the ONE mapping every binding reuses. `None`
     /// on anything else, so bindings fail LOUD on a typo.
@@ -227,6 +251,7 @@ impl ScanConfig {
             score_skip_axes: Vec::new(),
             score_skip_checks: Vec::new(),
             alpha_background: AlphaBackground::Auto,
+            alpha_palette: Vec::new(),
         }
     }
 

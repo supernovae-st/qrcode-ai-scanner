@@ -365,3 +365,11 @@ details.raw pre {
 .alpha-placement.pl-any { color: var(--g-a); }
 .alpha-placement.pl-light_only, .alpha-placement.pl-dark_only, .alpha-placement.pl-mixed { color: var(--g-c); }
 .alpha-placement.pl-none { color: var(--g-f); }
+
+/* ---- alpha · placement carousel ------------------------------------------ */
+.alpha-carousel { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+.alpha-tile-wrap { margin: 0; display: grid; gap: 4px; justify-items: center; }
+.alpha-tile { border-radius: 8px; display: block; }
+.alpha-tile.ok { outline: 2px solid var(--g-a); outline-offset: -2px; }
+.alpha-tile.ko { outline: 2px solid var(--g-f); outline-offset: -2px; opacity: .75; }
+.alpha-tile-wrap figcaption { font-size: 11px; letter-spacing: .02em; }

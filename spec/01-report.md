@@ -157,7 +157,12 @@ score · UEC · ISO) sees the flattened image.
     ],
     "safe_luma": [[160, 255]], // contiguous decoded bands — every endpoint
                                // is a TESTED background, never interpolation
-    "placement": "any" | "light_only" | "dark_only" | "mixed" | "none"
+    "placement": "any" | "light_only" | "dark_only" | "mixed" | "none",
+    "palette": [               // HOST-requested colors (`alpha_palette`
+                               // config), request order — [] when none;
+                               // never distorts probes/safe_luma/placement
+      { "background": "#f5f5f4", "background_luma": 245, "decoded": true }
+    ]
   }
 }
 ```
@@ -175,7 +180,12 @@ Semantics, normative:
   decoding": quick decode probes (the primary symbol's own decode class,
   never the full ladder's recovery power) on neutral backgrounds. It is
   informational — it never moves `score.value` (surface truth, not score
-  surgery) — and drives the `alpha_background_dependent` hint.
+  surgery) — and drives the `alpha_background_dependent` +
+  `add_background_plate` hints.
+- **The palette** (`alpha_palette` config, `white` · `black` · `#rrggbb`)
+  lets the host probe ITS theme/brand colors inside the same scan —
+  per-color verdicts in request order, evaluated at each color's BT.601
+  luma (the sweep is luma-space by construction).
 - **Exporter invariance**: the RGB stored under fully transparent pixels
   never influences the report.
 - **Opaque inputs** (or `"none"`): the historical path bit for bit, no

@@ -60,6 +60,7 @@ CONTRACT_STRUCTS = [
     (REPORT_RS, "Iso15415Report"),
     (REPORT_RS, "Score"),
     (REPORT_RS, "AlphaProbe"),
+    (REPORT_RS, "AlphaPaletteProbe"),
     (REPORT_RS, "AlphaEnvelope"),
     (REPORT_RS, "AlphaReport"),
     (REPORT_RS, "StageTrace"),
@@ -283,6 +284,7 @@ def main() -> None:
         "fix_finder_pattern",
         "low_correction_margin",
         "alpha_background_dependent",
+        "add_background_plate",
     }
     if fielded - hint_conds:
         fail("fielded hints missing a schema conditional", fielded - hint_conds)

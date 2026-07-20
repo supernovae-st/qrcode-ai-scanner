@@ -17,6 +17,7 @@ async function scan(image, options = {}) {
     options.scoreSkipAxes,
     options.scoreSkipChecks,
     options.alphaBackground,
+    options.alphaPalette,
   );
   return JSON.parse(json);
 }
@@ -32,6 +33,7 @@ function scanSync(image, options = {}) {
       options.scoreSkipAxes,
       options.scoreSkipChecks,
       options.alphaBackground,
+      options.alphaPalette,
     ),
   );
 }

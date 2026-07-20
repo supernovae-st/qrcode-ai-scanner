@@ -602,6 +602,20 @@ class AlphaProbe {
       );
 }
 
+/// One HOST-requested palette probe (`alpha_palette` config).
+class AlphaPaletteProbe {
+  /// The requested color — `"white"` · `"black"` · `"#rrggbb"`.
+  final String background;
+  final int backgroundLuma;
+  final bool decoded;
+  const AlphaPaletteProbe(this.background, this.backgroundLuma, this.decoded);
+  factory AlphaPaletteProbe.fromJson(Map<String, dynamic> j) => AlphaPaletteProbe(
+        _str(j['background']),
+        _int(j['background_luma']) ?? 0,
+        j['decoded'] == true,
+      );
+}
+
 /// The placement envelope — over which backgrounds the transparent design
 /// keeps decoding. Every reported endpoint is a TESTED background.
 class AlphaEnvelope {
@@ -610,7 +624,10 @@ class AlphaEnvelope {
   /// Contiguous decoded bands `[lo, hi]`.
   final List<List<int>> safeLuma;
   final AlphaPlacement placement;
-  const AlphaEnvelope(this.probes, this.safeLuma, this.placement);
+
+  /// HOST palette verdicts, request order — empty when none requested.
+  final List<AlphaPaletteProbe> palette;
+  const AlphaEnvelope(this.probes, this.safeLuma, this.placement, this.palette);
   factory AlphaEnvelope.fromJson(Map<String, dynamic> j) => AlphaEnvelope(
         _objList(j['probes']).map(AlphaProbe.fromJson).toList(),
         [
@@ -618,6 +635,7 @@ class AlphaEnvelope {
             [for (final v in (band is List ? band : const [])) _int(v) ?? 0]
         ],
         AlphaPlacement.from(j['placement']),
+        _objList(j['palette']).map(AlphaPaletteProbe.fromJson).toList(),
       );
 }
 
@@ -670,6 +688,7 @@ sealed class Hint {
           errors: _int(j['errors']) ?? 0, capacity: _int(j['capacity']) ?? 0),
       'alpha_background_dependent' =>
         HintAlphaBackgroundDependent(AlphaPlacement.from(j['placement'])),
+      'add_background_plate' => HintAddBackgroundPlate(_str(j['color'])),
       _ => HintUnknown(h, j),
     };
   }
@@ -725,6 +744,15 @@ class HintAlphaBackgroundDependent implements Hint {
   String get hint => 'alpha_background_dependent';
   final AlphaPlacement placement;
   const HintAlphaBackgroundDependent(this.placement);
+}
+
+class HintAddBackgroundPlate implements Hint {
+  @override
+  String get hint => 'add_background_plate';
+
+  /// `'white'` (dark content) or `'black'` (light content).
+  final String color;
+  const HintAddBackgroundPlate(this.color);
 }
 
 class HintUnknown implements Hint {
