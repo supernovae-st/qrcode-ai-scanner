@@ -76,6 +76,13 @@ fn config_from(
     // scan (`alpha.envelope.palette`) — same loud posture on a bad color.
     let palette: Vec<[u8; 3]> = match &alpha_palette {
         None => Vec::new(),
+        Some(names) if names.len() > ScanConfig::MAX_ALPHA_PALETTE => {
+            return Err(JsError::new(&format!(
+                "alpha palette too large: {} colors (max {})",
+                names.len(),
+                ScanConfig::MAX_ALPHA_PALETTE
+            )));
+        }
         Some(names) => names
             .iter()
             .map(|n| {

@@ -8,7 +8,8 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use scanner_core::{
-    AlphaBackground, ImageInput, Limits, ScanProfile, Scanner, ScoreCheck, StressAxis,
+    AlphaBackground, ImageInput, Limits, ScanConfig, ScanProfile, Scanner, ScoreCheck,
+    StressAxis,
 };
 
 fn parse_profile(profile: &str) -> PyResult<ScanProfile> {
@@ -93,6 +94,13 @@ fn with_config(
     // scan (`alpha.envelope.palette`) — same loud posture on a bad color.
     let palette: Vec<[u8; 3]> = match &alpha_palette {
         None => Vec::new(),
+        Some(names) if names.len() > ScanConfig::MAX_ALPHA_PALETTE => {
+            return Err(PyValueError::new_err(format!(
+                "alpha palette too large: {} colors (max {})",
+                names.len(),
+                ScanConfig::MAX_ALPHA_PALETTE
+            )));
+        }
         Some(names) => names
             .iter()
             .map(|n| {

@@ -12,7 +12,7 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use qrcode_ai_scanner::{
-    AlphaBackground, ImageInput, Limits, ScanProfile, Scanner, ScoreCheck, StressAxis,
+    AlphaBackground, ImageInput, Limits, ScanConfig, ScanProfile, Scanner, ScoreCheck, StressAxis,
 };
 
 /// Server deployments SHOULD lower the input caps (the library default —
@@ -97,6 +97,13 @@ fn profile_from(
     // scan (`alpha.envelope.palette`) — same loud posture on a bad color.
     let palette: Vec<[u8; 3]> = match &alpha_palette {
         None => Vec::new(),
+        Some(names) if names.len() > ScanConfig::MAX_ALPHA_PALETTE => {
+            return Err(Error::from_reason(format!(
+                "alpha palette too large: {} colors (max {})",
+                names.len(),
+                ScanConfig::MAX_ALPHA_PALETTE
+            )));
+        }
         Some(names) => names
             .iter()
             .map(|n| {

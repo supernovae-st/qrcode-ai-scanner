@@ -327,6 +327,37 @@ fn auto_fallback_rescues_a_mis_called_mean() {
         alpha.background, "black",
         "the report names the rescuing background"
     );
+    // the envelope then measures on the RESCUED background: the light
+    // design (plus its opaque black plate) survives dark rungs only
+    let envelope = alpha.envelope.as_ref().expect("full profile sweeps");
+    assert_eq!(
+        envelope.placement,
+        AlphaPlacement::DarkOnly,
+        "fallback and envelope compose: the sweep stands on the adopted background"
+    );
+}
+
+/// Honest degradation: a budget too small for the sweep yields NO
+/// envelope — never a partial verdict about untested backgrounds.
+#[test]
+fn envelope_absent_when_the_budget_cannot_carry_it() {
+    let luma = qr_luma(URL);
+    let transparent = qr_rgba(&luma, [0, 0, 0, 255], [0, 0, 0, 0]);
+    let bytes = png(&transparent);
+
+    let mut config = ScanConfig::full();
+    config.budget_ms = Some(1);
+    let report = Scanner::builder()
+        .profile(ScanProfile::Custom(config))
+        .build()
+        .scan(ImageInput::encoded(&bytes))
+        .unwrap();
+    if let Some(alpha) = report.alpha.as_ref() {
+        assert!(
+            alpha.envelope.is_none(),
+            "a cut budget must drop the whole envelope, not truncate it"
+        );
+    }
 }
 
 /// Palette probes: per-color verdicts inside ONE scan, request order —

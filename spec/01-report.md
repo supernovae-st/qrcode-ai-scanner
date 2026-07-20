@@ -185,7 +185,9 @@ Semantics, normative:
 - **The palette** (`alpha_palette` config, `white` · `black` · `#rrggbb`)
   lets the host probe ITS theme/brand colors inside the same scan —
   per-color verdicts in request order, evaluated at each color's BT.601
-  luma (the sweep is luma-space by construction).
+  luma (the sweep is luma-space by construction). Every binding rejects
+  more than 32 colors loudly (anti-DoS: each entry costs a composite +
+  up to three decode attempts).
 - **Exporter invariance**: the RGB stored under fully transparent pixels
   never influences the report.
 - **Opaque inputs** (or `"none"`): the historical path bit for bit, no

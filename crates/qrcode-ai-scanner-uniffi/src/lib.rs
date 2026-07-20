@@ -8,7 +8,8 @@
 //! sync by design); callers move it off the main thread on their side.
 
 use scanner_core::{
-    AlphaBackground, ImageInput, Limits, ScanProfile, Scanner, ScoreCheck, StressAxis,
+    AlphaBackground, ImageInput, Limits, ScanConfig, ScanProfile, Scanner, ScoreCheck,
+    StressAxis,
 };
 
 uniffi::setup_scaffolding!();
@@ -35,6 +36,9 @@ pub enum ScanBindingError {
     /// Unknown palette color in `alpha_palette`.
     #[error("unknown palette color: {0} — expected white | black | #rrggbb")]
     UnknownPaletteColor(String),
+    /// More palette colors than the anti-DoS cap allows.
+    #[error("alpha palette too large: {0} colors (max 32)")]
+    PaletteTooLarge(u64),
     /// A real scan fault (invalid/oversized buffer, cancellation).
     #[error("scan failed: {0}")]
     ScanFailed(String),
@@ -97,6 +101,9 @@ fn profile_from(
     // scan (`alpha.envelope.palette`) — same loud posture on a bad color.
     let palette: Vec<[u8; 3]> = match &alpha_palette {
         None => Vec::new(),
+        Some(names) if names.len() > ScanConfig::MAX_ALPHA_PALETTE => {
+            return Err(ScanBindingError::PaletteTooLarge(names.len() as u64));
+        }
         Some(names) => names
             .iter()
             .map(|n| {

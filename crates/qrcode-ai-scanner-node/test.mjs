@@ -96,5 +96,10 @@ assert.throws(
   /unknown palette color/,
   "modes are not colors — reject loudly",
 );
+assert.throws(
+  () => scanSync(clean, { alphaPalette: Array.from({ length: 33 }, () => "#ffffff") }),
+  /alpha palette too large/,
+  "the anti-DoS cap rejects loudly, never truncates silently",
+);
 
 console.log(`node binding OK — native ${version()}`);

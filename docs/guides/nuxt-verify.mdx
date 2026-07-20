@@ -97,7 +97,11 @@ the editor:
    the PNG's alpha composites naturally) with the probe's ✓/✕.
 2. **Probe your theme palette in the same scan** —
    `alpha_palette: ["#f5f5f4", "#1c1917"]` returns per-color verdicts in
-   `alpha.envelope.palette`, instead of one full scan per candidate.
+   `alpha.envelope.palette`, instead of one full scan per candidate
+   (max 32 colors — the bindings reject more, loudly).
+   Debounced verify-while-typing? Skip the sweep during typing
+   (`score_skip_checks: ["alpha_envelope"]`) and run it on idle/export —
+   the flatten and score are untouched either way.
 3. **Map the two alpha hints**: `alpha_background_dependent` → "this
    design only survives {placement} backgrounds" ·
    `add_background_plate` → a one-click "add a {color} plate" action

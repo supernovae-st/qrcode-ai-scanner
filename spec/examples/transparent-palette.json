@@ -1,0 +1,205 @@
+{
+  "detections": [
+    {
+      "symbology": "qr_code",
+      "content": {
+        "text": "https://qrc-ai.com/76xMa",
+        "raw": "aHR0cHM6Ly9xcmMtYWkuY29tLzc2eE1h",
+        "charset": "utf8"
+      },
+      "payload": {
+        "kind": "url",
+        "url": "https://qrc-ai.com/76xMa"
+      },
+      "corners": [
+        {
+          "x": 76.0,
+          "y": 70.0
+        },
+        {
+          "x": 968.0,
+          "y": 68.0
+        },
+        {
+          "x": 990.0,
+          "y": 994.0
+        },
+        {
+          "x": 64.0,
+          "y": 988.0
+        }
+      ],
+      "meta": {
+        "version": 2,
+        "ec_level": "m",
+        "mask": 6,
+        "modules": 25,
+        "inverted": false
+      },
+      "engines": [
+        "rxing",
+        "rqrr"
+      ]
+    }
+  ],
+  "score": {
+    "value": 100,
+    "grade": "excellent",
+    "axes": [
+      {
+        "axis": "resolution",
+        "passed": 5,
+        "total": 5,
+        "failed_at": null
+      },
+      {
+        "axis": "blur",
+        "passed": 5,
+        "total": 5,
+        "failed_at": null
+      },
+      {
+        "axis": "contrast",
+        "passed": 5,
+        "total": 5,
+        "failed_at": null
+      },
+      {
+        "axis": "perspective",
+        "passed": 5,
+        "total": 5,
+        "failed_at": null
+      },
+      {
+        "axis": "rotation",
+        "passed": 5,
+        "total": 5,
+        "failed_at": null
+      },
+      {
+        "axis": "lighting",
+        "passed": 5,
+        "total": 5,
+        "failed_at": null
+      }
+    ],
+    "structural": {
+      "finder_integrity": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "quiet_zone_ok": true
+    },
+    "uec": {
+      "margin": 1.0,
+      "grade": "a",
+      "worst_block_errors": 0,
+      "worst_block_capacity": 16
+    },
+    "iso15415": {
+      "symbol_contrast": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "modulation": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "axial_nonuniformity": {
+        "value": 0.014372145,
+        "grade": "a"
+      },
+      "fixed_pattern_damage": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "unused_error_correction": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "overall": "a"
+    }
+  },
+  "hints": [
+    {
+      "hint": "alpha_background_dependent",
+      "placement": "light_only"
+    },
+    {
+      "hint": "add_background_plate",
+      "color": "white"
+    }
+  ],
+  "alpha": {
+    "coverage": 0.612,
+    "content_luma": 2,
+    "mode": "auto",
+    "background": "white",
+    "fallback_used": false,
+    "envelope": {
+      "probes": [
+        {
+          "background_luma": 0,
+          "decoded": false
+        },
+        {
+          "background_luma": 32,
+          "decoded": true
+        },
+        {
+          "background_luma": 64,
+          "decoded": true
+        },
+        {
+          "background_luma": 128,
+          "decoded": true
+        },
+        {
+          "background_luma": 192,
+          "decoded": true
+        },
+        {
+          "background_luma": 255,
+          "decoded": true
+        }
+      ],
+      "safe_luma": [
+        [
+          32,
+          255
+        ]
+      ],
+      "placement": "light_only",
+      "palette": [
+        {
+          "background": "#f5f5f4",
+          "background_luma": 245,
+          "decoded": true
+        },
+        {
+          "background": "#1c1917",
+          "background_luma": 26,
+          "decoded": true
+        }
+      ]
+    }
+  },
+  "trace": {
+    "stages": [
+      {
+        "stage": "pyramid",
+        "transforms_tried": 1,
+        "ms": 6.857208,
+        "detections_found": 2
+      }
+    ],
+    "engine_panics": 0,
+    "total_ms": 6.9265419999999995
+  },
+  "versions": {
+    "scanner": "0.8.1",
+    "pipeline": 2,
+    "score_contract": 4
+  }
+}

@@ -275,6 +275,16 @@ fn parse_skip_checks(args: &[String]) -> Result<Vec<ScoreCheck>, ExitCode> {
 
 /// Parse `--alpha-palette` colors with the CLI's loud-typo posture.
 fn parse_palette_args(args: &[String]) -> Result<Vec<[u8; 3]>, ExitCode> {
+    if args.len() > qrcode_ai_scanner::ScanConfig::MAX_ALPHA_PALETTE {
+        let th = term::Theme::auto_stderr();
+        eprintln!(
+            "{} alpha palette too large: {} colors (max {})",
+            th.err_strong("✖"),
+            args.len(),
+            qrcode_ai_scanner::ScanConfig::MAX_ALPHA_PALETTE
+        );
+        return Err(ExitCode::from(2));
+    }
     let mut palette = Vec::with_capacity(args.len());
     for name in args {
         let Some(color) = AlphaBackground::palette_color(name) else {
