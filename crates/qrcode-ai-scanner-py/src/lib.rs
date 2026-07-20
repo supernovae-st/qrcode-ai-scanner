@@ -71,7 +71,7 @@ fn with_config(
             .map(|n| {
                 ScoreCheck::from_name(n).ok_or_else(|| {
                     PyValueError::new_err(format!(
-                        "unknown score check `{n}` — expected uec | iso15415"
+                        "unknown score check `{n}` — expected uec | iso15415 | alpha_envelope"
                     ))
                 })
             })

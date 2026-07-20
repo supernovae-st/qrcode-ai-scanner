@@ -9,7 +9,11 @@ between attempts; engines are panic-isolated.
 
 ```text
 ImageInput (Encoded | Rgba8 | Luma8)
-  → validate limits · BT.601 luma · cap to max_engine_side (2048)
+  → validate limits
+  → alpha flatten — transparent pixels composite over a declared
+    background BEFORE anything else (auto = the design's intended
+    placement; opaque inputs untouched, bit for bit)
+  → BT.601 luma · cap to max_engine_side (2048)
   S1 pyramid    ≤512px downscale — cheapest, often best on artistic
   S2 direct     full-resolution luma
   S3 enhance    otsu · invert · contrast stretch · R/G/B channels
@@ -17,7 +21,8 @@ ImageInput (Encoded | Rgba8 | Luma8)
                 then a size × stretch × binarization grid
   S5 rescue     errors-and-erasures RS over grids the engines read
                 but could not decode
-  → merge (text-keyed) → score → ScanReport
+  → (alpha auto, zero detections) retry over the OPPOSITE background
+  → merge (text-keyed) → score → alpha placement envelope → ScanReport
 ```
 
 A stage that finds something still **completes** (consensus inside the
@@ -32,6 +37,7 @@ documented failure class:
 | S4 boosts | low-contrast art texture (multiplicative contrast crush) |
 | S4 morphological closes | **blob/dot pixel styles** — gaps between sub-module blobs read as noise until closed |
 | S5 rescue | **logo-occluded symbols** past the engines' RS error wall |
+| alpha flatten + retry | **transparent exports** — the class where the verdict used to depend on which tool wrote the PNG (canvas stores black under the alpha, editors often white); the flatten pins it, the opposite-background retry kills the false "no detection", and `report.alpha.envelope` answers *over which backgrounds the design keeps decoding* with tested probes |
 
 ## S5 — the erasure rescue
 

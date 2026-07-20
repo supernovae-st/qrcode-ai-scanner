@@ -23,6 +23,8 @@ await QrcodeAiScanner.init();                       // once, before any scan
 
 // encoded image (PNG/JPEG/WebP/GIF) → typed ScanReport
 final report = await QrcodeAiScanner.scan(pngBytes); // profile: 'full' (default)
+// transparent PNGs flatten engine-side ('auto') — read report.alpha for the
+// resolved background + placement envelope (the facade exposes no override yet)
 
 // raw RGBA camera frame (width*height*4 bytes), no scoring
 final frame = await QrcodeAiScanner.scanFrame(rgba, w, h); // profile: 'frame'

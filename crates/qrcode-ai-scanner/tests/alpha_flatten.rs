@@ -328,6 +328,35 @@ fn auto_fallback_rescues_a_mis_called_mean() {
     );
 }
 
+/// Large transparent artwork (>512px — the real AI-art class) exercises
+/// the premultiplied downscale before probing: the envelope must still
+/// read the same sane verdict as the small render.
+#[test]
+fn envelope_downscales_large_transparent_artwork() {
+    let code = qrcode::QrCode::with_error_correction_level(URL, qrcode::EcLevel::Q).unwrap();
+    let luma = code
+        .render::<image::Luma<u8>>()
+        .module_dimensions(24, 24)
+        .build();
+    assert!(luma.width() > 512, "the downscale path must actually run");
+    let transparent = qr_rgba(&luma, [0, 0, 0, 255], [0, 0, 0, 0]);
+    let bytes = png(&transparent);
+
+    let report = Scanner::default()
+        .scan(ImageInput::encoded(&bytes))
+        .unwrap();
+    assert_eq!(report.detections[0].content.text, URL);
+    let envelope = report
+        .alpha
+        .as_ref()
+        .unwrap()
+        .envelope
+        .as_ref()
+        .expect("large artwork still sweeps");
+    assert_eq!(envelope.placement, AlphaPlacement::LightOnly);
+    assert_eq!(envelope.safe_luma.last().unwrap()[1], 255);
+}
+
 /// A fully transparent input (every pixel alpha 0) is a valid scan, not a
 /// crash: flattens to a blank plane, decodes nothing, reports coverage 1.
 #[test]

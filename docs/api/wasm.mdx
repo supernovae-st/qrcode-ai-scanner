@@ -19,7 +19,10 @@ import init, { scan_image, scan_frame, version }
 await init(); // once — fetches + instantiates the .wasm
 
 // encoded bytes (PNG/JPEG/WebP/GIF)
-// args: bytes, profile?, max_dimension?, max_pixels?, budget_ms?
+// args: bytes, profile?, max_dimension?, max_pixels?, budget_ms?,
+//       score_skip_axes?, score_skip_checks?, alpha_background?
+//       (alpha_background: "auto" | "white" | "black" | "none" | "#rrggbb"
+//        — the background under transparent pixels; result in report.alpha)
 const report = scan_image(bytes, "full", undefined, undefined, 1500);
 
 // raw RGBA frames (live camera) — defaults to the `frame` profile

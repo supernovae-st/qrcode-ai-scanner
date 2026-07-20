@@ -32,6 +32,19 @@ Machine-readable mirrors — load these directly in tools and agents:
   [`spec/06-hints.md`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/06-hints.md).
 </ResponseField>
 
+<ResponseField name="alpha" type="AlphaReport">
+  Transparent-input handling — **the key is ABSENT** (not `null`) for
+  opaque inputs and under `alphaBackground: "none"`, so pre-alpha
+  consumers keep their exact bytes. Carries the resolved `background`
+  (`"white"` / `"black"` / `"#rrggbb"`), `coverage`, `content_luma`,
+  `fallback_used`, and the **placement envelope** (`full` profile):
+  decode probes over neutral backgrounds, contiguous `safe_luma` bands
+  (every endpoint a TESTED background, never interpolation) and a
+  `placement` verdict (`any` · `light_only` · `dark_only` · `mixed` ·
+  `none`). Full semantics:
+  [`spec/01-report.md` § Alpha](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/01-report.md).
+</ResponseField>
+
 <ResponseField name="trace" type="PipelineTrace" required>
   Per-stage execution trace (`pyramid`·`direct`·`enhance`·`deep`·`rescue`)
   — why the scan succeeded or came back empty. `detections_found` counts
@@ -39,8 +52,9 @@ Machine-readable mirrors — load these directly in tools and agents:
 </ResponseField>
 
 <ResponseField name="versions" type="Versions" required>
-  Contract markers: `scanner` (semver), `pipeline` (1),
-  `score_contract` (3).
+  Contract markers: `scanner` (semver), `pipeline` (2: transparent
+  inputs flatten before decode), `score_contract` (4: alpha inputs
+  score their flattened image).
 </ResponseField>
 
 ## Detection

@@ -67,6 +67,32 @@ assert.equal(frame.score, null, "frame profile skips scoring");
 const framed = scan_frame(rgba, side, side, "fast", 200);
 assert.equal(framed.detections.length, 0);
 
+// alpha_background (#8) positional contract: a transparent input carries the
+// alpha block through the serde_wasm_bindgen boundary (the skip_serializing_if
+// key must be ABSENT on the JS object, not nulled — the serializer's
+// serialize_missing_as_null(true) must not resurrect it on opaque reports)
+const transparent = new Uint8Array(
+  readFileSync(new URL("../../playground/public/samples/transparent.png", import.meta.url)),
+);
+const flat = scan_image(transparent, "full", undefined, undefined, 0);
+assert.equal(flat.detections.length, 1, "the flatten rescues the canvas-export class");
+assert.equal(flat.alpha.background, "white");
+assert.equal(flat.alpha.envelope.placement, "light_only");
+assert.ok(
+  flat.hints.some((h) => h.hint === "alpha_background_dependent"),
+  "narrow envelope drives the hint",
+);
+assert.ok(!("alpha" in clean), "opaque reports omit the alpha key entirely");
+const opaqueForced = scan_image(cleanBytes, "full", undefined, undefined, 0, undefined, undefined, "white");
+assert.ok(!("alpha" in opaqueForced), "forced mode on an opaque input still omits the key");
+const dropped = scan_image(transparent, "full", undefined, undefined, 0, undefined, undefined, "none");
+assert.equal(dropped.detections.length, 0, "none = the pre-0.9 exporter-dependent path");
+assert.throws(
+  () => scan_image(cleanBytes, "full", undefined, undefined, undefined, undefined, undefined, "transparent"),
+  /unknown alpha background/,
+  "typo'd alpha background must throw loudly",
+);
+
 // invalid bytes → typed throw, not a crash
 assert.throws(() => scan_image(new Uint8Array([1, 2, 3])), /QRS-001/);
 

@@ -30,9 +30,30 @@ void main() {
       expect(files, isNotEmpty);
       for (final f in files) {
         final r = ScanReport.parse(f.readAsStringSync());
-        expect(r.versions.scoreContract, 3, reason: f.path);
+        expect(r.versions.scoreContract, 4, reason: f.path);
         expect(r.detections, isA<List<Detection>>(), reason: f.path);
       }
+    }, skip: skipReason);
+
+    test('transparent-envelope → alpha block, envelope, placement hint', () {
+      final r = golden('transparent-envelope.json');
+      final a = r.alpha!;
+      expect(a.background, 'white');
+      expect(a.mode, AlphaMode.auto);
+      expect(a.fallbackUsed, isFalse);
+      expect(a.coverage, closeTo(0.612, 0.001));
+      final env = a.envelope!;
+      expect(env.placement, AlphaPlacement.lightOnly);
+      expect(env.probes, isNotEmpty);
+      expect(env.probes.first.decoded, isFalse);
+      expect(env.probes.last.decoded, isTrue);
+      expect(env.safeLuma.last.last, 255);
+      expect(r.hints.whereType<HintAlphaBackgroundDependent>(), isNotEmpty);
+    }, skip: skipReason);
+
+    test('opaque goldens carry no alpha block at all', () {
+      expect(golden('clean-url.json').alpha, isNull);
+      expect(golden('no-detection.json').alpha, isNull);
     }, skip: skipReason);
 
     test('clean-url → typed url payload + grades', () {

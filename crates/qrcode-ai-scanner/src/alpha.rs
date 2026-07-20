@@ -219,6 +219,11 @@ impl AlphaContext {
             &LumaImage::new(self.alpha.clone(), self.width, self.height),
             ENVELOPE_BASE_SIDE,
         );
+        // Two round-half-up divisions (premultiply, then the background
+        // term) instead of one exact composite: the sum can stray ±1 LSB
+        // from `composite(fg, bg, a)` (double-rounding bound, pinned by
+        // test) — far below any decode threshold at probe scale, and the
+        // price of downscaling ONCE instead of once per rung.
         let over = |bg: u8| -> LumaImage {
             let luma: Vec<u8> = pm
                 .data()
@@ -231,18 +236,18 @@ impl AlphaContext {
         // Calibrate once on the design over its primary background (the
         // image the verdict stands on, at probe scale) — colored custom
         // backgrounds calibrate at their BT.601 luma (probes are a luma-
-        // space sweep by construction).
+        // space sweep by construction). A design that does not decode in
+        // the probe class AT ALL (its primary detection came through the
+        // channel-split or rescue stages) gets NO envelope rather than a
+        // false all-fail verdict contradicting the successful scan.
         let base = over(bt601(
             self.background[0],
             self.background[1],
             self.background[2],
         ));
-        let cell = crate::score::CellProbe::calibrate(&base, expected_text, symbology).unwrap_or(
-            crate::score::CellProbe {
-                rung: None,
-                symbology,
-            },
-        );
+        let Some(cell) = crate::score::CellProbe::calibrate(&base, expected_text, symbology) else {
+            return Ok(None);
+        };
 
         let probe = |bg: u8| -> Result<Option<bool>> {
             if cancel.is_cancelled() {
@@ -370,6 +375,27 @@ mod tests {
         // background — the two ends every exporter agrees on
         assert_eq!(composite(40, 255, 255), 40);
         assert_eq!(composite(40, 255, 0), 255);
+    }
+
+    /// The envelope premultiplies then adds the background term — two
+    /// round-half-up divisions instead of one. Pin the double-rounding
+    /// bound over the full (fg, a) grid × representative backgrounds: the
+    /// split path never strays more than 1 LSB from the exact single
+    /// composite (refuter counterexample: fg=128, bg=1, a=1 → 2 vs 1).
+    #[test]
+    fn split_composite_stays_within_one_lsb_of_direct() {
+        for fg in 0..=255u8 {
+            for a in 0..=255u8 {
+                for &bg in &[0u8, 1, 64, 128, 192, 254, 255] {
+                    let split = composite(fg, 0, a).saturating_add(composite(0, bg, a));
+                    let direct = composite(fg, bg, a);
+                    assert!(
+                        split.abs_diff(direct) <= 1,
+                        "fg={fg} bg={bg} a={a}: split {split} vs direct {direct}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

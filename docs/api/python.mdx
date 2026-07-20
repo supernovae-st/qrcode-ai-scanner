@@ -22,6 +22,9 @@ report = q.scan(
     "full",              # "full" | "fast" | "frame"   (default "full")
     max_dimension=4096,  # anti-DoS — LOWER THESE for untrusted uploads
     max_pixels=16_000_000,
+    alpha_background="auto",  # background under transparent pixels:
+                              # "auto" | "white" | "black" | "none" | "#rrggbb"
+                              # (opaque inputs untouched; result in report["alpha"])
 )
 
 # raw RGBA camera frame (width * height * 4 bytes), no format roundtrip

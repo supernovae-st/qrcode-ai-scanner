@@ -4,7 +4,7 @@ QR decoding + scannability scoring for artistic, AI-generated and photo-captured
 QR codes. Every call returns the same versioned ScanReport (the cross-surface
 contract — full schema: spec/scan-report.schema.json).
 """
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 __version__: str
 
@@ -14,6 +14,9 @@ class ScanReport(TypedDict):
     detections: list[dict[str, Any]]
     score: dict[str, Any]
     hints: list[Any]
+    alpha: NotRequired[dict[str, Any]]
+    """Alpha-transparency handling — the key is ABSENT for opaque inputs and
+    under ``alpha_background="none"`` (spec/01 § alpha)."""
     trace: dict[str, Any]
     versions: dict[str, Any]
 

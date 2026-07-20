@@ -75,7 +75,7 @@ fn profile_from(
             .map(|n| {
                 ScoreCheck::from_name(n).ok_or_else(|| {
                     Error::from_reason(format!(
-                        "unknown score check `{n}` — expected uec | iso15415"
+                        "unknown score check `{n}` — expected uec | iso15415 | alpha_envelope"
                     ))
                 })
             })

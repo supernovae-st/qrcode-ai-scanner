@@ -69,7 +69,10 @@ const flat = scanSync(transparent, { profile: "full", budgetMs: 0 });
 assert.equal(flat.detections.length, 1, "the flatten rescues the canvas-export class");
 assert.equal(flat.alpha.background, "white", "dark content flattens over white");
 assert.equal(flat.alpha.envelope.placement, "light_only");
-assert.ok(!("alpha" in report), "opaque reports omit the key entirely");
+// an opaque input never carries the block — even under a FORCED mode
+const opaqueForced = scanSync(clean, { profile: "full", budgetMs: 0, alphaBackground: "white" });
+assert.equal(opaqueForced.detections.length, 1);
+assert.ok(!("alpha" in opaqueForced), "opaque reports omit the key entirely, whatever the mode");
 const dropped = scanSync(transparent, { profile: "full", budgetMs: 0, alphaBackground: "none" });
 assert.equal(dropped.detections.length, 0, "none = the pre-0.9 exporter-dependent path");
 assert.ok(!("alpha" in dropped), "none carries no block");

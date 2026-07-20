@@ -171,7 +171,9 @@ impl Scanner {
         };
         // The placement envelope — Full depth only (the sweep is a quality-
         // gate diagnostic), skippable through the same seam as every other
-        // report section.
+        // report section. Same panic posture as scoring: the sweep shares
+        // the score module's math path, so a panic there degrades to "no
+        // envelope", never a crash out of the public API.
         let envelope = match (&alpha_context, outcome.merged.first()) {
             (Some(context), Some(primary))
                 if self.config.score_depth == ScoreDepth::Full
@@ -180,7 +182,13 @@ impl Scanner {
                         .score_skip_checks
                         .contains(&ScoreCheck::AlphaEnvelope) =>
             {
-                context.envelope(&primary.text, primary.symbology, cancel, deadline)?
+                let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    context.envelope(&primary.text, primary.symbology, cancel, deadline)
+                }));
+                match attempt {
+                    Ok(result) => result?,
+                    Err(_) => None,
+                }
             }
             _ => None,
         };

@@ -10,8 +10,14 @@ cargo install qrcode-ai-scanner-cli
 ## Usage
 
 ```bash
-qrscan <image> [--profile full|fast|frame] [--pretty|-p] [--score-only|-s]
+qrscan <image> [--profile full|fast|frame] [--alpha-background auto|white|black|none|"#rrggbb"]
+               [--pretty|-p] [--score-only|-s]
 ```
+
+`--alpha-background` picks the background flattened under transparent
+pixels (`auto` default — opaque images are untouched); `--pretty` then
+renders the flatten verdict plus the placement-envelope strip
+(`placement LightOnly · safe luma 32-255 · probes ✕0 ✓32 ✓64 …`).
 
 | Mode | Output |
 |---|---|

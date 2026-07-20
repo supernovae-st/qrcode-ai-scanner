@@ -55,6 +55,9 @@ let reports = scanner.scan_batch(&inputs);
 ```rust
 let mut config: ScanConfig = ScanProfile::Full.config(); // preset → adjust
 config.budget_ms = Some(1_500);
+// background under transparent pixels — AlphaBackground::from_name parses
+// "auto" | "white" | "black" | "none" | "#rrggbb" (opaque inputs untouched)
+config.alpha_background = AlphaBackground::Custom([0x1a, 0x1a, 0x2e]);
 let scanner = Scanner::builder()
     .profile(ScanProfile::Custom(config))
     .build();

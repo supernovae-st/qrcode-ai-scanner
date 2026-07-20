@@ -22,6 +22,9 @@ const report: ScanReport = await scan(imageBuffer, {
   budgetMs: 1500,         // wall-clock bound; 0 = unbounded
   maxDimension: 4096,     // anti-DoS — LOWER THESE for untrusted uploads
   maxPixels: 16_000_000,
+  alphaBackground: "auto", // background under transparent pixels:
+                          // "auto" | "white" | "black" | "none" | "#rrggbb"
+                          // (opaque inputs untouched; result in report.alpha)
   signal: controller.signal, // cancels QUEUED tasks (see note)
 } satisfies ScanOptions);
 
