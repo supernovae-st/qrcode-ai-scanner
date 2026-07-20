@@ -454,12 +454,16 @@ class AxisScore {
   /// Wire label of the first failed cell ("blur 2.5", "glare", "128px"…) —
   /// null when every cell passed.
   final String? failedAt;
-  const AxisScore(this.axis, this.passed, this.total, this.failedAt);
+
+  /// The bisected knee — absent when no refinement ran.
+  final String? refinedFailedAt;
+  const AxisScore(this.axis, this.passed, this.total, this.failedAt, this.refinedFailedAt);
   factory AxisScore.fromJson(Map<String, dynamic> j) => AxisScore(
       StressAxis.from(j['axis']),
       _int(j['passed']) ?? 0,
       _int(j['total']) ?? 0,
-      j['failed_at'] as String?);
+      j['failed_at'] as String?,
+      j['refined_failed_at'] as String?);
 }
 
 class StructuralReport {
@@ -529,16 +533,21 @@ class Iso15415Report {
 class Score {
   final int value;
   final Grade grade;
+
+  /// Σ contract weights of the axes that ran (100 = the full contract).
+  /// 0 when parsing pre-0.9 reports (the key is absent there).
+  final int weightsRun;
   final List<AxisScore> axes;
   final StructuralReport? structural;
   final UecReport? uec;
   final Iso15415Report? iso15415;
-  const Score(this.value, this.grade, this.axes, this.structural, this.uec,
-      this.iso15415);
+  const Score(this.value, this.grade, this.weightsRun, this.axes,
+      this.structural, this.uec, this.iso15415);
 
   factory Score.fromJson(Map<String, dynamic> j) => Score(
         _int(j['value']) ?? 0,
         Grade.from(j['grade']),
+        _int(j['weights_run']) ?? 0,
         _objList(j['axes']).map(AxisScore.fromJson).toList(),
         j['structural'] == null
             ? null

@@ -293,6 +293,16 @@ pub struct AxisScore {
     /// ("blur 2.5", "glare", "128px"…). `null` when every cell passed.
     /// The panel's explainability seam: a lost point always names its cell.
     pub failed_at: Option<String>,
+    /// The knee, bisected once (Full depth, ordered ramps only): the
+    /// TIGHTEST TESTED failing intensity — the midpoint label when the
+    /// midpoint probe failed, the knee cell's label when it held. Key
+    /// ABSENT when no refinement ran (Reduced depth · no knee · lighting ·
+    /// budget cut). Informational: the composite never reads it.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub refined_failed_at: Option<String>,
 }
 
 /// ISO 15415 UEC grade bands.
@@ -434,6 +444,13 @@ pub struct Iso15415Report {
 pub struct Score {
     /// Composite 0-100 (weighted axis survival, structurally capped).
     pub value: u8,
+    /// Σ contract weights of the axes that RAN (100 = the full six-axis
+    /// contract · 70 with perspective+rotation skipped). The honesty
+    /// integer: a partial score SAYS how much contract stands behind it —
+    /// two 85s with different `weights_run` are different promises.
+    /// Lenient default 0 when parsing pre-0.9 reports.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub weights_run: u8,
     /// Interpretation band for `value`.
     pub grade: Grade,
     /// Per-axis survival breakdown.
@@ -775,18 +792,21 @@ mod tests {
         Score {
             value: 87,
             grade: Grade::Excellent,
+            weights_run: 42,
             axes: vec![
                 AxisScore {
                     axis: StressAxis::Resolution,
                     passed: 4,
                     total: 5,
                     failed_at: None,
+                    refined_failed_at: None,
                 },
                 AxisScore {
                     axis: StressAxis::Perspective,
                     passed: 3,
                     total: 5,
-                    failed_at: None,
+                    failed_at: Some("34\u{b0}".into()),
+                    refined_failed_at: Some("30\u{b0}".into()),
                 },
             ],
             structural: Some(StructuralReport {

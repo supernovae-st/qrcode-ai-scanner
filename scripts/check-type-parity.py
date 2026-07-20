@@ -72,7 +72,11 @@ CONTRACT_STRUCTS = [
 # Fields the wire OMITS entirely when None (serde skip_serializing_if):
 # present in the Rust struct + TS (`?:`) + Dart reads, ABSENT from the
 # schema's `required` (but its `properties` must still describe them).
-OPTIONAL_FIELDS: dict[str, set[str]] = {"ScanReport": {"alpha"}}
+OPTIONAL_FIELDS: dict[str, set[str]] = {
+    "ScanReport": {"alpha"},
+    "Score": {"weights_run"},
+    "AxisScore": {"refined_failed_at"},
+}
 
 # Flat enums with a same-named schema $def (rust ↔ ts ↔ schema).
 FLAT_ENUMS = [

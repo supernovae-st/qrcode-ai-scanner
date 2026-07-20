@@ -6,7 +6,8 @@
 //! `raw` as base64) — identical shape to the server/CLI surfaces.
 
 use qrcode_ai_scanner::{
-    AlphaBackground, ImageInput, Limits, ScanConfig, ScanProfile, Scanner, ScoreCheck, StressAxis,
+    AlphaBackground, ImageInput, Limits, ScanConfig, ScanProfile, Scanner, ScoreCheck, ScorePreset,
+    StressAxis,
 };
 use serde::Serialize as _;
 use wasm_bindgen::prelude::*;
@@ -18,6 +19,7 @@ fn config_from(
     score_skip_checks: Option<Vec<String>>,
     alpha_background: Option<String>,
     alpha_palette: Option<Vec<String>>,
+    score_preset: Option<String>,
 ) -> Result<ScanProfile, JsError> {
     let profile = match name.as_deref() {
         None => ScanProfile::Full,
@@ -93,6 +95,26 @@ fn config_from(
                 })
             })
             .collect::<Result<_, _>>()?,
+    };
+    // score_preset: the drift-proof named posture (design | capture) —
+    // sugar over score_skip_axes, mutually exclusive with an explicit list
+    // (silent precedence would be the worst drift of all).
+    let preset = match &score_preset {
+        None => None,
+        Some(name) => Some(ScorePreset::from_name(name).ok_or_else(|| {
+            JsError::new(&format!(
+                "unknown score preset `{name}` — expected design | capture"
+            ))
+        })?),
+    };
+    if preset.is_some() && !skip.is_empty() {
+        return Err(JsError::new(
+            "score_preset and score_skip_axes are mutually exclusive — pass one",
+        ));
+    }
+    let skip = match preset {
+        Some(preset) => preset.skips(),
+        None => skip,
     };
     // wasm runs the scan ON the caller's thread (browser main thread unless
     // the embedder uses a worker) — budget control is how a verify-while-
@@ -192,6 +214,7 @@ pub fn scan_image(
     score_skip_checks: Option<Vec<String>>,
     alpha_background: Option<String>,
     alpha_palette: Option<Vec<String>>,
+    score_preset: Option<String>,
 ) -> Result<JsValue, JsError> {
     run_scan(
         ImageInput::encoded(bytes),
@@ -202,6 +225,7 @@ pub fn scan_image(
             score_skip_checks,
             alpha_background,
             alpha_palette,
+            score_preset,
         )?,
         max_dimension,
         max_pixels,
@@ -220,8 +244,16 @@ pub fn scan_frame(
     budget_ms: Option<f64>,
 ) -> Result<JsValue, JsError> {
     let profile = match profile {
-        Some(_) => config_from(profile, budget_ms, None, None, None, None)?,
-        None => config_from(Some("frame".to_owned()), budget_ms, None, None, None, None)?,
+        Some(_) => config_from(profile, budget_ms, None, None, None, None, None)?,
+        None => config_from(
+            Some("frame".to_owned()),
+            budget_ms,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )?,
     };
     run_scan(ImageInput::rgba8(data, width, height), profile, None, None)
 }

@@ -30,6 +30,7 @@ def scan(
     score_skip_checks: list[str] | None = None,
     alpha_background: str | None = None,
     alpha_palette: list[str] | None = None,
+    score_preset: str | None = None,
 ) -> ScanReport:
     """Decode + score an encoded image (PNG, JPEG, WebP, GIF).
 
@@ -50,6 +51,11 @@ def scan(
     alpha_palette: theme/brand colors (``["white", "black", "#rrggbb", ...]``)
     probed by the placement envelope inside the same scan — per-color verdicts in
     ``report["alpha"]["envelope"]["palette"]`` (request order); an unknown value raises.
+    score_preset: named axis posture — ``"design"`` (generated previews: skips
+    perspective+rotation, keeps lighting) | ``"capture"`` (all six axes). Mutually
+    exclusive with score_skip_axes (raises). The report carries ``score.weights_run``
+    (Σ weights of the axes that ran) so a partial score says how much contract
+    stands behind it.
     alpha_background: the background flattened under transparent pixels —
     ``"auto"`` (default: the design's own content picks it, with an opposite-
     background retry on zero detections) | ``"white"`` | ``"black"`` |
@@ -74,6 +80,7 @@ def scan_frame(
     score_skip_checks: list[str] | None = None,
     alpha_background: str | None = None,
     alpha_palette: list[str] | None = None,
+    score_preset: str | None = None,
 ) -> ScanReport:
     """Decode + score a raw RGBA frame (e.g. a camera frame) — no image-format roundtrip.
 

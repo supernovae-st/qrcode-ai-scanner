@@ -23,7 +23,10 @@ Machine-readable mirrors — load these directly in tools and agents:
 
 <ResponseField name="score" type="Score | null" required>
   Scannability of the PRIMARY (first) detection. `null` in the `frame`
-  profile or when nothing decoded. See [Scoring](/concepts/scoring).
+  profile or when nothing decoded. Carries `weights_run` (how much of the
+  six-axis contract ran — the honesty integer behind partial scores) and
+  per-axis `refined_failed_at` (the bisected knee: "blur 2.25"). See
+  [Scoring](/concepts/scoring).
 </ResponseField>
 
 <ResponseField name="hints" type="Hint[]" required>

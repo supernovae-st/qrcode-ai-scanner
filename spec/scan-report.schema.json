@@ -583,6 +583,10 @@
               "type": "null"
             }
           ]
+        },
+        "refined_failed_at": {
+          "description": "The knee bisected once — the tightest TESTED failing intensity. Key absent when no refinement ran.",
+          "type": "string"
         }
       }
     },
@@ -742,6 +746,12 @@
               "type": "null"
             }
           ]
+        },
+        "weights_run": {
+          "description": "Σ contract weights of the axes that RAN (100 = full six-axis contract). Absent on pre-0.9 reports.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
         }
       }
     },

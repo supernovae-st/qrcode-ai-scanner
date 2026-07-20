@@ -58,6 +58,35 @@ surface truth, not score surgery. The canonical case: a host that displays
 neither the correction margin nor the ISO parameters (the builder panel)
 skips both; verifier-style surfaces keep them.
 
+### `weights_run` — the honesty integer
+
+`score.weights_run` = Σ contract weights of the axes that RAN (100 = the
+full six-axis contract · 70 with `perspective`+`rotation` skipped). A
+partial score SAYS how much contract stands behind it: two 85s with
+different `weights_run` are different promises, and panels can render
+"85 — on 70% of the contract" without arithmetic. Absent on pre-0.9
+reports (parse leniently, default 0).
+
+### Presets — the drift-proof postures
+
+`score_preset` (bindings `scorePreset` / `--score-preset`) names the two
+canonical integration postures instead of N hand-built skip lists:
+`design` = generated previews (skips `perspective`+`rotation`, KEEPS
+`lighting` — the glare cell measures the design's own fragility, not the
+capture) · `capture` = the full six. Pure sugar over `score_skip_axes`;
+passing both rejects loudly (silent precedence would be the worst drift).
+
+### The bisected knee — `axes[].refined_failed_at`
+
+At Full depth, an ordered ramp that dies gains ONE bisection probe
+between the knee cell and its lower neighbour (the unstressed value for
+a knee at cell 0): the wire carries the tightest TESTED failing
+intensity ("blur 2.25" when the midpoint fails · the knee cell's label
+when it holds). Informational by contract — the composite never reads
+it; the key is ABSENT when no refinement ran (Reduced depth · no knee ·
+lighting's unordered set · budget cut). The generator loop finally sees
+sub-cell progress.
+
 ### Structural caps (applied after the weighted sum)
 
 | Condition | Cap |

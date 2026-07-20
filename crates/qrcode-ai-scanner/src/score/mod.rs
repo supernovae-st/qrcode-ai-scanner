@@ -26,6 +26,9 @@ use crate::transform;
 
 /// A stress-cell builder: base image + ramp index → transformed cell.
 type RampBuilder<'a> = &'a dyn Fn(&LumaImage, usize) -> LumaImage;
+/// Builds the ONE bisection cell between the knee and its lower neighbour
+/// (the unstressed base for a knee at index 0) + its wire label.
+type RampRefiner<'a> = &'a dyn Fn(&LumaImage, usize) -> (LumaImage, String);
 
 /// Stress cells run on a ≤512px base — bounded cost, consistent geometry.
 const STRESS_BASE_SIDE: u32 = 512;
@@ -210,60 +213,52 @@ fn cell_label(axis: StressAxis, i: usize) -> &'static str {
     }
 }
 
-/// Run the five ordered ramps + the lighting set at the given depth.
-/// Axes in `skip` never run — their cells are never built (the integration
-/// perf win) and they are absent from the returned list (the report
-/// self-describes what was measured).
-fn run_axes(
+/// One bisection probe tightens a knee (Full depth only): the report gains
+/// the tightest TESTED failing intensity, the composite reads nothing from
+/// it. Budget-cut / no knee / Reduced depth → honestly absent.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the refinement seam mirrors run_ramp's full context — a struct would obscure a 1-caller helper"
+)]
+fn refine_knee(
+    base: &LumaImage,
+    expected_text: &str,
+    probe: CellProbe,
+    axis: StressAxis,
+    knee: Option<usize>,
+    depth: ScoreDepth,
+    cancel: &CancelToken,
+    deadline: Option<Instant>,
+    refine: RampRefiner<'_>,
+) -> Option<String> {
+    match knee {
+        Some(i)
+            if matches!(depth, ScoreDepth::Full)
+                && !cancel.is_cancelled()
+                && deadline.is_none_or(|d| Instant::now() < d) =>
+        {
+            let (cell, label) = refine(base, i);
+            Some(if cell_passes(&cell, expected_text, probe) {
+                cell_label(axis, i).to_owned()
+            } else {
+                label
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The lighting defect SET (unordered — no knee, no refinement): shadows,
+/// centred glare, exposure extremes. Split from `run_axes` for line-budget
+/// and because its pass-set semantics differ from the ordered ramps.
+fn run_lighting(
     base: &LumaImage,
     expected_text: &str,
     depth: ScoreDepth,
-    skip: &[StressAxis],
     cancel: &CancelToken,
     deadline: Option<Instant>,
     probe: CellProbe,
-) -> Result<Vec<AxisScore>> {
-    // ---- ordered ramps (intensity grows with the index) ----
-    let resolution_sides: [u32; 5] = [358, 256, 179, 128, 90];
-    let blur_sigmas: [f32; 5] = [0.5, 1.0, 1.5, 2.0, 2.5];
-    let contrast_factors: [f32; 5] = [0.7, 0.55, 0.4, 0.3, 0.2];
-    let tilt_degrees: [f32; 5] = [10.0, 18.0, 26.0, 34.0, 42.0];
-    let rotation_degrees: [f32; 5] = [10.0, 20.0, 30.0, 40.0, 50.0];
-
-    let indices = depth_indices(depth);
-    let mut axes = Vec::with_capacity(6);
-    let ramps: [(StressAxis, RampBuilder<'_>); 5] = [
-        (StressAxis::Resolution, &|b, i| {
-            transform::downscale_to(b, resolution_sides[i])
-        }),
-        (StressAxis::Blur, &|b, i| {
-            transform::gaussian_blur(b, blur_sigmas[i])
-        }),
-        (StressAxis::Contrast, &|b, i| {
-            transform::contrast_boost(b, contrast_factors[i], 1.0)
-        }),
-        (StressAxis::Perspective, &|b, i| {
-            warp::perspective_tilt(b, tilt_degrees[i])
-        }),
-        (StressAxis::Rotation, &|b, i| {
-            warp::rotate(b, rotation_degrees[i])
-        }),
-    ];
-    for (axis, build) in ramps {
-        if skip.contains(&axis) {
-            continue; // never built, never run — absent from the report
-        }
-        let (passed, total, knee) =
-            run_ramp(base, expected_text, cancel, deadline, probe, indices, build)?;
-        axes.push(AxisScore {
-            axis,
-            passed,
-            total,
-            failed_at: knee.map(|i| cell_label(axis, i).to_owned()),
-        });
-    }
-
-    // ---- lighting: an unordered defect set ----
+) -> Result<AxisScore> {
     #[allow(
         clippy::cast_precision_loss,
         reason = "image dimensions bounded by Limits::max_dimension (lint presence varies by build shape)"
@@ -291,7 +286,7 @@ fn run_axes(
         ScoreDepth::Reduced => &[1, 2],
         ScoreDepth::Full => &[0, 1, 2, 3, 4],
     };
-    if !skip.contains(&StressAxis::Lighting) {
+    {
         let mut lighting_passed = 0u8;
         let mut first_failed = None;
         for &i in lighting_picks {
@@ -307,12 +302,131 @@ fn run_axes(
                 first_failed = Some(i);
             }
         }
-        axes.push(AxisScore {
+        Ok(AxisScore {
             axis: StressAxis::Lighting,
             passed: lighting_passed,
             total: u8::try_from(lighting_picks.len()).unwrap_or(u8::MAX),
             failed_at: first_failed.map(|i| cell_label(StressAxis::Lighting, i).to_owned()),
+            // an unordered defect SET has no knee to bisect
+            refined_failed_at: None,
+        })
+    }
+}
+
+/// Run the five ordered ramps + the lighting set at the given depth.
+/// Axes in `skip` never run — their cells are never built (the integration
+/// perf win) and they are absent from the returned list (the report
+/// self-describes what was measured).
+fn run_axes(
+    base: &LumaImage,
+    expected_text: &str,
+    depth: ScoreDepth,
+    skip: &[StressAxis],
+    cancel: &CancelToken,
+    deadline: Option<Instant>,
+    probe: CellProbe,
+) -> Result<Vec<AxisScore>> {
+    // ---- ordered ramps (intensity grows with the index) ----
+    let resolution_sides: [u32; 5] = [358, 256, 179, 128, 90];
+    let blur_sigmas: [f32; 5] = [0.5, 1.0, 1.5, 2.0, 2.5];
+    let contrast_factors: [f32; 5] = [0.7, 0.55, 0.4, 0.3, 0.2];
+    let tilt_degrees: [f32; 5] = [10.0, 18.0, 26.0, 34.0, 42.0];
+    let rotation_degrees: [f32; 5] = [10.0, 20.0, 30.0, 40.0, 50.0];
+
+    let indices = depth_indices(depth);
+    let mut axes = Vec::with_capacity(6);
+    // midpoint of the knee cell and its lower neighbour (index 0 bisects
+    // against the UNSTRESSED value: base side 512 · sigma 0 · factor 1 · 0°)
+    let mid = |arr: &[f32; 5], i: usize, unstressed: f32| -> f32 {
+        f32::midpoint(if i == 0 { unstressed } else { arr[i - 1] }, arr[i])
+    };
+    let ramps: [(StressAxis, RampBuilder<'_>, RampRefiner<'_>); 5] = [
+        (
+            StressAxis::Resolution,
+            &|b, i| transform::downscale_to(b, resolution_sides[i]),
+            &|b, i| {
+                let side = u32::midpoint(
+                    if i == 0 {
+                        STRESS_BASE_SIDE
+                    } else {
+                        resolution_sides[i - 1]
+                    },
+                    resolution_sides[i],
+                );
+                (transform::downscale_to(b, side), format!("{side}px"))
+            },
+        ),
+        (
+            StressAxis::Blur,
+            &|b, i| transform::gaussian_blur(b, blur_sigmas[i]),
+            &|b, i| {
+                let sigma = mid(&blur_sigmas, i, 0.0);
+                (transform::gaussian_blur(b, sigma), format!("blur {sigma}"))
+            },
+        ),
+        (
+            StressAxis::Contrast,
+            &|b, i| transform::contrast_boost(b, contrast_factors[i], 1.0),
+            &|b, i| {
+                let factor = mid(&contrast_factors, i, 1.0);
+                (
+                    transform::contrast_boost(b, factor, 1.0),
+                    format!("contrast {:.0}%", factor * 100.0),
+                )
+            },
+        ),
+        (
+            StressAxis::Perspective,
+            &|b, i| warp::perspective_tilt(b, tilt_degrees[i]),
+            &|b, i| {
+                let deg = mid(&tilt_degrees, i, 0.0);
+                (warp::perspective_tilt(b, deg), format!("{deg}\u{b0}"))
+            },
+        ),
+        (
+            StressAxis::Rotation,
+            &|b, i| warp::rotate(b, rotation_degrees[i]),
+            &|b, i| {
+                let deg = mid(&rotation_degrees, i, 0.0);
+                (warp::rotate(b, deg), format!("{deg}\u{b0}"))
+            },
+        ),
+    ];
+    for (axis, build, refine) in ramps {
+        if skip.contains(&axis) {
+            continue; // never built, never run — absent from the report
+        }
+        let (passed, total, knee) =
+            run_ramp(base, expected_text, cancel, deadline, probe, indices, build)?;
+        let refined_failed_at = refine_knee(
+            base,
+            expected_text,
+            probe,
+            axis,
+            knee,
+            depth,
+            cancel,
+            deadline,
+            refine,
+        );
+        axes.push(AxisScore {
+            axis,
+            passed,
+            total,
+            failed_at: knee.map(|i| cell_label(axis, i).to_owned()),
+            refined_failed_at,
         });
+    }
+
+    if !skip.contains(&StressAxis::Lighting) {
+        axes.push(run_lighting(
+            base,
+            expected_text,
+            depth,
+            cancel,
+            deadline,
+            probe,
+        )?);
     }
     Ok(axes)
 }
@@ -423,6 +537,8 @@ fn compose(
     let score = Score {
         value,
         grade: Grade::from_value(value),
+        // the honesty integer: how much contract stands behind `value`
+        weights_run: u8::try_from(weight_run.min(100)).unwrap_or(100),
         axes,
         structural,
         uec,
@@ -534,6 +650,7 @@ mod tests {
                 passed: 5,
                 total: 5,
                 failed_at: None,
+                refined_failed_at: None,
             })
             .collect();
         for &(axis, passed, total) in overrides {
@@ -1077,6 +1194,7 @@ mod tests {
             passed: 1,
             total: 2,
             failed_at: None,
+            refined_failed_at: None,
         }];
         let (score_lone, _) = compose(lone, None, None, None, &d);
         assert_eq!(score_lone.value, 50, "weights re-span the run set");

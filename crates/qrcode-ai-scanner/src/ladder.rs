@@ -167,6 +167,47 @@ impl ScoreCheck {
     }
 }
 
+/// Named axis-skip presets — the drift-proof spelling of the two canonical
+/// integration postures, so N host surfaces cannot slowly diverge on their
+/// hand-built skip lists. Pure sugar over `score_skip_axes` (the bindings
+/// reject passing BOTH, loudly): `design` = a generated preview with no
+/// capture geometry (skips perspective + rotation · keeps lighting — the
+/// glare cell measures the DESIGN's fragility, not the capture) · `capture`
+/// = the full six-axis contract for photo/camera surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScorePreset {
+    /// Generated-preview posture: skip `perspective` + `rotation`.
+    Design,
+    /// Photo/camera posture: every axis runs (an explicit spelling of the
+    /// default — so integrations can WRITE their posture down).
+    Capture,
+}
+
+impl ScorePreset {
+    /// Parse the cross-language wire name (`design` · `capture`) — the ONE
+    /// mapping every binding reuses. `None` on anything else, loud upstream.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "design" => Some(Self::Design),
+            "capture" => Some(Self::Capture),
+            _ => None,
+        }
+    }
+
+    /// The axes this preset SKIPS.
+    #[must_use]
+    pub fn skips(self) -> Vec<crate::report::StressAxis> {
+        match self {
+            Self::Design => vec![
+                crate::report::StressAxis::Perspective,
+                crate::report::StressAxis::Rotation,
+            ],
+            Self::Capture => Vec::new(),
+        }
+    }
+}
+
 /// Background applied under transparent pixels BEFORE luma conversion and
 /// RGB extraction — the config side of the report's `alpha` block. A
 /// transparent asset has no one background: 0.8.x read the STORED RGB

@@ -8,7 +8,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
 use qrcode_ai_scanner::{
-    AlphaBackground, ImageInput, ScanProfile, ScanReport, Scanner, ScoreCheck, StressAxis,
+    AlphaBackground, ImageInput, ScanProfile, ScanReport, Scanner, ScoreCheck, ScorePreset,
+    StressAxis,
 };
 
 mod term;
@@ -56,6 +57,12 @@ struct Cli {
     /// integration config (spec/04 § skipping axes).
     #[arg(long, value_delimiter = ',', value_name = "AXIS,...")]
     score_skip_axes: Vec<String>,
+
+    /// Named axis posture: `design` (generated previews — skips
+    /// perspective+rotation, keeps lighting) or `capture` (all six).
+    /// Mutually exclusive with --score-skip-axes.
+    #[arg(long, value_name = "PRESET", conflicts_with = "score_skip_axes")]
+    score_preset: Option<String>,
 
     /// Report SECTIONS to exclude at the source (comma-separated: `uec`,
     /// `iso15415`, `alpha_envelope`). Never computed, the wire carries
@@ -189,17 +196,29 @@ fn render_pretty(report: &ScanReport) {
     }
     if let Some(score) = &report.score {
         let grade = format!("{:?}", score.grade);
+        let coverage = if score.weights_run < 100 {
+            format!(" \u{b7} {}% of contract", score.weights_run)
+        } else {
+            String::new()
+        };
         println!(
-            "score     {} ({})",
+            "score     {} ({}{})",
             th.grade_text(&grade, &format!("{}/100", score.value)),
-            grade
+            grade,
+            coverage
         );
         for axis in &score.axes {
+            let knee = match (&axis.refined_failed_at, &axis.failed_at) {
+                (Some(refined), _) => format!(" \u{b7} dies at {refined}"),
+                (None, Some(failed)) => format!(" \u{b7} failed {failed}"),
+                _ => String::new(),
+            };
             println!(
-                "  {:12} {}/{}",
+                "  {:12} {}/{}{}",
                 format!("{:?}", axis.axis).to_lowercase(),
                 axis.passed,
-                axis.total
+                axis.total,
+                knee
             );
         }
         if let Some(uec) = score.uec {
@@ -236,6 +255,23 @@ fn render_pretty(report: &ScanReport) {
         "{}",
         th.dim(&format!("took      {:.0}ms", report.trace.total_ms))
     );
+}
+
+/// Resolve `--score-preset` OR `--score-skip-axes` into the skip list
+/// (clap's `conflicts_with` guarantees at most one arrived).
+fn parse_axis_posture(axes: &[String], preset: Option<&str>) -> Result<Vec<StressAxis>, ExitCode> {
+    if let Some(name) = preset {
+        let Some(preset) = ScorePreset::from_name(name) else {
+            let th = term::Theme::auto_stderr();
+            eprintln!(
+                "{} unknown score preset `{name}` — expected design | capture",
+                th.err_strong("✖")
+            );
+            return Err(ExitCode::from(2));
+        };
+        return Ok(preset.skips());
+    }
+    parse_skip_axes(axes)
 }
 
 /// Parse `--score-skip-axes` names with the CLI's loud-typo posture.
@@ -334,7 +370,8 @@ fn main() -> ExitCode {
 
     // --score-skip-axes: wire names, loud on a typo (a silently ignored
     // axis would score all six and drift the caller's contract).
-    let skip = match parse_skip_axes(&cli.score_skip_axes) {
+    // preset and explicit list resolve in one seam (clap enforces exclusivity)
+    let skip = match parse_axis_posture(&cli.score_skip_axes, cli.score_preset.as_deref()) {
         Ok(skip) => skip,
         Err(code) => return code,
     };
@@ -361,6 +398,7 @@ fn main() -> ExitCode {
         && checks.is_empty()
         && alpha.is_none()
         && palette.is_empty()
+        && cli.score_preset.is_none()
     {
         cli.profile.into()
     } else {

@@ -89,6 +89,12 @@ export interface AxisScore {
   total: number;
   /** Wire label of the first failed cell ("blur 2.5", "glare", "128px"…) — null when every cell passed. */
   failed_at: string | null;
+  /**
+   * The knee bisected once (Full depth, ordered ramps): the tightest
+   * TESTED failing intensity ("blur 2.25"…). ABSENT when no refinement
+   * ran. Informational — the composite never reads it.
+   */
+  refined_failed_at?: string;
 }
 export interface StructuralReport { finder_integrity: [number, number, number]; quiet_zone_ok: boolean }
 export interface UecReport {
@@ -127,6 +133,13 @@ export interface Iso15415Report {
 export interface Score {
   value: number;
   grade: Grade;
+  /**
+   * Σ contract weights of the axes that RAN (100 = the full six-axis
+   * contract · 70 with perspective+rotation skipped). The honesty
+   * integer: two 85s with different weights_run are different promises.
+   * Absent on pre-0.9 reports.
+   */
+  weights_run: number;
   axes: AxisScore[];
   structural: StructuralReport | null;
   /** Synthetic ISO 15415 unused-error-correction margin. */

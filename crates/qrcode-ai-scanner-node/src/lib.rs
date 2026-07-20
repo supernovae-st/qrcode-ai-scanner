@@ -12,7 +12,8 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use qrcode_ai_scanner::{
-    AlphaBackground, ImageInput, Limits, ScanConfig, ScanProfile, Scanner, ScoreCheck, StressAxis,
+    AlphaBackground, ImageInput, Limits, ScanConfig, ScanProfile, Scanner, ScoreCheck, ScorePreset,
+    StressAxis,
 };
 
 /// Server deployments SHOULD lower the input caps (the library default —
@@ -38,6 +39,7 @@ fn profile_from(
     score_skip_checks: Option<Vec<String>>,
     alpha_background: Option<String>,
     alpha_palette: Option<Vec<String>>,
+    score_preset: Option<String>,
 ) -> Result<ScanProfile> {
     let profile = match name {
         None => ScanProfile::Full,
@@ -114,6 +116,25 @@ fn profile_from(
                 })
             })
             .collect::<Result<_>>()?,
+    };
+    // scorePreset: the drift-proof named posture (design | capture) — sugar
+    // over scoreSkipAxes, mutually exclusive with an explicit list.
+    let preset = match &score_preset {
+        None => None,
+        Some(name) => Some(ScorePreset::from_name(name).ok_or_else(|| {
+            Error::from_reason(format!(
+                "unknown score preset `{name}` — expected design | capture"
+            ))
+        })?),
+    };
+    if preset.is_some() && !skip.is_empty() {
+        return Err(Error::from_reason(
+            "scorePreset and scoreSkipAxes are mutually exclusive — pass one",
+        ));
+    }
+    let skip = match preset {
+        Some(preset) => preset.skips(),
+        None => skip,
     };
     // budgetMs overrides the preset's wall-clock budget (0 = unbounded) —
     // server embedders bound tail latency without giving up the deep ladder.
@@ -200,6 +221,7 @@ pub fn scan(
     score_skip_checks: Option<Vec<String>>,
     alpha_background: Option<String>,
     alpha_palette: Option<Vec<String>>,
+    score_preset: Option<String>,
 ) -> Result<AsyncTask<ScanTask>> {
     let task = ScanTask {
         bytes: image.to_vec(),
@@ -210,6 +232,7 @@ pub fn scan(
             score_skip_checks,
             alpha_background,
             alpha_palette,
+            score_preset,
         )?,
         limits: limits_from(max_dimension, max_pixels),
     };
@@ -234,6 +257,7 @@ pub fn scan_sync(
     score_skip_checks: Option<Vec<String>>,
     alpha_background: Option<String>,
     alpha_palette: Option<Vec<String>>,
+    score_preset: Option<String>,
 ) -> Result<String> {
     let scanner = Scanner::builder()
         .profile(profile_from(
@@ -243,6 +267,7 @@ pub fn scan_sync(
             score_skip_checks,
             alpha_background,
             alpha_palette,
+            score_preset,
         )?)
         .limits(limits_from(max_dimension, max_pixels))
         .build();

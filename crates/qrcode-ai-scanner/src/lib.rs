@@ -39,7 +39,9 @@ mod transform;
 pub use error::{Result, ScanError};
 pub use gs1::Gs1Element;
 pub use input::{ImageInput, Limits};
-pub use ladder::{AlphaBackground, CancelToken, ScanConfig, ScanProfile, ScoreCheck, ScoreDepth};
+pub use ladder::{
+    AlphaBackground, CancelToken, ScanConfig, ScanProfile, ScoreCheck, ScoreDepth, ScorePreset,
+};
 pub use payload::Payload;
 pub use report::{
     AlphaEnvelope, AlphaMode, AlphaPaletteProbe, AlphaPlacement, AlphaProbe, AlphaReport,

@@ -65,6 +65,13 @@ export interface ScanOptions {
    * reject loudly.
    */
   alphaPalette?: ("white" | "black" | `#${string}`)[];
+  /**
+   * Named axis posture — the drift-proof spelling of the two canonical
+   * integrations: "design" (generated previews — skips perspective +
+   * rotation, keeps lighting) | "capture" (photo/camera — all six).
+   * Mutually exclusive with scoreSkipAxes (rejects loudly).
+   */
+  scorePreset?: "design" | "capture";
 }
 
 /** Async scan on the libuv pool — never blocks the event loop. */

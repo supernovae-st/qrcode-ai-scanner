@@ -77,6 +77,23 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   (`white` for dark content, `black` for light) maximizes contrast.
   Maps 1:1 to an editor's one-click fix.
 
+- `score.weights_run` — the honesty integer: Σ contract weights of the
+  axes that ran (100 = the full six-axis contract). A partial score now
+  SAYS how much contract stands behind it; pre-0.9 reports parse
+  leniently (default 0). `qrscan --pretty` renders "· 70% of contract"
+  when partial.
+- `score_preset` on every option surface (`scorePreset` /
+  `--score-preset`): the two canonical postures by NAME — `design`
+  (generated previews: skips perspective+rotation, keeps lighting) ·
+  `capture` (all six). Sugar over `score_skip_axes`, mutually exclusive
+  with an explicit list (rejects loudly on every surface) — N host
+  integrations can no longer drift apart on hand-built lists.
+- `axes[].refined_failed_at` — the knee, bisected once at Full depth:
+  the tightest TESTED failing intensity ("blur 2.25", "435px", "63%").
+  One extra probe per kneed ramp; the composite never reads it; absent
+  when no refinement ran. The generate→scan→regenerate loop sees
+  sub-cell progress instead of 2-4 point cliffs.
+
 ## 0.8.1 — 2026-07-10
 
 ### Fixed

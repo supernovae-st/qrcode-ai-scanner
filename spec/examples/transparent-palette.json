@@ -44,6 +44,7 @@
   ],
   "score": {
     "value": 100,
+    "weights_run": 100,
     "grade": "excellent",
     "axes": [
       {
@@ -190,12 +191,12 @@
       {
         "stage": "pyramid",
         "transforms_tried": 1,
-        "ms": 6.857208,
+        "ms": 6.276083,
         "detections_found": 2
       }
     ],
     "engine_panics": 0,
-    "total_ms": 6.9265419999999995
+    "total_ms": 6.349375
   },
   "versions": {
     "scanner": "0.8.1",

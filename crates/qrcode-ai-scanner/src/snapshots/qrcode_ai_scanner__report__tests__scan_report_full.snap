@@ -47,6 +47,7 @@ expression: full_report()
   ],
   "score": {
     "value": 87,
+    "weights_run": 42,
     "grade": "excellent",
     "axes": [
       {
@@ -59,7 +60,8 @@ expression: full_report()
         "axis": "perspective",
         "passed": 3,
         "total": 5,
-        "failed_at": null
+        "failed_at": "34°",
+        "refined_failed_at": "30°"
       }
     ],
     "structural": {

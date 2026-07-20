@@ -102,4 +102,20 @@ assert.throws(
   "the anti-DoS cap rejects loudly, never truncates silently",
 );
 
+// scorePreset: the named posture — 4 axes run, the wire declares 70% contract
+const designed = scanSync(clean, { profile: "full", budgetMs: 0, scorePreset: "design" });
+assert.equal(designed.score.axes.length, 4, "design skips perspective+rotation");
+assert.equal(designed.score.weights_run, 70, "the honesty integer declares the partial contract");
+assert.equal(report.score.weights_run, 100, "full contract says 100");
+assert.throws(
+  () => scanSync(clean, { scorePreset: "builder" }),
+  /unknown score preset/,
+  "typo'd preset must reject loudly",
+);
+assert.throws(
+  () => scanSync(clean, { scorePreset: "design", scoreSkipAxes: ["blur"] }),
+  /mutually exclusive/,
+  "preset + explicit list must reject loudly",
+);
+
 console.log(`node binding OK — native ${version()}`);

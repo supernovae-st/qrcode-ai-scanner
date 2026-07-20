@@ -9,7 +9,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use scanner_core::{
     AlphaBackground, ImageInput, Limits, ScanConfig, ScanProfile, Scanner, ScoreCheck,
-    StressAxis,
+    ScorePreset, StressAxis,
 };
 
 fn parse_profile(profile: &str) -> PyResult<ScanProfile> {
@@ -48,6 +48,7 @@ fn with_config(
     score_skip_checks: Option<Vec<String>>,
     alpha_background: Option<String>,
     alpha_palette: Option<Vec<String>>,
+    score_preset: Option<String>,
 ) -> PyResult<ScanProfile> {
     let skip: Vec<StressAxis> = match &score_skip_axes {
         None => Vec::new(),
@@ -112,11 +113,31 @@ fn with_config(
             })
             .collect::<PyResult<_>>()?,
     };
+    // score_preset: named posture — sugar over score_skip_axes, mutually
+    // exclusive with an explicit list (loud, never a silent precedence).
+    let preset = match &score_preset {
+        None => None,
+        Some(name) => Some(ScorePreset::from_name(name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "unknown score preset `{name}` — expected design | capture"
+            ))
+        })?),
+    };
+    if preset.is_some() && !skip.is_empty() {
+        return Err(PyValueError::new_err(
+            "score_preset and score_skip_axes are mutually exclusive — pass one",
+        ));
+    }
+    let skip = match preset {
+        Some(preset) => preset.skips(),
+        None => skip,
+    };
     if budget_ms.is_none()
         && skip.is_empty()
         && checks.is_empty()
         && alpha.is_none()
         && palette.is_empty()
+        && score_preset.is_none()
     {
         return Ok(profile);
     }
@@ -149,7 +170,7 @@ fn report_to_py<'py>(
 /// `detections`); a `ValueError` is raised only for invalid input or cancellation.
 /// `budget_ms` overrides the profile's wall-clock budget (0 = unbounded).
 #[pyfunction]
-#[pyo3(signature = (image, profile = "full", max_dimension = None, max_pixels = None, budget_ms = None, score_skip_axes = None, score_skip_checks = None, alpha_background = None, alpha_palette = None))]
+#[pyo3(signature = (image, profile = "full", max_dimension = None, max_pixels = None, budget_ms = None, score_skip_axes = None, score_skip_checks = None, alpha_background = None, alpha_palette = None, score_preset = None))]
 #[expect(
     clippy::too_many_arguments,
     reason = "the Python signature IS the cross-binding contract (profile + caps + budget + skips + alpha)"
@@ -165,6 +186,7 @@ fn scan<'py>(
     score_skip_checks: Option<Vec<String>>,
     alpha_background: Option<String>,
     alpha_palette: Option<Vec<String>>,
+    score_preset: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let profile = with_config(
         parse_profile(profile)?,
@@ -173,6 +195,7 @@ fn scan<'py>(
         score_skip_checks,
         alpha_background,
         alpha_palette,
+        score_preset,
     )?;
     let limits = build_limits(max_dimension, max_pixels);
     let image = image.to_vec(); // own it before releasing the GIL
@@ -194,7 +217,7 @@ fn scan<'py>(
 /// `rgba` must be `width * height * 4` bytes. `budget_ms` overrides the profile's
 /// wall-clock budget (0 = unbounded) — the camera loop's per-frame bound.
 #[pyfunction]
-#[pyo3(signature = (rgba, width, height, profile = "frame", max_dimension = None, max_pixels = None, budget_ms = None, score_skip_axes = None, score_skip_checks = None, alpha_background = None, alpha_palette = None))]
+#[pyo3(signature = (rgba, width, height, profile = "frame", max_dimension = None, max_pixels = None, budget_ms = None, score_skip_axes = None, score_skip_checks = None, alpha_background = None, alpha_palette = None, score_preset = None))]
 #[expect(
     clippy::too_many_arguments,
     reason = "the Python signature IS the cross-binding contract (dims + profile + caps + budget + skips + alpha)"
@@ -212,6 +235,7 @@ fn scan_frame<'py>(
     score_skip_checks: Option<Vec<String>>,
     alpha_background: Option<String>,
     alpha_palette: Option<Vec<String>>,
+    score_preset: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let profile = with_config(
         parse_profile(profile)?,
@@ -220,6 +244,7 @@ fn scan_frame<'py>(
         score_skip_checks,
         alpha_background,
         alpha_palette,
+        score_preset,
     )?;
     let limits = build_limits(max_dimension, max_pixels);
     let rgba = rgba.to_vec(); // own it before releasing the GIL
