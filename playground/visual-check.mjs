@@ -10,6 +10,10 @@ const SAMPLES = [
   { name: 'clean',    expect: 'qrc-ai.com/76xMa', sym: 'qr_code',     kind: 'url' },
   { name: 'artistic', expect: 'K1Ng2',            sym: 'qr_code',     kind: 'url' },
   { name: 'rescue',   expect: 'rescue-pin',       sym: 'qr_code',     kind: 'url', rescue: true },
+  // dark modules over canvas-style transparency (RGB black stored under
+  // alpha 0) — the input class that was a false "no detection" pre-0.9;
+  // must decode, carry the alpha block, and read a light_only envelope.
+  { name: 'transparent', expect: 'qrc-ai.com/76xMa', sym: 'qr_code',  kind: 'url', alpha: 'light_only' },
   { name: 'ean13',    expect: '9506000134352',    sym: 'ean13',       kind: 'gs1' },
   { name: 'gs1',      expect: '0950600013435',    sym: 'data_matrix', kind: 'gs1' },
 ];
@@ -46,6 +50,8 @@ const read = () => page.evaluate(() => {
     conformant: txt('.pill-ok') || txt('.pill-no'),
     cornersDrawn: !!document.querySelector('.corners polygon'),
     rawJson: !!document.querySelector('details.raw'),
+    alphaPlacement: txt('.alpha-placement'),
+    alphaProbes: document.querySelectorAll('.alpha-probe').length,
   };
 });
 
@@ -61,7 +67,8 @@ for (const s of SAMPLES) {
   await page.screenshot({ path: `${OUT}/pg-${s.name}.png`, fullPage: true });
   const ok =
     got.verdict?.includes(s.expect) && got.symbology === s.sym && got.kind === s.kind &&
-    (!s.rescue || (got.rescueBadge && got.uecDanger && got.critHint));
+    (!s.rescue || (got.rescueBadge && got.uecDanger && got.critHint)) &&
+    (!s.alpha || (got.alphaPlacement === s.alpha && got.alphaProbes >= 5 && got.hints >= 1));
   results.push({ sample: s.name, ok, got });
 }
 

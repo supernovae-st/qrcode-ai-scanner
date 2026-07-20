@@ -1,7 +1,7 @@
 import init, { scan_image, scan_frame, version } from '@supernovae-st/qrcode-ai-scanner-wasm';
 import type {
   ScanReport, Score, AxisScore, Detection, Payload, Hint,
-  Iso15415Report, IsoParameter, UecReport, Grade,
+  Iso15415Report, IsoParameter, UecReport, Grade, AlphaReport,
 } from '@supernovae-st/qrcode-ai-scanner-wasm';
 import './style.css';
 
@@ -44,6 +44,12 @@ let blobUrl: string | null = null;
 /* ---------- helpers ---------- */
 const profile = (): string => ($('input[name=profile]:checked') as HTMLInputElement)?.value ?? 'full';
 const budget = (): number => Number(($('#budget') as HTMLInputElement).value) || 0;
+// undefined = the engine default (auto) — the explicit value only when forced,
+// so the default path stays byte-identical to a host that passes nothing.
+const alphaMode = (): string | undefined => {
+  const v = ($('input[name=alphamode]:checked') as HTMLInputElement)?.value ?? 'auto';
+  return v === 'auto' ? undefined : v;
+};
 
 const GRADE_LETTER: Record<Grade, string> = {
   excellent: 'a', good: 'b', acceptable: 'c', fair: 'd', poor: 'f',
@@ -97,7 +103,9 @@ function scanBytes(bytes: Uint8Array, label: string) {
 
   try {
     const t0 = performance.now();
-    const report = scan_image(bytes, profile(), undefined, undefined, budget()) as ScanReport;
+    const report = scan_image(
+      bytes, profile(), undefined, undefined, budget(), undefined, undefined, alphaMode(),
+    ) as ScanReport;
     const wall = performance.now() - t0;
     lastDetection = report.detections[0] ?? null;
     renderReport(report, wall);
@@ -157,6 +165,7 @@ function renderReport(r: ScanReport, wall: number) {
   report.append(verdict);
 
   if (r.score) report.append(scoreModule(r.score));
+  if (r.alpha) report.append(alphaModule(r.alpha));
   if (r.score?.uec) report.append(uecModule(r.score.uec));
   if (r.score?.iso15415) report.append(isoModule(r.score.iso15415));
   if (r.score) report.append(hintsModule(r.hints));
@@ -238,6 +247,39 @@ function isoModule(iso: Iso15415Report): HTMLElement {
   return h('section', { class: 'module' }, h('h2', {}, 'ISO 15415 card · informed, not certified'), card);
 }
 
+/* The alpha block: the flatten verdict + the placement envelope — "over
+   which backgrounds does this transparent design keep decoding". Every
+   probe swatch IS its tested background color; bands are tested endpoints. */
+function alphaModule(a: AlphaReport): HTMLElement {
+  const verdict = h('div', { class: 'alpha-verdict' },
+    h('span', { class: 'badge muted' }, `flattened over ${a.background}`),
+    h('span', { class: 'badge muted' }, `mode ${a.mode}`),
+    h('span', { class: 'badge muted' }, `transparency ${(a.coverage * 100).toFixed(0)}%`),
+    a.fallback_used ? h('span', { class: 'badge rescue' }, '⛑ opposite-background rescue') : null,
+  );
+  const mod = h('section', { class: 'module alpha' },
+    h('h2', {}, 'Alpha · placement envelope'), verdict);
+  if (a.envelope) {
+    const strip = h('div', { class: 'alpha-strip', role: 'img',
+      'aria-label': `decode probes over neutral backgrounds, placement ${a.envelope.placement}` });
+    for (const p of a.envelope.probes) {
+      const sw = h('span', { class: `alpha-probe${p.decoded ? ' on' : ''}`, title: `luma ${p.background_luma}` },
+        p.decoded ? '✓' : '✕');
+      sw.style.background = `rgb(${p.background_luma},${p.background_luma},${p.background_luma})`;
+      sw.style.color = p.background_luma < 128 ? '#e8e8e8' : '#111';
+      strip.append(sw);
+    }
+    const bands = a.envelope.safe_luma.map(([lo, hi]) => `${lo}–${hi}`).join(' · ') || 'none';
+    mod.append(strip, h('div', { class: 'alpha-meta' },
+      h('span', { class: `alpha-placement pl-${a.envelope.placement}` }, a.envelope.placement),
+      h('span', {}, `safe background luma ${bands}`),
+    ));
+  } else {
+    mod.append(h('p', { class: 'hints-empty' }, 'envelope not swept (full profile only / skipped)'));
+  }
+  return mod;
+}
+
 const HINT_INFO: Record<string, { glyph: string; act: (x: any) => string; crit?: boolean }> = {
   fix_finder_pattern:     { glyph: '◳', act: (x) => `Clear the art off corner ${x.corner} (0=TL · 1=TR · 2=BL).` },
   restore_quiet_zone:     { glyph: '▢', act: () => 'Add a clean ≥2-module margin around the symbol.' },
@@ -246,6 +288,7 @@ const HINT_INFO: Record<string, { glyph: string; act: (x: any) => string; crit?:
   reduce_art_texture:     { glyph: '░', act: () => 'Lighten the texture over the data zone.' },
   raise_error_correction: { glyph: '↑', act: (x) => `Regenerate at a higher EC level (current: ${String(x.current).toUpperCase()}).` },
   low_correction_margin:  { glyph: '⚠', crit: true, act: (x) => `Decode at the RS limit (${x.errors}/${x.capacity}) — possible miscorrection. Verify out-of-band / regenerate.` },
+  alpha_background_dependent: { glyph: '▞', act: (x) => `Only survives ${String(x.placement).replace('_', ' ')} backgrounds — pin a background layer, or place it inside the safe luma bands.` },
 };
 
 function hintsModule(hints: Hint[]): HTMLElement {
@@ -376,6 +419,7 @@ document.querySelectorAll<HTMLButtonElement>('[data-sample]').forEach((btn) =>
 
 $('#profile').addEventListener('change', () => { if (lastBytes && !cameraOn) scanBytes(lastBytes, 'rescan'); });
 $('#budget').addEventListener('change', () => { if (lastBytes && !cameraOn) scanBytes(lastBytes, 'rescan'); });
+$('#alphamode').addEventListener('change', () => { if (lastBytes && !cameraOn) scanBytes(lastBytes, 'rescan'); });
 
 /* ---------- live camera (scan_frame) ---------- */
 let cameraOn = false;

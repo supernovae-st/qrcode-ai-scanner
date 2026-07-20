@@ -338,3 +338,30 @@ details.raw pre {
   .report > *:nth-child(n+6) { animation-delay: .2s; }
   @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
 }
+
+/* ---- alpha · placement envelope ------------------------------------------ */
+#alphamode { grid-template-columns: repeat(4, 1fr); }
+/* checkerboard under the preview so transparency is VISIBLE — the whole
+   point of the alpha demo (a transparent PNG on a flat dark page reads as
+   an opaque dark image) */
+.preview-frame img {
+  background: repeating-conic-gradient(#26262b 0% 25%, #17171b 0% 50%) 0 0 / 18px 18px;
+}
+.alpha-verdict { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.alpha-strip { display: flex; gap: 4px; }
+.alpha-probe {
+  width: 30px; height: 30px; border-radius: 6px;
+  display: grid; place-items: center;
+  font-weight: 700; font-size: 13px;
+  border: 1px solid rgba(255, 255, 255, .14);
+}
+.alpha-probe.on { outline: 2px solid var(--g-a); outline-offset: -2px; }
+.alpha-meta { display: flex; gap: 10px; align-items: center; margin-top: 8px; font-size: 13px; }
+.alpha-placement {
+  padding: 2px 8px; border-radius: 999px;
+  font-weight: 600; font-size: 12px;
+  border: 1px solid currentColor;
+}
+.alpha-placement.pl-any { color: var(--g-a); }
+.alpha-placement.pl-light_only, .alpha-placement.pl-dark_only, .alpha-placement.pl-mixed { color: var(--g-c); }
+.alpha-placement.pl-none { color: var(--g-f); }
