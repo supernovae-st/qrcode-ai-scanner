@@ -16,14 +16,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # --use-napi-cross is Linux-host-only (napi CLI >=3.7.3 hard-errors on
-        # mac/windows hosts); darwin/windows rows build their targets natively.
+        # --use-napi-cross is Linux-gnu-only (napi CLI >=3.7.3 hard-errors on
+        # mac/windows hosts AND on musl targets); darwin/windows rows build
+        # natively, musl rides zig (-x + setup-zig + cargo-zigbuild, the
+        # official napi-rs template recipe).
         settings:
           - { host: macos-latest, target: aarch64-apple-darwin, cross: "" }
           - { host: macos-latest, target: x86_64-apple-darwin, cross: "" }
           - { host: ubuntu-latest, target: x86_64-unknown-linux-gnu, cross: "--use-napi-cross" }
           - { host: ubuntu-latest, target: aarch64-unknown-linux-gnu, cross: "--use-napi-cross" }
-          - { host: ubuntu-latest, target: x86_64-unknown-linux-musl, cross: "--use-napi-cross" }
+          - { host: ubuntu-latest, target: x86_64-unknown-linux-musl, cross: "-x" }
           - { host: windows-latest, target: x86_64-pc-windows-msvc, cross: "" }
     runs-on: ${{ matrix.settings.host }}
     defaults:
@@ -41,6 +43,17 @@ jobs:
         with:
           node-version: 22
       - uses: Swatinem/rust-cache@v2
+      - uses: mlugg/setup-zig@v2
+        if: ${{ contains(matrix.settings.target, 'musl') }}
+        with:
+          version: 0.14.1
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        if: ${{ contains(matrix.settings.target, 'musl') }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tool: cargo-zigbuild
       - run: pnpm install --frozen-lockfile=false
       - run: pnpm exec napi build --platform --release --target ${{ matrix.settings.target }} --js native.js --dts native.d.ts ${{ matrix.settings.cross }}
       - uses: actions/upload-artifact@v4
