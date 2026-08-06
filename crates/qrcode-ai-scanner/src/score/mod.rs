@@ -48,6 +48,33 @@ const WEIGHTS: [(StressAxis, u32); 6] = [
 const FINDER_INTEGRITY_FLOOR: f32 = 0.5;
 const FINDER_DAMAGE_CAP: u8 = 40;
 const QUIET_ZONE_CAP: u8 = 60;
+/// UEC margin cap (the occlusion-cliff fix · door-admin probe 2026-08-05):
+/// a consumed RS budget is invisible to the stress axes — the composite sat
+/// flat while a growing center logo ate the margin, then decode died with
+/// zero warning (at EC=H the raise-EC hint can never fire). Below the
+/// half-budget line the margin caps the value CONTINUOUSLY: 0.5 → 100
+/// (no-op seam) · 0.25 (ISO D) → 70 · 0.0 (ISO F, at the RS limit) → 40,
+/// the finder-damage floor — a decode at the limit is never a pass.
+const UEC_HEALTHY_MARGIN: f32 = 0.5;
+const UEC_ZERO_MARGIN_CAP: u8 = 40;
+
+/// The composite cap a measured RS margin allows — 100 (no-op) at or above
+/// the healthy half-budget, then a continuous slope down to
+/// [`UEC_ZERO_MARGIN_CAP`] at margin zero.
+fn uec_margin_cap(margin: f32) -> u8 {
+    if margin >= UEC_HEALTHY_MARGIN {
+        return 100;
+    }
+    let span = f32::from(100 - UEC_ZERO_MARGIN_CAP);
+    let cap = f32::from(UEC_ZERO_MARGIN_CAP) + (margin.max(0.0) / UEC_HEALTHY_MARGIN) * span;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "cap in 40..=100"
+    )]
+    let cap = cap.round() as u8;
+    cap
+}
 
 fn detections_match(found: &[engine::RawDetection], expected_text: &str) -> bool {
     found
@@ -480,6 +507,11 @@ fn compose(
             hints.push(Hint::RestoreQuietZone);
         }
     }
+    // A melting RS margin caps the composite on a continuous slope (see the
+    // UEC_HEALTHY_MARGIN doc) — the report's `uec` field carries the why.
+    if let Some(u) = &uec {
+        value = value.min(uec_margin_cap(u.margin));
+    }
 
     // ---- axis-derived hints (stable order) ----
     let fraction = |axis: StressAxis| -> Option<(u8, u8)> {
@@ -830,7 +862,9 @@ mod tests {
             "{hints:?}"
         );
 
-        // thin UEC margin (grade D) fires even at value 100
+        // thin UEC margin (grade D) fires even when every axis passes — and
+        // since the margin cap (2026-08-06) the value SAYS the melt too
+        // (0.30/0.5 × 60 + 40 = 76, no longer a flat 100 over a thin budget)
         let thin = UecReport {
             margin: 0.30,
             grade: UecGrade::D,
@@ -838,7 +872,7 @@ mod tests {
             worst_block_capacity: 18,
         };
         let (score, hints) = compose(axes_with(&[]), None, Some(thin), None, &d);
-        assert_eq!(score.value, 100);
+        assert_eq!(score.value, 76);
         assert!(
             hints
                 .iter()
@@ -885,6 +919,58 @@ mod tests {
                 .any(|h| matches!(h, Hint::RaiseErrorCorrection { .. })),
             "{hints:?}"
         );
+    }
+
+    /// The occlusion cliff (door-admin probe 2026-08-05): a center logo eats
+    /// the RS budget while every stress axis keeps passing — the composite
+    /// sat at 88 from `logo_scale` 12→18 then fell to no-decode at 24 with no
+    /// warning (at EC=H the raise-EC hint can never fire). The margin IS the
+    /// distance to that cliff, so it must SHAPE the value: flat while the
+    /// budget is healthy, a continuous slope below the half-budget line.
+    #[test]
+    fn uec_margin_caps_the_composite_continuously() {
+        use crate::report::{UecGrade, UecReport};
+        let d = detection_with(Some(EcLevel::H));
+        let at = |margin: f32| UecReport {
+            margin,
+            grade: UecGrade::from_margin(margin),
+            worst_block_errors: 6,
+            worst_block_capacity: 24,
+        };
+        let value = |uec: Option<UecReport>| compose(axes_with(&[]), None, uec, None, &d).0.value;
+
+        // healthy budget (≥ half) — the cap is a no-op, including the seam
+        assert_eq!(value(None), 100, "no measurement → no penalty");
+        assert_eq!(value(Some(at(1.0))), 100);
+        assert_eq!(
+            value(Some(at(0.5))),
+            100,
+            "continuous seam at the threshold"
+        );
+
+        // below half-budget the value slopes down — the cliff gets a warning
+        let v37 = value(Some(at(0.37))); // ISO C
+        let v25 = value(Some(at(0.25))); // ISO D
+        let v10 = value(Some(at(0.10)));
+        let v0 = value(Some(at(0.0))); // ISO F — at the RS limit
+        assert!(
+            v37 < 100 && v25 < v37 && v10 < v25 && v0 < v10,
+            "monotone slope: {v37} {v25} {v10} {v0}"
+        );
+        assert_eq!(v25, 70, "ISO D lands at 70 — visibly below the far band");
+        assert_eq!(v0, 40, "RS limit = the finder-damage floor, never a pass");
+
+        // the cap CAPS — it never raises a value the axes already sank
+        let sunk = compose(
+            axes_with(&[(StressAxis::Blur, 0, 5), (StressAxis::Perspective, 0, 5)]),
+            None,
+            Some(at(0.45)),
+            None,
+            &d,
+        )
+        .0
+        .value;
+        assert!(sunk < 94, "axes verdict survives under a mild cap: {sunk}");
     }
 
     #[test]

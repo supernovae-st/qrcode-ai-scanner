@@ -6,6 +6,23 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
 
 ## Unreleased
 
+### Changed
+
+- **A melting RS margin now caps the composite** (`score_contract` +1) —
+  the occlusion cliff (door-admin probe 2026-08-05): a growing center
+  logo ate the correction budget while every stress axis kept passing,
+  so the score sat flat (88 at `logo_scale` 12 AND 18) then decode died
+  at 24 with zero warning — at EC=H the raise-EC hint can never fire,
+  and `low_correction_margin` only speaks at margin ZERO. The measured
+  UEC margin now caps the value on a continuous slope below the healthy
+  half-budget: 0.5 → 100 (no-op seam) · 0.25 (ISO D) → 70 · 0.0 (ISO F)
+  → 40, the finder-damage floor — a decode at the RS limit is never a
+  pass. Scope honesty: the cap only bites where UEC measures (rqrr-path
+  decodes carrying the raw stream); rxing-path artistic decodes report
+  `uec: null` and keep their prior scores unchanged (the youtube-video
+  bench face re-judged 88, byte-stable) — consumers must read a null
+  margin as UNMEASURED, never as healthy.
+
 ### CI
 
 - **The release tooling pins exact** — the v0.9.0 npm-publish legs died
