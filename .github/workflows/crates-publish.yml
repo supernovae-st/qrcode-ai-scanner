@@ -80,15 +80,22 @@ jobs:
           cargo --version
       # The archives this job uploads, packed here (`cargo package --locked
       # --no-verify`: no build, no build script) and read back before the
-      # crates.io token is minted. `cargo publish` packs them again from this
-      # same checkout with this same cargo.
+      # crates.io token is minted, then kept aside: `cargo publish` packs
+      # them again from this same checkout with this same cargo, and each
+      # upload is compared with its inspected archive, byte for byte.
       - name: package + inspect the two .crate files about to be uploaded
-        run: python3 scripts/package-inspect.py crates --strict --quiet
+        run: |
+          python3 scripts/package-inspect.py crates --strict --quiet
+          mkdir -p "$RUNNER_TEMP/inspected"
+          cp target/package/*.crate "$RUNNER_TEMP/inspected/"
       - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
         id: auth
       # --no-verify: `package` built each crate from its own archive at this
       # very commit; a verify build here would run every dependency's build
-      # script next to the registry token.
+      # script next to the registry token. cargo packs reproducibly, and the
+      # cli's packaged lockfile pins the core by the checksum of the core
+      # archive inspected above, so each upload must be that archive: one
+      # that is not stops the job before the next crate.
       - name: publish lib then cli (skip versions already live)
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
@@ -104,5 +111,9 @@ jobs:
               echo "$crate $ws already on crates.io — skip"
             else
               cargo publish -p "$crate" --locked --no-verify
+              if ! cmp "target/package/$crate-$ws.crate" "$RUNNER_TEMP/inspected/$crate-$ws.crate"; then
+                echo "::error::$crate $ws went up, but not as the archive inspected above: compare the two, yank if needed"
+                exit 1
+              fi
             fi
           done
