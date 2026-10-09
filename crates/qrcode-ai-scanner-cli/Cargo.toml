@@ -26,4 +26,5 @@ workspace = true
 [dev-dependencies]
 image.workspace = true
 jsonschema.workspace = true
+qrcode.workspace = true
 serde_json.workspace = true

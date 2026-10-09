@@ -232,6 +232,123 @@ fn cli_reports_are_deterministic_across_processes_modulo_wall_clock() {
     }
 }
 
+// ---- the content lines of --pretty (spec/01 § Content) -----------------
+
+/// A v3-M symbol from an explicit segment stream, rendered to a temp PNG
+/// (6 px modules, 4-module quiet zone) named after the row.
+fn symbol_png(
+    name: &str,
+    push: impl FnOnce(&mut qrcode::bits::Bits) -> qrcode::types::QrResult<()>,
+) -> PathBuf {
+    let (version, ec) = (qrcode::Version::Normal(3), qrcode::EcLevel::M);
+    let mut bits = qrcode::bits::Bits::new(version);
+    push(&mut bits).unwrap();
+    bits.push_terminator(ec).unwrap();
+    let code = qrcode::QrCode::with_bits(bits, ec).unwrap();
+    let width = code.width();
+    let side = u32::try_from((width + 8) * 6).unwrap();
+    let mut img = image::GrayImage::from_pixel(side, side, image::Luma([255]));
+    for (i, color) in code.to_colors().iter().enumerate() {
+        if *color == qrcode::Color::Dark {
+            let mx = u32::try_from(i % width + 4).unwrap();
+            let my = u32::try_from(i / width + 4).unwrap();
+            for dy in 0..6 {
+                for dx in 0..6 {
+                    img.put_pixel(mx * 6 + dx, my * 6 + dy, image::Luma([0]));
+                }
+            }
+        }
+    }
+    let path = std::env::temp_dir().join(format!("qrscan-cli-content-{name}.png"));
+    img.save(&path).unwrap();
+    path
+}
+
+/// The `--pretty` lines of a frame-profile scan (piped stdout: no colour).
+fn pretty_lines(path: &PathBuf) -> Vec<String> {
+    let out = qrscan()
+        .args(["--pretty", "--profile", "frame", "--budget-ms", "0"])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[track_caller]
+fn assert_line(lines: &[String], expected: &str) {
+    assert!(
+        lines.iter().any(|l| l == expected),
+        "want {expected:?} in {lines:#?}"
+    );
+}
+
+#[test]
+fn pretty_names_the_charset_and_the_declarations() {
+    // ECI 3 [35 80] — the C1 control escaped, the declared reading named
+    // with the designator and where it takes effect
+    let lines = pretty_lines(&symbol_png("eci3", |b| {
+        b.push_eci_designator(3)?;
+        b.push_byte_data(&[0x35, 0x80])
+    }));
+    assert_line(&lines, "content   5\\u{80}");
+    assert_line(&lines, "charset   eci · ECI 3@0");
+    // ECI 999 [A1] — no reading: the replacement glyph stays a glyph, and
+    // the line says the text is not verified
+    let lines = pretty_lines(&symbol_png("eci999", |b| {
+        b.push_eci_designator(999)?;
+        b.push_byte_data(&[0xA1])
+    }));
+    assert_line(&lines, "content   \u{FFFD}");
+    assert_line(
+        &lines,
+        "charset   unknown · ECI 999@0 · no verified text (raw: --json)",
+    );
+    // FNC1 in second position
+    let lines = pretty_lines(&symbol_png("fnc1-second", |b| {
+        b.push_fnc1_second_position(37)?;
+        b.push_byte_data(b"abc")
+    }));
+    assert_line(&lines, "content   37abc");
+    assert_line(&lines, "fnc1      second");
+}
+
+#[test]
+fn pretty_escapes_what_the_data_encodes() {
+    // a U+FFFD the data encodes is a character — escaped, so it never reads
+    // as an unreadable byte; utf8 without a declaration has no charset line
+    let lines = pretty_lines(&symbol_png("encoded-fffd", |b| {
+        b.push_byte_data(&[0x41, 0xEF, 0xBF, 0xBD, 0x42])
+    }));
+    assert_line(&lines, "content   A\\u{fffd}B");
+    assert!(
+        !lines.iter().any(|l| l.starts_with("charset")),
+        "{lines:#?}"
+    );
+    let lines = pretty_lines(&symbol_png("gb18030-fffd", |b| {
+        b.push_eci_designator(32)?;
+        b.push_byte_data(&[0x41, 0x84, 0x31, 0xA4, 0x37, 0x42])
+    }));
+    assert_line(&lines, "content   A\\u{fffd}B");
+    assert_line(&lines, "charset   gb18030 · ECI 32@0");
+    // a backslash doubles; a bidi override is escaped, never applied
+    let lines = pretty_lines(&symbol_png("backslash", |b| b.push_byte_data(b"a\\b")));
+    assert_line(&lines, "content   a\\\\b");
+    let lines = pretty_lines(&symbol_png("rlo", |b| {
+        b.push_byte_data("\u{202E}abc".as_bytes())
+    }));
+    assert_line(&lines, "content   \\u{202e}abc");
+}
+
 /// --score-skip-axes threads to the engine (axes absent from the wire) and a
 /// typo'd axis is a loud exit-2, never a silent six-axis score.
 #[test]

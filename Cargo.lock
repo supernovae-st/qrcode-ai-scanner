@@ -1524,6 +1524,7 @@ dependencies = [
  "clap",
  "image",
  "jsonschema",
+ "qrcode",
  "qrcode-ai-scanner",
  "serde_json",
 ]

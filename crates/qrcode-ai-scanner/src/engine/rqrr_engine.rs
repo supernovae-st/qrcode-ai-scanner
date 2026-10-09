@@ -325,11 +325,26 @@ mod tests {
         Rederived,
     );
 
+    /// A malformed re-derivation whose tolerant reading is `bytes`.
+    fn malformed_reading(bytes: &[u8]) -> Rederived {
+        Rederived::Malformed {
+            port: Some(PortRead {
+                bytes: bytes.to_vec(),
+                signalled: true,
+                fnc1: Fnc1::None,
+            }),
+        }
+    }
+
     #[test]
     fn an_ambiguous_orientation_is_unverified_never_refused() {
-        // The transpose is consulted only when the sampled stream does not
-        // reproduce rqrr's decode: when both orientations verify, neither
-        // stands.
+        // The RS-verified grid is the truth: when one orientation verifies,
+        // its parse decides — whatever rqrr wrote — and a malformed one
+        // refuses. Nothing is decided when no orientation verifies, or when
+        // both verify with DIFFERENT results (crafted grids only); never a
+        // refusal on ambiguity. The same result both ways is no ambiguity (a
+        // transpose-symmetric grid). The transpose is read only when the
+        // sampled stream does not reproduce rqrr's decode.
         let abc: &[u8] = b"abc";
         let cases: Vec<SettleCase> = vec![
             (
@@ -354,6 +369,13 @@ mod tests {
                 parsed_bytes(abc),
             ),
             (
+                "mirrored, other bytes",
+                Rederived::Unverified,
+                Some(parsed_bytes(b"xyz")),
+                abc.to_vec(),
+                parsed_bytes(b"xyz"),
+            ),
+            (
                 "mirrored malformed",
                 Rederived::Unverified,
                 Some(malformed()),
@@ -375,11 +397,25 @@ mod tests {
                 Rederived::Unverified,
             ),
             (
-                "malformed both ways",
+                "malformed both ways, identical",
                 malformed(),
                 Some(malformed()),
                 abc.to_vec(),
+                malformed(),
+            ),
+            (
+                "malformed both ways, different readings",
+                malformed_reading(abc),
+                Some(malformed_reading(b"xyz")),
+                abc.to_vec(),
                 Rederived::Unverified,
+            ),
+            (
+                "other bytes both ways, identical",
+                parsed_bytes(b"xyz"),
+                Some(parsed_bytes(b"xyz")),
+                abc.to_vec(),
+                parsed_bytes(b"xyz"),
             ),
             (
                 "malformed, transpose unverified",
