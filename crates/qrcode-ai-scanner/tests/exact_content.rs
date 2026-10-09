@@ -21,6 +21,7 @@ use qrcode::types::QrResult;
 use qrcode::{EcLevel, QrCode, Version};
 use qrcode_ai_scanner::{
     Charset, Detection, EngineKind, ImageInput, Payload, ScanProfile, ScanReport, Scanner,
+    ScoreDepth,
 };
 
 // ------------------------------------------------------------ fixtures
@@ -81,6 +82,10 @@ fn png_modules(colors: &[qrcode::Color], width: usize, version: Version, stray: 
     if stray {
         paint(1, 1);
     }
+    encode_png(img)
+}
+
+fn encode_png(img: image::GrayImage) -> Vec<u8> {
     let mut out = Vec::new();
     image::DynamicImage::ImageLuma8(img)
         .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
@@ -88,11 +93,13 @@ fn png_modules(colors: &[qrcode::Color], width: usize, version: Version, stray: 
     out
 }
 
-/// A v1-M symbol whose DATA CODEWORDS are the given MSB-first bit string
-/// (zero-padded to a byte, then ISO pad codewords 0xEC/0x11): the
-/// encoder's own RS, placement and masking around a stream its Bits API
-/// refuses to write — like a `111xxxxx` ECI designator.
-fn png_from_bit_stream(bits: &str) -> Vec<u8> {
+/// The module colors of a v1-M symbol whose DATA CODEWORDS are the given
+/// MSB-first bit string (zero-padded to a byte, then ISO pad codewords
+/// 0xEC/0x11): the encoder's own RS, placement and masking around a stream
+/// its Bits API refuses to write — like a `111xxxxx` ECI designator. The
+/// codewords at `corrupt` (data then EC, in block order) are inverted after
+/// the RS parity is computed: errors the decoders must correct.
+fn bit_stream_colors(bits: &str, corrupt: &[usize]) -> (Vec<qrcode::Color>, usize) {
     let (version, ec) = (Version::Normal(1), EcLevel::M);
     let clean: Vec<u8> = bits.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
     let mut data: Vec<u8> = clean
@@ -109,18 +116,32 @@ fn png_from_bit_stream(bits: &str) -> Vec<u8> {
     while data.len() < capacity {
         data.push(pads.next().unwrap());
     }
-    let (data_codewords, ec_codewords) =
+    let (mut data_codewords, mut ec_codewords) =
         qrcode::ec::construct_codewords(&data, version, ec).unwrap();
+    for &index in corrupt {
+        match index.checked_sub(data_codewords.len()) {
+            None => data_codewords[index] ^= 0xFF,
+            Some(parity) => ec_codewords[parity] ^= 0xFF,
+        }
+    }
     let mut canvas = qrcode::canvas::Canvas::new(version, ec);
     canvas.draw_all_functional_patterns();
     canvas.draw_data(&data_codewords, &ec_codewords);
     let colors = canvas.apply_best_mask().into_colors();
-    png_modules(
-        &colors,
-        usize::try_from(version.width()).unwrap(),
-        version,
-        false,
-    )
+    (colors, usize::try_from(version.width()).unwrap())
+}
+
+/// A v1-M symbol from an explicit data-codeword bit string (see
+/// [`bit_stream_colors`]).
+fn png_from_bit_stream(bits: &str) -> Vec<u8> {
+    let (colors, width) = bit_stream_colors(bits, &[]);
+    png_modules(&colors, width, Version::Normal(1), false)
+}
+
+/// [`png_from_bit_stream`], left-right mirrored.
+fn png_from_bit_stream_mirrored(bits: &str) -> Vec<u8> {
+    let (colors, width) = bit_stream_colors(bits, &[]);
+    png_modules(&mirror(&colors, width), width, Version::Normal(1), false)
 }
 
 /// Content rows scan with the camera-frame stages and no wall clock: the
@@ -128,6 +149,19 @@ fn png_from_bit_stream(bits: &str) -> Vec<u8> {
 fn scan_content(png: &[u8]) -> ScanReport {
     let mut config = ScanProfile::Frame.config();
     config.budget_ms = None;
+    Scanner::builder()
+        .profile(ScanProfile::Custom(config))
+        .build()
+        .scan(ImageInput::encoded(png))
+        .unwrap()
+}
+
+/// The whole ladder (enhance, deep, rescue) with no wall clock and no
+/// scoring — for rows whose content a later stage decides.
+fn scan_walk(png: &[u8]) -> ScanReport {
+    let mut config = ScanProfile::Full.config();
+    config.budget_ms = None;
+    config.score_depth = ScoreDepth::Off;
     Scanner::builder()
         .profile(ScanProfile::Custom(config))
         .build()
@@ -211,14 +245,104 @@ fn png_pair(left: &QrCode, right: &QrCode) -> Vec<u8> {
     out
 }
 
-/// A left-right mirror image of `code` (module x becomes width-1-x).
+/// Module colors mirrored left-right (module x becomes width-1-x).
+fn mirror(colors: &[qrcode::Color], width: usize) -> Vec<qrcode::Color> {
+    (0..width * width)
+        .map(|i| colors[(i / width) * width + (width - 1 - i % width)])
+        .collect()
+}
+
+/// A left-right mirror image of `code`.
 fn png_mirrored(code: &QrCode) -> Vec<u8> {
     let width = code.width();
-    let colors = code.to_colors();
-    let mirrored: Vec<qrcode::Color> = (0..width * width)
-        .map(|i| colors[(i / width) * width + (width - 1 - i % width)])
-        .collect();
-    png_modules(&mirrored, width, code.version(), false)
+    png_modules(
+        &mirror(&code.to_colors(), width),
+        width,
+        code.version(),
+        false,
+    )
+}
+
+/// A light-on-dark render of `code` (every pixel inverted).
+fn png_inverted(code: &QrCode) -> Vec<u8> {
+    let mut img = image::load_from_memory(&png(code, false))
+        .unwrap()
+        .into_luma8();
+    image::imageops::invert(&mut img);
+    encode_png(img)
+}
+
+/// Pixels per module of the artistic-like renders below.
+const ART_PX: u32 = 8;
+
+/// Dot-style data modules (round dots of 4.8 px in 8 px cells), finder
+/// patterns kept square — an artistic-like rendering.
+fn png_dots(code: &QrCode) -> Vec<u8> {
+    const QUIET: u32 = 4;
+    const RADIUS: f32 = 2.4;
+    let n = u32::try_from(code.width()).unwrap();
+    let side = (n + 2 * QUIET) * ART_PX;
+    let mut img = image::GrayImage::from_pixel(side, side, image::Luma([255]));
+    let finder = |r: u32, c: u32| (r < 8 && (c < 8 || c >= n - 8)) || (r >= n - 8 && c < 8);
+    for (i, color) in code.to_colors().iter().enumerate() {
+        if *color != qrcode::Color::Dark {
+            continue;
+        }
+        let i = u32::try_from(i).unwrap();
+        let (r, c) = (i / n, i % n);
+        for dy in 0..ART_PX {
+            for dx in 0..ART_PX {
+                #[expect(clippy::cast_precision_loss, reason = "a few pixels")]
+                let (fx, fy) = (
+                    dx as f32 + 0.5 - ART_PX as f32 / 2.0,
+                    dy as f32 + 0.5 - ART_PX as f32 / 2.0,
+                );
+                if finder(r, c) || fx * fx + fy * fy <= RADIUS * RADIUS {
+                    img.put_pixel(
+                        (c + QUIET) * ART_PX + dx,
+                        (r + QUIET) * ART_PX + dy,
+                        image::Luma([0]),
+                    );
+                }
+            }
+        }
+    }
+    encode_png(img)
+}
+
+/// A Gaussian-blurred render (8 px modules, `sigma` in pixels).
+fn png_blurred(code: &QrCode, sigma: f32) -> Vec<u8> {
+    const QUIET: u32 = 4;
+    let n = u32::try_from(code.width()).unwrap();
+    let side = (n + 2 * QUIET) * ART_PX;
+    let mut img = image::GrayImage::from_pixel(side, side, image::Luma([255]));
+    for (i, color) in code.to_colors().iter().enumerate() {
+        if *color == qrcode::Color::Dark {
+            let i = u32::try_from(i).unwrap();
+            let (r, c) = (i / n, i % n);
+            for dy in 0..ART_PX {
+                for dx in 0..ART_PX {
+                    img.put_pixel(
+                        (c + QUIET) * ART_PX + dx,
+                        (r + QUIET) * ART_PX + dy,
+                        image::Luma([0]),
+                    );
+                }
+            }
+        }
+    }
+    encode_png(image::imageops::blur(&img, sigma))
+}
+
+/// The ASCII URL the artistic-like ECI 26 rows carry.
+const URL: &str = "https://qrc-ai.com/K1Ng2";
+
+/// An ECI 26 (UTF-8) symbol carrying [`URL`] in byte mode.
+fn eci26_url() -> QrCode {
+    v3(|b| {
+        b.push_eci_designator(26)?;
+        b.push_byte_data(URL.as_bytes())
+    })
 }
 
 /// ISO/IEC 8859-5 bytes of "Привет".
@@ -427,18 +551,77 @@ fn a10_eci899_binary_keeps_exact_bytes() {
     assert_eq!(d.content.text, replacement(4));
 }
 
+/// A stream ISO 18004 does not define leaves no detection, whichever
+/// stages run.
+fn assert_refused(name: &str, png: &[u8]) {
+    for (profile, report) in [("frame", scan_content(png)), ("walk", scan_walk(png))] {
+        assert!(
+            report.detections.is_empty(),
+            "{name} ({profile}): {:?}",
+            summary(&report)
+        );
+    }
+}
+
+/// Byte mode "abc" after the designator, as a bit string.
+const BYTE_ABC: &str = "0100 00000011 01100001 01100010 01100011 0000";
+
 #[test]
-fn a11_malformed_designator_is_refused_by_every_path() {
+fn a11_a_111xxxxx_designator_leaves_no_detection() {
     // ECI whose first codeword is 111xxxxx (no ISO 18004 Table 4 form),
-    // then byte "abc". rxing and zbar refuse it; rqrr reads it as a
+    // then byte "abc". rxing's port and zbar refuse it; rqrr reads it as a
     // one-byte designator and returns "abc" — a guess the scanner refuses
     // with them: the verified stream is not one ISO defines.
-    let png = png_from_bit_stream("0111 11100000 0100 00000011 01100001 01100010 01100011 0000");
-    let report = scan_content(&png);
-    assert!(report.detections.is_empty(), "{:?}", summary(&report));
+    assert_refused(
+        "111xxxxx",
+        &png_from_bit_stream(&format!("0111 11100000 {BYTE_ABC}")),
+    );
     // control: the same stream with a well-formed designator (ECI 4) reads
-    let png = png_from_bit_stream("0111 00000100 0100 00000011 01100001 01100010 01100011 0000");
-    let report = scan_content(&png);
+    let report = scan_content(&png_from_bit_stream(&format!("0111 00000100 {BYTE_ABC}")));
+    let d = one(&report);
+    assert_eq!(d.content.raw, b"abc".to_vec());
+    assert_both_engines(d);
+}
+
+#[test]
+fn a11b_a_designator_above_999999_vetoes_the_port_read() {
+    // The 110xxxxx form above the register: rxing's port maps the number
+    // to "unknown" and still reads "abc" (designator signalled, never
+    // exposed); rqrr decodes "abc" and the scanner's parser proves its
+    // stream malformed. That proof refuses the symbol: the port's read of
+    // the same bytes is vetoed — no detection.
+    for (name, designator) in [
+        ("1000000", "11001111 01000010 01000000"),
+        ("0x1FFFFF", "11011111 11111111 11111111"),
+    ] {
+        assert_refused(
+            name,
+            &png_from_bit_stream(&format!("0111 {designator} {BYTE_ABC}")),
+        );
+    }
+    // control: 999999, the last assignable number, reads (as unsupported)
+    let report = scan_content(&png_from_bit_stream(&format!(
+        "0111 11001111 01000010 00111111 {BYTE_ABC}"
+    )));
+    let d = one(&report);
+    assert_eq!(d.content.raw, b"abc".to_vec());
+    assert_eq!(d.content.text, replacement(3));
+    assert_both_engines(d);
+}
+
+#[test]
+fn a11c_a_mirrored_111xxxxx_designator_leaves_no_detection() {
+    // rqrr decodes the mirrored symbol through its transposed grid; the
+    // re-derivation reads that same grid and proves it malformed (rxing's
+    // port refuses the designator in either orientation).
+    assert_refused(
+        "mirrored 111xxxxx",
+        &png_from_bit_stream_mirrored(&format!("0111 11100000 {BYTE_ABC}")),
+    );
+    // control: the mirrored well-formed stream reads
+    let report = scan_content(&png_from_bit_stream_mirrored(&format!(
+        "0111 00000100 {BYTE_ABC}"
+    )));
     let d = one(&report);
     assert_eq!(d.content.raw, b"abc".to_vec());
     assert_both_engines(d);
@@ -446,13 +629,45 @@ fn a11_malformed_designator_is_refused_by_every_path() {
 
 #[test]
 fn a13_signalled_only_declaration_is_marked_not_guessed() {
-    // A mirrored symbol: rqrr decodes it through its mirrored grid, but the
-    // stream it samples is the unmirrored one, so the re-derivation fails
-    // and rqrr's ECI evidence stays unobserved (not a refusal). rxing's
-    // port states that a designator exists without locating it. Until the
-    // publication rule for signalled-only content is final, the bytes are
-    // marked unknown — one U+FFFD per byte, every byte kept, no engine
-    // text taken on trust.
+    // A light-on-dark symbol under the camera-frame stages: rxing's port
+    // reads it (inverted) and states that a designator exists without
+    // locating it; rqrr reads no inverted symbol, so no stream locates the
+    // designator. Until the publication rule for signalled-only content is
+    // final, the bytes are marked unknown — one U+FFFD per byte, every byte
+    // kept, no engine text taken on trust.
+    let code = v3(|b| {
+        b.push_eci_designator(4)?;
+        b.push_byte_data(&[0xA1])
+    });
+    let report = scan_content(&png_inverted(&code));
+    let d = one(&report);
+    assert_eq!(d.engines, vec![EngineKind::Rxing], "{:?}", report.trace);
+    assert_eq!(d.content.raw, vec![0xA1]);
+    assert_eq!(d.content.text, replacement(1));
+}
+
+#[test]
+fn a15_mirrored_declarations_are_located_on_the_transposed_grid() {
+    // rqrr decodes a mirrored symbol through its transposed grid; the
+    // re-derivation reads that same grid, so the declaration is located
+    // and the declared reading published — both engines, rqrr geometry.
+    let report = scan_content(&png_mirrored(&eci26_url()));
+    let d = one(&report);
+    assert_eq!(d.content.raw, URL.as_bytes().to_vec());
+    assert_eq!(d.content.text, URL);
+    assert_eq!(
+        d.content.charset,
+        Charset::Utf8,
+        "ECI 26 reproduces as utf8"
+    );
+    assert!(
+        matches!(&d.payload, Payload::Url { url } if url == URL),
+        "{:?}",
+        d.payload
+    );
+    assert_both_engines(d);
+    assert!(d.corners.is_some());
+
     let code = v3(|b| {
         b.push_eci_designator(4)?;
         b.push_byte_data(&[0xA1])
@@ -460,7 +675,27 @@ fn a13_signalled_only_declaration_is_marked_not_guessed() {
     let report = scan_content(&png_mirrored(&code));
     let d = one(&report);
     assert_eq!(d.content.raw, vec![0xA1]);
-    assert_eq!(d.content.text, replacement(1));
+    assert_eq!(d.content.text, "\u{104}");
+    assert_both_engines(d);
+    assert!(d.corners.is_some());
+}
+
+#[test]
+fn a16_corrections_rqrr_accepted_inside_the_annex_b_reserve_are_located() {
+    // v1-M ECI 4 + byte A1 with five corrupted codewords: plain RS (10
+    // parity codewords) corrects them and both engines read the symbol,
+    // but 2·5 + 2 exceeds the Annex B budget the scanner keeps for its own
+    // decodes. rqrr already accepted these codewords, so its re-derivation
+    // runs plain RS and locates the declaration: 'Ą', never a marked text.
+    let (colors, width) = bit_stream_colors(
+        "0111 00000100 0100 00000001 10100001 0000",
+        &[6, 8, 10, 12, 14],
+    );
+    let report = scan_content(&png_modules(&colors, width, Version::Normal(1), false));
+    let d = one(&report);
+    assert_eq!(d.content.raw, vec![0xA1]);
+    assert_eq!(d.content.text, "\u{104}");
+    assert_both_engines(d);
 }
 
 #[test]
@@ -633,6 +868,57 @@ fn c2_byte_then_kanji_merges_as_shift_jis() {
     assert_both_engines(d);
 }
 
+#[test]
+fn c3_kanji_9ffd_to_9fff_keep_their_original_bytes() {
+    // ISO 18004 §7.4.6 (and rxing's port, and the scanner's parser) map
+    // the 13-bit values 5949-5951 to Shift JIS 9F FD..9F FF; rqrr 0.10.1
+    // tests `value + 0x8140 <= 0x9FFC` and writes DF FD..DF FF. The
+    // RS-verified re-derivation of rqrr's own grid is the truth: one
+    // detection with the original bytes, both engines, rqrr geometry —
+    // unmarked and under a declaration alike.
+    for low in [0xFD_u8, 0xFE, 0xFF] {
+        let pair = [0x9F, low];
+        let iso_8859_2 = encoding_rs::ISO_8859_2
+            .decode_without_bom_handling(&pair)
+            .0
+            .into_owned();
+        let cases = [
+            (
+                "unmarked",
+                v3(|b| b.push_kanji_data(&pair)),
+                encoding_rs::WINDOWS_1252
+                    .decode_without_bom_handling(&pair)
+                    .0
+                    .into_owned(),
+            ),
+            (
+                "ECI 4",
+                v3(|b| {
+                    b.push_eci_designator(4)?;
+                    b.push_kanji_data(&pair)
+                }),
+                iso_8859_2,
+            ),
+            (
+                "ECI 26",
+                v3(|b| {
+                    b.push_eci_designator(26)?;
+                    b.push_kanji_data(&pair)
+                }),
+                String::from_utf8_lossy(&pair).into_owned(),
+            ),
+        ];
+        for (name, code, text) in cases {
+            let report = scan_content(&png(&code, false));
+            let d = one(&report);
+            assert_eq!(d.content.raw, pair.to_vec(), "{name} 9F {low:02X}");
+            assert_eq!(d.content.text, text, "{name} 9F {low:02X}");
+            assert_both_engines(d);
+            assert!(d.corners.is_some(), "{name} 9F {low:02X}: rqrr geometry");
+        }
+    }
+}
+
 // ------------------------------------------------------------- D · FNC1
 
 #[test]
@@ -674,6 +960,118 @@ fn d3_fnc1_second_keeps_the_application_indicator_and_is_not_gs1() {
     assert_eq!(d.content.raw, b"37abc".to_vec());
     assert_eq!(d.content.text, "37abc");
     assert!(!matches!(d.payload, Payload::Gs1 { .. }), "{:?}", d.payload);
+}
+
+/// The GTIN element string the GS1 rows carry.
+const GS1_GTIN: &str = "0109506000134352";
+
+#[test]
+fn d4_eci26_gs1_is_located_through_rqrrs_grid() {
+    // rqrr cannot decode FNC1 symbols, so its grid is a rescue candidate,
+    // and rxing's port only signals the ECI. Re-deriving that candidate
+    // (clean RS) locates ECI 26 over the port's bytes: the element string
+    // reads, the payload is GS1 with its GTIN.
+    let code = v3(|b| {
+        b.push_eci_designator(26)?;
+        b.push_fnc1_first_position()?;
+        b.push_numeric_data(GS1_GTIN.as_bytes())
+    });
+    let report = scan_content(&png(&code, false));
+    let d = one(&report);
+    assert_eq!(d.content.raw, GS1_GTIN.as_bytes().to_vec());
+    assert_eq!(d.content.text, GS1_GTIN);
+    match &d.payload {
+        Payload::Gs1 {
+            gtin, conformant, ..
+        } => {
+            assert_eq!(gtin.as_deref(), Some("09506000134352"));
+            assert!(*conformant, "{:?}", d.payload);
+        }
+        other => panic!("not GS1: {other:?}"),
+    }
+    assert!(d.corners.is_some(), "the candidate's grid is the symbol");
+}
+
+#[test]
+fn d5_fnc1_second_then_first_vetoes_the_port_read() {
+    // FNC1 in second position, then FNC1 in first position: no symbol ISO
+    // 18004 defines. rxing's port publishes it as GS1 with the AIM digits
+    // leading the element string — confidently wrong; rqrr cannot decode
+    // FNC1, and the scanner's parser proves its grid malformed. The proof
+    // vetoes the port's read of the same bytes: no detection.
+    assert_refused(
+        "FNC1 second then first",
+        &png_from_bit_stream(&format!("1001 00100101 0101 {BYTE_ABC}")),
+    );
+    // control: FNC1 second alone reads, indicator first, never GS1
+    let report = scan_content(&png_from_bit_stream(&format!("1001 00100101 {BYTE_ABC}")));
+    let d = one(&report);
+    assert_eq!(d.content.raw, b"37abc".to_vec());
+    assert!(!matches!(d.payload, Payload::Gs1 { .. }), "{:?}", d.payload);
+}
+
+#[test]
+fn d6_plain_and_fnc1_first_twins_stay_two_detections() {
+    // Equal transmitted bytes, but one symbol declares no FNC1 and the
+    // other FNC1 in first position: every QR read observes the position,
+    // so they are two contents — one GS1 element string, one plain.
+    let plain = v3(|b| b.push_numeric_data(GS1_GTIN.as_bytes()));
+    let gs1 = v3(|b| {
+        b.push_fnc1_first_position()?;
+        b.push_numeric_data(GS1_GTIN.as_bytes())
+    });
+    let report = scan_content(&png_pair(&plain, &gs1));
+    assert_eq!(report.detections.len(), 2, "{:?}", summary(&report));
+    assert!(
+        report
+            .detections
+            .iter()
+            .all(|d| d.content.raw == GS1_GTIN.as_bytes())
+    );
+    // the plain twin carries GS1 syntax without the mode header: the
+    // classifier flags it non-conformant; only the FNC1 one conforms
+    let conformant: Vec<bool> = report
+        .detections
+        .iter()
+        .map(|d| {
+            matches!(
+                d.payload,
+                Payload::Gs1 {
+                    conformant: true,
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(
+        conformant.iter().filter(|&&c| c).count(),
+        1,
+        "{:?}",
+        report
+            .detections
+            .iter()
+            .map(|d| &d.payload)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn d7_plain_and_fnc1_second_twins_stay_two_detections() {
+    // "37abc" in byte mode and FNC1 second (37) + "abc" transmit equal
+    // bytes; the observed positions (none · second) keep them two.
+    let plain = v3(|b| b.push_byte_data(b"37abc"));
+    let aim = v3(|b| {
+        b.push_fnc1_second_position(37)?;
+        b.push_byte_data(b"abc")
+    });
+    let report = scan_content(&png_pair(&plain, &aim));
+    assert_eq!(report.detections.len(), 2, "{:?}", summary(&report));
+    assert!(
+        report
+            .detections
+            .iter()
+            .all(|d| d.content.raw == b"37abc" && !matches!(d.payload, Payload::Gs1 { .. }))
+    );
 }
 
 // --------------------------------------------- E · single-engine paths
@@ -744,6 +1142,28 @@ fn e4_rescue_only_eci4_reads_the_declaration() {
     assert_eq!(d.engines, vec![EngineKind::Rescue], "{:?}", report.trace);
     assert_eq!(d.content.raw, vec![0xA1]);
     assert_eq!(d.content.text, "\u{104}");
+}
+
+#[test]
+fn e5_artistic_eci26_urls_are_located_by_a_later_stage() {
+    // rxing reads these renders first and only signals the ECI; rqrr reads
+    // them in a later stage. The walk does not stop on signalled-only
+    // reads, so the declaration is located and the URL publishes.
+    for (name, png) in [
+        ("dots", png_dots(&eci26_url())),
+        ("blur 2.5", png_blurred(&eci26_url(), 2.5)),
+        ("blur 3.5", png_blurred(&eci26_url(), 3.5)),
+    ] {
+        let report = scan_walk(&png);
+        let d = one(&report);
+        assert_eq!(d.content.raw, URL.as_bytes().to_vec(), "{name}");
+        assert_eq!(d.content.text, URL, "{name}: {:?}", report.trace);
+        assert!(
+            matches!(&d.payload, Payload::Url { url } if url == URL),
+            "{name}: {:?}",
+            d.payload
+        );
+    }
 }
 
 // ---------------------------------------------------- F · invariants
