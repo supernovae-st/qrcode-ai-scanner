@@ -14,6 +14,17 @@ fn fixture(rel: &str) -> Vec<u8> {
     std::fs::read(&path).unwrap_or_else(|e| panic!("missing fixture {path}: {e}"))
 }
 
+/// A profile minus its wall-clock budget. A judgment the budget cannot
+/// complete is ABSENT (`score: None`), so a score pin under a budget would
+/// hinge on how loaded the machine is — exact pins run unbudgeted.
+fn unbudgeted(profile: ScanProfile) -> Scanner {
+    let mut config = profile.config();
+    config.budget_ms = None;
+    Scanner::builder()
+        .profile(ScanProfile::Custom(config))
+        .build()
+}
+
 fn white_png(side: u32) -> Vec<u8> {
     let img = image::DynamicImage::ImageLuma8(image::ImageBuffer::from_pixel(
         side,
@@ -112,7 +123,7 @@ fn no_qr_is_ok_with_empty_detections() {
 #[test]
 fn determinism_modulo_trace_timing() {
     let bytes = generated_qr_png("determinism pin");
-    let scanner = Scanner::default();
+    let scanner = unbudgeted(ScanProfile::Full);
     let a = scanner.scan(ImageInput::encoded(&bytes)).unwrap();
     let b = scanner.scan(ImageInput::encoded(&bytes)).unwrap();
 
@@ -176,7 +187,7 @@ fn grade_surface_is_reexported() {
 #[test]
 fn clean_qr_scores_high_with_full_breakdown() {
     let bytes = generated_qr_png("https://qrcode-ai.com/score-pin");
-    let report = Scanner::default()
+    let report = unbudgeted(ScanProfile::Full)
         .scan(ImageInput::encoded(&bytes))
         .unwrap();
     let score = report.score.expect("Full profile scores");
@@ -223,7 +234,7 @@ fn degraded_copy_never_scores_higher_and_a_knee_crossing_scores_less() {
         )
         .unwrap();
 
-    let scanner = Scanner::default();
+    let scanner = unbudgeted(ScanProfile::Full);
     let score_clean = scanner
         .scan(ImageInput::encoded(&clean))
         .unwrap()
@@ -261,7 +272,7 @@ fn degraded_copy_never_scores_higher_and_a_knee_crossing_scores_less() {
 #[test]
 fn fast_profile_runs_reduced_ramps() {
     let bytes = generated_qr_png("fast depth pin");
-    let scanner = Scanner::builder().profile(ScanProfile::Fast).build();
+    let scanner = unbudgeted(ScanProfile::Fast);
     let report = scanner.scan(ImageInput::encoded(&bytes)).unwrap();
     let score = report.score.expect("Fast profile still scores");
     for axis in &score.axes {
@@ -272,7 +283,7 @@ fn fast_profile_runs_reduced_ramps() {
 #[test]
 fn score_is_deterministic() {
     let bytes = generated_qr_png("score determinism pin");
-    let scanner = Scanner::default();
+    let scanner = unbudgeted(ScanProfile::Full);
     let a = scanner.scan(ImageInput::encoded(&bytes)).unwrap().score;
     let b = scanner.scan(ImageInput::encoded(&bytes)).unwrap().score;
     assert_eq!(a, b);
@@ -281,7 +292,7 @@ fn score_is_deterministic() {
 #[test]
 fn uec_margin_ships_in_the_report() {
     let bytes = generated_qr_png("uec e2e pin");
-    let report = Scanner::default()
+    let report = unbudgeted(ScanProfile::Full)
         .scan(ImageInput::encoded(&bytes))
         .unwrap();
     let score = report.score.expect("Full profile scores");
@@ -339,7 +350,7 @@ fn artistic_image_that_decodes_must_not_score_zero() {
     // decodable symbol (margin of nothing measured). Cells must probe the
     // decode class that the baseline itself needs.
     let bytes = fixture("artistic/OK_1069ms_85_8b6a54b3.png");
-    let report = Scanner::default()
+    let report = unbudgeted(ScanProfile::Full)
         .scan(ImageInput::encoded(&bytes))
         .unwrap();
     assert_eq!(report.detections.len(), 1);
@@ -358,7 +369,7 @@ fn blob_style_template_decodes_and_scores() {
     // the rung must exist in BOTH the ladder and the score probe (a decode
     // that scores 0/100 is the round-2 regression class).
     let bytes = fixture("artistic/blob-style-monkey-logo.webp");
-    let report = Scanner::default()
+    let report = unbudgeted(ScanProfile::Full)
         .scan(ImageInput::encoded(&bytes))
         .unwrap();
     assert_eq!(report.detections.len(), 1, "trace: {:?}", report.trace);
@@ -435,7 +446,7 @@ fn gs1_digital_link_qr_end_to_end() {
 #[test]
 fn iso15415_grade_card_on_a_clean_symbol() {
     let bytes = generated_qr_png("https://qrcode-ai.com/iso-pin");
-    let report = Scanner::default()
+    let report = unbudgeted(ScanProfile::Full)
         .scan(ImageInput::encoded(&bytes))
         .unwrap();
     let score = report.score.expect("Full profile scores");
@@ -505,6 +516,7 @@ fn inverted_symbol_structural_checks_read_true_polarity() {
     // force the S3 path where rqrr decodes on the INVERT attempt and
     // becomes the geometry source.
     let mut config = qrcode_ai_scanner::ScanConfig::full();
+    config.budget_ms = None;
     config.pyramid = false;
     config.direct = false;
     let scanner = Scanner::builder()
@@ -737,7 +749,9 @@ fn qr_family_is_always_the_primary_detection() {
         .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
         .unwrap();
 
-    let report = Scanner::default().scan(ImageInput::encoded(&buf)).unwrap();
+    let report = unbudgeted(ScanProfile::Full)
+        .scan(ImageInput::encoded(&buf))
+        .unwrap();
     assert!(report.detections.len() >= 2, "{:?}", report.detections);
     assert_eq!(
         report.detections[0].symbology,
@@ -819,7 +833,7 @@ fn quiet_ring_shifts_perspective_cells_near_the_knee() {
     let mut scores = Vec::new();
     for name in ["quiet-ring-phase-1015.png", "quiet-ring-phase-1023.png"] {
         let bytes = fixture(&format!("degraded/{name}"));
-        let report = Scanner::default()
+        let report = unbudgeted(ScanProfile::Full)
             .scan(ImageInput::encoded(&bytes))
             .unwrap();
         let d = report.detections.first().expect("decodes");

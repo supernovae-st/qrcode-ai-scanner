@@ -3,11 +3,57 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use qrcode_ai_scanner::{ImageInput, ScanConfig, ScanProfile, Scanner, ScorePreset, StressAxis};
+use qrcode_ai_scanner::{
+    ImageInput, ScanConfig, ScanProfile, Scanner, Score, ScorePreset, StressAxis,
+};
 
 fn fixture(rel: &str) -> Vec<u8> {
     let path = format!("{}/../../fixtures/{rel}", env!("CARGO_MANIFEST_DIR"));
     std::fs::read(&path).unwrap_or_else(|e| panic!("missing fixture {path}: {e}"))
+}
+
+/// The Full profile without its wall-clock budget: a judgment the budget
+/// cannot complete is absent, so these pins must never depend on load.
+fn unbudgeted_full() -> ScanConfig {
+    let mut config = ScanConfig::full();
+    config.budget_ms = None;
+    config
+}
+
+/// The wire labels of an axis's five cells (spec/04-score.md).
+fn cell_labels(axis: StressAxis) -> [&'static str; 5] {
+    match axis {
+        StressAxis::Resolution => ["358px", "256px", "179px", "128px", "90px"],
+        StressAxis::Blur => ["blur 0.5", "blur 1.0", "blur 1.5", "blur 2.0", "blur 2.5"],
+        StressAxis::Contrast => [
+            "contrast 70%",
+            "contrast 55%",
+            "contrast 40%",
+            "contrast 30%",
+            "contrast 20%",
+        ],
+        StressAxis::Perspective => ["10°", "18°", "26°", "34°", "42°"],
+        StressAxis::Rotation => ["10°", "20°", "30°", "40°", "50°"],
+        StressAxis::Lighting => [
+            "soft shadow",
+            "hard shadow",
+            "glare",
+            "overexposure",
+            "underexposure",
+        ],
+        other => panic!("unknown axis {other:?}"),
+    }
+}
+
+/// A judgment is whole: `passed == total` exactly when nothing failed, and
+/// a lost point names one of its axis's cells.
+fn assert_honest(score: &Score) {
+    for a in &score.axes {
+        assert_eq!(a.passed == a.total, a.failed_at.is_none(), "{a:?}");
+        if let Some(label) = a.failed_at.as_deref() {
+            assert!(cell_labels(a.axis).contains(&label), "{a:?}");
+        }
+    }
 }
 
 fn generated_qr() -> Vec<u8> {
@@ -30,10 +76,14 @@ fn generated_qr() -> Vec<u8> {
 #[test]
 fn full_contract_reads_weights_run_100() {
     let bytes = generated_qr();
-    let report = Scanner::default()
+    let report = Scanner::builder()
+        .profile(ScanProfile::Custom(unbudgeted_full()))
+        .build()
         .scan(ImageInput::encoded(&bytes))
         .unwrap();
-    assert_eq!(report.score.unwrap().weights_run, 100);
+    let score = report.score.unwrap();
+    assert_honest(&score);
+    assert_eq!(score.weights_run, 100);
 }
 
 /// Skipping axes renormalizes AND declares: perspective(20)+rotation(10)
@@ -41,7 +91,7 @@ fn full_contract_reads_weights_run_100() {
 #[test]
 fn skipped_axes_declare_their_weight() {
     let bytes = generated_qr();
-    let mut config = ScanConfig::full();
+    let mut config = unbudgeted_full();
     config.score_skip_axes = vec![StressAxis::Perspective, StressAxis::Rotation];
     let report = Scanner::builder()
         .profile(ScanProfile::Custom(config))
@@ -49,6 +99,7 @@ fn skipped_axes_declare_their_weight() {
         .scan(ImageInput::encoded(&bytes))
         .unwrap();
     let score = report.score.unwrap();
+    assert_honest(&score);
     assert_eq!(score.weights_run, 70);
     assert_eq!(score.axes.len(), 4);
 }
@@ -78,10 +129,13 @@ fn presets_spell_the_two_postures() {
 #[test]
 fn knee_axes_carry_a_refined_label() {
     let bytes = fixture("artistic/blob-style-monkey-logo.webp");
-    let report = Scanner::default()
+    let report = Scanner::builder()
+        .profile(ScanProfile::Custom(unbudgeted_full()))
+        .build()
         .scan(ImageInput::encoded(&bytes))
         .unwrap();
     let score = report.score.unwrap();
+    assert_honest(&score);
     let kneed: Vec<_> = score
         .axes
         .iter()
