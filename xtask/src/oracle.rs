@@ -67,7 +67,10 @@ use crate::external::{self, CorpusRoot, Row, Status};
 
 /// Judge-rules identifier carried by every receipt — bump it with any rule
 /// change so receipts made under different rules never compare silently.
-const RULES_ID: &str = "qrscan-oracle/v1";
+/// v1.1: dispositions pin the output they excuse, a text-only unit consumes
+/// one observed group, and one exit-code family (0 · 1 · 2 · 3) with the
+/// scanned tree in every receipt.
+const RULES_ID: &str = "qrscan-oracle/v1.1";
 /// The vendored manifest, at the repo root.
 const VENDORED: &str = "corpus.toml";
 /// Detection groups per report (`spec/01-report.md`, anti-amplification).
@@ -2237,6 +2240,20 @@ mod tests {
             .map(Outcome::as_str)
             .collect();
         assert_eq!(blocking, ["extra", "mixed", "wrong", "false_positive"]);
+    }
+
+    /// Every receipt names the rules it was judged under; v1 receipts
+    /// (before pinned excuses and one-to-one text-only units) must never
+    /// read as comparable to v1.1 ones.
+    #[test]
+    fn receipts_carry_the_rules_id() {
+        let source = SourceEcho {
+            git_sha: String::from("unknown"),
+            tree: String::from("unknown"),
+        };
+        let receipt = new_receipt(source, "manifest", "vendored", Integrity::default());
+        let json = serde_json::to_value(&receipt).expect("receipt serialises");
+        assert_eq!(json["oracle"], "qrscan-oracle/v1.1");
     }
 
     #[test]
