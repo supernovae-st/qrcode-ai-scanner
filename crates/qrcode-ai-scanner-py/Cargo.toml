@@ -23,3 +23,14 @@ serde_json = "1"
 # aliased to avoid a name clash with this crate's lib name (the Python module
 # is `qrcode_ai_scanner`, which must equal `[lib] name`).
 scanner-core = { package = "qrcode-ai-scanner", path = "../qrcode-ai-scanner", features = ["serde"] }
+
+# Workspace-excluded, so maturin builds this crate as its own cargo root and
+# the workspace [profile.release] never applies (cargo reads profiles from the
+# root manifest only). Restate its safety setting: rxing 0.9.1 can underflow
+# on adversarial pixels, and overflow-checks turn that into a panic the engine
+# wrapper catches (report.trace.engine_panics) instead of a runaway allocation
+# (root Cargo.toml has the history). The sdist ships this manifest, so a
+# from-source install keeps it too. The size settings (lto · strip) are not
+# safety and stay a separate decision.
+[profile.release.package.rxing]
+overflow-checks = true
