@@ -3,11 +3,13 @@
 
 Each target is packed or built locally the way its publish job does it, and
 the resulting archive is read back: the AGPL LICENSE text (byte-identical to
-the root copy), the README, the type files, the version strings, the exact
-file set where it is known, and the absence of private or stray files.
-Nothing is ever uploaded: packing goes through `cargo package`, `npm pack
---pack-destination`, scripts/build-wasm.sh (wasm-pack), maturin and
-`pub publish --dry-run`.
+the root copy, where PEP 639 says it is for Python), the README, the type
+files, the version strings, the file set, and the absence of private or stray
+files. The file set is exact for npm packages and wheels; a .crate or an sdist
+may only hold files git tracks in the directories it packs, plus what cargo
+and maturin generate. Nothing is ever uploaded: packing goes through `cargo
+package`, `npm pack --pack-destination`, scripts/build-wasm.sh (wasm-pack),
+maturin and `pub publish --dry-run`.
 
   package-inspect.py all [--no-build]          every target this host can run
   package-inspect.py crates [--verify]         the .crate of each published crate
@@ -19,11 +21,14 @@ Nothing is ever uploaded: packing goes through `cargo package`, `npm pack
   package-inspect.py licenses [--sync]         every LICENSE copy against the root text
   package-inspect.py profiles [--nightly TC]   effective release profile per build root
   package-inspect.py versions [--tag vX.Y.Z]   publish-surface versions (+ the release tag)
+  package-inspect.py selftest                  synthetic archives, one defect each: all must fail
 
 Common options: --out DIR (JSON + Markdown receipt and command logs; the
 Markdown also lands in $GITHUB_STEP_SUMMARY when that is set) · --strict
 (UNAVAILABLE fails too: CI, where every tool must exist) · --cargo-wrapper
-PATH (run cargo as `PATH cargo ...`) · --allow-dirty (passed to cargo).
+PATH (run cargo as `PATH cargo ...`) · --allow-dirty (passed to cargo) ·
+--release-set (node · archive: the npm set about to publish, where the main
+package pins every napi target and each pin has its platform package).
 
 Verdicts: PASS · FAIL · UNAVAILABLE (a tool or input this host lacks, named,
 never a pass) · BLOCKED (a known structural blocker that packaging metadata
@@ -32,6 +37,7 @@ unavailable) · 1 otherwise · 2 usage. Stdlib only, Python >= 3.11.
 """
 
 import argparse
+import contextlib
 import dataclasses
 import datetime
 import email.parser
@@ -93,20 +99,32 @@ WASM_FILES = frozenset({
     "report-types.d.ts",
 })
 
-# Never in a published archive, whatever its kind.
-STRAY = (
-    (re.compile(r"(^|/)\.qrscan-lane(/|$)"), "lane scratch"),
-    (re.compile(r"(^|/)plans/"), "planning docs"),
-    (re.compile(r"(^|/)\.env($|\.)|\.env$"), "environment file"),
-    (re.compile(r"\.(pem|key|p12)$"), "key material"),
-    (re.compile(r"(^|/)\.npmrc$"), "npm credentials file"),
-    (re.compile(r"(^|/)(credentials|secrets)[^/]*$"), "credentials"),
-    (re.compile(r"(^|/)(target|node_modules|\.dart_tool|__pycache__|mutants\.out[^/]*)/"), "build output"),
-    (re.compile(r"(^|/)\.git/"), "git metadata"),
-    (re.compile(r"(^|/)(\.DS_Store|Thumbs\.db)$"), "OS junk"),
-    (re.compile(r"(\.swp|\.swo|~)$"), "editor junk"),
-    (re.compile(r"\.(crate|whl|tgz)$"), "nested archive"),
-)
+# Never in a published archive, whatever its kind; matched case-insensitively
+# (Credentials.json leaks as surely as credentials.json). Defence in depth:
+# each archive is also held to an exact set or to the files git tracks.
+STRAY = tuple((re.compile(pattern, re.IGNORECASE), why) for pattern, why in (
+    (r"(^|/)\.qrscan-lane(/|$)", "lane scratch"),
+    (r"(^|/)plans/", "planning docs"),
+    (r"(^|/)\.env($|\.)|\.env$|(^|/)\.envrc$", "environment file"),
+    (r"\.(pem|key|p12|pfx|p8|jks|keystore|gpg|pgp|ppk|kdbx)$", "key material or keystore"),
+    (r"(^|/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$|(^|/)\.ssh/", "SSH key"),
+    (r"(^|/)(\.npmrc|\.yarnrc(\.yml)?|\.pypirc|[._]netrc|\.git-credentials)$", "credentials file"),
+    (r"(^|/)(credentials|secrets)[^/]*$", "credentials"),
+    (r"(^|/)(target|node_modules|\.dart_tool|__pycache__|mutants\.out[^/]*)/", "build output"),
+    (r"(^|/)\.git(/|$)", "git metadata"),
+    (r"(^|/)\.(vscode|idea|claude|cursor|codex|aider[^/]*|windsurf|zed|fleet)/", "editor or agent directory"),
+    (r"(^|/)(\.DS_Store|Thumbs\.db)$", "OS junk"),
+    (r"(\.swp|\.swo|~)$", "editor junk"),
+    (r"\.(crate|whl|tgz|zip|tar|gz|bz2|xz|zst|7z|rar|jar|aar|apk|ipa)$", "nested archive"),
+))
+
+# What cargo writes into a .crate besides the package's own tracked files.
+CARGO_GENERATED = frozenset({".cargo_vcs_info.json", "Cargo.toml.orig", "Cargo.lock"})
+# What maturin writes at the sdist root besides the PEP 639 license files.
+MATURIN_SDIST_ROOT = frozenset({"PKG-INFO", "pyproject.toml", "README.md"})
+# The sdist packs the binding crate and its path dependency side by side.
+SDIST_CRATES = {"qrcode-ai-scanner-py/": "crates/qrcode-ai-scanner-py",
+                "qrcode-ai-scanner/": "crates/qrcode-ai-scanner"}
 
 # A literal semver in the napi loader's version check: the 0.9.0 loader
 # compared every platform package against '0.8.1'.
@@ -135,6 +153,7 @@ class Artifact:
     notes: list = dataclasses.field(default_factory=list)
     reason: str = ""
     forced: str = ""  # UNAVAILABLE or BLOCKED, set explicitly
+    package: dict = dataclasses.field(default_factory=dict)  # npm: name · version · optionalDependencies
 
     def check(self, name: str, ok: bool, detail: str = "") -> bool:
         self.checks.append(Check(name, bool(ok), detail))
@@ -270,6 +289,62 @@ def check_stray(art: Artifact, names) -> None:
     art.check("no private or stray files", not hits, "; ".join(hits) if hits else "")
 
 
+_TRACKED: dict = {}
+
+
+def tracked(directory: str):
+    """Files git tracks under DIRECTORY, relative to it; None when git cannot say."""
+    if directory not in _TRACKED:
+        proc = subprocess.run(["git", "ls-files", "-z", "--", directory], cwd=ROOT, capture_output=True)
+        prefix = directory.rstrip("/") + "/"
+        _TRACKED[directory] = None if proc.returncode else {
+            name[len(prefix):] for name in proc.stdout.decode().split("\0") if name.startswith(prefix)}
+    return _TRACKED[directory]
+
+
+def check_tracked(art: Artifact, names, sources: dict, generated=frozenset()) -> None:
+    """Every entry is a file git tracks in the directory it was packed from, or
+    one the packager generates: an untracked file (picked up through
+    --allow-dirty, or left in a build directory) never ships.
+
+    SOURCES maps an archive prefix to the repository directory packed under it.
+    """
+    allowed = set(generated)
+    for prefix, directory in sources.items():
+        files = tracked(directory)
+        if files is None:
+            art.check("every file is tracked by git or generated by the packager", False,
+                      f"git ls-files {directory} failed")
+            return
+        allowed |= {prefix + name for name in files}
+    extra = sorted(set(names) - allowed)
+    art.check("every file is tracked by git or generated by the packager", not extra,
+              f"not tracked by git: {', '.join(extra)}" if extra else "")
+
+
+def glob_regex(pattern: str) -> re.Pattern:
+    """A PEP 639 license-files glob (`*`, `?`, `**`, `[...]`) as a full-match regex."""
+    out, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] in "*?":
+            out.append("[^/]*" if pattern[i] == "*" else "[^/]")
+            i += 1
+        elif pattern[i] == "[" and "]" in pattern[i + 1:]:
+            end = pattern.index("]", i + 1)
+            out.append(pattern[i:end + 1])
+            i = end + 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("".join(out))
+
+
 def check_exact_set(art: Artifact, names, expected: frozenset, what: str) -> None:
     names = set(names)
     extra, missing = sorted(names - expected), sorted(expected - names)
@@ -291,13 +366,12 @@ def check_equal_file(art: Artifact, name: str, data, source: pathlib.Path) -> No
 
 def inspect_crate(host: Host, path: pathlib.Path, notes=()) -> Artifact:
     files, top = read_tar(path)
-    name_ver = top.rsplit("-", 1)
-    name = name_ver[0] if len(name_ver) == 2 else top
     art = host.add(Artifact(f"crate {top}", "crate"))
     art.notes.extend(notes)
     describe(art, path, files)
     manifest = tomllib.loads(files.get("Cargo.toml", b"").decode() or "")
     package = manifest.get("package", {})
+    name = package.get("name") or top.rsplit("-", 1)[0]
     art.check("archive root is <name>-<version>", top == f"{package.get('name')}-{package.get('version')}", top)
     art.check(f"version = {host.version} (workspace)", package.get("version") == host.version,
               f"Cargo.toml version {package.get('version')}")
@@ -314,6 +388,7 @@ def inspect_crate(host: Host, path: pathlib.Path, notes=()) -> Artifact:
     if readme.is_file():
         check_equal_file(art, "README.md", files.get("README.md"), readme)
     check_license(art, files.get("LICENSE"), "LICENSE")
+    check_tracked(art, files, {"": f"crates/{name}"}, CARGO_GENERATED)
     check_stray(art, files)
     # Profiles never ride along from the workspace root: what `cargo install`
     # builds is whatever this manifest itself says.
@@ -377,6 +452,7 @@ def inspect_npm(host: Host, path: pathlib.Path, notes=()) -> Artifact:
     name = pkg.get("name", "?")
     art = host.add(Artifact(f"npm {name}@{pkg.get('version')}", "npm"))
     art.notes.extend(notes)
+    art.package = {key: pkg.get(key) for key in ("name", "version", "optionalDependencies")}
     describe(art, path, files)
     art.check(f"version = {host.version} (workspace)", pkg.get("version") == host.version,
               f"package.json version {pkg.get('version')}")
@@ -397,6 +473,12 @@ def inspect_npm(host: Host, path: pathlib.Path, notes=()) -> Artifact:
         check_equal_file(art, "README.md", files.get("README.md"), NODE_DIR / "README.md")
         for dts in ("index.d.ts", "native.d.ts"):
             check_equal_file(art, dts, files.get(dts), NODE_DIR / dts)
+        # `napi pre-publish` pins every napi target at the package version: the
+        # loader can only find a binary through those pins. The committed
+        # manifest carries none (a dev build); a release set must carry all.
+        optional = pkg.get("optionalDependencies")
+        if optional is not None or host.args.release_set:
+            check_pins(art, optional or {}, pkg)
     elif name == WASM_NAME:
         check_exact_set(art, files, WASM_FILES, "wasm-pack output + patch allowlist")
         check_equal_file(art, "report-types.d.ts", files.get("report-types.d.ts"), CANON_TYPES)
@@ -420,11 +502,69 @@ def inspect_npm(host: Host, path: pathlib.Path, notes=()) -> Artifact:
     return art
 
 
+def check_pins(art: Artifact, optional: dict, pkg: dict) -> None:
+    version = pkg.get("version")
+    targets = pkg.get("napi", {}).get("targets") or []
+    want = {f"{NODE_NAME}-{napi_suffix(triple)}": version for triple in targets}
+    problems = [f"missing {dep}" for dep in sorted(set(want) - set(optional))]
+    problems += [f"unexpected {dep}" for dep in sorted(set(optional) - set(want))]
+    problems += [f"{dep} pinned at {optional[dep]}, not {version}" for dep in sorted(set(want) & set(optional))
+                 if optional[dep] != version]
+    art.check(f"optionalDependencies pin every napi target ({len(want)}) at {version}",
+              bool(want) and not problems, "; ".join(problems) or f"{len(want)} pins")
+
+
+def check_release_set(host: Host) -> None:
+    """--release-set: one main package, and exactly one platform package per pin."""
+    npm = [a for a in host.artifacts if a.kind == "npm" and a.package.get("name")]
+    mains = [a for a in npm if a.package["name"] == NODE_NAME]
+    art = host.add(Artifact("npm release set", "npm"))
+    if not art.check("exactly one main package", len(mains) == 1, f"{len(mains)} found"):
+        return
+    pins = mains[0].package.get("optionalDependencies") or {}
+    platforms = {a.package["name"]: a.package.get("version") for a in npm
+                 if a.package["name"].startswith(NODE_NAME + "-") and a.package["name"] != WASM_NAME}
+    problems = [f"no {dep}@{version} platform package" for dep, version in sorted(pins.items())
+                if platforms.get(dep) != version]
+    problems += [f"{dep} is not pinned by the main package" for dep in sorted(set(platforms) - set(pins))]
+    art.listing = sorted(f"{dep}@{version}" for dep, version in platforms.items())
+    art.check(f"one platform package per pin ({len(pins)}), at the pinned version", bool(pins) and not problems,
+              "; ".join(problems))
+
+
 NAPI_SUFFIX = {
     ("darwin", "arm64"): "darwin-arm64", ("darwin", "x86_64"): "darwin-x64",
     ("linux", "x86_64"): "linux-x64-gnu", ("linux", "aarch64"): "linux-arm64-gnu",
     ("win32", "AMD64"): "win32-x64-msvc",
 }
+
+# napi-rs's platformArchABI, ported as-is from @napi-rs/cli 3.7.3
+# (cli/src/utils/target.ts parseTriple): the suffix of each platform package
+# that `napi pre-publish` pins in the main package's optionalDependencies.
+_NAPI_CPU = {"x86_64": "x64", "aarch64": "arm64", "i686": "ia32", "armv7": "arm",
+             "loongarch64": "loong64", "riscv64gc": "riscv64", "powerpc64le": "ppc64"}
+_NAPI_SYS = {"linux": "linux", "freebsd": "freebsd", "darwin": "darwin", "windows": "win32",
+             "ohos": "openharmony"}
+
+
+def napi_suffix(triple: str) -> str:
+    if triple in ("wasm32-wasi", "wasm32-wasi-preview1-threads") or triple.startswith("wasm32-wasip"):
+        return "wasm32-wasi"
+    parts = (f"{triple[:-4]}-eabi" if triple.endswith("eabi") else triple).split("-")
+    if len(parts) == 2:
+        cpu, system, abi = parts[0], parts[1], None
+    else:
+        cpu, system, abi = parts[0], parts[2], parts[3] if len(parts) > 3 else None
+    if abi in ("android", "ohos"):
+        system, abi = abi, None
+    platform_name, arch = _NAPI_SYS.get(system, system), _NAPI_CPU.get(cpu, cpu)
+    return f"{platform_name}-{arch}-{abi}" if abi else f"{platform_name}-{arch}"
+
+
+def napi_suffixes() -> list:
+    """The platform-package suffix of every target in the node package.json."""
+    targets = json.loads((NODE_DIR / "package.json").read_text())["napi"]["targets"]
+    return [napi_suffix(triple) for triple in targets]
 
 
 def emulated_platform_dir(host: Host) -> pathlib.Path:
@@ -480,6 +620,12 @@ def cmd_node(host: Host) -> None:
                 host.add(Artifact(f"npm platform {pdir.name}", "npm")).check("npm pack", False, err)
             else:
                 inspect_npm(host, tarball, notes=["napi create-npm-dirs + napi artifacts output"])
+        if host.args.release_set:
+            check_release_set(host)
+        return
+    if host.args.release_set:
+        host.add(Artifact("npm release set", "npm")).check("--platform-dirs given", False,
+                                                           "a release set needs its platform packages")
         return
     tarball, err = npm_pack(host, "node-platform-emulated", emulated_platform_dir(host))
     if tarball is None:
@@ -551,17 +697,25 @@ def inspect_wheel(host: Host, path: pathlib.Path, notes=()) -> Artifact:
     if not art.check("one .dist-info/METADATA", len(dist_info) == 1, ", ".join(dist_info)):
         return art
     info = dist_info[0]
-    check_python_metadata(art, host, metadata(files[f"{info}/METADATA"]))
-    # PEP 639 puts license files under .dist-info/licenses/ (older maturin:
-    # license_files/).
-    candidates = (f"{info}/licenses/LICENSE", f"{info}/license_files/LICENSE", f"{info}/LICENSE")
-    license_path = next((p for p in candidates if p in files), None)
-    check_license(art, files.get(license_path) if license_path else None, license_path or f"{info}/licenses/LICENSE")
+    meta = metadata(files[f"{info}/METADATA"])
+    check_python_metadata(art, host, meta)
+    # PEP 639: each License-File value names a file under .dist-info/licenses/.
+    for value in meta.get_all("License-File") or ["LICENSE"]:
+        check_license(art, files.get(f"{info}/licenses/{value}"), f"{info}/licenses/{value} (License-File {value})")
     for typed in ("qrcode_ai_scanner/__init__.pyi", "qrcode_ai_scanner/py.typed"):
         art.check(f"{typed} present (type stubs)", typed in files)
     modules = [n for n in files if re.match(r"qrcode_ai_scanner/qrcode_ai_scanner\.[^/]*(so|pyd)$", n)]
     art.check("exactly one compiled extension module", len(modules) == 1, ", ".join(modules))
-    art.check("no test sources in the wheel", not any("/tests/" in n or n.startswith("tests/") for n in files))
+    # The whole wheel, exactly: the dist-info maturin writes, the license
+    # files, the SBOM, and the package (init · stubs · marker · extension).
+    exact = {f"{info}/{n}" for n in ("METADATA", "WHEEL", "RECORD")} | {
+        f"{info}/licenses/{v}" for v in meta.get_all("License-File") or []} | {
+        f"qrcode_ai_scanner/{n}" for n in ("__init__.py", "__init__.pyi", "py.typed")}
+    patterns = (re.compile(rf"{re.escape(info)}/sboms/[^/]+\.cyclonedx\.json"),
+                re.compile(r"qrcode_ai_scanner/qrcode_ai_scanner(\.[^/]+)?\.(so|pyd)"))
+    extra = sorted(n for n in files if n not in exact and not any(p.fullmatch(n) for p in patterns))
+    art.check("file set is exactly the wheel allowlist (dist-info · licenses · sbom · package)", not extra,
+              f"unexpected: {', '.join(extra)}" if extra else "")
     check_stray(art, files)
     return art
 
@@ -572,17 +726,33 @@ def inspect_sdist(host: Host, path: pathlib.Path, notes=()) -> Artifact:
     art.notes.extend(notes)
     describe(art, path, files)
     art.check(f"archive root is qrcode_ai_scanner-{host.version}", top == f"qrcode_ai_scanner-{host.version}", top)
-    if "PKG-INFO" in files:
-        check_python_metadata(art, host, metadata(files["PKG-INFO"]))
+    meta = metadata(files["PKG-INFO"]) if "PKG-INFO" in files else None
+    if meta is not None:
+        check_python_metadata(art, host, meta)
     else:
         art.check("PKG-INFO present", False)
     for required in ("pyproject.toml", "README.md"):
         art.check(f"{required} present", required in files)
-    # maturin lays the binding crate and its path dependency side by side, and
-    # may also put the PEP 639 license file next to the rewritten pyproject.
-    binding = next((p for p in ("LICENSE", "qrcode-ai-scanner-py/LICENSE") if p in files), None)
-    check_license(art, files.get(binding) if binding else None, binding or "LICENSE (binding)")
+    # PEP 639: License-File values and the pyproject's license-files globs are
+    # relative to the sdist root, where the rewritten pyproject.toml sits. A
+    # copy only inside the binding crate directory does not satisfy them, and a
+    # build from this sdist would find no license file.
+    for value in (meta.get_all("License-File") or []) if meta is not None else []:
+        check_license(art, files.get(value), f"License-File {value} at the sdist root")
+    project = tomllib.loads(files.get("pyproject.toml", b"").decode() or "").get("project", {})
+    globs = project.get("license-files")
+    art.check("pyproject.toml declares license-files (PEP 639)", isinstance(globs, list) and bool(globs), f"{globs}")
+    licensed = set()
+    for pattern in globs if isinstance(globs, list) else []:
+        matched = sorted(n for n in files if glob_regex(pattern).fullmatch(n))
+        if art.check(f"license-files {pattern!r} matches a file at the sdist root", bool(matched),
+                     ", ".join(matched)):
+            for name in matched:
+                check_license(art, files[name], f"{name} (license-files {pattern!r})")
+        licensed |= set(matched)
     check_license(art, files.get("qrcode-ai-scanner/LICENSE"), "qrcode-ai-scanner/LICENSE (vendored core)")
+    check_tracked(art, files, SDIST_CRATES, MATURIN_SDIST_ROOT | licensed | {
+        prefix + name for prefix in SDIST_CRATES for name in CARGO_GENERATED})
     py_manifest = tomllib.loads(files.get("qrcode-ai-scanner-py/Cargo.toml", b"").decode() or "")
     rxing = py_manifest.get("profile", {}).get("release", {}).get("package", {}).get("rxing", {})
     art.check("the shipped binding manifest keeps rxing overflow-checks (an sdist build is its own root)",
@@ -855,7 +1025,9 @@ def cmd_archive(host: Host) -> None:
         print("archive: give at least one file", file=sys.stderr)
         sys.exit(2)
     for name in host.args.files:
-        path = pathlib.Path(name).resolve()
+        # Unresolved: an archive outside the repo is reported as given, never as
+        # the symlink-resolved path (which can name a private home directory).
+        path = pathlib.Path(name)
         note = [f"given archive {name}"]
         if not path.is_file():
             host.add(Artifact(f"archive {name}", "archive")).check("file exists", False, name)
@@ -869,6 +1041,8 @@ def cmd_archive(host: Host) -> None:
             inspect_sdist(host, path, notes=note)
         else:
             host.add(Artifact(f"archive {name}", "archive")).check("known archive kind", False, path.suffix)
+    if host.args.release_set:
+        check_release_set(host)
 
 
 def cmd_all(host: Host) -> None:
@@ -877,6 +1051,234 @@ def cmd_all(host: Host) -> None:
             step(host)
         except Exception as err:  # one broken target must not hide the others
             host.add(Artifact(step.__name__.removeprefix("cmd_"), "error")).check("ran", False, repr(err))
+
+
+# ---------------------------------------------------------------- selftest
+
+# One name per class of file the stray gates exist for. Each scenario plants
+# one in an otherwise clean synthetic archive, which must then FAIL with that
+# name in a failing check.
+PLANTED = (
+    ".netrc", "_netrc", ".pypirc", ".git-credentials", ".npmrc", ".env", ".ENV.production", ".envrc",
+    "id_rsa", "id_ed25519", "deploy/ID_ECDSA", ".ssh/known_hosts", "release.jks", "upload.keystore",
+    "AuthKey_ABC123.p8", "signing.pfx", "dev.p12", "server.pem", "secring.gpg", "Credentials.json",
+    "secrets.toml", ".vscode/settings.json", ".idea/workspace.xml", ".claude/settings.local.json",
+    ".cursor/rules.mdc", ".codex/config.toml", "notes.zip", "vendor.tar.gz", "nested.crate", "dist.whl",
+    "plans/roadmap.md", "target/release/build.log", "node_modules/x/index.js", ".git/config", ".DS_Store",
+    "lib.rs~",
+)
+REPO_URL = {"type": "git", "url": "https://github.com/supernovae-st/qrcode-ai-scanner"}
+
+
+def _tar(path: pathlib.Path, top: str, files: dict) -> pathlib.Path:
+    with tarfile.open(path, "w:gz") as archive:
+        for name, data in sorted(files.items()):
+            info = tarfile.TarInfo(f"{top}/{name}")
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return path
+
+
+def _zip(path: pathlib.Path, files: dict) -> pathlib.Path:
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, data in sorted(files.items()):
+            archive.writestr(name, data)
+    return path
+
+
+def _clean_crate(version: str) -> dict:
+    core = ROOT / "crates" / "qrcode-ai-scanner"
+    manifest = f'[package]\nname = "qrcode-ai-scanner"\nversion = "{version}"\nlicense = "{SPDX}"\n'
+    return {
+        "Cargo.toml": manifest.encode(), "Cargo.toml.orig": (core / "Cargo.toml").read_bytes(),
+        ".cargo_vcs_info.json": b'{"git": {"sha1": "0"}, "path_in_vcs": "crates/qrcode-ai-scanner"}\n',
+        "Cargo.lock": b"version = 4\n", "src/lib.rs": b"//! synthetic\n",
+        "README.md": (core / "README.md").read_bytes(), "LICENSE": LICENSE.read_bytes(),
+    }
+
+
+def _python_metadata(version: str) -> bytes:
+    return (f"Metadata-Version: 2.4\nName: {PYPI_NAME}\nVersion: {version}\n"
+            f"License-Expression: {SPDX}\nLicense-File: LICENSE\n").encode()
+
+
+def _clean_wheel(version: str) -> dict:
+    info = f"qrcode_ai_scanner-{version}.dist-info"
+    return {
+        f"{info}/METADATA": _python_metadata(version), f"{info}/WHEEL": b"Wheel-Version: 1.0\n",
+        f"{info}/RECORD": b"", f"{info}/licenses/LICENSE": LICENSE.read_bytes(),
+        f"{info}/sboms/qrcode-ai-scanner-py.cyclonedx.json": b"{}\n",
+        "qrcode_ai_scanner/__init__.py": b"", "qrcode_ai_scanner/__init__.pyi": b"",
+        "qrcode_ai_scanner/py.typed": b"", "qrcode_ai_scanner/qrcode_ai_scanner.abi3.so": b"\x7fELF",
+    }
+
+
+def _clean_sdist(version: str) -> dict:
+    py, core = PY_DIR, ROOT / "crates" / "qrcode-ai-scanner"
+    return {
+        "PKG-INFO": _python_metadata(version), "pyproject.toml": (py / "pyproject.toml").read_bytes(),
+        "README.md": (py / "README.md").read_bytes(), "LICENSE": LICENSE.read_bytes(),
+        "qrcode-ai-scanner-py/Cargo.toml": (py / "Cargo.toml").read_bytes(),
+        "qrcode-ai-scanner-py/src/lib.rs": b"", "qrcode-ai-scanner-py/LICENSE": LICENSE.read_bytes(),
+        "qrcode-ai-scanner/Cargo.toml": (core / "Cargo.toml").read_bytes(),
+        "qrcode-ai-scanner/src/lib.rs": b"", "qrcode-ai-scanner/README.md": (core / "README.md").read_bytes(),
+        "qrcode-ai-scanner/LICENSE": LICENSE.read_bytes(),
+    }
+
+
+def _npm_main(version: str, optional=None) -> dict:
+    pkg = json.loads((NODE_DIR / "package.json").read_text())
+    if optional is not None:
+        pkg["optionalDependencies"] = optional
+    files = {name: (NODE_DIR / name).read_bytes() for name in ("README.md", "index.js", "index.d.ts",
+                                                               "native.js", "native.d.ts")}
+    return files | {"package.json": json.dumps(pkg, indent=2).encode(), "LICENSE": LICENSE.read_bytes(),
+                    "report-types.d.ts": CANON_TYPES.read_bytes()}
+
+
+def _npm_platform(version: str, suffix: str) -> dict:
+    binary = f"qrcode-ai-scanner.{suffix}.node"
+    os_name, cpu = suffix.split("-")[:2]
+    pkg = {"name": f"{NODE_NAME}-{suffix}", "version": version, "os": [os_name], "cpu": [cpu],
+           "main": binary, "files": [binary], "license": SPDX, "repository": REPO_URL}
+    return {"package.json": json.dumps(pkg).encode(), "README.md": f"# `{NODE_NAME}-{suffix}`\n".encode(),
+            "LICENSE": LICENSE.read_bytes(), binary: b"\x7fELF"}
+
+
+def self_test() -> int:
+    """Synthetic archives with one known defect each, judged by `archive`."""
+    version = workspace_version()
+    pins = {f"{NODE_NAME}-{suffix}": version for suffix in napi_suffixes()}
+    crlf = LICENSE.read_bytes().replace(b"\n", b"\r\n")
+    failures: list[str] = []
+    ran = 0
+    with tempfile.TemporaryDirectory(prefix="package-inspect-selftest-") as tmp:
+        base = pathlib.Path(tmp)
+
+        def judge(name: str, paths: list, want: str, *needles: str, release_set: bool = False) -> None:
+            nonlocal ran
+            ran += 1
+            argv = ["archive", *map(str, paths), *(["--release-set"] if release_set else [])]
+            host = Host(build_parser().parse_args(argv))
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    cmd_archive(host)
+            finally:
+                shutil.rmtree(host.scratch, ignore_errors=True)
+            got = FAIL if any(a.status == FAIL for a in host.artifacts) else PASS
+            failed = " · ".join(f"{c.name}: {c.detail}" for a in host.artifacts for c in a.checks if not c.ok)
+            missing = [n for n in needles if n not in failed]
+            if got != want or missing:
+                failures.append(f"{name}: {got.upper()} (want {want.upper()})"
+                                + (f", no failing check names {missing}" if missing else "")
+                                + (f" — failing: {failed}" if failed else ""))
+
+        def crate(name: str, files: dict) -> pathlib.Path:
+            return _tar(base / f"{name}.crate", f"qrcode-ai-scanner-{version}", files)
+
+        def wheel(name: str, files: dict) -> pathlib.Path:
+            return _zip(base / name / f"qrcode_ai_scanner-{version}-cp38-abi3-manylinux_2_17_x86_64.whl", files)
+
+        def sdist(name: str, files: dict) -> pathlib.Path:
+            return _tar(base / name / f"qrcode_ai_scanner-{version}.tar.gz", f"qrcode_ai_scanner-{version}", files)
+
+        def npm(name: str, files: dict) -> pathlib.Path:
+            pkg = json.loads(files["package.json"])
+            return _tar(base / name / f"{pkg['name'].lstrip('@').replace('/', '-')}-{version}.tgz", "package",
+                        files)
+
+        for label in ("crate", "wheel", "sdist"):
+            (base / label).mkdir()
+        (base / "platform").mkdir()
+        # The clean archives pass: every negative below fails for its plant.
+        judge("clean crate", [crate("clean", _clean_crate(version))], PASS)
+        judge("clean wheel", [wheel("wheel", _clean_wheel(version))], PASS)
+        judge("clean sdist", [sdist("sdist", _clean_sdist(version))], PASS)
+        judge("clean platform package", [npm("platform", _npm_platform(version, "linux-x64-gnu"))], PASS)
+
+        for i, planted in enumerate(PLANTED):
+            ran += 1
+            if not any(pattern.search(planted) for pattern, _why in STRAY):
+                failures.append(f"denylist: {planted!r} matches no STRAY pattern")
+            judge(f"crate + {planted}", [crate(f"stray-{i}", _clean_crate(version) | {planted: b"x"})],
+                  FAIL, planted)
+            (base / f"wheel-{i}").mkdir()
+            judge(f"wheel + qrcode_ai_scanner/{planted}",
+                  [wheel(f"wheel-{i}", _clean_wheel(version) | {f"qrcode_ai_scanner/{planted}": b"x"})],
+                  FAIL, planted)
+            (base / f"sdist-{i}").mkdir()
+            judge(f"sdist + qrcode-ai-scanner-py/{planted}",
+                  [sdist(f"sdist-{i}", _clean_sdist(version) | {f"qrcode-ai-scanner-py/{planted}": b"x"})],
+                  FAIL, planted)
+            (base / f"platform-{i}").mkdir()
+            judge(f"platform package + {planted}",
+                  [npm(f"platform-{i}", _npm_platform(version, "linux-x64-gnu") | {planted: b"x"})],
+                  FAIL, planted)
+
+        # Untracked but innocuous files: the git allowlist alone must catch them.
+        judge("crate + an untracked source file", [crate("untracked", _clean_crate(version) | {"src/scratch.rs": b""})],
+              FAIL, "src/scratch.rs")
+        (base / "wheel-extra").mkdir()
+        judge("wheel + a file outside the wheel allowlist",
+              [wheel("wheel-extra", _clean_wheel(version) | {"qrcode_ai_scanner/notes.txt": b""})],
+              FAIL, "qrcode_ai_scanner/notes.txt")
+        (base / "sdist-extra").mkdir()
+        judge("sdist + an untracked core file",
+              [sdist("sdist-extra", _clean_sdist(version) | {"qrcode-ai-scanner/src/extra.rs": b""})],
+              FAIL, "qrcode-ai-scanner/src/extra.rs")
+
+        # The AGPL text where PEP 639 says it is, byte for byte.
+        (base / "wheel-crlf").mkdir()
+        judge("win wheel with a CRLF LICENSE",
+              [wheel("wheel-crlf", _clean_wheel(version) | {
+                  f"qrcode_ai_scanner-{version}.dist-info/licenses/LICENSE": crlf})], FAIL, "LICENSE")
+        no_root = {k: v for k, v in _clean_sdist(version).items() if k != "LICENSE"}
+        (base / "sdist-py-license-only").mkdir()
+        judge("sdist with the AGPL text only under qrcode-ai-scanner-py/",
+              [sdist("sdist-py-license-only", no_root)], FAIL, "License-File")
+        (base / "sdist-crlf").mkdir()
+        judge("sdist whose License-File is a CRLF copy",
+              [sdist("sdist-crlf", _clean_sdist(version) | {"LICENSE": crlf})], FAIL, "License-File")
+        globbed = _clean_sdist(version)
+        globbed["pyproject.toml"] = globbed["pyproject.toml"].replace(b'license-files = ["LICENSE"]',
+                                                                      b'license-files = ["LICENSES/*.txt"]')
+        (base / "sdist-glob").mkdir()
+        judge("sdist whose pyproject license-files matches nothing", [sdist("sdist-glob", globbed)],
+              FAIL, "license-files")
+
+        # The main npm package pins exactly every napi target at this version.
+        for label, optional, want, release_set, needle in (
+            ("main, dev build (no pins)", None, PASS, False, ""),
+            ("main, every target pinned", pins, PASS, False, ""),
+            ("main, release set without pins", None, FAIL, True, "optionalDependencies"),
+            ("main, one target missing", {k: v for k, v in pins.items() if not k.endswith("-linux-x64-musl")},
+             FAIL, True, "linux-x64-musl"),
+            ("main, one pin at another version", pins | {f"{NODE_NAME}-darwin-arm64": "0.0.1"}, FAIL, True,
+             "darwin-arm64"),
+            ("main, an unknown extra pin", pins | {f"{NODE_NAME}-linux-riscv64-gnu": version}, FAIL, True,
+             "linux-riscv64-gnu"),
+            ("main, dev build with a stale pin", pins | {f"{NODE_NAME}-win32-x64-msvc": "0.8.1"}, FAIL, False,
+             "win32-x64-msvc"),
+        ):
+            slug = re.sub(r"[^a-z0-9]+", "-", label)
+            (base / slug).mkdir()
+            judge(label, [npm(slug, _npm_main(version, optional))], want, *filter(None, [needle]),
+                  release_set=release_set)
+        # --release-set over tarballs: one platform tarball per pin, no more.
+        (base / "set").mkdir()
+        main = npm("set", _npm_main(version, pins))
+        platforms = []
+        for suffix in napi_suffixes():
+            (base / f"set-{suffix}").mkdir()
+            platforms.append(npm(f"set-{suffix}", _npm_platform(version, suffix)))
+        judge("release set: main + one tarball per pin", [main, *platforms], PASS, release_set=True)
+        judge("release set: a pinned platform tarball missing", [main, *platforms[:-1]], FAIL,
+              napi_suffixes()[-1], release_set=True)
+
+    for failure in failures:
+        print(f"SELF-TEST FAILED · {failure}", file=sys.stderr)
+    print(f"self-test: {ran - len(failures)}/{ran} scenarios as expected")
+    return 1 if failures else 0
 
 
 # ---------------------------------------------------------------- report
@@ -911,10 +1313,10 @@ def markdown(host: Host, title: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("target", choices=["all", "crates", "node", "wasm", "python", "flutter",
-                                           "archive", "licenses", "profiles", "versions"])
+                                           "archive", "licenses", "profiles", "versions", "selftest"])
     parser.add_argument("files", nargs="*", help="archive: files to inspect")
     parser.add_argument("--out", help="write package-inspect.{json,md} + logs/ here")
     parser.add_argument("--strict", action="store_true", help="UNAVAILABLE fails too")
@@ -928,7 +1330,16 @@ def main() -> int:
     parser.add_argument("--sync", action="store_true", help="licenses: rewrite stale copies")
     parser.add_argument("--nightly", help="profiles: the nightly toolchain for --unit-graph")
     parser.add_argument("--tag", help="versions: the release tag (vX.Y.Z or refs/tags/vX.Y.Z)")
-    args = parser.parse_args()
+    parser.add_argument("--release-set", action="store_true",
+                        help="node · archive: the npm set about to publish — the main package pins every napi "
+                             "target at this version, and every pin has its platform package")
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if args.target == "selftest":
+        return self_test()
 
     host = Host(args)
     try:

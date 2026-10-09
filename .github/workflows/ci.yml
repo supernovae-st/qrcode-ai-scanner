@@ -159,9 +159,9 @@ jobs:
   # What the registries would receive, read back on every PR
   # (scripts/package-inspect.py): every LICENSE copy byte-identical to the
   # root one, every publish surface on one version, and the .crate of each
-  # published crate (LICENSE · README · version · core pin · no stray file).
-  # The npm tarballs are inspected in their smoke jobs, the wheel in
-  # python.yml, right after each build.
+  # published crate (LICENSE · README · version · core pin · tracked files
+  # only · no stray file). The npm tarballs are inspected in their smoke
+  # jobs, the wheel and sdist in python.yml, right after each build.
   packaging:
     runs-on: ubuntu-24.04
     steps:
@@ -169,6 +169,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # The inspector's own scenarios first: a synthetic crate, wheel, sdist
+      # and npm package per planted secret, key, editor or agent directory,
+      # nested archive or untracked file, each of which must FAIL.
+      - run: python3 scripts/package-inspect.py selftest
       - run: python3 scripts/package-inspect.py licenses --strict --quiet
       - run: python3 scripts/package-inspect.py versions --strict --quiet
       - run: python3 scripts/package-inspect.py crates --strict --quiet
