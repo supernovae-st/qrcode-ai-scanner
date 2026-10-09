@@ -1,60 +1,107 @@
 #!/usr/bin/env python3
-"""Publishing-job policy for .github/workflows: a static check, run in ci › lint.
+"""Workflow policy for .github/workflows: static checks, run in ci › lint.
 
-A job is PRIVILEGED when it publishes (a step runs `cargo publish`, `npm
-publish`, `napi pre-publish`, `pub publish`, `twine upload`, `gh release
-create|upload|edit|delete`, pypa/gh-action-pypi-publish or
-rust-lang/crates-io-auth-action) or when it holds a write permission
-(`id-token: write` included: it can mint registry tokens). Every privileged
-job must:
+What this is, and what it is not: a static lint over the workflow files of
+this revision. It reads their YAML (a strict subset: what it cannot read is
+exit 2), matches patterns over each `run:` script and judges what a job may
+do. It cannot see a publish hidden in a script a step calls, a workflow on
+another branch or tag, or a repository setting. The security boundary lies
+elsewhere: the environments' deployment rules (v* tags only) and the tag
+ruleset, which the registries' trusted publishers rely on (RELEASING.md §
+Publishing). This check keeps this revision's publishing jobs from drifting
+away from those rules through an unnoticed edit.
 
-  guard        run from a release tag only: its `if:` carries the top-level
-               conjunct startsWith(github.ref, 'refs/tags/v'), never under `||`
-  environment  name one of the environments crates-io · npm · release · pub,
-               whose deployment rules are the security boundary
+  check-publish-guards.py [--workflows DIR]             the publishing-job policy
+  check-publish-guards.py --toolchains [--root DIR]     the one-toolchain policy
+  check-publish-guards.py --self-test                   both, on the real tree and on mutated copies
+
+Every workflow (*.yml or *.yaml; any other entry in the directory fails):
+read-only top-level permissions; no reference to the `secrets` context
+anywhere (index syntax, toJSON, a workflow-level env and `secrets: inherit`
+included; no workflow here reads a secret); no job-level `uses:` other than
+a local workflow of the same directory, which this check reads.
+
+A job is PRIVILEGED when it publishes (cargo publish/yank/owner, npm
+publish/unpublish/deprecate/dist-tag/owner/access/stage, pnpm/yarn/bun
+publish, napi pre-publish unless it uploads nothing, pub publish,
+twine/uv/maturin/poetry publish, gh release create/upload/edit/delete or a
+`gh api` releases call, pypa/gh-action-pypi-publish,
+rust-lang/crates-io-auth-action), with options before the subcommand,
+npm's abbreviations and backslash-continued lines included, or when it
+holds a write permission (`id-token: write` included: it can mint registry
+tokens). Every privileged job must:
+
+  guard        run from a release tag only: its raw `if:` has the top-level
+               conjunct startsWith(github.ref, 'refs/tags/v'), never under
+               `||`; no `#`; no `${{` unless one expression spans the whole
+               value (text around one makes a string, always true); and no
+               always(), cancelled(), failure() or success()
+  needs        need the job that inspects what it uploads (INSPECTION)
+  environment  name one of crates-io · npm · release · pub
   permissions  declare its own, minimal: contents read (write only to run
                `gh release`), id-token write only to publish to a registry
-  secrets      read no repository secret
-  pinned       pin every third-party action by commit SHA (actions/* are
-               first-party), setup-node and setup-python included (below)
-  gate         run `package-inspect.py versions --tag` as its first step after
-               the checkout: the tag names the version, the CHANGELOG its date
-  toolchains   pinned only: Rust through rustup or a SHA-pinned action at
-               RUST_TOOLCHAIN; pnpm, Flutter and Dart at an exact x.y.z
-  node/python  actions/setup-node and actions/setup-python, SHA-pinned, may
-               name a release line (node 24, python 3.12) or an exact version,
-               never lts/*, latest, current, node, a range or nothing: security
+  pinned       use every action by a 40-hex commit SHA (actions/* included)
+               and no local `./` action (its steps are not judged here);
+               container and service images by @sha256 digest; check out
+               with `persist-credentials: false`; no shell other than bash;
+               no `${{ }}` interpolated into a script
+  gate         run, as its first step after the checkout, exactly
+               `python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet`
+               (no key but name and working-directory, nothing joined to it)
+  toolchains   Rust through rustup or a pinned action at RUST_TOOLCHAIN,
+               resolved step > job > workflow to an exact x.y.z and never set
+               in a script, no rust-toolchain file; pnpm, Flutter, Dart and
+               every other setup action or installer tool at an exact x.y.z
+  node/python  actions/setup-node and actions/setup-python may name a
+               release line (node 24, python 3.12) or an exact version, never
+               lts/*, latest, current, node, a range or nothing: security
                point releases arrive without a repository change, and the
-               action and its version manifest are first-party. The job prints
-               the resolved versions before its first publishing step.
-  locked       fetch no unlocked dependency (no npm/pnpm/yarn install, npx,
-               pip install, cargo install without --locked, pub get without
-               --enforce-lockfile, piped installer); `cargo publish` carries
-               --locked --no-verify
+               action and its version manifest are first-party. A step after
+               the setup and before the first publishing step prints the
+               resolved versions exactly as PRINTED says (npm >= 11.5.1
+               asserted)
+  locked       fetch nothing unlocked: npm install/i/add/update/exec/x/init/
+               create, pnpm without --frozen-lockfile, npx/pnpx/bunx/dlx,
+               yarn without --immutable, corepack, pip or uv pip without
+               --require-hashes, pipx, uvx, uv tool, cargo install without
+               --locked and an exact --version, cargo binstall, pub get/add/
+               upgrade without --enforce-lockfile, pub global, dart run,
+               gem/go install, a download piped into a shell
+  publish      `cargo publish` with --locked --no-verify; `npm publish` of a
+               tarball (`*.tgz`, or a variable named *tgz) with
+               --ignore-scripts; never pnpm, yarn or bun publish
   concurrency  join publish-${{ github.workflow }}-${{ github.ref }}, never
                cancelling, so a re-run on the tag waits instead of racing
-
-Every workflow also sets read-only top-level permissions.
 
 `napi pre-publish` with both --skip-optional-publish and --no-gh-release (or
 --dry-run) uploads nothing (@napi-rs/cli 3.7.3, cli/src/api/pre-publish.ts):
 it only writes optionalDependencies, so it does not make a job privileged.
 
-One NAMED EXCEPTION, scoped to flutter.yml › publish and to exactly two facts:
-its Flutter and Dart SDKs come from the stable channel, and `flutter pub get`
-resolves without a lockfile. The job is dormant (pub.dev's first upload is
-manual and the package's crate still depends on a path outside it), and pub
-resolution runs no package code. The exception ends before the pub.dev
-trusted publisher is configured (RELEASING.md § Publishing): a waiver that no
-longer matches a finding fails this check, so it is removed with the fix.
+ONE NAMED EXCEPTION, keyed to three exact steps of flutter.yml › publish:
+the setup-dart and flutter-action steps (stable-channel SDKs) and its
+`flutter pub get` (no lockfile). The job is dormant (pub.dev's first upload
+is manual and the package's crate still depends on a path outside it), and
+pub resolution runs no package code. Another step with the same finding is
+not waived; a waiver that matches nothing fails, so it is removed with the
+fix (RELEASING.md § Publishing).
 
-  check-publish-guards.py [--workflows DIR]   judge the workflows (default .github/workflows)
-  check-publish-guards.py --self-test         the real workflows pass, every mutated copy fails
+The one-toolchain policy (--toolchains), over every workflow: every
+RUST_TOOLCHAIN assignment (workflow, job or step env) holds the same exact
+x.y.z; no script assigns RUST_TOOLCHAIN, FUZZ_TOOLCHAIN or RUSTUP_TOOLCHAIN,
+and no env sets RUSTUP_TOOLCHAIN; FUZZ_TOOLCHAIN is a dated
+nightly-YYYY-MM-DD; every toolchain a leg names (an action's toolchain or
+rust-toolchain input, flow mappings included, rustup and `cargo +`
+arguments, --toolchain) is one of those variables; the one literal is the
+MSRV leg, dtolnay/rust-toolchain at the rust-version the root manifest
+declares (pinned by SHA, it names that version as its toolchain input); no
+step names a rust-toolchain file, and none exists in the tree (it outranks
+`rustup default` in its directory and below).
 
-The YAML reader covers the subset the workflows here use (block mappings and
-sequences, flow collections, quoted and plain scalars, literal and folded
-block scalars, comments) and refuses anything else: anchors, aliases, tags,
-multi-line plain scalars. Exit 0 compliant · 1 a violation · 2 cannot judge
+The YAML reader covers the subset the workflows here use (block mappings
+and sequences, flow collections, quoted and plain scalars, literal and
+folded block scalars, comments ending where YAML ends them) and refuses
+anything else: anchors, aliases, tags, multi-line plain scalars, a comment
+inside a flow collection. Exit 0 compliant · 1 a violation · 2 cannot judge
 (an unreadable workflow). Stdlib only, Python >= 3.11.
 """
 
@@ -66,39 +113,93 @@ import os
 import pathlib
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
+import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-WORKFLOWS = ROOT / ".github" / "workflows"
 
 ENVIRONMENTS = {"crates-io", "npm", "release", "pub"}
 GUARD = "startsWith(github.ref, 'refs/tags/v')"
 CONCURRENCY = "publish-${{ github.workflow }}-${{ github.ref }}"
-GATE = re.compile(r"package-inspect\.py versions --tag\b")
+GATE_RUN = 'python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet'
 SHA = re.compile(r"[0-9a-f]{40}")
 EXACT = re.compile(r"\d+\.\d+\.\d+")
+DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
 
-DORMANT = "dormant until pub.dev's manual first upload and the fix of the path dependency"
-# (workflow, job) -> {finding code: reason}; nothing else is ever waived.
-EXCEPTIONS = {
-    ("flutter.yml", "publish"): {
-        "floating-flutter-sdk": DORMANT,
-        "floating-dart-sdk": DORMANT,
-        "unlocked-pub-get": f"{DORMANT}; pub resolution runs no package code",
-    },
+# The job each publishing job must need: the one that inspects (for the iOS
+# zip, builds) what it uploads. A publishing job missing here fails.
+INSPECTION = {
+    ("crates-publish.yml", "publish"): "package",
+    ("npm-publish.yml", "publish-native"): "pack-native",
+    ("npm-publish.yml", "publish-wasm"): "build-wasm",
+    ("python.yml", "release"): "inspect",
+    ("mobile.yml", "ios-release"): "ios",
+    ("flutter.yml", "publish"): "test",
 }
 
-# A step publishes when it runs one of these, or uses one of PUBLISHING_ACTIONS.
+# What a job relying on the setup-node/-python relaxation runs, verbatim, in
+# one step after the setup and before its first publishing step.
+PRINTED = {
+    "actions/setup-node": "\n".join((
+        "node --version",
+        "v=$(npm --version)",
+        'echo "npm $v"',
+        "if [ \"$(printf '%s\\n' 11.5.1 \"$v\" | sort -V | head -n1)\" != 11.5.1 ]; then",
+        '  echo "::error::npm $v cannot publish through trusted publishing (needs >= 11.5.1)"',
+        "  exit 1",
+        "fi",
+    )),
+    "actions/setup-python": "python --version\npip --version",
+}
+
+DORMANT = "dormant until pub.dev's manual first upload and the fix of the path dependency"
+# (workflow, job) -> the exact steps waived, each with the one finding it may
+# carry; nothing else is ever waived.
+EXCEPTIONS = {
+    ("flutter.yml", "publish"): (
+        ("floating-dart-sdk", {"uses": "dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d"}, DORMANT),
+        ("floating-flutter-sdk", {"uses": "subosito/flutter-action@e938fdf56512cc96ef2f93601a5a40bde3801046",
+                                  "with": {"channel": "stable"}}, DORMANT),
+        ("unlocked-pub-get", {"run": "flutter pub get"}, f"{DORMANT}; pub resolution runs no package code"),
+    ),
+}
+
+# A step publishes when it runs a tool with one of these subcommands as a later
+# word of the same command line, matches PUBLISHING_RUN, or uses one of
+# PUBLISHING_ACTIONS. npm accepts any unique prefix of a command.
+NPM_UPLOAD = frozenset({"pu", "pub", "publ", "publi", "publish"})
+PUBLISHING_TOOLS = (
+    ("cargo", frozenset({"publish", "yank", "owner"}), "cargo publish"),
+    ("npm", NPM_UPLOAD | {"unpublish", "deprecate", "dist-tag", "dist-tags", "owner", "access", "stage"},
+     "npm publish"),
+    ("pnpm", frozenset({"publish"}), "pnpm publish"),
+    ("yarn", frozenset({"publish"}), "yarn publish"),
+    ("bun", frozenset({"publish"}), "bun publish"),
+    ("twine", frozenset({"upload"}), "twine upload"),
+    ("uv", frozenset({"publish"}), "uv publish"),
+    ("maturin", frozenset({"publish", "upload"}), "maturin publish"),
+    ("poetry", frozenset({"publish"}), "poetry publish"),
+)
 PUBLISHING_RUN = (
-    (re.compile(r"\bcargo\s+(publish|yank|owner)\b"), "cargo publish"),
-    (re.compile(r"\bnpm\s+(publish|unpublish|deprecate|dist-tag)\b"), "npm publish"),
     (re.compile(r"\bnapi\s+pre-?publish\b"), "napi pre-publish"),
-    (re.compile(r"\bpub\s+publish\b"), "pub publish"),
-    (re.compile(r"\btwine\s+upload\b"), "twine upload"),
+    (re.compile(r"\bpub\s+(publish|lish)\b"), "pub publish"),
     (re.compile(r"\bgh\s+release\s+(create|upload|edit|delete)\b"), "gh release"),
+    (re.compile(r"\bgh\s+api\b.*\breleases\b"), "gh release"),
 )
 PUBLISHING_ACTIONS = ("pypa/gh-action-pypi-publish", "rust-lang/crates-io-auth-action")
+NPM_FETCH = frozenset({"install", "i", "in", "ins", "inst", "insta", "instal", "isnt", "isnta", "isntal",
+                       "isntall", "add", "update", "up", "upgrade", "udpate", "exec", "x", "init", "create",
+                       "innit", "install-test", "it"})
+TGZ_ARG = re.compile(r"\S*\.tgz|\$\{?\w*tgz\}?")
+
+# Toolchain names a leg may use instead of a literal: the variables.
+NAMED_INPUTS = {"${{env.RUST_TOOLCHAIN}}", "${{env.FUZZ_TOOLCHAIN}}", "${{inputs.toolchain||env.RUST_TOOLCHAIN}}"}
+NAMED_VARIABLE = re.compile(r"\$\{?(RUST_TOOLCHAIN|FUZZ_TOOLCHAIN)\}?")
+# Actions with a rule of their own; any other setup-* / *-setup action needs an exact version.
+SPECIFIC_SETUP = {"dtolnay/rust-toolchain", "pnpm/action-setup", "subosito/flutter-action", "dart-lang/setup-dart",
+                  "actions/setup-node", "actions/setup-python"}
 
 
 # ---------------------------------------------------------------- YAML subset
@@ -116,16 +217,12 @@ def _is_dash(content: str) -> bool:
     return content == "-" or content.startswith("- ")
 
 
-def _strip_comment(text: str) -> str:
-    """Drop a trailing ` # comment` that sits outside quotes."""
-    quote = None
+def _plain_comment(text: str) -> str:
+    """A plain scalar without its comment. YAML starts a comment at a `#` that
+    begins the text or follows whitespace; quotes inside a plain scalar are
+    ordinary characters, so they never hide one."""
     for i, ch in enumerate(text):
-        if quote:
-            if ch == quote:
-                quote = None
-        elif ch in "'\"" and (i == 0 or text[i - 1] in " \t[{,:"):
-            quote = ch
-        elif ch == "#" and (i == 0 or text[i - 1] in " \t"):
+        if ch == "#" and (i == 0 or text[i - 1] in " \t"):
             return text[:i].rstrip()
     return text.rstrip()
 
@@ -200,6 +297,8 @@ def _flow(text: str, i: int) -> tuple:
         return _single_quoted(text, i)
     end = i
     while end < len(text) and text[end] not in ",]}" and not (text[end] == ":" and text[end + 1:end + 2] == " "):
+        if text[end] == "#" and text[end - 1] in " \t":
+            raise YamlError(f"a comment inside a flow collection: {text!r}")
         end += 1
     return text[i:end].strip(), end
 
@@ -264,9 +363,18 @@ class _Reader:
         text = text.strip()
         if text[:1] in ("|", ">"):
             return self.block_scalar(text, indent)
-        text = _strip_comment(text)
         if text[:1] in ("&", "*", "!"):
             raise YamlError(f"line {self.i}: anchors, aliases and tags are not supported")
+        if text[:1] in ("[", "{", '"', "'"):
+            # A quoted scalar or a flow collection: a comment may only follow it.
+            try:
+                value, end = _flow(text, 0)
+            except IndexError:
+                raise YamlError(f"line {self.i}: unterminated {text!r}") from None
+            if text[end:].strip() and not re.match(r"[ \t]+#", text[end:]):
+                raise YamlError(f"line {self.i}: trailing text after {text[:end]!r}")
+            return value
+        text = _plain_comment(text)
         if not text:
             head = self.peek()
             if head is None:
@@ -276,14 +384,6 @@ class _Reader:
             if head[0] == indent and _is_dash(head[1]):
                 return self.sequence(indent)
             return None
-        if text[0] in "[{\"'":
-            try:
-                value, end = _flow(text, 0)
-            except IndexError:
-                raise YamlError(f"line {self.i}: unterminated {text!r}") from None
-            if text[end:].strip():
-                raise YamlError(f"line {self.i}: trailing text after {text[:end]!r}")
-            return value
         head = self.peek()
         if head is not None and head[0] > indent and not _is_dash(head[1]):
             raise YamlError(f"line {self.i + 1}: multi-line plain scalars are not supported")
@@ -340,7 +440,7 @@ def load_yaml(text: str):
     return value
 
 
-# ---------------------------------------------------------------- policy
+# ---------------------------------------------------------------- shared helpers
 
 
 @dataclasses.dataclass
@@ -349,6 +449,7 @@ class Finding:
     job: str
     code: str
     message: str
+    step: int = -1  # index in the job's steps; -1 for a job- or workflow-level finding
     waived: str = ""
 
 
@@ -361,11 +462,84 @@ def _text(node) -> str:
     return "" if node is None else str(node)
 
 
-def _code_lines(script: str):
-    for line in script.splitlines():
-        line = line.strip()
-        if line and not line.startswith("#"):
-            yield line
+def _code_lines(script) -> list:
+    """The command lines of a run script: backslash continuations joined into
+    one line, blank lines and comment lines dropped."""
+    lines, pending = [], ""
+    for raw in str(script or "").splitlines():
+        line = raw.strip()
+        if not pending and (not line or line.startswith("#")):
+            continue
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+            continue
+        lines.append((pending + line).strip())
+        pending = ""
+    if pending.strip():
+        lines.append(pending.strip())
+    return lines
+
+
+def _words(text: str) -> list:
+    """Shell words of TEXT, each stripped of the quotes and the punctuation a
+    command substitution or a sequence wraps around it."""
+    return [word.strip("\"'`;)(") for word in text.split()]
+
+
+def _invokes(line: str, tool: str, subcommands) -> bool:
+    """LINE runs TOOL (a word ending in it: a path, a quote or a command
+    substitution may precede it) with one of SUBCOMMANDS as a later word."""
+    raw = line.split()
+    for i, token in enumerate(raw):
+        if re.search(rf"(?:^|[=(`'\"/]){re.escape(tool)}$", token.rstrip("\"'`;)")) and \
+                any(word in subcommands for word in _words(" ".join(raw[i + 1:]))):
+            return True
+    return False
+
+
+def _uses(step) -> tuple:
+    """(action without its ref, ref) of a `uses:` step, or ('', '')."""
+    uses = step.get("uses") if isinstance(step, dict) else None
+    if not uses:
+        return "", ""
+    action, _, ref = str(uses).partition("@")
+    return action, ref
+
+
+def _steps(job) -> list:
+    return [step if isinstance(step, dict) else {} for step in (job.get("steps") or [])]
+
+
+def _resolve(key: str, *envs):
+    """KEY as the first of ENVS that sets it sees it (step > job > workflow), or None."""
+    for env in envs:
+        if isinstance(env, dict) and key in env:
+            return env[key]
+    return None
+
+
+def workflow_files(workflows: pathlib.Path) -> tuple:
+    """(the *.yml and *.yaml files, every other entry of the directory)."""
+    entries = sorted(workflows.iterdir())
+    files = [path for path in entries if path.is_file() and path.suffix in (".yml", ".yaml")]
+    return files, [path.name for path in entries if path not in files]
+
+
+def load_workflows(workflows: pathlib.Path) -> list:
+    """[(file name, parsed workflow)]; a YamlError names the file."""
+    loaded = []
+    for path in workflow_files(workflows)[0]:
+        try:
+            wf = load_yaml(path.read_text())
+        except YamlError as err:
+            raise YamlError(f"{path.name}: {err}") from err
+        if not isinstance(wf, dict) or not isinstance(wf.get("jobs"), dict):
+            raise YamlError(f"{path.name}: no jobs map")
+        loaded.append((path.name, wf))
+    return loaded
+
+
+# ---------------------------------------------------------------- publishing policy
 
 
 def _top_level(expr: str, op: str) -> list:
@@ -396,10 +570,8 @@ def _top_level(expr: str, op: str) -> list:
 
 
 def _unwrap(expr: str) -> str:
-    """An expression without ${{ }}, outer parentheses or extra whitespace."""
+    """An expression without outer parentheses or extra whitespace."""
     expr = expr.strip()
-    if expr.startswith("${{") and expr.endswith("}}"):
-        expr = expr[3:-2].strip()
     while expr.startswith("(") and expr.endswith(")"):
         depth = 0
         for i, ch in enumerate(expr):
@@ -414,24 +586,26 @@ def _unwrap(expr: str) -> str:
 
 
 def guarded(condition) -> str:
-    """'' when CONDITION carries the tag guard as a top-level conjunct, else why not."""
+    """'' when the raw `if:` value CONDITION runs on a release tag only, else why not."""
     if condition is None:
         return "no `if:`: the job runs on every ref"
-    expr = _unwrap(str(condition))
+    raw = str(condition)
+    if "#" in raw:
+        return f"`if: {raw!r}` holds a `#`: where the value ends depends on who reads it"
+    expr = raw
+    if "${{" in raw:
+        whole = re.fullmatch(r"\$\{\{(.*)\}\}", raw, re.DOTALL)
+        if not whole or "${{" in whole.group(1) or "}}" in whole.group(1):
+            return f"`if: {raw!r}`: text around `${{{{ }}}}` makes a string, which is always true"
+        expr = whole.group(1)
+    if re.search(r"\b(always|cancelled|failure|success)\s*\(", expr):
+        return f"`if: {raw!r}` calls a status function: the job would run whatever its needs did"
+    expr = _unwrap(expr)
     if len(_top_level(expr, "||")) > 1:
-        return f"`if: {condition}` puts the tag guard under ||"
+        return f"`if: {raw!r}` puts the tag guard under ||"
     if GUARD not in (_unwrap(part) for part in _top_level(expr, "&&")):
-        return f"`if: {condition}` has no top-level {GUARD}"
+        return f"`if: {raw!r}` has no top-level {GUARD}"
     return ""
-
-
-def _uses(step) -> tuple:
-    """(action without its ref, ref) of a `uses:` step, or ('', '')."""
-    uses = step.get("uses") if isinstance(step, dict) else None
-    if not uses:
-        return "", ""
-    action, _, ref = str(uses).partition("@")
-    return action, ref
 
 
 def publishing_steps(steps) -> list:
@@ -442,12 +616,15 @@ def publishing_steps(steps) -> list:
         if any(action == a or action.startswith(a + "/") for a in PUBLISHING_ACTIONS):
             found.append((index, action))
             continue
-        for line in _code_lines(str(step.get("run") or "")):
+        for line in _code_lines(step.get("run")):
+            found += [(index, what) for tool, subcommands, what in PUBLISHING_TOOLS
+                      if _invokes(line, tool, subcommands)]
             for pattern, what in PUBLISHING_RUN:
-                if not pattern.search(line) or "--dry-run" in line:
+                if not pattern.search(line):
                     continue
-                if what == "napi pre-publish" and "--skip-optional-publish" in line and \
-                        re.search(r"--no-gh-release\b|--gh-release[= ]false\b", line):
+                if what == "napi pre-publish" and ("--dry-run" in line or (
+                        "--skip-optional-publish" in line and
+                        re.search(r"--no-gh-release\b|--gh-release[= ]false\b", line))):
                     continue  # writes optionalDependencies, uploads nothing
                 found.append((index, what))
     return found
@@ -462,36 +639,45 @@ def _write_permissions(perms) -> list:
 
 
 def _unlocked(line: str):
-    """(code, message) when a run line fetches an unlocked dependency, else None."""
+    """(code, message) when a run line fetches or runs an unlocked dependency, else None."""
     if re.search(r"\b(flutter|dart)\s+pub\s+(get|upgrade|add|downgrade)\b", line) and \
             "--enforce-lockfile" not in line:
         return "unlocked-pub-get", f"`{line}` resolves without --enforce-lockfile"
-    if re.search(r"\bnpm\s+(install|i|add|update|up|exec)\b", line):
-        return "unlocked-install", f"`{line}`: npm without a lockfile (`npm ci` is the locked form)"
-    if re.search(r"\bpnpm\s+(install|i|add|update|up)\b", line) and not re.search(r"--frozen-lockfile(\s|$)", line):
+    if re.search(r"\b(flutter|dart)\s+pub\s+(global|run)\b|\bdart\s+run\b", line):
+        return "unlocked-install", f"`{line}` runs package code fetched on demand"
+    if _invokes(line, "npm", NPM_FETCH):
+        return "unlocked-install", f"`{line}`: npm fetches without a lockfile (`npm ci` is the locked form)"
+    if _invokes(line, "pnpm", {"install", "i", "add", "update", "up"}) and \
+            not re.search(r"--frozen-lockfile(\s|$)", line):
         return "unlocked-install", f"`{line}`: pnpm without --frozen-lockfile"
-    if re.search(r"\b(npx|pnpx|bunx)\b|\b(pnpm|yarn)\s+dlx\b", line):
+    if re.search(r"\b(npx|pnpx|bunx)\b", line) or _invokes(line, "pnpm", {"dlx"}) or _invokes(line, "yarn", {"dlx"}):
         return "unlocked-install", f"`{line}` fetches a package on demand"
     if re.search(r"\byarn\b", line) and not re.search(r"--(immutable|frozen-lockfile)\b", line):
         return "unlocked-install", f"`{line}`: yarn without --immutable"
-    if re.search(r"\bpip3?\s+install\b|\bpython3?\s+-m\s+pip\s+install\b|\bpipx\b", line) and \
-            "--require-hashes" not in line:
+    if re.search(r"\bcorepack\b", line):
+        return "unlocked-install", f"`{line}`: corepack fetches package managers on demand"
+    if re.search(r"\bpip3?\s+install\b|\bpython[\d.]*\s+-m\s+pip\s+install\b|\buv\s+pip\s+install\b", line) and \
+            "--require-hashes" not in line or re.search(r"\bpipx\b", line):
         return "unlocked-install", f"`{line}`: pip without --require-hashes"
-    if re.search(r"\bcargo\s+install\b", line) and not (
-            "--locked" in line and re.search(r"--version[= ]=?\d+\.\d+\.\d+", line)):
+    if re.search(r"\buvx\b", line) or _invokes(line, "uv", {"tool"}):
+        return "unlocked-install", f"`{line}` fetches a tool on demand"
+    if _invokes(line, "cargo", {"binstall"}):
+        return "unlocked-install", f"`{line}`: cargo binstall downloads a prebuilt binary"
+    if _invokes(line, "cargo", {"install"}) and not (
+            "--locked" in _words(line) and re.search(r"--version[= ]=?\d+\.\d+\.\d+\b", line)):
         return "unlocked-install", f"`{line}`: cargo install needs --locked and an exact --version"
     if re.search(r"\b(gem|go)\s+(install|get)\b", line):
         return "unlocked-install", f"`{line}`"
-    if re.search(r"\b(curl|wget)\b.*\|\s*(sudo\s+)?(ba|z)?sh\b", line):
-        return "unlocked-install", f"`{line}` pipes a download into a shell"
+    if re.search(r"\b(curl|wget)\b.*\|\s*(sudo\s+)?((ba|z|da)?sh|python3?|node)\b", line):
+        return "unlocked-install", f"`{line}` pipes a download into an interpreter"
     return None
 
 
 def _toolchain_findings(step) -> list:
-    """Floating-toolchain findings of one step of a privileged job."""
+    """Floating-tool findings of one step of a privileged job."""
     found = []
     action, ref = _uses(step)
-    inputs = step.get("with") or {}
+    inputs = step.get("with") if isinstance(step.get("with"), dict) else {}
     if action == "dtolnay/rust-toolchain" and \
             re.sub(r"\s+", "", str(inputs.get("toolchain", ref))) != "${{env.RUST_TOOLCHAIN}}":
         found.append(("floating-rust", f"{action} toolchain {inputs.get('toolchain', ref)!r}, not RUST_TOOLCHAIN"))
@@ -510,34 +696,62 @@ def _toolchain_findings(step) -> list:
             found.append(("floating-runtime", f"{action}@{ref}: a version line needs the action pinned by SHA"))
         if not re.fullmatch(r"\d+" if node else r"\d+\.\d+", version) and not EXACT.fullmatch(version):
             found.append(("floating-runtime", f"{action} {key} {version!r}: a release line or an exact version"))
-    for line in _code_lines(str(step.get("run") or "")):
+    name = action.rsplit("/", 1)[-1]
+    if action and action not in SPECIFIC_SETUP and (name.startswith("setup-") or name.endswith("-setup")):
+        versions = {k: str(v).strip() for k, v in inputs.items() if k.endswith("version") or k in ("sdk", "toolchain")}
+        if not versions or not all(EXACT.fullmatch(v) for v in versions.values()):
+            found.append(("floating-tool", f"{action} {versions or 'with no version input'}: an exact x.y.z"))
+    if action == "taiki-e/install-action":
+        tools = [tool.strip() for tool in str(inputs.get("tool", "")).split(",") if tool.strip()]
+        loose = [tool for tool in tools if not re.fullmatch(r"[A-Za-z0-9_.-]+@\d+\.\d+\.\d+", tool)]
+        if not tools or loose:
+            found.append(("floating-tool", f"install-action tool {inputs.get('tool')!r}: every tool at @x.y.z"))
+    for line in _code_lines(step.get("run")):
         for match in re.finditer(r"\brustup\s+(?:toolchain\s+install|default|override\s+set|run)\s+(\S+)", line):
             if match.group(1).strip("\"'{}$") != "RUST_TOOLCHAIN":
                 found.append(("floating-rust", f"`{line}` names {match.group(1)}, not $RUST_TOOLCHAIN"))
+        if re.search(r"\b(RUST_TOOLCHAIN|RUSTUP_TOOLCHAIN)=|\bRUSTUP_TOOLCHAIN\b", line):
+            found.append(("floating-rust", f"`{line}` sets the toolchain in a script, where no check can resolve it"))
+        if re.search(r"rust-toolchain(\.toml)?\b", line):
+            found.append(("floating-rust", f"`{line}`: a rust-toolchain file outranks `rustup default`"))
     return found
 
 
-# The resolved versions a job relying on the setup-node/-python relaxation prints.
-PRINTED = {
-    "actions/setup-node": ("`node --version` and `npm --version`",
-                           (re.compile(r"\bnode --version\b"), re.compile(r"\bnpm --version\b"))),
-    "actions/setup-python": ("`python --version` and `pip --version`",
-                             (re.compile(r"\bpython3? --version\b"), re.compile(r"\bpip3? --version\b"))),
-}
+def _images(job: dict) -> list:
+    """(where, image) of the job's container and service images."""
+    found = []
+    container = job.get("container")
+    if container is not None:
+        found.append(("container", str(container.get("image") if isinstance(container, dict) else container)))
+    services = job.get("services")
+    for name, service in (services.items() if isinstance(services, dict) else []):
+        found.append((f"service {name}", str(service.get("image") if isinstance(service, dict) else service)))
+    return found
 
 
-def check_job(workflow: str, job_id: str, job: dict) -> list:
-    steps = job.get("steps") or []
+def _block(script) -> str:
+    return "\n".join(line.rstrip() for line in str(script or "").strip().splitlines())
+
+
+def check_job(workflow: str, job_id: str, job: dict, wf: dict) -> list:
+    steps = _steps(job)
     publishing = publishing_steps(steps)
     if not publishing and not _write_permissions(job.get("permissions")):
         return []
     out: list = []
 
-    def flag(code: str, message: str) -> None:
-        out.append(Finding(workflow, job_id, code, message))
+    def flag(code: str, message: str, step: int = -1) -> None:
+        out.append(Finding(workflow, job_id, code, message, step))
 
     if problem := guarded(job.get("if")):
         flag("guard", problem)
+    needs = job.get("needs")
+    needs = [needs] if isinstance(needs, str) else [str(n) for n in needs or []]
+    inspection = INSPECTION.get((workflow, job_id))
+    if inspection is None:
+        flag("needs", "a publishing job with no inspection job declared (INSPECTION)")
+    elif inspection not in needs or inspection not in wf["jobs"]:
+        flag("needs", f"needs {needs}: must include {inspection!r}, the job that inspects what this one uploads")
     env = job.get("environment")
     env_name = env.get("name") if isinstance(env, dict) else env
     if env_name not in ENVIRONMENTS:
@@ -555,30 +769,71 @@ def check_job(workflow: str, job_id: str, job: dict) -> list:
                     ((scope, level) == ("id-token", "write") and registry):
                 continue
             flag("permissions", f"`{scope}: {level}` is more than this job needs")
-    if "secrets." in _text(job):
-        flag("secrets", "reads a repository secret")
-    for step in steps:
+    for where, image in _images(job):
+        if not DIGEST.search(image):
+            flag("container", f"{where} image {image!r} is not pinned by @sha256 digest")
+    for where, defaults in (("workflow", wf.get("defaults")), ("job", job.get("defaults"))):
+        shell = (defaults.get("run") or {}).get("shell") if isinstance(defaults, dict) else None
+        if shell is not None and str(shell) != "bash":
+            flag("shell", f"{where} defaults run every script through {shell!r}, not bash")
+    for level, env_map in (("job", job.get("env")), *((f"step {i + 1}", s.get("env")) for i, s in enumerate(steps))):
+        if env_map is not None and not isinstance(env_map, dict):
+            flag("floating-rust", f"{level} env {env_map!r} is not a mapping: no check can resolve it")
+    for i, step in enumerate(steps):
+        uses = step.get("uses")
         action, ref = _uses(step)
-        if action and not (action.startswith(("./", "docker://", "actions/")) or SHA.fullmatch(ref)):
-            flag("unpinned-action", f"{action}@{ref} is not pinned by commit SHA")
-        if action.startswith("docker://") and "@sha256:" not in str(step.get("uses")):
-            flag("unpinned-action", f"{step.get('uses')} is not pinned by digest")
+        if uses is not None:
+            if str(uses).startswith("./"):
+                flag("local-action", f"{uses}: a local action's steps are not judged here", i)
+            elif str(uses).startswith("docker://"):
+                if not DIGEST.search(str(uses)):
+                    flag("unpinned-action", f"{uses} is not pinned by digest", i)
+            elif not SHA.fullmatch(ref):
+                flag("unpinned-action", f"{uses} is not pinned by commit SHA", i)
+        if action == "actions/checkout" and str((step.get("with") or {}).get("persist-credentials")) != "false":
+            flag("persist-credentials", "actions/checkout without `persist-credentials: false` leaves the job "
+                                        "token in .git/config for every later step", i)
+        if step.get("shell") is not None and str(step["shell"]) != "bash":
+            flag("shell", f"step shell {step['shell']!r}, not bash", i)
+        if "${{" in str(step.get("run") or ""):
+            flag("expression", "a `${{ }}` interpolated into a script: pass the value through env", i)
         for code, message in _toolchain_findings(step):
-            flag(code, message)
-        for line in _code_lines(str(step.get("run") or "")):
+            flag(code, message, i)
+        rust = _resolve("RUST_TOOLCHAIN", step.get("env"), job.get("env"), wf.get("env"))
+        if "RUST_TOOLCHAIN" in _text(step) and not EXACT.fullmatch(str(rust or "")):
+            flag("floating-rust", f"RUST_TOOLCHAIN resolves to {rust!r} for this step (step > job > workflow "
+                                  "env), not an exact x.y.z", i)
+        for line in _code_lines(step.get("run")):
             if hit := _unlocked(line):
-                flag(*hit)
-            if re.search(r"\bcargo\s+publish\b", line) and not ("--locked" in line and "--no-verify" in line):
-                flag("cargo-publish", f"`{line}` needs --locked --no-verify (the package job verified this commit)")
+                flag(*hit, i)
+            if _invokes(line, "cargo", {"publish"}) and not {"--locked", "--no-verify"} <= set(_words(line)):
+                flag("cargo-publish", f"`{line}` needs --locked --no-verify (the package job verified this commit)",
+                     i)
+            if _invokes(line, "npm", NPM_UPLOAD):
+                words = _words(line)
+                if not {"--ignore-scripts", "--ignore-scripts=true"} & set(words) or \
+                        not any(TGZ_ARG.fullmatch(word) for word in words):
+                    flag("npm-publish", f"`{line}`: npm publish takes the inspected tarball (`*.tgz`, or a variable "
+                                        "named *tgz) and --ignore-scripts", i)
+            for tool in ("pnpm", "yarn", "bun"):
+                if _invokes(line, tool, {"publish"}):
+                    flag("npm-publish", f"`{line}`: {tool} publish packs a directory and runs its scripts; upload "
+                                        "the inspected tarball with npm publish --ignore-scripts", i)
+    for level, env_map in (("job", job.get("env")), *((f"step {i + 1}", s.get("env")) for i, s in enumerate(steps))):
+        value = env_map.get("RUST_TOOLCHAIN") if isinstance(env_map, dict) else None
+        if value is not None and not EXACT.fullmatch(str(value)):
+            flag("floating-rust", f"{level} env RUST_TOOLCHAIN {value!r} is not an exact x.y.z")
     checkout = next((i for i, step in enumerate(steps) if _uses(step)[0] == "actions/checkout"), None)
-    if checkout is None or checkout + 1 >= len(steps) or not GATE.search(str(steps[checkout + 1].get("run") or "")):
-        flag("gate", "the first step after the checkout must be `package-inspect.py versions --tag`")
+    gate = steps[checkout + 1] if checkout is not None and checkout + 1 < len(steps) else {}
+    if set(gate) - {"run", "name", "working-directory"} or str(gate.get("run", "")).strip() != GATE_RUN:
+        flag("gate", f"the first step after the checkout must be exactly `{GATE_RUN}`, with no other key")
     first_publish = min((i for i, _ in publishing), default=len(steps))
-    for runtime, (label, needles) in PRINTED.items():
-        if any(_uses(step)[0] == runtime for step in steps) and not any(
-                all(n.search(str(step.get("run") or "")) for n in needles) for step in steps[:first_publish]):
-            flag("versions-printed", f"{runtime}: print the resolved versions ({label}) in one step "
-                                     "before the first publishing step")
+    for runtime, block in PRINTED.items():
+        setups = [i for i, step in enumerate(steps) if _uses(step)[0] == runtime]
+        if setups and not any(set(step) <= {"name", "run"} and _block(step.get("run")) == block
+                              for step in steps[max(setups) + 1:first_publish]):
+            flag("versions-printed", f"{runtime}: print the resolved versions exactly as PRINTED says, in a step "
+                                     "after the setup and before the first publishing step")
     concurrency = job.get("concurrency")
     group = concurrency.get("group") if isinstance(concurrency, dict) else concurrency
     cancels = str(concurrency.get("cancel-in-progress", "false")) if isinstance(concurrency, dict) else "false"
@@ -587,32 +842,50 @@ def check_job(workflow: str, job_id: str, job: dict) -> list:
     return out
 
 
+def _mentions_secrets(node) -> bool:
+    if isinstance(node, dict):
+        return any(key == "secrets" or _mentions_secrets(key) or _mentions_secrets(value)
+                   for key, value in node.items())
+    if isinstance(node, list):
+        return any(_mentions_secrets(value) for value in node)
+    return node is not None and bool(re.search(r"\bsecrets\b", str(node)))
+
+
 def check(workflows: pathlib.Path) -> tuple:
     """(findings, privileged jobs judged, stale waivers); a YamlError propagates."""
-    findings, judged, waived = [], [], set()
-    for path in sorted(workflows.glob("*.yml")):
-        try:
-            wf = load_yaml(path.read_text())
-        except YamlError as err:
-            raise YamlError(f"{path.name}: {err}") from err
-        if not isinstance(wf, dict) or not isinstance(wf.get("jobs"), dict):
-            raise YamlError(f"{path.name}: no jobs map")
+    findings, judged, stale, visited = [], [], [], set()
+    findings += [Finding(name, "(directory)", "workflow-file", "not a *.yml or *.yaml workflow: GitHub reads both, "
+                         "and nothing else belongs here") for name in workflow_files(workflows)[1]]
+    for name, wf in load_workflows(workflows):
         top = wf.get("permissions")
         if not (isinstance(top, dict) and not _write_permissions(top)) and top != "read-all":
-            findings.append(Finding(path.name, "(workflow)", "permissions",
+            findings.append(Finding(name, "(workflow)", "permissions",
                                     f"top-level permissions must be read-only, got {top!r}"))
+        if _mentions_secrets({key: value for key, value in wf.items() if key != "jobs"}):
+            findings.append(Finding(name, "(workflow)", "secrets", "references the secrets context"))
         for job_id, job in wf["jobs"].items():
-            job = job or {}
-            if publishing_steps(job.get("steps") or []) or _write_permissions(job.get("permissions")):
-                judged.append(f"{path.name} › {job_id}")
-            waivers = EXCEPTIONS.get((path.name, job_id), {})
-            for finding in check_job(path.name, job_id, job):
-                if finding.code in waivers:
-                    finding.waived = waivers[finding.code]
-                    waived.add((path.name, job_id, finding.code))
-                findings.append(finding)
-    stale = [f"{wf} › {job}: {code}" for (wf, job), codes in EXCEPTIONS.items()
-             for code in codes if (wf, job, code) not in waived]
+            job = job if isinstance(job, dict) else {}
+            if _mentions_secrets(job):
+                findings.append(Finding(name, job_id, "secrets", "references the secrets context"))
+            uses = job.get("uses")
+            local = re.fullmatch(r"\./\.github/workflows/([^/@]+\.ya?ml)", str(uses))
+            if uses is not None and not (local and (workflows / local.group(1)).is_file()):
+                findings.append(Finding(name, job_id, "reusable-workflow",
+                                        f"`uses: {uses}`: only a local workflow of this directory, which is read"))
+            if publishing_steps(_steps(job)) or _write_permissions(job.get("permissions")):
+                judged.append(f"{name} › {job_id}")
+            found = check_job(name, job_id, job, wf)
+            steps = _steps(job)
+            visited.add((name, job_id))
+            for code, step, reason in EXCEPTIONS.get((name, job_id), ()):
+                hit = next((f for f in found if f.code == code and not f.waived and 0 <= f.step < len(steps)
+                            and steps[f.step] == step), None)
+                if hit:
+                    hit.waived = reason
+                else:
+                    stale.append(f"{name} › {job_id}: {code} on {step}")
+            findings += found
+    stale += [f"{wf} › {job}: no such job" for wf, job in EXCEPTIONS if (wf, job) not in visited]
     return findings, judged, stale
 
 
@@ -626,10 +899,11 @@ def report(workflows: pathlib.Path) -> int:
     print(f"privileged jobs ({len(judged)}): {', '.join(judged) or 'none'}")
     for finding in findings:
         where = f"{finding.workflow} › {finding.job}"
+        step = f" (step {finding.step + 1})" if finding.step >= 0 else ""
         if finding.waived:
-            print(f"  waived  {where} [{finding.code}] {finding.message} — named exception: {finding.waived}")
+            print(f"  waived  {where} [{finding.code}]{step} {finding.message} — named exception: {finding.waived}")
             continue
-        print(f"  FAIL    {where} [{finding.code}] {finding.message}")
+        print(f"  FAIL    {where} [{finding.code}]{step} {finding.message}")
         if annotate:
             print(f"::error file=.github/workflows/{finding.workflow},title=publish guard::{where}: {finding.message}")
     for entry in stale:
@@ -640,114 +914,586 @@ def report(workflows: pathlib.Path) -> int:
     return 1 if failed or stale else 0
 
 
+# ---------------------------------------------------------------- toolchain policy
+
+
+def _msrv(root: pathlib.Path):
+    manifest = tomllib.loads((root / "Cargo.toml").read_text())
+    return manifest.get("workspace", {}).get("package", {}).get("rust-version")
+
+
+def _same_version(a, b) -> bool:
+    def norm(v):
+        return re.sub(r"(\.0)+$", "", str(v).strip().strip("\"'"))
+    return b is not None and norm(a) == norm(b)
+
+
+def toolchain_files(root: pathlib.Path) -> list:
+    """Every rust-toolchain(.toml) under ROOT: git's view (tracked and
+    untracked, not ignored) when ROOT is a work tree's top, else the files."""
+    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=root, capture_output=True, text=True)
+    if top.returncode == 0 and pathlib.Path(top.stdout.strip()).resolve() == root.resolve():
+        listed = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=root,
+                                capture_output=True, check=True).stdout.decode().split("\0")
+    else:
+        listed = [str(path.relative_to(root)) for path in root.rglob("*") if path.is_file()]
+    return sorted(name for name in listed if pathlib.PurePosixPath(name).name in ("rust-toolchain",
+                                                                                  "rust-toolchain.toml"))
+
+
+def check_toolchains(root: pathlib.Path, workflows: pathlib.Path) -> tuple:
+    """(findings, the RUST_TOOLCHAIN values seen); a YamlError propagates."""
+    findings, pins, msrv = [], {}, _msrv(root)
+
+    def flag(workflow: str, job: str, code: str, message: str) -> None:
+        findings.append(Finding(workflow, job, code, message))
+
+    for name, wf in load_workflows(workflows):
+        envs = [("(workflow)", wf.get("env"))]
+        for job_id, job in wf["jobs"].items():
+            job = job if isinstance(job, dict) else {}
+            envs.append((job_id, job.get("env")))
+            for i, step in enumerate(_steps(job)):
+                where = f"{job_id} (step {i + 1})"
+                envs.append((where, step.get("env")))
+                action, ref = _uses(step)
+                inputs = step.get("with") if isinstance(step.get("with"), dict) else {}
+                toolchain = inputs.get("toolchain")
+                named = toolchain is not None and re.sub(r"\s+", "", str(toolchain)) in NAMED_INPUTS
+                if action == "dtolnay/rust-toolchain":
+                    if re.fullmatch(r"\d+\.\d+(\.\d+)?", ref):
+                        if not _same_version(ref, msrv) or (toolchain is not None and not _same_version(toolchain,
+                                                                                                    msrv)):
+                            flag(name, where, "leg", f"rust-toolchain@{ref}: the one literal is the MSRV leg, at "
+                                                     f"the rust-version {msrv} the root manifest declares")
+                    elif re.fullmatch(r"(stable|beta|nightly)([-.].*)?", ref):
+                        flag(name, where, "leg", f"rust-toolchain@{ref}: a moving channel; name RUST_TOOLCHAIN")
+                    elif toolchain is None:
+                        flag(name, where, "leg", f"rust-toolchain@{ref} names no toolchain input: the ref decides "
+                                                 "which Rust it installs")
+                    elif not named and not (SHA.fullmatch(ref) and _same_version(toolchain, msrv)):
+                        flag(name, where, "leg", f"rust-toolchain toolchain {toolchain!r}: name RUST_TOOLCHAIN "
+                                                 "(or, SHA-pinned, the MSRV leg's rust-version)")
+                for key in ("toolchain", "rust-toolchain"):
+                    value = inputs.get(key)
+                    if action != "dtolnay/rust-toolchain" and value is not None and \
+                            re.sub(r"\s+", "", str(value)) not in NAMED_INPUTS:
+                        flag(name, where, "leg", f"{action} {key} {value!r}: name RUST_TOOLCHAIN")
+                for line in _code_lines(step.get("run")):
+                    if re.search(r"\b(RUST_TOOLCHAIN|FUZZ_TOOLCHAIN|RUSTUP_TOOLCHAIN)=", line):
+                        flag(name, where, "script", f"`{line}` assigns a toolchain in a script")
+                    elif re.search(r"\bRUSTUP_TOOLCHAIN\b", line):
+                        flag(name, where, "leg", f"`{line}`: RUSTUP_TOOLCHAIN overrides every leg")
+                    if re.search(r"rust-toolchain(\.toml)?\b", line):
+                        flag(name, where, "file", f"`{line}`: a rust-toolchain file outranks `rustup default`")
+                    named_args = [m.group(1) for m in re.finditer(
+                        r"\brustup\s+(?:toolchain\s+(?:install|add)|install|default|override\s+set|run|update)\s+(\S+)",
+                        line)]
+                    named_args += [m.group(1) for m in re.finditer(r"--toolchain[= ](\S+)", line)]
+                    words = line.split()
+                    named_args += [word for previous, word in zip(words, words[1:])
+                                   if re.search(r"(?:^|/)(cargo|rustc|rustdoc)$", previous.strip("\"'"))
+                                   and word.strip("\"'").startswith("+")]
+                    for arg in named_args:
+                        if not NAMED_VARIABLE.fullmatch(arg.strip("\"'").lstrip("+").strip("\"'")):
+                            flag(name, where, "leg", f"`{line}` names {arg}, not $RUST_TOOLCHAIN or $FUZZ_TOOLCHAIN")
+        for where, env in envs:
+            if env is None:
+                continue
+            if not isinstance(env, dict):
+                flag(name, where, "pin", f"env {env!r} is not a mapping: no check can read its toolchain")
+                continue
+            if "RUST_TOOLCHAIN" in env:
+                pins.setdefault(str(env["RUST_TOOLCHAIN"]), []).append(f"{name} › {where}")
+            if "FUZZ_TOOLCHAIN" in env and not re.fullmatch(r"nightly-\d{4}-\d{2}-\d{2}", str(env["FUZZ_TOOLCHAIN"])):
+                flag(name, where, "fuzz-pin", f"FUZZ_TOOLCHAIN {env['FUZZ_TOOLCHAIN']!r} is not a dated "
+                                              "nightly-YYYY-MM-DD")
+            if "RUSTUP_TOOLCHAIN" in env:
+                flag(name, where, "leg", "env RUSTUP_TOOLCHAIN overrides every leg's toolchain")
+    if len(pins) != 1:
+        flag("(all)", "(all)", "pin", f"RUST_TOOLCHAIN must hold one value across every workflow, got "
+                                      f"{ {value: len(places) for value, places in pins.items()} }")
+    for value, places in pins.items():
+        if not EXACT.fullmatch(value):
+            flag("(all)", "(all)", "pin", f"RUST_TOOLCHAIN {value!r} is not an exact x.y.z ({', '.join(places)})")
+    for path in toolchain_files(root):
+        flag("(tree)", path, "file", "a rust-toolchain file outranks RUST_TOOLCHAIN for every build below it")
+    return findings, pins
+
+
+def report_toolchains(root: pathlib.Path, workflows: pathlib.Path) -> int:
+    try:
+        findings, pins = check_toolchains(root, workflows)
+    except YamlError as err:
+        print(f"check-publish-guards --toolchains: cannot judge — {err}", file=sys.stderr)
+        return 2
+    annotate = bool(os.environ.get("GITHUB_ACTIONS"))
+    print(f"RUST_TOOLCHAIN: {', '.join(f'{v} ({len(p)})' for v, p in pins.items()) or 'none'} · "
+          f"MSRV leg: {_msrv(root)}")
+    for finding in findings:
+        print(f"  FAIL    {finding.workflow} › {finding.job} [{finding.code}] {finding.message}")
+        if annotate:
+            print(f"::error title=one Rust toolchain::{finding.workflow} › {finding.job}: {finding.message}")
+    print(f"{len(findings)} violation(s)")
+    return 1 if findings else 0
+
+
 # ---------------------------------------------------------------- self-test
 
+PIN = "e2a55d2ffb04f378e9626c28d38b36d230d1e12f"
+CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
+GATE_STEP = f"      - run: {GATE_RUN}\n"
 PRINT_STEP = """\
       - name: node + npm versions (npm >= 11.5.1 for trusted publishing)
         run: |
           node --version
           v=$(npm --version)
+          echo "npm $v"
+          if [ "$(printf '%s\\n' 11.5.1 "$v" | sort -V | head -n1)" != 11.5.1 ]; then
+            echo "::error::npm $v cannot publish through trusted publishing (needs >= 11.5.1)"
+            exit 1
+          fi
 """
-# Mutations of the real workflows: (name, file, old, new, expected exit, needle).
-# The real tree passes; each mutated copy must fail with the needle printed.
+CRATES_IF = ("    if: startsWith(github.ref, 'refs/tags/v')\n    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n"
+             "    environment: crates-io")
+PY_IF = "    if: startsWith(github.ref, 'refs/tags/v')\n    needs: [test, inspect]"
+IOS_IF = "    if: startsWith(github.ref, 'refs/tags/v')\n    runs-on: ubuntu-24.04\n    environment: release"
+RUSTUP_STEP = "      - name: Rust ${{ env.RUST_TOOLCHAIN }} through rustup\n        run: |\n"
+REINSPECT = "      - name: re-inspect the release set about to be uploaded\n"
+WASM_TAIL = "      # the very tarball build-wasm packed, smoke-tested and inspected\n"
+NATIVE_PUBLISH = '                if out=$(npm publish "$tgz" --access public --ignore-scripts 2>&1); then'
+WASM_PUBLISH = ('              echo "publishing $name@$version"\n'
+                '              if out=$(npm publish "$tgz" --access public --ignore-scripts 2>&1); then')
+PYPI = "      - uses: pypa/gh-action-pypi-publish"
+FLUTTER_PUBLISH = "      - name: publish (OIDC)\n"
+EXTRA_PUBLISHER = """\
+name: release
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: someone/some-action@main
+      - run: npx some-tool
+      - run: npm publish --access public
+      - run: gh release create v0 x.zip
+"""
+SNEAKY_PNPM = """
+  sneaky:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: pnpm publish --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+"""
+SNEAKY_CARGO = """
+  sneaky:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          cargo \\
+            publish -p qrcode-ai-scanner
+"""
+OIDC_PNPM = """
+  sneaky:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    environment: npm
+    concurrency:
+      group: publish-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet
+      - run: pnpm publish --no-git-checks
+"""
+REUSABLE = """
+  elsewhere:
+    uses: someone/workflows/.github/workflows/publish.yml@main
+    secrets: inherit
+"""
+ALL_WORKFLOWS = ("ci.yml", "crates-publish.yml", "deep-checks.yml", "flutter.yml", "mobile.yml", "npm-publish.yml",
+                 "python.yml", "toolchain-probe.yml")
+PIN_LINE = '  RUST_TOOLCHAIN: "1.97.0"\n'
+
+# (name, mode, edits [(workflow, old, new)], extra files {path: text}, exit, needle).
+# The real tree passes both modes; each mutated copy must exit as said, with
+# the needle printed.
+P, T = "publish", "toolchains"
 MUTATIONS = (
-    ("tag guard removed", "crates-publish.yml", "    if: startsWith(github.ref, 'refs/tags/v')\n    runs-on: ubuntu-24.04\n"
-     "    timeout-minutes: 30\n    environment: crates-io", "    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n"
-     "    environment: crates-io", 1, "crates-publish.yml › publish [guard]"),
-    ("tag guard under ||", "python.yml", "    if: startsWith(github.ref, 'refs/tags/v')\n    needs: [test, inspect]",
-     "    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'\n"
-     "    needs: [test, inspect]", 1, "under ||"),
-    ("tag guard negated", "mobile.yml", "    if: startsWith(github.ref, 'refs/tags/v')\n    runs-on: ubuntu-24.04\n"
-     "    environment: release", "    if: \"!startsWith(github.ref, 'refs/tags/v')\"\n    runs-on: ubuntu-24.04\n"
-     "    environment: release", 1, "mobile.yml › ios-release [guard]"),
-    ("environment removed", "crates-publish.yml", "    environment: crates-io\n", "", 1,
+    # -- the tag guard, raw
+    ("tag guard removed", P, [("crates-publish.yml", CRATES_IF, CRATES_IF.split("\n", 1)[1])], {}, 1,
+     "crates-publish.yml › publish [guard]"),
+    ("tag guard under ||", P, [("python.yml", PY_IF, PY_IF.replace("'refs/tags/v')", "'refs/tags/v') || "
+                                "github.event_name == 'workflow_dispatch'"))], {}, 1, "under ||"),
+    ("tag guard negated", P, [("mobile.yml", IOS_IF, IOS_IF.replace("if: startsWith(github.ref, 'refs/tags/v')",
+                                                                    "if: \"!startsWith(github.ref, 'refs/tags/v')\""))],
+     {}, 1, "mobile.yml › ios-release [guard]"),
+    ("guard as a literal block, ${{ }} and a newline", P, [("crates-publish.yml", CRATES_IF, CRATES_IF.replace(
+        "    if: startsWith(github.ref, 'refs/tags/v')", "    if: |\n      ${{ startsWith(github.ref, 'refs/tags/v') }}"))],
+     {}, 1, "crates-publish.yml › publish [guard]"),
+    ("guard in ${{ }} followed by && true", P, [("python.yml", PY_IF, PY_IF.replace(
+        "if: startsWith(github.ref, 'refs/tags/v')", "if: ${{ startsWith(github.ref, 'refs/tags/v') }} && true"))],
+     {}, 1, "python.yml › release [guard]"),
+    ("guard in ${{ }} followed by && success()", P, [("python.yml", PY_IF, PY_IF.replace(
+        "if: startsWith(github.ref, 'refs/tags/v')", "if: ${{ startsWith(github.ref, 'refs/tags/v') }} && success()"))],
+     {}, 1, "python.yml › release [guard]"),
+    ("guard in ${{ }} with a trailing space", P, [("mobile.yml", IOS_IF, IOS_IF.replace(
+        "if: startsWith(github.ref, 'refs/tags/v')", "if: \"${{ startsWith(github.ref, 'refs/tags/v') }} \""))],
+     {}, 1, "mobile.yml › ios-release [guard]"),
+    ("guard behind a # the reader and YAML split differently", P, [("crates-publish.yml", CRATES_IF, CRATES_IF.replace(
+        "if: startsWith(github.ref, 'refs/tags/v')",
+        "if: contains('a \"', 'a') #\" && startsWith(github.ref, 'refs/tags/v')"))], {}, 1,
+     "crates-publish.yml › publish [guard]"),
+    ("guard && !cancelled(): runs when inspect failed", P, [("python.yml", PY_IF, PY_IF.replace(
+        "'refs/tags/v')", "'refs/tags/v') && !cancelled()"))], {}, 1, "calls a status function"),
+    ("guard && always()", P, [("crates-publish.yml", CRATES_IF, CRATES_IF.replace(
+        "'refs/tags/v')", "'refs/tags/v') && always()"))], {}, 1, "calls a status function"),
+    # -- the inspection job
+    ("crates publish no longer needs package", P, [("crates-publish.yml", "  publish:\n    needs: package\n",
+                                                    "  publish:\n")], {}, 1, "crates-publish.yml › publish [needs]"),
+    ("python release needs test only", P, [("python.yml", PY_IF, PY_IF.replace("[test, inspect]", "[test]"))], {}, 1,
+     "python.yml › release [needs]"),
+    ("a publishing job with no declared inspection job", P, [("npm-publish.yml", None, OIDC_PNPM)], {}, 1,
+     "npm-publish.yml › sneaky [needs]"),
+    # -- environment, permissions
+    ("environment removed", P, [("crates-publish.yml", "    environment: crates-io\n", "")], {}, 1,
      "crates-publish.yml › publish [environment]"),
-    ("environment renamed pub.dev", "flutter.yml", "    environment: pub\n", "    environment: pub.dev\n", 1,
-     "[environment]"),
-    ("packages: write added", "crates-publish.yml", "      id-token: write # crates.io trusted publishing (OIDC)",
-     "      id-token: write # crates.io trusted publishing (OIDC)\n      packages: write", 1, "`packages: write`"),
-    ("contents: write without gh release", "python.yml", "      contents: read\n      id-token: write # trusted "
-     "publishing", "      contents: write\n      id-token: write # trusted publishing", 1, "`contents: write`"),
-    ("id-token on the GitHub-release job", "mobile.yml", "      contents: write # create the GitHub release + attach "
-     "the asset", "      contents: write # create the GitHub release + attach the asset\n      id-token: write", 1,
+    ("environment renamed pub.dev", P, [("flutter.yml", "    environment: pub\n", "    environment: pub.dev\n")],
+     {}, 1, "[environment]"),
+    ("environment by expression", P, [("crates-publish.yml", "    environment: crates-io\n",
+                                       "    environment: ${{ 'crates-io' }}\n")], {}, 1, "[environment]"),
+    ("packages: write added", P, [("crates-publish.yml", "      id-token: write # crates.io trusted publishing (OIDC)",
+                                   "      id-token: write # crates.io trusted publishing (OIDC)\n      packages: write")],
+     {}, 1, "`packages: write`"),
+    ("contents: write without gh release", P, [("python.yml", "      contents: read\n      id-token: write # trusted "
+                                                "publishing", "      contents: write\n      id-token: write # trusted "
+                                                "publishing")], {}, 1, "`contents: write`"),
+    ("id-token on the GitHub-release job", P, [("mobile.yml", "      contents: write # create the GitHub release + "
+                                                "attach the asset", "      contents: write # create the GitHub "
+                                                "release + attach the asset\n      id-token: write")], {}, 1,
      "`id-token: write`"),
-    ("job permissions write-all", "flutter.yml", "    permissions:\n      contents: read\n      id-token: write # "
-     "OIDC — pub.dev automated publishing, no token", "    permissions: write-all", 1, "an explicit map"),
-    ("a registry secret read", "npm-publish.yml", "          name: npm-native-tarballs\n          path: npm-release",
-     "          name: npm-native-tarballs\n          path: npm-release\n        env:\n          NODE_AUTH_TOKEN: "
-     "${{ secrets.NPM_TOKEN }}", 1, "[secrets]"),
-    ("third-party action by tag", "crates-publish.yml",
-     "rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18", "rust-lang/crates-io-auth-action@v1",
-     1, "rust-lang/crates-io-auth-action@v1 is not pinned"),
-    ("dtolnay@master back in a publish job", "crates-publish.yml", "        run: |\n          rustup toolchain install "
-     "\"$RUST_TOOLCHAIN\" --profile minimal\n          rustup default \"$RUST_TOOLCHAIN\"\n          cargo --version",
-     "        uses: dtolnay/rust-toolchain@master\n        with:\n          toolchain: ${{ env.RUST_TOOLCHAIN }}", 1,
+    ("job permissions write-all", P, [("flutter.yml", "    permissions:\n      contents: read\n      id-token: write "
+                                       "# OIDC — pub.dev automated publishing, no token", "    permissions: write-all")],
+     {}, 1, "an explicit map"),
+    ("id-token inherited from the workflow", P, [("crates-publish.yml", "permissions:\n  contents: read\n",
+                                                  "permissions:\n  contents: read\n  id-token: write\n")], {}, 1,
+     "top-level permissions must be read-only"),
+    ("top-level permissions widened", P, [("deep-checks.yml", "permissions:\n  contents: read\n",
+                                           "permissions:\n  contents: write\n")], {}, 1,
+     "top-level permissions must be read-only"),
+    ("id-token on an unguarded build job", P, [("ci.yml", "  lint:\n    runs-on: ubuntu-24.04\n",
+                                                "  lint:\n    runs-on: ubuntu-24.04\n    permissions:\n"
+                                                "      id-token: write\n")], {}, 1, "ci.yml › lint [guard]"),
+    # -- secrets, anywhere
+    ("a registry secret read", P, [("npm-publish.yml", "          name: npm-native-tarballs\n          path: npm-release",
+                                    "          name: npm-native-tarballs\n          path: npm-release\n        env:\n"
+                                    "          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}")], {}, 1,
+     "npm-publish.yml › publish-native [secrets]"),
+    ("a secret by index syntax", P, [("npm-publish.yml", REINSPECT, REINSPECT + "        env:\n          "
+                                      "NODE_AUTH_TOKEN: ${{ secrets['NPM_TOKEN'] }}\n")], {}, 1,
+     "npm-publish.yml › publish-native [secrets]"),
+    ("every secret through toJSON", P, [("crates-publish.yml", "          CARGO_REGISTRY_TOKEN: ${{ "
+                                         "steps.auth.outputs.token }}", "          CARGO_REGISTRY_TOKEN: ${{ "
+                                         "steps.auth.outputs.token }}\n          ALL: ${{ toJSON(secrets) }}")], {}, 1,
+     "crates-publish.yml › publish [secrets]"),
+    ("a secret in the workflow env", P, [("npm-publish.yml", "env:\n  CARGO_TERM_COLOR: always\n",
+                                          "env:\n  CARGO_TERM_COLOR: always\n  NODE_AUTH_TOKEN: ${{ "
+                                          "secrets.NPM_TOKEN }}\n")], {}, 1, "npm-publish.yml › (workflow) [secrets]"),
+    ("a job publishing with pnpm and a secret", P, [("npm-publish.yml", None, SNEAKY_PNPM)], {}, 1,
+     "npm-publish.yml › sneaky [secrets]"),
+    ("a reusable workflow given every secret", P, [("crates-publish.yml", None, REUSABLE)], {}, 1,
+     "crates-publish.yml › elsewhere [reusable-workflow]"),
+    # -- publishing spellings: the job becomes privileged and fails
+    ("cargo publish split over a continuation", P, [("crates-publish.yml", None, SNEAKY_CARGO)], {}, 1,
+     "crates-publish.yml › sneaky [guard]"),
+    ("npm options before the subcommand, in a ci job", P, [("ci.yml", "      - run: node test.mjs\n",
+                                                            "      - run: node test.mjs\n      - run: npm --access "
+                                                            "public publish\n")], {}, 1, "ci.yml › node-smoke [guard]"),
+    ("cargo options before the subcommand, in ci › packaging", P, [(
+        "ci.yml", "      - run: python3 scripts/package-inspect.py crates --strict --quiet\n",
+        "      - run: python3 scripts/package-inspect.py crates --strict --quiet\n      - run: cargo --locked publish "
+        "-p qrcode-ai-scanner\n")], {}, 1, "ci.yml › packaging [guard]"),
+    ("npm's abbreviation `npm pu`, in a ci job", P, [("ci.yml", "      - run: node test.mjs\n",
+                                                      "      - run: node test.mjs\n      - run: npm pu ./x.tgz "
+                                                      "--ignore-scripts\n")], {}, 1, "ci.yml › node-smoke [guard]"),
+    ("a release upload in a build job", P, [("mobile.yml", "        run: gradle :qrcodeaiscanner:assembleRelease",
+                                             "        run: gradle :qrcodeaiscanner:assembleRelease && gh release "
+                                             "upload v0 x.aar")], {}, 1, "mobile.yml › android [guard]"),
+    ("napi pre-publish that uploads", P, [("npm-publish.yml",
+                                           "pnpm exec napi pre-publish -t npm --no-gh-release --skip-optional-publish",
+                                           "pnpm exec napi pre-publish -t npm --no-gh-release")], {}, 1,
+     "npm-publish.yml › pack-native [guard]"),
+    # -- files and reusable workflows
+    ("an unguarded publisher in a .yaml workflow", P, [], {".github/workflows/release.yaml": EXTRA_PUBLISHER}, 1,
+     "release.yaml › publish [guard]"),
+    ("another file in the workflows directory", P, [], {".github/workflows/notes.txt": "x\n"}, 1, "[workflow-file]"),
+    # -- pinned code
+    ("third-party action by tag", P, [("crates-publish.yml",
+                                       "rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18",
+                                       "rust-lang/crates-io-auth-action@v1")], {}, 1,
+     "rust-lang/crates-io-auth-action@v1 is not pinned"),
+    ("dtolnay@master back in a publish job", P, [("crates-publish.yml", "        run: |\n          rustup toolchain "
+                                                   "install \"$RUST_TOOLCHAIN\" --profile minimal\n          rustup "
+                                                   "default \"$RUST_TOOLCHAIN\"\n          cargo --version",
+                                                   "        uses: dtolnay/rust-toolchain@master\n        with:\n"
+                                                   "          toolchain: ${{ env.RUST_TOOLCHAIN }}")], {}, 1,
      "dtolnay/rust-toolchain@master is not pinned"),
-    ("rustup on a channel", "crates-publish.yml", 'rustup default "$RUST_TOOLCHAIN"', "rustup default stable", 1,
-     "[floating-rust]"),
-    ("setup-node by tag", "npm-publish.yml", "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0",
-     "actions/setup-node@v7", 1, "needs the action pinned by SHA"),
-    *((f"setup-node {spec}", "npm-publish.yml", "node-version: 24\n          registry-url",
-       f"node-version: {spec}\n          registry-url", 1, "a release line or an exact version")
+    ("checkout by tag in a publish job", P, [("crates-publish.yml", CHECKOUT, "actions/checkout@v7")], {}, 1,
+     "crates-publish.yml › publish [unpinned-action]"),
+    ("download-artifact by tag in a publish job", P, [(
+        "python.yml", "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2",
+        "actions/download-artifact@v8")], {}, 1, "python.yml › release [unpinned-action]"),
+    ("a floating first-party action asking for the OIDC token", P, [(
+        "npm-publish.yml", REINSPECT, "      - uses: actions/github-script@v8\n        with:\n          script: "
+                                      "core.info(await core.getIDToken())\n" + REINSPECT)], {}, 1,
+     "npm-publish.yml › publish-native [unpinned-action]"),
+    ("checkout persisting the job token", P, [("mobile.yml", f"      - uses: {CHECKOUT}\n        with:\n          "
+                                               "persist-credentials: false\n", f"      - uses: {CHECKOUT}\n")], {}, 1,
+     "mobile.yml › ios-release [persist-credentials]"),
+    ("a local composite action", P, [("npm-publish.yml", WASM_TAIL, "      - uses: ./.github/actions/prepare\n"
+                                      + WASM_TAIL)], {}, 1, "npm-publish.yml › publish-wasm [local-action]"),
+    ("the publish job in a floating container", P, [("crates-publish.yml", "    environment: crates-io\n",
+                                                     "    environment: crates-io\n    container: rust:1\n")], {}, 1,
+     "crates-publish.yml › publish [container]"),
+    ("a service image by tag", P, [("python.yml", "    environment: release\n", "    environment: release\n"
+                                    "    services:\n      cache:\n        image: redis:7\n")], {}, 1,
+     "python.yml › release [container]"),
+    ("scripts through another shell", P, [("crates-publish.yml", "  publish:\n    needs: package\n",
+                                           "  publish:\n    needs: package\n    defaults:\n      run:\n"
+                                           "        shell: \"true {0}\"\n")], {}, 1, "crates-publish.yml › publish [shell]"),
+    ("an expression in a publish script", P, [("mobile.yml", "          zip=build/QrcodeAiScannerFFI.xcframework.zip\n",
+                                               "          zip=${{ github.event.inputs.zip }}\n")], {}, 1,
+     "mobile.yml › ios-release [expression]"),
+    # -- the versions gate, exactly
+    ("versions gate removed", P, [("mobile.yml", GATE_STEP + "      - uses: actions/download-artifact@",
+                                   "      - uses: actions/download-artifact@")], {}, 1,
+     "mobile.yml › ios-release [gate]"),
+    ("versions gate || true", P, [("crates-publish.yml", GATE_STEP + "      # This job can mint",
+                                   GATE_STEP.replace("--quiet", "--quiet || true") + "      # This job can mint")],
+     {}, 1, "crates-publish.yml › publish [gate]"),
+    ("versions gate with continue-on-error", P, [("crates-publish.yml", GATE_STEP + "      # This job can mint",
+                                                  GATE_STEP + "        continue-on-error: true\n      # This job can "
+                                                  "mint")], {}, 1, "crates-publish.yml › publish [gate]"),
+    ("versions gate as a comment", P, [("npm-publish.yml", GATE_STEP + "      # Node 24 for npm",
+                                        "      - run: \"true # package-inspect.py versions --tag\"\n      # Node 24 "
+                                        "for npm")], {}, 1, "npm-publish.yml › publish-native [gate]"),
+    # -- runtimes, printed
+    ("setup-node by tag", P, [("npm-publish.yml", "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0",
+                               "actions/setup-node@v7")], {}, 1, "needs the action pinned by SHA"),
+    *((f"setup-node {spec}", P, [("npm-publish.yml", "node-version: 24\n          registry-url",
+                                  f"node-version: {spec}\n          registry-url")], {}, 1,
+       "a release line or an exact version")
       for spec in ("lts/*", "latest", "current", "node", "'>=24'", "24.x", "''")),
-    ("node versions not printed", "npm-publish.yml", PRINT_STEP + "          echo \"npm $v\"\n"
-     "          if [ \"$(printf '%s\\n' 11.5.1 \"$v\" | sort -V | head -n1)\" != 11.5.1 ]; then\n"
-     "            echo \"::error::npm $v cannot publish through trusted publishing (needs >= 11.5.1)\"\n"
-     "            exit 1\n          fi\n      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"
-     " # v8.0.2\n        with:\n          name: npm-native-tarballs", "      - uses: actions/download-artifact@"
-     "9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2\n        with:\n          name: npm-native-tarballs", 1,
-     "[versions-printed]"),
-    ("versions gate removed", "mobile.yml", "      - run: python3 scripts/package-inspect.py versions --tag "
-     "\"$GITHUB_REF\" --strict --quiet\n      - uses: actions/download-artifact@", "      - uses: "
-     "actions/download-artifact@", 1, "mobile.yml › ios-release [gate]"),
-    ("concurrency removed", "python.yml", "    concurrency:\n      group: publish-${{ github.workflow }}-${{ "
-     "github.ref }}\n      cancel-in-progress: false\n    permissions:", "    permissions:", 1,
-     "python.yml › release [concurrency]"),
-    ("concurrency cancelling", "mobile.yml", "      cancel-in-progress: false\n    permissions:\n      contents: write",
-     "      cancel-in-progress: true\n    permissions:\n      contents: write", 1, "mobile.yml › ios-release [concurrency]"),
-    ("pnpm install in a publish job", "npm-publish.yml", "      - name: re-inspect the release set about to be uploaded",
-     "      - run: pnpm install --frozen-lockfile=false\n      - name: re-inspect the release set about to be "
-     "uploaded", 1, "pnpm without --frozen-lockfile"),
-    ("npx in a publish job", "npm-publish.yml", "      - name: re-inspect the release set about to be uploaded",
-     "      - run: npx some-tool\n      - name: re-inspect the release set about to be uploaded", 1,
+    ("node versions not printed", P, [("npm-publish.yml", PRINT_STEP + "      - uses: actions/download-artifact@"
+                                       "9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2\n        with:\n          "
+                                       "name: npm-native-tarballs", "      - uses: actions/download-artifact@"
+                                       "9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2\n        with:\n          "
+                                       "name: npm-native-tarballs")], {}, 1, "npm-publish.yml › publish-native "
+                                                                             "[versions-printed]"),
+    ("node versions printed by a comment", P, [("npm-publish.yml", PRINT_STEP + WASM_TAIL,
+                                                "      - run: \"true # node --version npm --version\"\n" + WASM_TAIL)],
+     {}, 1, "npm-publish.yml › publish-wasm [versions-printed]"),
+    ("the npm floor assertion dropped", P, [("npm-publish.yml", PRINT_STEP + WASM_TAIL,
+                                             "      - name: node + npm versions\n        run: |\n          node "
+                                             "--version\n          npm --version\n" + WASM_TAIL)], {}, 1,
+     "npm-publish.yml › publish-wasm [versions-printed]"),
+    # -- toolchains and tools in a publish job
+    ("rustup on a channel", P, [("crates-publish.yml", 'rustup default "$RUST_TOOLCHAIN"', "rustup default stable")],
+     {}, 1, "[floating-rust]"),
+    ("RUST_TOOLCHAIN on a channel for the publish job", P, [("crates-publish.yml", "  publish:\n    needs: package\n",
+                                                             "  publish:\n    needs: package\n    env:\n      "
+                                                             "RUST_TOOLCHAIN: stable\n")], {}, 1,
+     "crates-publish.yml › publish [floating-rust]"),
+    ("RUST_TOOLCHAIN on a channel for the rustup step", P, [("crates-publish.yml", RUSTUP_STEP, RUSTUP_STEP.replace(
+        "        run: |\n", "        env:\n          RUST_TOOLCHAIN: stable\n        run: |\n"))], {}, 1,
+     "crates-publish.yml › publish [floating-rust]"),
+    ("RUST_TOOLCHAIN written to GITHUB_ENV in a publish job", P, [("crates-publish.yml", RUSTUP_STEP,
+                                                                   "      - run: echo \"RUST_TOOLCHAIN=1.96.0\" >> "
+                                                                   "\"$GITHUB_ENV\"\n" + RUSTUP_STEP)], {}, 1,
+     "crates-publish.yml › publish [floating-rust]"),
+    ("a rust-toolchain.toml written in a publish job", P, [(
+        "crates-publish.yml", "      - uses: rust-lang/crates-io-auth-action",
+        "      - run: printf '[toolchain]\\nchannel = \"stable\"\\n' > rust-toolchain.toml\n"
+        "      - uses: rust-lang/crates-io-auth-action")], {}, 1, "crates-publish.yml › publish [floating-rust]"),
+    ("pnpm by major line in a publish job", P, [("npm-publish.yml", REINSPECT, "      - uses: pnpm/action-setup@"
+                                                 "0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10\n        with:\n"
+                                                 "          version: 10\n" + REINSPECT)], {}, 1, "[floating-pnpm]"),
+    ("setup-go by tag on stable", P, [("python.yml", PYPI, "      - uses: actions/setup-go@v6\n        with:\n"
+                                       "          go-version: stable\n" + PYPI)], {}, 1,
+     "python.yml › release [floating-tool]"),
+    ("setup-uv by SHA on latest", P, [("python.yml", PYPI, "      - uses: astral-sh/setup-uv@"
+                                       "0123456789abcdef0123456789abcdef01234567\n        with:\n          version: "
+                                       "latest\n" + PYPI)], {}, 1, "python.yml › release [floating-tool]"),
+    ("install-action fetching an unversioned tool", P, [(
+        "crates-publish.yml", "      - uses: rust-lang/crates-io-auth-action",
+        "      - uses: taiki-e/install-action@0000000000000000000000000000000000000001 # v2\n        with:\n"
+        "          tool: cargo-release\n      - uses: rust-lang/crates-io-auth-action")], {}, 1,
+     "crates-publish.yml › publish [floating-tool]"),
+    # -- unlocked code in a publish job
+    ("pnpm install in a publish job", P, [("npm-publish.yml", REINSPECT, "      - run: pnpm install "
+                                           "--frozen-lockfile=false\n" + REINSPECT)], {}, 1,
+     "pnpm without --frozen-lockfile"),
+    ("npx in a publish job", P, [("npm-publish.yml", REINSPECT, "      - run: npx some-tool\n" + REINSPECT)], {}, 1,
      "fetches a package on demand"),
-    ("pip install in a publish job", "python.yml", "      - uses: pypa/gh-action-pypi-publish",
-     "      - run: pip install twine\n      - uses: pypa/gh-action-pypi-publish", 1, "pip without --require-hashes"),
-    ("piped installer in a publish job", "mobile.yml", "      - name: publish + verify the xcframework asset",
-     "      - run: curl -sSf https://example.invalid/install.sh | sh\n      - name: publish + verify the xcframework "
-     "asset", 1, "pipes a download into a shell"),
-    ("cargo publish verifying again", "crates-publish.yml", 'cargo publish -p "$crate" --locked --no-verify',
-     'cargo publish -p "$crate" --locked', 1, "[cargo-publish]"),
-    ("cargo publish unlocked", "crates-publish.yml", 'cargo publish -p "$crate" --locked --no-verify',
-     'cargo publish -p "$crate" --no-verify', 1, "[cargo-publish]"),
-    ("pnpm by major line in a publish job", "npm-publish.yml", "      - name: re-inspect the release set about to be "
-     "uploaded", "      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10\n        with:\n"
-     "          version: 10\n      - name: re-inspect the release set about to be uploaded", 1, "[floating-pnpm]"),
-    ("the Flutter waiver claimed by another job", "python.yml", "      - uses: pypa/gh-action-pypi-publish",
-     "      - run: flutter pub get\n      - uses: pypa/gh-action-pypi-publish", 1,
-     "FAIL    python.yml › release [unlocked-pub-get]"),
-    ("the Flutter job with a third violation", "flutter.yml", "    concurrency:\n      group: publish-${{ "
-     "github.workflow }}-${{ github.ref }}\n      cancel-in-progress: false\n", "", 1,
-     "FAIL    flutter.yml › publish [concurrency]"),
-    ("the Flutter exception gone stale", "flutter.yml", "      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f7"
-     "3cd65adc8cdfcb92d # v1.8.1\n      - uses: subosito/flutter-action@e938fdf56512cc96ef2f93601a5a40bde3801046 # "
-     "v2.19.0\n        with:\n          channel: stable\n      - run: flutter pub get\n",
-     "      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1\n        with:\n"
-     "          sdk: 3.10.4\n      - uses: subosito/flutter-action@e938fdf56512cc96ef2f93601a5a40bde3801046 # "
-     "v2.19.0\n        with:\n          flutter-version: 3.44.2\n      - run: flutter pub get --enforce-lockfile\n",
-     1, "stale named exception flutter.yml › publish"),
-    ("id-token on an unguarded build job", "ci.yml", "  lint:\n    runs-on: ubuntu-24.04\n",
-     "  lint:\n    runs-on: ubuntu-24.04\n    permissions:\n      id-token: write\n", 1, "ci.yml › lint [guard]"),
-    ("a release upload in a build job", "mobile.yml", "        run: gradle :qrcodeaiscanner:assembleRelease",
-     "        run: gradle :qrcodeaiscanner:assembleRelease && gh release upload v0 x.aar", 1,
-     "mobile.yml › android [guard]"),
-    ("napi pre-publish that uploads", "npm-publish.yml",
-     "pnpm exec napi pre-publish -t npm --no-gh-release --skip-optional-publish",
-     "pnpm exec napi pre-publish -t npm --no-gh-release", 1, "npm-publish.yml › pack-native [guard]"),
-    ("top-level permissions widened", "deep-checks.yml", "permissions:\n  contents: read\n",
-     "permissions:\n  contents: write\n", 1, "top-level permissions must be read-only"),
-    ("an anchor the reader refuses", "toolchain-probe.yml", "    runs-on: ubuntu-24.04\n",
-     "    runs-on: &runner ubuntu-24.04\n", 2, "anchors, aliases and tags"),
+    ("npm x in a publish job", P, [("npm-publish.yml", WASM_TAIL, "      - run: npm x --yes some-tool\n" + WASM_TAIL)],
+     {}, 1, "npm-publish.yml › publish-wasm [unlocked-install]"),
+    ("corepack in a publish job", P, [("npm-publish.yml", REINSPECT, "      - run: corepack enable\n" + REINSPECT)],
+     {}, 1, "npm-publish.yml › publish-native [unlocked-install]"),
+    ("pip install in a publish job", P, [("python.yml", PYPI, "      - run: pip install twine\n" + PYPI)], {}, 1,
+     "pip without --require-hashes"),
+    ("python3.12 -m pip install in a publish job", P, [("python.yml", PYPI, "      - run: python3.12 -m pip install "
+                                                        "twine\n" + PYPI)], {}, 1, "python.yml › release "
+                                                                                    "[unlocked-install]"),
+    ("uvx in a publish job", P, [("python.yml", PYPI, "      - run: uvx some-tool\n" + PYPI)], {}, 1,
+     "python.yml › release [unlocked-install]"),
+    ("cargo +toolchain install in a publish job", P, [(
+        "crates-publish.yml", "      - uses: rust-lang/crates-io-auth-action",
+        "      - run: cargo +\"$RUST_TOOLCHAIN\" install cargo-release\n      - uses: rust-lang/crates-io-auth-action")],
+     {}, 1, "crates-publish.yml › publish [unlocked-install]"),
+    ("piped installer in a publish job", P, [("mobile.yml", "      - name: publish + verify the xcframework asset",
+                                              "      - run: curl -sSf https://example.invalid/install.sh | sh\n"
+                                              "      - name: publish + verify the xcframework asset")], {}, 1,
+     "pipes a download into an interpreter"),
+    # -- what a publish step uploads
+    ("cargo publish verifying again", P, [("crates-publish.yml", 'cargo publish -p "$crate" --locked --no-verify',
+                                           'cargo publish -p "$crate" --locked')], {}, 1, "[cargo-publish]"),
+    ("cargo publish unlocked", P, [("crates-publish.yml", 'cargo publish -p "$crate" --locked --no-verify',
+                                    'cargo publish -p "$crate" --no-verify')], {}, 1, "[cargo-publish]"),
+    ("cargo publish verifying, options first", P, [("crates-publish.yml",
+                                                    'cargo publish -p "$crate" --locked --no-verify',
+                                                    'cargo --locked publish -p "$crate"')], {}, 1, "[cargo-publish]"),
+    ("npm publish of a directory", P, [("npm-publish.yml", WASM_PUBLISH, WASM_PUBLISH.replace(
+        'npm publish "$tgz"', "cd npm-wasm && npm publish"))], {}, 1, "npm-publish.yml › publish-wasm [npm-publish]"),
+    ("npm publish without --ignore-scripts", P, [("npm-publish.yml", NATIVE_PUBLISH, NATIVE_PUBLISH.replace(
+        " --ignore-scripts", ""))], {}, 1, "npm-publish.yml › publish-native [npm-publish]"),
+    ("pnpm publish in a publish job", P, [("npm-publish.yml", NATIVE_PUBLISH, NATIVE_PUBLISH.replace(
+        "npm publish", "pnpm publish"))], {}, 1, "npm-publish.yml › publish-native [npm-publish]"),
+    # -- the named exception: three exact steps, nothing else
+    ("the Flutter waiver claimed by another job", P, [("python.yml", PYPI, "      - run: flutter pub get\n" + PYPI)],
+     {}, 1, "FAIL    python.yml › release [unlocked-pub-get]"),
+    ("the Flutter job with a third violation", P, [("flutter.yml", "    concurrency:\n      group: publish-${{ "
+                                                    "github.workflow }}-${{ github.ref }}\n      cancel-in-progress: "
+                                                    "false\n", "")], {}, 1, "FAIL    flutter.yml › publish "
+                                                                            "[concurrency]"),
+    ("flutter pub add beside the waived pub get", P, [("flutter.yml", FLUTTER_PUBLISH, "      - run: flutter pub add "
+                                                       "some_package\n" + FLUTTER_PUBLISH)], {}, 1,
+     "FAIL    flutter.yml › publish [unlocked-pub-get]"),
+    ("a second waived-looking pub get", P, [("flutter.yml", FLUTTER_PUBLISH, "      - run: flutter pub get\n"
+                                             + FLUTTER_PUBLISH)], {}, 1, "FAIL    flutter.yml › publish "
+                                                                         "[unlocked-pub-get]"),
+    ("a second Flutter SDK from the master channel", P, [(
+        "flutter.yml", FLUTTER_PUBLISH, "      - uses: subosito/flutter-action@e938fdf56512cc96ef2f93601a5a40bde3801046"
+                                        "\n        with:\n          channel: master\n" + FLUTTER_PUBLISH)], {}, 1,
+     "FAIL    flutter.yml › publish [floating-flutter-sdk]"),
+    ("a globally activated package in the Flutter job", P, [("flutter.yml", FLUTTER_PUBLISH, "      - run: dart pub "
+                                                             "global activate some_tool\n" + FLUTTER_PUBLISH)], {}, 1,
+     "FAIL    flutter.yml › publish [unlocked-install]"),
+    ("dart run in the Flutter job", P, [("flutter.yml", FLUTTER_PUBLISH, "      - run: dart run build_runner build\n"
+                                         + FLUTTER_PUBLISH)], {}, 1, "FAIL    flutter.yml › publish [unlocked-install]"),
+    ("the Flutter exception gone stale", P, [("flutter.yml", "      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f7"
+                                              "3cd65adc8cdfcb92d # v1.8.1\n      - uses: subosito/flutter-action@e938f"
+                                              "df56512cc96ef2f93601a5a40bde3801046 # v2.19.0\n        with:\n          "
+                                              "channel: stable\n      - run: flutter pub get\n",
+                                              "      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfc"
+                                              "b92d # v1.8.1\n        with:\n          sdk: 3.10.4\n      - uses: "
+                                              "subosito/flutter-action@e938fdf56512cc96ef2f93601a5a40bde3801046 # "
+                                              "v2.19.0\n        with:\n          flutter-version: 3.44.2\n      - run: "
+                                              "flutter pub get --enforce-lockfile\n")], {}, 1,
+     "stale named exception flutter.yml › publish"),
+    # -- the concurrency group
+    ("concurrency removed", P, [("python.yml", "    concurrency:\n      group: publish-${{ github.workflow }}-${{ "
+                                 "github.ref }}\n      cancel-in-progress: false\n    permissions:", "    permissions:")],
+     {}, 1, "python.yml › release [concurrency]"),
+    ("concurrency cancelling", P, [("mobile.yml", "      cancel-in-progress: false\n    permissions:\n      contents: "
+                                    "write", "      cancel-in-progress: true\n    permissions:\n      contents: write")],
+     {}, 1, "mobile.yml › ios-release [concurrency]"),
+    # -- the reader refuses what it cannot read
+    ("an anchor the reader refuses", P, [("toolchain-probe.yml", "    runs-on: ubuntu-24.04\n",
+                                          "    runs-on: &runner ubuntu-24.04\n")], {}, 2, "anchors, aliases and tags"),
+    ("a comment inside a flow collection", P, [("ci.yml", "        os: [ubuntu-24.04, macos-latest, windows-latest]",
+                                                "        os: [ubuntu-24.04, macos-latest # x\n          , "
+                                                "windows-latest]")], {}, 2, "cannot judge"),
+    # == the one-toolchain policy
+    ("RUST_TOOLCHAIN on stable everywhere", T, [(wf, PIN_LINE, "  RUST_TOOLCHAIN: stable\n") for wf in ALL_WORKFLOWS],
+     {}, 1, "RUST_TOOLCHAIN 'stable' is not an exact x.y.z"),
+    ("RUST_TOOLCHAIN at 1.97 everywhere", T, [(wf, PIN_LINE, '  RUST_TOOLCHAIN: "1.97"\n') for wf in ALL_WORKFLOWS],
+     {}, 1, "RUST_TOOLCHAIN '1.97' is not an exact x.y.z"),
+    ("a second pin", T, [("npm-publish.yml", PIN_LINE, '  RUST_TOOLCHAIN: "1.98.0"\n')], {}, 1,
+     "must hold one value"),
+    ("a job-level RUST_TOOLCHAIN", T, [("npm-publish.yml", "  build-native:\n    strategy:\n", "  build-native:\n    "
+                                        "env:\n      RUST_TOOLCHAIN: \"1.96.0\"\n    strategy:\n")], {}, 1,
+     "must hold one value"),
+    ("a step-level RUST_TOOLCHAIN", T, [("crates-publish.yml", RUSTUP_STEP, RUSTUP_STEP.replace(
+        "        run: |\n", "        env:\n          RUST_TOOLCHAIN: \"1.96.0\"\n        run: |\n"))], {}, 1,
+     "must hold one value"),
+    ("RUST_TOOLCHAIN written to GITHUB_ENV", T, [("ci.yml", "      - uses: taiki-e/install-action@nextest\n",
+                                                  "      - run: echo \"RUST_TOOLCHAIN=1.96.0\" >> \"$GITHUB_ENV\"\n"
+                                                  "      - uses: taiki-e/install-action@nextest\n")], {}, 1,
+     "ci.yml › test (step 4) [script]"),
+    ("a literal toolchain in a flow mapping", T, [("flutter.yml", "      - uses: dtolnay/rust-toolchain@master\n"
+                                                   "        with:\n          toolchain: ${{ env.RUST_TOOLCHAIN }}\n",
+                                                   "      - uses: dtolnay/rust-toolchain@master\n        with: { "
+                                                   "toolchain: \"1.96.0\" }\n")], {}, 1, "flutter.yml › test (step 2) "
+                                                                                         "[leg]"),
+    ("a literal beside the variable's name", T, [("crates-publish.yml", 'rustup default "$RUST_TOOLCHAIN"',
+                                                  "rustup default 1.96.0 # not $RUST_TOOLCHAIN")], {}, 1,
+     "names 1.96.0"),
+    ("a literal through cargo +", T, [("ci.yml", "cargo run --locked -p xtask -- corpus-report | tee",
+                                       "cargo +1.96.0 run --locked -p xtask -- corpus-report | tee")], {}, 1,
+     "names +1.96.0"),
+    ("a literal through --toolchain", T, [("ci.yml", "      - run: cargo fmt --all --check\n",
+                                           "      - run: rustup component add clippy --toolchain 1.96.0\n      - run: "
+                                           "cargo fmt --all --check\n")], {}, 1, "names 1.96.0"),
+    ("a moving channel by ref", T, [("ci.yml", "      - uses: dtolnay/rust-toolchain@master\n        with:\n          "
+                                     "toolchain: ${{ env.RUST_TOOLCHAIN }}\n          components: rustfmt, clippy\n",
+                                     "      - uses: dtolnay/rust-toolchain@stable\n        with:\n          "
+                                     "components: rustfmt, clippy\n")], {}, 1, "a moving channel"),
+    ("a moving channel by input", T, [("deep-checks.yml", "toolchain: ${{ env.RUST_TOOLCHAIN }}",
+                                       "toolchain: stable")], {}, 1, "deep-checks.yml › mutants (step 3) [leg]"),
+    ("maturin on a literal toolchain", T, [("python.yml", "rust-toolchain: ${{ env.RUST_TOOLCHAIN }}",
+                                            "rust-toolchain: 1.96.0")], {}, 1, "rust-toolchain '1.96.0'"),
+    ("RUSTUP_TOOLCHAIN in a workflow env", T, [("ci.yml", "  RUSTFLAGS: -D warnings\n", "  RUSTFLAGS: -D warnings\n"
+                                                "  RUSTUP_TOOLCHAIN: 1.97.0\n")], {}, 1, "RUSTUP_TOOLCHAIN overrides"),
+    ("the MSRV leg below rust-version", T, [("ci.yml", "dtolnay/rust-toolchain@1.88", "dtolnay/rust-toolchain@1.87")],
+     {}, 1, "the one literal is the MSRV leg"),
+    ("the MSRV leg by SHA, no toolchain input", T, [("ci.yml", "dtolnay/rust-toolchain@1.88",
+                                                     "dtolnay/rust-toolchain@e0000000000000000000000000000000000000a1 "
+                                                     "# 1.87.0")], {}, 1, "names no toolchain input"),
+    ("the MSRV leg by SHA with its rust-version", T, [("ci.yml", "      - uses: dtolnay/rust-toolchain@1.88\n",
+                                                       "      - uses: dtolnay/rust-toolchain@e0000000000000000000000000"
+                                                       "000000000000a1 # 1.88\n        with:\n          toolchain: "
+                                                       "\"1.88\"\n")], {}, 0, "0 violation(s)"),
+    ("rust-toolchain@master pinned by a digit-first SHA", T, [(
+        "ci.yml", "      - uses: dtolnay/rust-toolchain@master\n        with:\n          toolchain: ${{ "
+                  "env.RUST_TOOLCHAIN }}\n          components: rustfmt, clippy\n",
+        "      - uses: dtolnay/rust-toolchain@0f00000000000000000000000000000000000000 # master\n        with:\n"
+        "          toolchain: ${{ env.RUST_TOOLCHAIN }}\n          components: rustfmt, clippy\n")], {}, 0,
+     "0 violation(s)"),
+    ("FUZZ_TOOLCHAIN on the moving nightly", T, [("deep-checks.yml", "  FUZZ_TOOLCHAIN: nightly-2026-08-24\n",
+                                                  "  FUZZ_TOOLCHAIN: nightly\n")], {}, 1, "[fuzz-pin]"),
+    ("a rust-toolchain.toml at the root", T, [], {"rust-toolchain.toml": '[toolchain]\nchannel = "1.96.0"\n'}, 1,
+     "(tree) › rust-toolchain.toml [file]"),
+    ("a rust-toolchain file in a crate", T, [], {"crates/qrcode-ai-scanner-py/rust-toolchain": "stable\n"}, 1,
+     "crates/qrcode-ai-scanner-py/rust-toolchain [file]"),
+    ("a .yaml workflow naming a literal", T, [], {".github/workflows/extra.yaml": (
+        "name: extra\non:\n  workflow_dispatch:\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: "
+        "ubuntu-24.04\n    steps:\n      - uses: dtolnay/rust-toolchain@master\n        with:\n          toolchain: "
+        "1.96.0\n")}, 1, "extra.yaml › build (step 1) [leg]"),
 )
 
 
@@ -765,38 +1511,56 @@ def _run(argv: list) -> tuple:
 
 def self_test() -> int:
     failures = []
-    code, out = _run(["--workflows", str(WORKFLOWS)])
-    if code != 0:
-        failures.append(f"the real workflows: exit {code} (want 0)\n{out}")
-    for name, workflow, old, new, want, needle in MUTATIONS:
+    for mode in (P, T):
+        code, out = _run(["--toolchains"] if mode == T else [])
+        if code != 0:
+            failures.append(f"the real tree ({mode}): exit {code} (want 0)\n{out}")
+    for name, mode, edits, extra, want, needle in MUTATIONS:
         with tempfile.TemporaryDirectory(prefix="publish-guards-") as tmp:
-            copy = pathlib.Path(tmp) / "workflows"
-            shutil.copytree(WORKFLOWS, copy)
-            text = (copy / workflow).read_text()
-            if old not in text:
-                failures.append(f"{name}: anchor not found in {workflow} (update the mutation)")
+            root = pathlib.Path(tmp)
+            workflows = root / ".github" / "workflows"
+            shutil.copytree(ROOT / ".github" / "workflows", workflows)
+            shutil.copyfile(ROOT / "Cargo.toml", root / "Cargo.toml")
+            missing = []
+            for workflow, old, new in edits:
+                text = (workflows / workflow).read_text()
+                if old is None:
+                    text += new
+                elif old in text:
+                    text = text.replace(old, new, 1)
+                else:
+                    missing.append(workflow)
+                (workflows / workflow).write_text(text)
+            if missing:
+                failures.append(f"{name}: anchor not found in {', '.join(missing)} (update the mutation)")
                 continue
-            (copy / workflow).write_text(text.replace(old, new, 1))
-            code, out = _run(["--workflows", str(copy)])
+            for path, text in extra.items():
+                (root / path).parent.mkdir(parents=True, exist_ok=True)
+                (root / path).write_text(text)
+            code, out = _run(["--root", str(root), *(["--toolchains"] if mode == T else [])])
             if code != want or needle not in out:
                 failures.append(f"{name}: exit {code} (want {want}), {needle!r} "
                                 f"{'present' if needle in out else 'absent'}\n{out}")
     for failure in failures:
         print(f"SELF-TEST FAILED · {failure}", file=sys.stderr)
-    total = 1 + len(MUTATIONS)
-    print(f"self-test: {total - len(failures)}/{total} scenarios as expected "
-          f"(the real workflows pass; {len(MUTATIONS)} mutated copies each fail)")
+    total = 2 + len(MUTATIONS)
+    print(f"self-test: {total - len(failures)}/{total} scenarios as expected (the real tree passes both policies; "
+          f"{len(MUTATIONS)} mutated copies each exit as expected)")
     return 1 if failures else 0
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--workflows", type=pathlib.Path, default=WORKFLOWS, help="the workflows directory")
+    parser.add_argument("--root", type=pathlib.Path, default=ROOT,
+                        help="the repository root: Cargo.toml, rust-toolchain files, .github/workflows")
+    parser.add_argument("--workflows", type=pathlib.Path, help="the workflows directory (default ROOT/.github/workflows)")
+    parser.add_argument("--toolchains", action="store_true", help="judge the one-toolchain policy")
     parser.add_argument("--self-test", action="store_true", help="run the built-in scenarios, then exit")
     args = parser.parse_args(argv)
     if args.self_test:
         return self_test()
-    return report(args.workflows)
+    workflows = args.workflows or args.root / ".github" / "workflows"
+    return report_toolchains(args.root, workflows) if args.toolchains else report(workflows)
 
 
 if __name__ == "__main__":

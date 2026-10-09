@@ -25,39 +25,21 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+      # One Rust toolchain across every workflow (*.yml and *.yaml): every
+      # RUST_TOOLCHAIN assignment, at any level, holds the same exact x.y.z;
+      # no script assigns one; every leg names its toolchain through
+      # RUST_TOOLCHAIN (fuzzing: FUZZ_TOOLCHAIN, a dated nightly), read from
+      # the parsed YAML, flow mappings included; the one literal is the MSRV
+      # leg, at the rust-version the root manifest declares; and no
+      # rust-toolchain file overrides them (scripts/check-publish-guards.py).
       - name: one Rust toolchain across every workflow
         run: |
-          set -euo pipefail
-          pins=$(grep -h -E '^  RUST_TOOLCHAIN: ' .github/workflows/*.yml | sort -u)
-          echo "$pins"
-          if [ "$(printf '%s\n' "$pins" | wc -l)" -ne 1 ]; then
-            echo "::error::the workflows pin more than one RUST_TOOLCHAIN"
-            exit 1
-          fi
-          if grep -n -E 'rust-toolchain@(stable|beta|nightly)|toolchain: *"?(stable|beta|nightly)"? *$' .github/workflows/*.yml; then
-            echo "::error::a moving Rust channel is back: pin it through RUST_TOOLCHAIN"
-            exit 1
-          fi
-          # No literal version either: every leg names its toolchain through
-          # RUST_TOOLCHAIN (the fuzz job through FUZZ_TOOLCHAIN). The one
-          # literal is the MSRV leg, and it must be the rust-version the
-          # manifests declare. Comment lines are prose, not legs.
-          msrv=$(grep -m1 -E '^rust-version' Cargo.toml | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?')
-          # shellcheck disable=SC2016 # a regex matching expressions and variables, not an expansion
-          named='\$\{\{ (env\.RUST_TOOLCHAIN|env\.FUZZ_TOOLCHAIN|inputs\.toolchain \|\| env\.RUST_TOOLCHAIN) \}\}|"?[+]?\$(RUST_TOOLCHAIN|FUZZ_TOOLCHAIN)([^A-Za-z0-9_]|$)'
-          literal=$(grep -n -E 'rust-toolchain@[0-9]|^[[:space:]]+(rust-)?toolchain:[[:space:]]*[^[:space:]]|rustup[[:space:]]+(toolchain[[:space:]]+install|default|override[[:space:]]+set|run)[[:space:]]|cargo[[:space:]]+"?[+]|RUSTUP_TOOLCHAIN[:=]' .github/workflows/*.yml \
-            | grep -v -E '^[^:]+:[0-9]+:[[:space:]]*#' \
-            | grep -v -E "$named" \
-            | grep -v -E "rust-toolchain@${msrv//./[.]}( |$)" || true)
-          if [ -n "$literal" ]; then
-            echo "$literal"
-            echo "::error::a literal Rust version bypasses RUST_TOOLCHAIN: only the MSRV leg names one (dtolnay/rust-toolchain@$msrv)"
-            exit 1
-          fi
-      # The publishing-job policy (scripts/check-publish-guards.py): every job
-      # that publishes or holds a write permission runs from a v* tag only, in
-      # a named environment, with minimal permissions, no secret, pinned code
-      # and the versions gate first. Its mutated-copy scenarios run first.
+          python3 scripts/check-publish-guards.py --toolchains
+      # The publishing-job policy (scripts/check-publish-guards.py): a static
+      # lint holding every job that publishes or holds a write permission to
+      # the tag guard, its environment, minimal permissions, its inspection
+      # job, pinned code and the versions gate first; no workflow reads a
+      # secret. Its mutated-copy scenarios, for both policies, run first.
       - run: python3 scripts/check-publish-guards.py --self-test
       - run: python3 scripts/check-publish-guards.py
       - uses: dtolnay/rust-toolchain@master
