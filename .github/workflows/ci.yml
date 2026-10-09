@@ -11,9 +11,9 @@ env:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           # épinglé, jamais @stable · une lint qui arrive en amont doit casser
@@ -28,10 +28,10 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           # épinglé, jamais @stable · une lint qui arrive en amont doit casser
@@ -50,9 +50,9 @@ jobs:
   # (This job's first run proved the previously-declared 1.87 was fiction —
   # the code uses let-chains, stabilized in 1.88.)
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
       # --locked: the gate tests the COMMITTED dependency graph — without it
@@ -62,9 +62,9 @@ jobs:
       - run: cargo check -p qrcode-ai-scanner --all-features --locked
 
   wasm-shape:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           # épinglé, jamais @stable · une lint qui arrive en amont doit casser
@@ -87,9 +87,9 @@ jobs:
           --target wasm32-unknown-unknown
 
   corpus:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           # épinglé, jamais @stable · une lint qui arrive en amont doit casser
@@ -118,15 +118,15 @@ jobs:
             echo "::warning title=external corpus truth::$msg (corpus-external/ is not vendored: only the manifest parse ran)"
             printf '### external corpus truth: NOT VERIFIED\n\n%s — corpus-external/ is not vendored, so only the manifest parse and the skip path ran.\n' "$msg" >> "$GITHUB_STEP_SUMMARY"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: corpus-report
           path: corpus-report.txt
 
   deny:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Workspace graph — the hard gate. advisories · bans · licenses · sources
       # (bans + sources are enforced by the [bans]/[sources] policy in deny.toml).
       # Pinned by commit, not the floating @v2: this Docker action bakes in the

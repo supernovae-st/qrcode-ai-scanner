@@ -32,9 +32,9 @@ jobs:
   # Host gate: analyze + the report.dart contract tests, plus a FRB regen-drift
   # check so a change to rust/src/api/*.rs without re-running `generate` fails CI.
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -58,9 +58,9 @@ jobs:
 
   build-android:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
@@ -85,7 +85,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: macos-15 # Xcode 16, Apple silicon
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
@@ -105,7 +105,7 @@ jobs:
     name: publish to pub.dev
     if: startsWith(github.ref, 'refs/tags/')
     needs: [test, build-android, build-ios]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # v0.5.0 post-mortem: without the token exchange below, `pub publish` falls
     # back to INTERACTIVE auth and hangs on stdin forever (the job sat 2 h and
     # was hand-cancelled). Cap the whole job well under the 6 h runner default.
@@ -114,7 +114,7 @@ jobs:
     permissions:
       id-token: write # OIDC — pub.dev automated publishing, no token
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The OIDC→pub.dev temporary-credential exchange. subosito/flutter-action
       # does NOT perform it; dart-lang/setup-dart does (its documented
       # publishing support). Order matters: exchange first, then the Flutter
@@ -127,7 +127,7 @@ jobs:
       # then enable automated publishing (repo supernovae-st/qrcode-ai-scanner,
       # tag pattern v{{version}}, environment pub.dev) and every later tag
       # publishes hands-free.
-      - uses: dart-lang/setup-dart@e51d8e571e22473a2ddebf0ef8a2123f0ab2c02c # v1.7.1
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
       - uses: subosito/flutter-action@e938fdf56512cc96ef2f93601a5a40bde3801046 # v2.19.0
         with:
           channel: stable

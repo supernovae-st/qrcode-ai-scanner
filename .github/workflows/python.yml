@@ -21,10 +21,10 @@ defaults:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - uses: PyO3/maturin-action@v1
@@ -45,16 +45,16 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { runner: ubuntu-latest, target: x86_64, manylinux: auto }
-          - { runner: ubuntu-latest, target: aarch64, manylinux: auto }
-          - { runner: ubuntu-latest, target: x86_64, manylinux: musllinux_1_2 }
+          - { runner: ubuntu-24.04, target: x86_64, manylinux: auto }
+          - { runner: ubuntu-24.04, target: aarch64, manylinux: auto }
+          - { runner: ubuntu-24.04, target: x86_64, manylinux: musllinux_1_2 }
           # Intel-mac wheel cross-compiled on the Apple-Silicon runner — the
           # macos-13 (Intel) runner is being retired by GitHub and stalled the job.
           - { runner: macos-latest, target: x86_64, manylinux: "" }
           - { runner: macos-latest, target: aarch64, manylinux: "" }
           - { runner: windows-latest, target: x64, manylinux: "" }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: crates/qrcode-ai-scanner-py
@@ -62,22 +62,22 @@ jobs:
           manylinux: ${{ matrix.platform.manylinux }}
           args: --release --out dist
           sccache: "true"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.platform.runner }}-${{ matrix.platform.target }}-${{ matrix.platform.manylinux }}
           path: crates/qrcode-ai-scanner-py/dist
 
   sdist:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: crates/qrcode-ai-scanner-py
           command: sdist
           args: --out dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-sdist
           path: crates/qrcode-ai-scanner-py/dist
@@ -86,12 +86,12 @@ jobs:
     name: publish to PyPI
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     needs: [test, wheels, sdist]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: release
     permissions:
       id-token: write # trusted publishing (OIDC) — no PyPI token needed
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: wheels-*
           path: dist

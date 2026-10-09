@@ -26,14 +26,14 @@ jobs:
   # as one green run (2026-10-05: 2097 mutants, 77 missed, 5 timeouts,
   # conclusion success); a baseline failure (exit 4) read green the same way.
   mutants:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 100
     strategy:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Forensic history of the silent runner deaths (6 runs, always the same
       # shards): disk REFUTED (106G free at death, 07-06 telemetry), the
       # rescue-stress twin was pinned to an rxing 0.9.1 underflow whose wrap
@@ -90,7 +90,7 @@ jobs:
         env:
           NEXTEST_TEST_THREADS: "2"
         timeout-minutes: 85
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutants-report-shard-${{ matrix.shard }}
@@ -109,11 +109,11 @@ jobs:
   mutants-summary:
     needs: mutants
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: mutants-report-shard-*
           path: mutants-shards
@@ -130,10 +130,10 @@ jobs:
           mutants-shards/mutants-report-shard-{0..15}
 
   fuzz:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
       - uses: taiki-e/install-action@v2
         with:
@@ -175,10 +175,10 @@ jobs:
   #      is a REAL finding, not a flake — this stays a hard gate.
   # The full table uploads as an artifact for trend reading.
   rescue-stress:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 70
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Same silent runner-death class as the mutant shards, but at VARIABLE
       # elapsed (2/49/4 min across runs — an OOM race fits: rayon fans the
       # scan grid across all cores and a pathological render can allocate
@@ -227,7 +227,7 @@ jobs:
             echo "::error::a pass produced ZERO rescue decodes — its zero-wrong gate would measure nothing"
             exit 1
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: rescue-stress-report
@@ -243,10 +243,10 @@ jobs:
   # config as ci.yml's hard gate (workspace graph; the foreign binding trees
   # are scanned over there, findings report-only).
   advisories:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1 · cargo-deny 0.20.2
         with:
           command: check advisories

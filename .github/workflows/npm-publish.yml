@@ -23,26 +23,28 @@ jobs:
         settings:
           - { host: macos-latest, target: aarch64-apple-darwin, cross: "" }
           - { host: macos-latest, target: x86_64-apple-darwin, cross: "" }
-          - { host: ubuntu-latest, target: x86_64-unknown-linux-gnu, cross: "--use-napi-cross" }
-          - { host: ubuntu-latest, target: aarch64-unknown-linux-gnu, cross: "--use-napi-cross" }
-          - { host: ubuntu-latest, target: x86_64-unknown-linux-musl, cross: "-x" }
+          - { host: ubuntu-24.04, target: x86_64-unknown-linux-gnu, cross: "--use-napi-cross" }
+          - { host: ubuntu-24.04, target: aarch64-unknown-linux-gnu, cross: "--use-napi-cross" }
+          - { host: ubuntu-24.04, target: x86_64-unknown-linux-musl, cross: "-x" }
           - { host: windows-latest, target: x86_64-pc-windows-msvc, cross: "" }
     runs-on: ${{ matrix.settings.host }}
     defaults:
       run:
         working-directory: crates/qrcode-ai-scanner-node
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.settings.target }}
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - uses: Swatinem/rust-cache@v2
+      # The one action here still declaring node20 (no node24 release yet):
+      # since the runner dropped Node 20 it runs on Node 24 regardless.
       - uses: mlugg/setup-zig@v2
         if: ${{ contains(matrix.settings.target, 'musl') }}
         with:
@@ -56,7 +58,7 @@ jobs:
           tool: cargo-zigbuild
       - run: pnpm install --frozen-lockfile=false
       - run: pnpm exec napi build --platform --release --target ${{ matrix.settings.target }} --js native.js --dts native.d.ts ${{ matrix.settings.cross }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: binding-${{ matrix.settings.target }}
           path: crates/qrcode-ai-scanner-node/*.node
@@ -64,21 +66,21 @@ jobs:
 
   publish-native:
     needs: build-native
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: crates/qrcode-ai-scanner-node
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile=false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: crates/qrcode-ai-scanner-node/artifacts
       # napi v3: scaffold the per-platform npm/<triple>/ dirs before artifacts
@@ -97,7 +99,7 @@ jobs:
             echo "fresh release @$VER - platform packages will publish"
             echo "SKIP_OPTIONAL=" >> "$GITHUB_ENV"
           fi
-      - run: pnpm exec napi pre-publish -t npm --no-gh-release $SKIP_OPTIONAL
+      - run: pnpm exec napi pre-publish -t npm --no-gh-release ${SKIP_OPTIONAL:+"$SKIP_OPTIONAL"}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       # Idempotent: skip the main package if this version is already on npm
@@ -113,13 +115,13 @@ jobs:
           fi
 
   publish-wasm:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
