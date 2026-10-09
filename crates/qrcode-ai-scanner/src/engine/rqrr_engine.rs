@@ -6,7 +6,7 @@
 //! scanner's own codeword path and keeps it only when its payload equals
 //! rqrr's bytes — interpretation is OUR job, once, in `engine::content`.
 
-use super::content::EciEvidence;
+use super::content::{EciEvidence, Fnc1};
 use super::{MaskedStream, RawDetection};
 use crate::input::LumaImage;
 use crate::report::{EcLevel, EngineKind, Point, Symbology};
@@ -93,7 +93,7 @@ pub(super) fn decode(luma: &LumaImage) -> (Vec<RawDetection>, Vec<RescueCandidat
             ec,
             mask,
             // rqrr cannot decode FNC1 symbols (mode dispatch rejects 0x5/0x9)
-            fnc1: false,
+            fnc1: Fnc1::None,
             engine: EngineKind::Rqrr,
         });
     }
@@ -115,7 +115,7 @@ fn segment_evidence(
     };
     match crate::rescue::rederive(stream, version, ec, mask) {
         Rederived::Parsed(parsed) if parsed.bytes == raw => {
-            Some(EciEvidence::Parsed(parsed.segments))
+            Some(EciEvidence::from_marks(parsed.eci))
         }
         // rqrr may have decoded the MIRRORED grid while `get_raw_data` reads
         // it unmirrored: a stream that tells another story than the decoded
@@ -130,7 +130,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_precision_loss)]
 
     use super::{decode, segment_evidence};
-    use crate::engine::content::{EciEvidence, EciMark, SegmentMap};
+    use crate::engine::content::{EciEvidence, EciMark, Fnc1};
     use crate::input::LumaImage;
     use crate::report::{EcLevel, EngineKind, Symbology};
     use crate::rescue::test_symbols;
@@ -175,7 +175,8 @@ mod tests {
                 .all(|p| p.x >= 0.0 && p.x < side && p.y >= 0.0 && p.y < side),
             "{corners:?}"
         );
-        assert!(!d.fnc1, "a plain byte-mode QR is not FNC1");
+        assert_eq!(d.fnc1, Fnc1::None, "a plain byte-mode QR is not FNC1");
+        assert_eq!(d.eci, EciEvidence::NoEci, "observed: no designator");
     }
 
     #[test]
@@ -224,10 +225,7 @@ mod tests {
         assert_eq!(d.raw, b"12345\xA1");
         assert_eq!(
             d.eci,
-            EciEvidence::Parsed(SegmentMap {
-                eci: vec![EciMark { value: 4, start: 5 }],
-                double_byte: Vec::new(),
-            })
+            EciEvidence::Located(vec![EciMark { value: 4, start: 5 }])
         );
     }
 

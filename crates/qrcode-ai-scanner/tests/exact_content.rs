@@ -170,10 +170,55 @@ fn assert_both_engines(d: &Detection) {
     );
 }
 
-/// The lossless rendering published when no faithful reading exists: each
-/// byte as the code point of the same value (ISO/IEC 8859-1 order).
-fn byte_rendering(raw: &[u8]) -> String {
-    raw.iter().map(|&b| char::from(b)).collect()
+/// Text that cannot be decoded is marked, never transcribed: `n` U+FFFD.
+fn replacement(n: usize) -> String {
+    "\u{FFFD}".repeat(n)
+}
+
+/// Two symbols side by side on one canvas (the first on the left).
+fn png_pair(left: &QrCode, right: &QrCode) -> Vec<u8> {
+    let (a, b) = (left.to_colors(), right.to_colors());
+    let (wa, wb) = (left.width(), right.width());
+    let quiet = 4usize;
+    let px = MODULE_PX as usize;
+    let height = (wa.max(wb) + 2 * quiet) * px;
+    let width = (wa + wb + 3 * quiet) * px;
+    let mut img = image::GrayImage::from_pixel(
+        u32::try_from(width).unwrap(),
+        u32::try_from(height).unwrap(),
+        image::Luma([255]),
+    );
+    for (colors, modules, x0) in [(&a, wa, quiet), (&b, wb, wa + 2 * quiet)] {
+        for (i, color) in colors.iter().enumerate() {
+            if *color == qrcode::Color::Dark {
+                let (mx, my) = (x0 + i % modules, quiet + i / modules);
+                for dy in 0..px {
+                    for dx in 0..px {
+                        img.put_pixel(
+                            u32::try_from(mx * px + dx).unwrap(),
+                            u32::try_from(my * px + dy).unwrap(),
+                            image::Luma([0]),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    image::DynamicImage::ImageLuma8(img)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .unwrap();
+    out
+}
+
+/// A left-right mirror image of `code` (module x becomes width-1-x).
+fn png_mirrored(code: &QrCode) -> Vec<u8> {
+    let width = code.width();
+    let colors = code.to_colors();
+    let mirrored: Vec<qrcode::Color> = (0..width * width)
+        .map(|i| colors[(i / width) * width + (width - 1 - i % width)])
+        .collect();
+    png_modules(&mirrored, width, code.version(), false)
 }
 
 /// ISO/IEC 8859-5 bytes of "Привет".
@@ -226,8 +271,8 @@ fn a2_eci4_full_profile_scores_with_geometry_sections() {
 }
 
 #[test]
-#[ignore = "needs the stress-cell matcher to compare canonical text \
-            (score/mod.rs detections_match → engine::content::canonical_text)"]
+#[ignore = "needs the stress-cell matcher to admit hits by content \
+            (score/mod.rs detections_match → engine::content::ContentKey::admits)"]
 fn a2_eci4_axes_match_the_utf8_control() {
     // Same layout, same text 'Ą': ECI 4 [A1] versus ECI 26 [C4 84]. Stress
     // survival must not depend on which declaration carried the text.
@@ -330,14 +375,14 @@ fn a7_unsupported_eci_keeps_raw_in_one_detection() {
     let report = scan_content(&png(&code, false));
     let d = one(&report);
     assert_eq!(d.content.raw, vec![0xA1]);
-    // no faithful reading exists: the lossless byte rendering, not a guess
-    assert_eq!(d.content.text, byte_rendering(&[0xA1]));
+    // no reading exists: one U+FFFD per byte — never a transcription
+    assert_eq!(d.content.text, replacement(1));
 }
 
 #[test]
 fn a8_undecodable_declared_span_never_publishes_empty_text() {
     // ECI 26 over a lone A1 (invalid UTF-8): rxing's own text drops the
-    // span. The observation keeps every byte and a non-empty rendering.
+    // span. The observation keeps every byte and marks the invalid one.
     let code = v3(|b| {
         b.push_eci_designator(26)?;
         b.push_byte_data(&[0xA1])
@@ -345,14 +390,14 @@ fn a8_undecodable_declared_span_never_publishes_empty_text() {
     let report = scan_content(&png(&code, false));
     let d = one(&report);
     assert_eq!(d.content.raw, vec![0xA1]);
-    assert_eq!(d.content.text, byte_rendering(&[0xA1]));
+    assert_eq!(d.content.text, replacement(1));
 }
 
 #[test]
 fn a9_kanji_under_eci26_is_byte_compaction() {
     // ISO 18004 §7.4.2.1: under an ECI every mode only compacts bytes — the
-    // Kanji pairs are UTF-8 bytes here, and invalid ones: undecodable, so
-    // the lossless rendering, with every byte kept.
+    // Kanji pairs are UTF-8 bytes here: 'é' decodes, every ill-formed
+    // subpart after it is marked (WHATWG replacement), every byte kept.
     let code = v3(|b| {
         b.push_eci_designator(26)?;
         b.push_byte_data("é".as_bytes())?;
@@ -363,11 +408,14 @@ fn a9_kanji_under_eci26_is_byte_compaction() {
     let mut raw = "é".as_bytes().to_vec();
     raw.extend_from_slice(&KONNICHIWA_SJIS);
     assert_eq!(d.content.raw, raw);
-    assert_eq!(d.content.text, byte_rendering(&raw));
+    // one U+FFFD per maximal ill-formed subpart (C9 82 happens to be 'ɂ')
+    assert_eq!(d.content.text, String::from_utf8_lossy(&raw));
+    assert!(d.content.text.starts_with('é') && d.content.text.contains('\u{FFFD}'));
 }
 
 #[test]
 fn a10_eci899_binary_keeps_exact_bytes() {
+    // ECI 899 is binary: never text — one U+FFFD per byte
     let bytes = [0x00, 0xFF, 0x80, 0x7F];
     let code = v3(|b| {
         b.push_eci_designator(899)?;
@@ -376,7 +424,7 @@ fn a10_eci899_binary_keeps_exact_bytes() {
     let report = scan_content(&png(&code, false));
     let d = one(&report);
     assert_eq!(d.content.raw, bytes.to_vec());
-    assert_eq!(d.content.text, byte_rendering(&bytes));
+    assert_eq!(d.content.text, replacement(4));
 }
 
 #[test]
@@ -394,6 +442,48 @@ fn a11_malformed_designator_is_refused_by_every_path() {
     let d = one(&report);
     assert_eq!(d.content.raw, b"abc".to_vec());
     assert_both_engines(d);
+}
+
+#[test]
+fn a13_signalled_only_declaration_is_marked_not_guessed() {
+    // A mirrored symbol: rqrr decodes it through its mirrored grid, but the
+    // stream it samples is the unmirrored one, so the re-derivation fails
+    // and rqrr's ECI evidence stays unobserved (not a refusal). rxing's
+    // port states that a designator exists without locating it. Until the
+    // publication rule for signalled-only content is final, the bytes are
+    // marked unknown — one U+FFFD per byte, every byte kept, no engine
+    // text taken on trust.
+    let code = v3(|b| {
+        b.push_eci_designator(4)?;
+        b.push_byte_data(&[0xA1])
+    });
+    let report = scan_content(&png_mirrored(&code));
+    let d = one(&report);
+    assert_eq!(d.content.raw, vec![0xA1]);
+    assert_eq!(d.content.text, replacement(1));
+}
+
+#[test]
+fn a14_same_text_from_different_bytes_stays_two_detections() {
+    // Merge identity is the content (symbology, raw, compatible ECI
+    // evidence), not the text: a UTF-8 "é" symbol and a Windows-1252 "é"
+    // symbol are two detections although both read "é".
+    let utf8 = v3(|b| b.push_byte_data("é".as_bytes()));
+    let latin1 = v3(|b| b.push_byte_data(&[0xE9]));
+    let report = scan_content(&png_pair(&utf8, &latin1));
+    let mut raws: Vec<Vec<u8>> = report
+        .detections
+        .iter()
+        .map(|d| d.content.raw.clone())
+        .collect();
+    raws.sort();
+    assert_eq!(
+        raws,
+        vec![vec![0xC3, 0xA9], vec![0xE9]],
+        "{:?}",
+        summary(&report)
+    );
+    assert!(report.detections.iter().all(|d| d.content.text == "é"));
 }
 
 #[test]

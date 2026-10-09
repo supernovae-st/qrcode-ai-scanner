@@ -16,7 +16,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::input::LumaImage;
 use crate::report::{EcLevel, EngineKind, Point, Symbology};
-use content::EciEvidence;
+use content::{EciEvidence, Fnc1};
 
 /// Still-masked codeword bitstream as the engine sampled it (rqrr only) —
 /// feeds the synthetic UEC.
@@ -49,11 +49,12 @@ pub(crate) struct RawDetection {
     pub ec: Option<EcLevel>,
     /// Mask pattern 0-7 when measured.
     pub mask: Option<u8>,
-    /// FNC1-in-first-position symbol (GS1 formatted data — symbology
-    /// `]Q3`/`]Q4`). rqrr cannot decode FNC1 symbols at all (its mode
-    /// dispatch rejects indicators 0x5/0x9); rxing and the rescue parser
-    /// can. FNC1 in SECOND position is an AIM application, never GS1.
-    pub fnc1: bool,
+    /// The FNC1 position the read stated. First = GS1 formatted data (QR
+    /// `]Q3`/`]Q4` · `DataMatrix` `]d2` · GS1-128 `]C1`); second = an AIM
+    /// application, never GS1. rqrr cannot decode FNC1 symbols at all (its
+    /// mode dispatch rejects indicators 0x5/0x9); rxing and the rescue
+    /// parser can.
+    pub fnc1: Fnc1,
     /// Producing engine.
     pub engine: EngineKind,
 }
@@ -288,21 +289,32 @@ mod tests {
 
     #[cfg(all(feature = "engine-rxing", feature = "engine-rqrr"))]
     #[test]
-    fn stress_cell_hits_read_the_declared_text() {
-        // A stress cell survives when an engine hit reads the scored text.
-        // Every hit of an ECI-4 'Ą' symbol — clean, rotated, blurred, from
-        // either engine — reads 'Ą' under the one interpretation, exactly as
-        // the hits of a UTF-8 'Ą' symbol do; the heuristic over the same
-        // bytes reads '¡'. (The cell matcher must therefore compare
-        // `content::read`, not `charset::resolve`.)
-        let luma = crate::rescue::test_symbols::from_segments(
-            qrcode::Version::Normal(3),
-            qrcode::EcLevel::M,
-            |b| {
-                b.push_eci_designator(4)?;
-                b.push_byte_data(&[0xA1])
-            },
-        );
+    fn stress_cells_match_by_content_key_not_by_text() {
+        // A stress cell survives when an engine hit carries the scored
+        // CONTENT. Every hit of an ECI-4 [A1] symbol — clean, rotated,
+        // blurred, from either engine, located or only signalled — is
+        // admitted by the detection's key, while its heuristic text ('¡')
+        // differs from the detection's ('Ą'), and an unmarked [A1] hit is
+        // refused. (The cell matcher must compare `ContentKey::admits`.)
+        let symbol = |eci: bool| {
+            crate::rescue::test_symbols::from_segments(
+                qrcode::Version::Normal(3),
+                qrcode::EcLevel::M,
+                |b| {
+                    if eci {
+                        b.push_eci_designator(4)?;
+                    }
+                    b.push_byte_data(&[0xA1])
+                },
+            )
+        };
+        let key = content::ContentKey {
+            raw: vec![0xA1],
+            eci: EciEvidence::Located(vec![content::EciMark { value: 4, start: 0 }]),
+            fnc1: Fnc1::None,
+        };
+        assert_eq!(content::read(&key.raw, &key.eci).text, "\u{104}");
+        let luma = symbol(true);
         let cells = [
             luma.clone(),
             crate::score::warp::rotate(&luma, 20.0),
@@ -312,17 +324,13 @@ mod tests {
             let outcome = decode_filtered(cell, FormatFilter::Only(Symbology::QrCode));
             assert!(!outcome.detections.is_empty(), "cell {i} decodes");
             for d in &outcome.detections {
-                assert_eq!(d.raw, vec![0xA1], "cell {i} {:?}", d.engine);
-                assert_eq!(
-                    content::read(&d.raw, &d.eci).text,
-                    "\u{104}",
-                    "cell {i} {:?}: {:?}",
-                    d.engine,
-                    d.eci
-                );
+                assert!(key.admits(d), "cell {i} {:?}: {:?}", d.engine, d.eci);
                 assert_eq!(charset::resolve(&d.raw).0, "¡");
             }
         }
+        let unmarked = decode_filtered(&symbol(false), FormatFilter::Only(Symbology::QrCode));
+        assert!(!unmarked.detections.is_empty());
+        assert!(unmarked.detections.iter().all(|d| !key.admits(d)));
     }
 
     #[test]

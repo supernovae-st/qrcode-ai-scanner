@@ -1,31 +1,25 @@
 //! QR content observations and their ONE interpretation (ISO/IEC 18004
-//! §7.3.5 · §7.4.2).
+//! §7.3.5 · §7.4.2 · §7.4.8).
 //!
 //! An observation is payload bytes plus what its source could see of the
-//! segment structure: whether an ECI designator was present and — when the
-//! scanner parsed the RS-corrected codewords itself — which assignment
-//! number governs which bytes. [`read`] turns that into text exactly once,
-//! for every consumer (ladder grouping, the published content, stress-cell
-//! matching):
+//! ECI declarations and of the FNC1 position. Two reads are one physical
+//! content when their bytes are identical and their accounts agree
+//! ([`ContentKey::admits`]); [`read`] then turns the content into text
+//! exactly once:
 //!
-//! 1. A declared ECI governs its bytes until the next designator or the end
-//!    of data. Bytes before the first designator are ISO/IEC 8859-1 (the
-//!    default interpretation, §7.3.5) — Kanji/Hanzi pairs there carry their
-//!    own set, since no ECI governs them yet.
-//! 2. Under an ECI every mode only compacts bytes (§7.4.2.1): a Kanji pair
-//!    after ECI 26 is two UTF-8 bytes, not Shift JIS.
-//! 3. A payload without any designator keeps the charset heuristic
-//!    ([`charset::resolve`]) and its label, unchanged.
-//! 4. A declaration the scanner cannot honour — an assignment number with no
-//!    registered character set, bytes invalid in the declared set, ECI 899
-//!    binary, a designator an engine signalled but could not locate —
-//!    keeps every byte and publishes the lossless byte rendering (each byte
-//!    as the code point of the same value), never a guessed reading.
+//! 1. Located designators govern their bytes until the next designator or
+//!    the end of data (§7.4.2.3). Every byte before the first designator is
+//!    ISO/IEC 8859-1 whatever mode encoded it (the default interpretation,
+//!    §7.3.5) — text is a function of the bytes and the designators alone.
+//! 2. A payload without any designator keeps the legacy charset heuristic
+//!    ([`charset::resolve`]) and its label.
+//! 3. What cannot be decoded is marked, never transcribed nor guessed: one
+//!    U+FFFD per maximal ill-formed subpart inside a supported set (WHATWG),
+//!    one per byte under ECI 899 or a designator outside the decode table.
+//! 4. A designator an engine signalled without locating it leaves the text
+//!    unverified: its bytes are marked unknown.
 
-use std::borrow::Cow;
-use std::ops::Range;
-
-use super::charset;
+use super::{RawDetection, charset};
 use crate::report::Charset;
 
 /// One ECI designator: its six-digit assignment number and the payload
@@ -38,199 +32,267 @@ pub(crate) struct EciMark {
     pub(crate) start: usize,
 }
 
-/// A double-byte mode — its pairs carry their own character set where no
-/// ECI governs them.
+/// The FNC1 mode a read declared (ISO 18004 §7.4.8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DoubleByteMode {
-    /// Kanji mode (§7.4.6): Shift JIS (JIS X 0208) pairs.
-    Kanji,
-    /// Hanzi mode (GB/T 18284): GB 2312 pairs.
-    Hanzi,
+pub(crate) enum Fnc1 {
+    /// No FNC1 mode indicator.
+    None,
+    /// FNC1 in first position — GS1 data (`]Q3`/`]Q4`).
+    First,
+    /// FNC1 in second position — an AIM application, never GS1
+    /// (`]Q5`/`]Q6`); its application indicator leads the payload bytes.
+    Second,
 }
 
-/// Payload bytes `start..end`, written by one double-byte segment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DoubleByteSpan {
-    /// The segment's mode.
-    pub(crate) mode: DoubleByteMode,
-    /// First payload byte of the segment.
-    pub(crate) start: usize,
-    /// One past its last payload byte.
-    pub(crate) end: usize,
+impl Fnc1 {
+    /// First and second position describe different symbols.
+    fn agrees_with(self, other: Self) -> bool {
+        !matches!(
+            (self, other),
+            (Self::First, Self::Second) | (Self::Second, Self::First)
+        )
+    }
 }
 
-/// The parts of a segment stream the interpretation depends on.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct SegmentMap {
-    /// ECI designators, in stream order.
-    pub(crate) eci: Vec<EciMark>,
-    /// Double-byte segments, in stream order.
-    pub(crate) double_byte: Vec<DoubleByteSpan>,
-}
-
-/// What one observation could see of the ECI declarations of its bytes.
+/// What one read could see of the ECI declarations of its bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EciEvidence {
     /// Nothing observable: a symbology outside the QR family, or a stream
     /// re-derivation that failed or told another story than the engine's
     /// bytes (e.g. the unmirrored read of a mirrored symbol).
     Unobserved,
-    /// The engine stated that no designator is present (AIM modifier
-    /// `]Q0`/`]Q1`/`]Q3`/`]Q5`); the structure is otherwise unknown.
-    Absent,
+    /// No designator: stated by the engine (AIM modifier `]Q0`/`]Q1`/
+    /// `]Q3`/`]Q5`) or observed in the parsed stream.
+    NoEci,
     /// The engine stated a designator is present (`]Q2`/`]Q4`/`]Q6`) but
-    /// exposes neither its number nor its position. Its own text rides
-    /// along — kept only when it is a faithful decode of the bytes.
-    Unlocated {
-        /// The engine's decoded text.
-        engine_text: String,
-    },
-    /// The whole structure, parsed by the scanner from RS-corrected data
-    /// codewords.
-    Parsed(SegmentMap),
+    /// exposes neither its number nor its position.
+    Signalled,
+    /// The designators, parsed by the scanner from RS-corrected data
+    /// codewords, in stream order (never empty).
+    Located(Vec<EciMark>),
 }
 
 impl EciEvidence {
-    /// Whether two observations of the same bytes can be one physical
-    /// symbol: their ECI accounts must not contradict each other — an
-    /// unmarked `A1` and an ECI-4 `A1` are two different contents.
+    /// The account of a parsed stream: its designators, or their observed
+    /// absence.
+    pub(crate) fn from_marks(marks: Vec<EciMark>) -> Self {
+        if marks.is_empty() {
+            Self::NoEci
+        } else {
+            Self::Located(marks)
+        }
+    }
+
+    /// The compatibility lattice: unobserved ~ anything · no-ECI ~ no-ECI ·
+    /// signalled ~ signalled | located · located(a) ~ located(a) | signalled.
+    /// Everything else is a different content (an unmarked `A1` and an
+    /// ECI-4 `A1` stay two).
     pub(crate) fn agrees_with(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Unobserved, _)
             | (_, Self::Unobserved)
-            | (Self::Absent, Self::Absent)
-            | (Self::Unlocated { .. }, Self::Unlocated { .. }) => true,
-            (Self::Parsed(a), Self::Parsed(b)) => a == b,
-            (Self::Parsed(map), Self::Unlocated { .. })
-            | (Self::Unlocated { .. }, Self::Parsed(map)) => !map.eci.is_empty(),
-            (Self::Parsed(map), Self::Absent) | (Self::Absent, Self::Parsed(map)) => {
-                map.eci.is_empty()
-            }
-            (Self::Absent, Self::Unlocated { .. }) | (Self::Unlocated { .. }, Self::Absent) => {
-                false
-            }
+            | (Self::NoEci, Self::NoEci)
+            | (Self::Signalled, Self::Signalled | Self::Located(_))
+            | (Self::Located(_), Self::Signalled) => true,
+            (Self::Located(a), Self::Located(b)) => a == b,
+            (Self::NoEci, _) | (_, Self::NoEci) => false,
         }
     }
 
-    /// How much this account says: a parsed structure beats an engine's
-    /// presence flag, which beats nothing.
-    fn weight(&self) -> u8 {
+    fn specificity(&self) -> u8 {
         match self {
             Self::Unobserved => 0,
-            Self::Absent | Self::Unlocated { .. } => 1,
-            Self::Parsed(_) => 2,
-        }
-    }
-
-    /// Keep the more informative of two agreeing accounts (the first one
-    /// on a tie — deterministic in absorb order).
-    pub(crate) fn absorb(&mut self, other: Self) {
-        if other.weight() > self.weight() {
-            *self = other;
+            Self::NoEci | Self::Signalled => 1,
+            Self::Located(_) => 2,
         }
     }
 }
 
-/// How the scanner reached the text — the honest account behind the label.
+/// What one detection's content IS: the reconciliation identity, and what
+/// score stress cells and alpha probes compare an engine hit against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContentKey {
+    /// Original payload bytes, designators excluded.
+    pub(crate) raw: Vec<u8>,
+    /// The most specific ECI account any admitted read gave.
+    pub(crate) eci: EciEvidence,
+    /// The FNC1 position any admitted read stated.
+    pub(crate) fnc1: Fnc1,
+}
+
+impl ContentKey {
+    /// Whether an engine hit reads this same content: identical bytes,
+    /// agreeing ECI accounts, no FNC1 position conflict. Symbology is the
+    /// caller's filter.
+    pub(crate) fn admits(&self, hit: &RawDetection) -> bool {
+        self.raw == hit.raw && self.eci.agrees_with(&hit.eci) && self.fnc1.agrees_with(hit.fnc1)
+    }
+
+    /// Join an admitted read's account: the most specific one stays
+    /// (located over signalled, no-ECI over unobserved; the first on a tie).
+    pub(crate) fn join(&mut self, eci: EciEvidence, fnc1: Fnc1) {
+        if eci.specificity() > self.eci.specificity() {
+            self.eci = eci;
+        }
+        if self.fnc1 == Fnc1::None {
+            self.fnc1 = fnc1;
+        }
+    }
+}
+
+/// How a reading may be labelled — the account the three-label wire
+/// contract cannot carry yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ContentStatus {
-    /// No designator observed: the charset heuristic read the bytes.
-    Heuristic(Charset),
-    /// Every byte decoded under its declaration. `Some` names the legacy
-    /// label whose decoder reproduces the text from the bytes exactly.
-    Declared(Option<Charset>),
-    /// A designator was signalled but not located; the engine's text is a
-    /// strict decode of the bytes under a registered ECI character set, so
-    /// it was kept. `Some`: as for `Declared`.
-    EngineReading(Option<Charset>),
-    /// A designator was signalled but not located, and the engine's text is
-    /// not a faithful decode of the bytes.
-    UnlocatedEci,
-    /// ECI 000899: 8-bit binary data, no character interpretation.
-    Binary,
-    /// A declared assignment number with no registered character set the
-    /// scanner can decode (CP437, unassigned numbers, 900 and above).
-    UnsupportedEci,
-    /// Declared bytes that are invalid in their declared character set.
-    Undecodable,
+pub(crate) enum Label {
+    /// The legacy label whose decoder reproduces the text from the bytes
+    /// exactly (always the case for the heuristic's own choice).
+    Legacy(Charset),
+    /// Located declarations decoded without a mark, under no single legacy
+    /// label.
+    Eci,
+    /// Something is marked or unverified: a replacement, a designator that
+    /// is binary or outside the decode table, a signalled-only declaration.
+    Unknown,
 }
 
-/// The text of one observation and how it was reached.
+/// The text of one content and how it may be labelled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Reading {
-    /// The text — a faithful reading, or the lossless byte rendering when
-    /// `status` says no faithful reading exists.
+    /// The text; U+FFFD marks what has no reading.
     pub(crate) text: String,
-    /// How `text` was reached.
-    pub(crate) status: ContentStatus,
+    /// The label decision.
+    pub(crate) label: Label,
 }
 
 impl Reading {
-    /// The label published under the three-label wire contract. A faithful
-    /// reading publishes the legacy label that reproduces its text; a
-    /// reading no legacy label can express (an ISO/IEC 8859-2 text, a
-    /// byte rendering) keeps the heuristic's label for the bytes — `status`
-    /// carries the honest account.
-    pub(crate) fn label(&self, raw: &[u8]) -> Charset {
-        match self.status {
-            ContentStatus::Heuristic(label)
-            | ContentStatus::Declared(Some(label))
-            | ContentStatus::EngineReading(Some(label)) => label,
-            ContentStatus::Declared(None)
-            | ContentStatus::EngineReading(None)
-            | ContentStatus::UnlocatedEci
-            | ContentStatus::Binary
-            | ContentStatus::UnsupportedEci
-            | ContentStatus::Undecodable => charset::resolve(raw).1,
+    /// The label published while the wire contract has only the three
+    /// legacy labels: the legacy label when one is faithful, else `utf8` as
+    /// a placeholder — never `latin1`/`shift_jis`, which would claim a
+    /// legacy decoding for content that has none (`label` keeps the full account
+    /// until `eci`/`unknown` exist on the wire).
+    pub(crate) fn published(&self) -> Charset {
+        match self.label {
+            Label::Legacy(label) => label,
+            Label::Eci | Label::Unknown => Charset::Utf8,
         }
     }
 }
 
-/// Interpret one observation — THE content rule of the crate (module doc).
+/// Interpret one content — THE content rule of the crate (module doc).
 pub(crate) fn read(raw: &[u8], eci: &EciEvidence) -> Reading {
     match eci {
-        EciEvidence::Parsed(map) if !map.eci.is_empty() => read_declared(raw, map),
-        EciEvidence::Unlocated { engine_text } => read_unlocated(raw, engine_text),
-        EciEvidence::Unobserved | EciEvidence::Absent | EciEvidence::Parsed(_) => {
-            let (text, label) = charset::resolve(raw);
-            Reading {
-                text,
-                status: ContentStatus::Heuristic(label),
-            }
-        }
+        EciEvidence::Located(marks) => read_located(raw, marks),
+        EciEvidence::Signalled => read_signalled(raw),
+        EciEvidence::NoEci | EciEvidence::Unobserved => read_unmarked(raw),
     }
 }
 
-/// A character set an ECI assignment number declares (AIM ECI register,
-/// character-set block).
+/// No designator observed: the legacy heuristic and its label. (A mode-
+/// implied reading of Hanzi or mixed byte+Kanji payloads is still an open
+/// contract question; this is the one place it would land.)
+fn read_unmarked(raw: &[u8]) -> Reading {
+    let (text, label) = charset::resolve(raw);
+    Reading {
+        text,
+        label: Label::Legacy(label),
+    }
+}
+
+/// A designator was signalled but not located: which bytes it governs and
+/// under which set is unknown, so is the text. Conservative until the
+/// publication rule for signalled-only content is final: every byte marked.
+fn read_signalled(raw: &[u8]) -> Reading {
+    Reading {
+        text: replacement(raw.len()),
+        label: Label::Unknown,
+    }
+}
+
+fn read_located(raw: &[u8], marks: &[EciMark]) -> Reading {
+    // designator boundaries, clamped monotone into the payload (the parser
+    // never produces anything else — this only keeps the function total)
+    let mut starts = Vec::with_capacity(marks.len());
+    let mut previous = 0;
+    for mark in marks {
+        previous = mark.start.clamp(previous, raw.len());
+        starts.push(previous);
+    }
+    let first = starts.first().copied().unwrap_or(raw.len());
+    let mut text = charset::iso_8859_1(raw.get(..first).unwrap_or_default());
+    let mut marked = false;
+    let ends = starts.iter().skip(1).copied().chain([raw.len()]);
+    for ((mark, &start), end) in marks.iter().zip(&starts).zip(ends) {
+        let bytes = raw.get(start..end).unwrap_or_default();
+        match eci_set(mark.value) {
+            Some(set) => {
+                let (part, replaced) = decode(bytes, set);
+                text.push_str(&part);
+                marked |= replaced;
+            }
+            None => text.push_str(&replacement(bytes.len())),
+        }
+    }
+    // any listed designator without a set — even one governing no byte —
+    // means the content is not fully readable as declared
+    let label = if marked || marks.iter().any(|mark| eci_set(mark.value).is_none()) {
+        Label::Unknown
+    } else {
+        legacy_family(marks)
+            .filter(|&label| charset::decode_legacy(raw, label).as_deref() == Some(text.as_str()))
+            .map_or(Label::Eci, Label::Legacy)
+    };
+    Reading { text, label }
+}
+
+/// The legacy label every listed designator belongs to — `utf8`: 26
+/// (UTF-8), 27 (ASCII) · `shift_jis`: 20 · `latin1`: 1, 3 (ISO/IEC
+/// 8859-1), 23 (Windows-1252). `None` when they span several families or
+/// none.
+fn legacy_family(marks: &[EciMark]) -> Option<Charset> {
+    let mut family = None;
+    for mark in marks {
+        let own = match mark.value {
+            26 | 27 => Charset::Utf8,
+            20 => Charset::ShiftJis,
+            1 | 3 | 23 => Charset::Latin1,
+            _ => return None,
+        };
+        if family.is_some_and(|shared| shared != own) {
+            return None;
+        }
+        family = Some(own);
+    }
+    family
+}
+
+const REPLACEMENT: char = '\u{FFFD}';
+
+fn replacement(count: usize) -> String {
+    std::iter::repeat_n(REPLACEMENT, count).collect()
+}
+
+/// A character set of the decode table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EciSet {
-    /// ISO/IEC 8859-1 — byte n is U+00nn, C1 controls included (never the
-    /// Windows-1252 superset the heuristic's `latin1` label decodes).
+    /// ISO/IEC 8859-1 — byte n is U+00nn, C1 controls included.
     Latin1,
-    /// An ISO/IEC 8859 part `encoding_rs` only models through its Windows
-    /// superset: 0x80-0x9F are C1 controls in the ISO part and decode as
-    /// such; every other byte goes through the superset table.
-    IsoPart(&'static encoding_rs::Encoding),
+    /// ISO/IEC 8859-9, in-crate (no WHATWG decoder exists for it).
+    Iso8859_9,
+    /// ISO/IEC 8859-11, in-crate (no WHATWG decoder exists for it).
+    Iso8859_11,
     /// Decoded by `encoding_rs` exactly as registered.
     Whatwg(&'static encoding_rs::Encoding),
-    /// US-ASCII (ECI 27): seven-bit only.
+    /// US-ASCII: bytes from 0x80 have no reading.
     Ascii,
-    /// ISO/IEC 646 invariant (ECI 170): seven-bit minus the twelve
-    /// positions national variants redefine.
-    Iso646Invariant,
-    /// UTF-32 (ECI 34 big endian, ECI 35 little endian).
+    /// UTF-32 (ECI 34 big endian, ECI 35 little endian), in-crate.
     Utf32 {
         /// Byte order of each code unit.
         big_endian: bool,
     },
-    /// ECI 000899: binary — no character interpretation exists.
-    Binary,
 }
 
-/// The character set an assignment number declares; `None` when the
-/// scanner has none for it (CP437 = ECI 0/2, unassigned 14/19, 36-169,
-/// 171-898, and everything from 900 on).
+/// The normative decode table. `None`: no character set — ECI 899 (binary,
+/// never text), 0/2 (CP437), 14, 19, 170 and every other number.
 fn eci_set(value: u32) -> Option<EciSet> {
     use encoding_rs as e;
     Some(match value {
@@ -242,9 +304,9 @@ fn eci_set(value: u32) -> Option<EciSet> {
         8 => EciSet::Whatwg(e::ISO_8859_6),
         9 => EciSet::Whatwg(e::ISO_8859_7),
         10 => EciSet::Whatwg(e::ISO_8859_8),
-        11 => EciSet::IsoPart(e::WINDOWS_1254), // ISO/IEC 8859-9
+        11 => EciSet::Iso8859_9,
         12 => EciSet::Whatwg(e::ISO_8859_10),
-        13 => EciSet::IsoPart(e::WINDOWS_874), // ISO/IEC 8859-11
+        13 => EciSet::Iso8859_11,
         15 => EciSet::Whatwg(e::ISO_8859_13),
         16 => EciSet::Whatwg(e::ISO_8859_14),
         17 => EciSet::Whatwg(e::ISO_8859_15),
@@ -258,202 +320,94 @@ fn eci_set(value: u32) -> Option<EciSet> {
         26 => EciSet::Whatwg(e::UTF_8),
         27 => EciSet::Ascii,
         28 => EciSet::Whatwg(e::BIG5),
-        // GB 2312: the GBK decoder reads every GB 2312 sequence unchanged
-        29 | 31 => EciSet::Whatwg(e::GBK),
+        // GB 2312 · GBK · GB 18030: the gb18030 decoder reads all three
+        29 | 31 | 32 => EciSet::Whatwg(e::GB18030),
         30 => EciSet::Whatwg(e::EUC_KR),
-        32 => EciSet::Whatwg(e::GB18030),
         33 => EciSet::Whatwg(e::UTF_16LE),
         34 => EciSet::Utf32 { big_endian: true },
         35 => EciSet::Utf32 { big_endian: false },
-        170 => EciSet::Iso646Invariant,
-        899 => EciSet::Binary,
         _ => return None,
     })
 }
 
-/// The twelve ISO/IEC 646 positions national variants redefine (number
-/// sign, dollar, at, brackets, backslash, circumflex, grave accent, braces,
-/// vertical line, tilde) — outside the invariant set.
-const ISO_646_NATIONAL: &[u8; 12] = b"#$@[\\]^`{|}~";
-
-fn is_c1(byte: u8) -> bool {
-    (0x80..=0x9F).contains(&byte)
-}
-
-/// Strictly decode `bytes` under `set`: every byte must belong to the set
-/// — no replacement characters, no BOM sniffing. Binary never decodes.
-fn decode_strict(bytes: &[u8], set: EciSet) -> Option<String> {
+/// Decode `bytes` under `set`, marking what has no reading — one U+FFFD per
+/// maximal ill-formed subpart (WHATWG), no BOM sniffing. Returns whether
+/// anything was marked.
+fn decode(bytes: &[u8], set: EciSet) -> (String, bool) {
     match set {
-        EciSet::Latin1 => Some(charset::iso_8859_1(bytes)),
-        EciSet::Whatwg(encoding) => encoding
-            .decode_without_bom_handling_and_without_replacement(bytes)
-            .map(Cow::into_owned),
-        EciSet::IsoPart(superset) => {
-            let mut text = String::with_capacity(bytes.len());
-            for run in bytes.chunk_by(|a, b| is_c1(*a) == is_c1(*b)) {
-                if run.first().is_some_and(|&b| is_c1(b)) {
-                    text.push_str(&charset::iso_8859_1(run));
-                } else {
-                    text.push_str(
-                        &superset.decode_without_bom_handling_and_without_replacement(run)?,
-                    );
-                }
-            }
-            Some(text)
+        EciSet::Latin1 => (charset::iso_8859_1(bytes), false),
+        EciSet::Iso8859_9 => (bytes.iter().map(|&b| iso_8859_9(b)).collect(), false),
+        EciSet::Iso8859_11 => mark_each(bytes, iso_8859_11),
+        EciSet::Ascii => mark_each(bytes, |b| b.is_ascii().then_some(char::from(b))),
+        EciSet::Whatwg(encoding) => {
+            let (text, marked) = encoding.decode_without_bom_handling(bytes);
+            (text.into_owned(), marked)
         }
-        EciSet::Ascii => bytes.is_ascii().then(|| charset::iso_8859_1(bytes)),
-        EciSet::Iso646Invariant => bytes
-            .iter()
-            .all(|b| b.is_ascii() && !ISO_646_NATIONAL.contains(b))
-            .then(|| charset::iso_8859_1(bytes)),
         EciSet::Utf32 { big_endian } => {
             let units = bytes.chunks_exact(4);
-            if !units.remainder().is_empty() {
-                return None;
-            }
-            units
-                .map(|unit| {
-                    let unit = <[u8; 4]>::try_from(unit).ok()?;
-                    char::from_u32(if big_endian {
+            // a truncated final unit is one ill-formed subpart
+            let truncated = !units.remainder().is_empty();
+            let mut marked = truncated;
+            let mut text = String::with_capacity(bytes.len() / 4 + 1);
+            for unit in units {
+                let word = <[u8; 4]>::try_from(unit).map_or(u32::MAX, |unit| {
+                    if big_endian {
                         u32::from_be_bytes(unit)
                     } else {
                         u32::from_le_bytes(unit)
-                    })
-                })
-                .collect()
-        }
-        EciSet::Binary => None,
-    }
-}
-
-/// The legacy label whose decoder agrees with `set` on non-ASCII bytes.
-fn legacy_family(set: EciSet) -> Option<Charset> {
-    match set {
-        EciSet::Latin1 => Some(Charset::Latin1),
-        EciSet::Whatwg(encoding) if encoding == encoding_rs::WINDOWS_1252 => Some(Charset::Latin1),
-        EciSet::Whatwg(encoding) if encoding == encoding_rs::UTF_8 => Some(Charset::Utf8),
-        EciSet::Whatwg(encoding) if encoding == encoding_rs::SHIFT_JIS => Some(Charset::ShiftJis),
-        _ => None,
-    }
-}
-
-/// `family` as a published label, only when its legacy decoder reproduces
-/// `text` from the whole payload (the label/text pair stays consistent).
-fn faithful_label(raw: &[u8], text: &str, family: Option<Charset>) -> Option<Charset> {
-    family.filter(|&label| charset::decode_legacy(raw, label).as_deref() == Some(text))
-}
-
-/// Each payload range with the character set that governs it (`None`: an
-/// assignment number the scanner has no set for).
-fn spans(len: usize, map: &SegmentMap) -> Vec<(Range<usize>, Option<EciSet>)> {
-    let mut out = Vec::new();
-    let first = map.eci.first().map_or(len, |mark| mark.start.min(len));
-    // before the first designator: ISO/IEC 8859-1, except double-byte
-    // pairs — no ECI governs them yet, so their mode's own set does
-    let mut cursor = 0;
-    for span in &map.double_byte {
-        let (start, end) = (span.start.max(cursor), span.end.min(first));
-        if start >= end {
-            continue;
-        }
-        if start > cursor {
-            out.push((cursor..start, Some(EciSet::Latin1)));
-        }
-        let native = match span.mode {
-            DoubleByteMode::Kanji => encoding_rs::SHIFT_JIS,
-            DoubleByteMode::Hanzi => encoding_rs::GBK,
-        };
-        out.push((start..end, Some(EciSet::Whatwg(native))));
-        cursor = end;
-    }
-    if first > cursor {
-        out.push((cursor..first, Some(EciSet::Latin1)));
-    }
-    for (i, mark) in map.eci.iter().enumerate() {
-        let end = map.eci.get(i + 1).map_or(len, |next| next.start);
-        out.push((mark.start..end, eci_set(mark.value)));
-    }
-    out
-}
-
-fn read_declared(raw: &[u8], map: &SegmentMap) -> Reading {
-    let mut text = String::with_capacity(raw.len());
-    // the label family shared by every non-ASCII span: None = none seen
-    // yet, Some(None) = no single legacy label covers them
-    let mut family: Option<Option<Charset>> = None;
-    let (mut unsupported, mut undecodable, mut binary) = (false, false, false);
-    for (range, set) in spans(raw.len(), map) {
-        let Some(bytes) = raw.get(range) else {
-            undecodable = true;
-            continue;
-        };
-        if bytes.is_empty() {
-            continue; // a declaration that governs no byte claims nothing
-        }
-        match set {
-            None => unsupported = true,
-            Some(EciSet::Binary) => binary = true,
-            Some(set) => match decode_strict(bytes, set) {
-                Some(part) => {
-                    text.push_str(&part);
-                    if !bytes.is_ascii() {
-                        let own = legacy_family(set);
-                        family = Some(match family {
-                            None => own,
-                            Some(shared) if shared == own => shared,
-                            Some(_) => None,
-                        });
                     }
+                });
+                if let Some(c) = char::from_u32(word) {
+                    text.push(c);
+                } else {
+                    marked = true;
+                    text.push(REPLACEMENT);
                 }
-                None => undecodable = true,
-            },
+            }
+            if truncated {
+                text.push(REPLACEMENT);
+            }
+            (text, marked)
         }
-    }
-    let status = if unsupported {
-        ContentStatus::UnsupportedEci
-    } else if undecodable {
-        ContentStatus::Undecodable
-    } else if binary {
-        ContentStatus::Binary
-    } else {
-        // all-ASCII payloads read the same under every label: utf8, as the
-        // heuristic says for them
-        let label = faithful_label(raw, &text, family.unwrap_or(Some(Charset::Utf8)));
-        return Reading {
-            text,
-            status: ContentStatus::Declared(label),
-        };
-    };
-    Reading {
-        text: charset::iso_8859_1(raw),
-        status,
     }
 }
 
-fn read_unlocated(raw: &[u8], engine_text: &str) -> Reading {
-    // The engine decoded spans we cannot see. Its text is kept only when a
-    // registered character set reproduces it from the bytes exactly — then
-    // it IS a faithful reading of them, whatever the declared number was.
-    // Assignment order makes the pick deterministic.
-    let matching = (0..=899)
-        .filter_map(eci_set)
-        .find(|&set| decode_strict(raw, set).as_deref() == Some(engine_text));
-    match matching {
-        Some(set) => {
-            let family = if raw.is_ascii() {
-                Some(Charset::Utf8)
-            } else {
-                legacy_family(set)
-            };
-            Reading {
-                text: engine_text.to_owned(),
-                status: ContentStatus::EngineReading(faithful_label(raw, engine_text, family)),
-            }
-        }
-        None => Reading {
-            text: charset::iso_8859_1(raw),
-            status: ContentStatus::UnlocatedEci,
-        },
+/// Decode a single-byte set byte by byte, marking unassigned bytes.
+fn mark_each(bytes: &[u8], map: impl Fn(u8) -> Option<char>) -> (String, bool) {
+    let mut marked = false;
+    let text = bytes
+        .iter()
+        .map(|&b| {
+            map(b).unwrap_or_else(|| {
+                marked = true;
+                REPLACEMENT
+            })
+        })
+        .collect();
+    (text, marked)
+}
+
+/// ISO/IEC 8859-9 (Latin-5): ISO/IEC 8859-1 with six Turkish letters.
+fn iso_8859_9(byte: u8) -> char {
+    match byte {
+        0xD0 => 'Ğ',
+        0xDD => 'İ',
+        0xDE => 'Ş',
+        0xF0 => 'ğ',
+        0xFD => 'ı',
+        0xFE => 'ş',
+        _ => char::from(byte),
+    }
+}
+
+/// ISO/IEC 8859-11 (Thai): 0x00-0xA0 as ISO/IEC 8859-1 (C1 controls,
+/// no-break space); 0xA1-0xDA and 0xDF-0xFB are U+0E01-U+0E3A and
+/// U+0E3F-U+0E5B; 0xDB-0xDE and 0xFC-0xFF are unassigned.
+fn iso_8859_11(byte: u8) -> Option<char> {
+    match byte {
+        0x00..=0xA0 => Some(char::from(byte)),
+        0xA1..=0xDA | 0xDF..=0xFB => char::from_u32(0x0E01 + u32::from(byte - 0xA1)),
+        _ => None,
     }
 }
 
@@ -464,32 +418,22 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::report::{EngineKind, Symbology};
 
-    fn declared(marks: &[(u32, usize)]) -> EciEvidence {
-        EciEvidence::Parsed(SegmentMap {
-            eci: marks
+    fn located(marks: &[(u32, usize)]) -> EciEvidence {
+        EciEvidence::Located(
+            marks
                 .iter()
                 .map(|&(value, start)| EciMark { value, start })
                 .collect(),
-            double_byte: Vec::new(),
-        })
-    }
-
-    fn rendering(raw: &[u8]) -> String {
-        raw.iter().map(|&b| char::from(b)).collect()
+        )
     }
 
     const KONNICHIWA_SJIS: [u8; 10] = [0x82, 0xB1, 0x82, 0xF1, 0x82, 0xC9, 0x82, 0xBF, 0x82, 0xCD];
 
     #[test]
-    fn no_designator_keeps_the_heuristic_and_its_label() {
-        // Absent, Unobserved and a parsed stream without designators all
-        // read exactly as charset::resolve — labels unchanged.
-        for evidence in [
-            EciEvidence::Absent,
-            EciEvidence::Unobserved,
-            EciEvidence::Parsed(SegmentMap::default()),
-        ] {
+    fn unmarked_payloads_keep_the_heuristic_and_its_label() {
+        for evidence in [EciEvidence::NoEci, EciEvidence::Unobserved] {
             for raw in [
                 &[0xA1][..],
                 &[0x35, 0x80],
@@ -499,282 +443,285 @@ mod tests {
                 let (text, label) = charset::resolve(raw);
                 let reading = read(raw, &evidence);
                 assert_eq!(reading.text, text, "{evidence:?} {raw:?}");
-                assert_eq!(reading.status, ContentStatus::Heuristic(label));
-                assert_eq!(reading.label(raw), label);
+                assert_eq!(reading.label, Label::Legacy(label));
+                assert_eq!(reading.published(), label);
             }
         }
     }
 
     #[test]
-    fn a_declared_eci_wins_over_the_heuristic() {
-        // ECI 4 (ISO/IEC 8859-2): A1 is 'Ą' — no legacy label reproduces it
-        let reading = read(&[0xA1], &declared(&[(4, 0)]));
+    fn a_located_designator_decides_its_bytes() {
+        // ECI 4 (ISO/IEC 8859-2): A1 is 'Ą' — designator 4 is in no legacy
+        // family, so the honest label is `eci`
+        let reading = read(&[0xA1], &located(&[(4, 0)]));
         assert_eq!(reading.text, "\u{104}");
-        assert_eq!(reading.status, ContentStatus::Declared(None));
-        // ECI 7 (ISO/IEC 8859-5)
+        assert_eq!(reading.label, Label::Eci);
+        // the three-label wire carries the utf8 placeholder meanwhile, never
+        // the heuristic's latin1 for [A1]
+        assert_eq!(reading.published(), Charset::Utf8);
         let privet = [0xBF, 0xE0, 0xD8, 0xD2, 0xD5, 0xE2];
-        assert_eq!(read(&privet, &declared(&[(7, 0)])).text, "Привет");
+        assert_eq!(read(&privet, &located(&[(7, 0)])).text, "Привет");
+        // ASCII under ECI 4 still reads as declared: `eci`, not utf8
+        assert_eq!(read(b"abc", &located(&[(4, 0)])).label, Label::Eci);
     }
 
+    /// (raw, designators as (value, start), text, label)
+    type LabelCase = (&'static [u8], &'static [(u32, usize)], &'static str, Label);
+
     #[test]
-    fn eci_1_and_3_are_strict_iso_8859_1() {
-        // 0x80 is the C1 control U+0080 under ISO/IEC 8859-1 — the
-        // Windows-1252 '€' would be a different character, so the legacy
-        // label (which decodes Windows-1252) cannot name this reading
-        for value in [1, 3] {
-            let reading = read(&[0x35, 0x80], &declared(&[(value, 0)]));
-            assert_eq!(reading.text, "5\u{80}");
-            assert_eq!(reading.status, ContentStatus::Declared(None));
+    fn the_legacy_label_requires_its_family_and_an_exact_reproduction() {
+        let cases: [LabelCase; 7] = [
+            (
+                "\u{104}".as_bytes(),
+                &[(26, 0)],
+                "\u{104}",
+                Label::Legacy(Charset::Utf8),
+            ),
+            (b"A", &[(27, 0)], "A", Label::Legacy(Charset::Utf8)),
+            (
+                &KONNICHIWA_SJIS,
+                &[(20, 0)],
+                "こんにちは",
+                Label::Legacy(Charset::ShiftJis),
+            ),
+            (&[0xA1], &[(3, 0)], "¡", Label::Legacy(Charset::Latin1)),
+            (&[0x80], &[(23, 0)], "€", Label::Legacy(Charset::Latin1)),
+            // ISO/IEC 8859-1 keeps 0x80 a C1 control; the latin1 label's
+            // decoder reads '€' — no reproduction, so `eci`
+            (&[0x35, 0x80], &[(3, 0)], "5\u{80}", Label::Eci),
+            // two families (latin1 + utf8): no single legacy label
+            (b"a\xC3\xA9", &[(3, 0), (26, 1)], "aé", Label::Eci),
+        ];
+        for (raw, marks, text, label) in cases {
+            let reading = read(raw, &located(marks));
+            assert_eq!(reading.text, text, "{marks:?}");
+            assert_eq!(reading.label, label, "{marks:?}");
         }
-        // outside 0x80-0x9F the two agree: the legacy label is faithful
-        let reading = read(&[0xA1], &declared(&[(3, 0)]));
-        assert_eq!(reading.text, "¡");
-        assert_eq!(
-            reading.status,
-            ContentStatus::Declared(Some(Charset::Latin1))
-        );
     }
 
     #[test]
-    fn faithful_declarations_keep_their_legacy_label() {
-        let reading = read("\u{104}".as_bytes(), &declared(&[(26, 0)]));
-        assert_eq!(reading.status, ContentStatus::Declared(Some(Charset::Utf8)));
-        let reading = read(&KONNICHIWA_SJIS, &declared(&[(20, 0)]));
-        assert_eq!(reading.text, "こんにちは");
-        assert_eq!(
-            reading.status,
-            ContentStatus::Declared(Some(Charset::ShiftJis))
-        );
-        // ASCII under any declaration reads the same everywhere: utf8
-        let reading = read(b"abc", &declared(&[(4, 0)]));
-        assert_eq!(reading.status, ContentStatus::Declared(Some(Charset::Utf8)));
-    }
-
-    #[test]
-    fn each_declaration_governs_until_the_next() {
+    fn each_designator_governs_until_the_next() {
         let raw = [0xA1, 0xE2, 0x82, 0xAC];
-        let reading = read(&raw, &declared(&[(4, 0), (26, 1)]));
+        let reading = read(&raw, &located(&[(4, 0), (26, 1)]));
         assert_eq!(reading.text, "\u{104}€");
-        assert_eq!(reading.status, ContentStatus::Declared(None));
+        assert_eq!(reading.label, Label::Eci);
     }
 
     #[test]
-    fn bytes_before_the_first_designator_are_iso_8859_1() {
-        let reading = read(b"12345\xA1", &declared(&[(4, 5)]));
+    fn every_byte_before_the_first_designator_is_iso_8859_1() {
+        let reading = read(b"12345\xA1", &located(&[(4, 5)]));
         assert_eq!(reading.text, "12345\u{104}");
-        // C1 bytes there are controls, not Windows-1252 punctuation
-        let reading = read(&[0x80, 0xA1], &declared(&[(4, 1)]));
-        assert_eq!(reading.text, "\u{80}\u{104}");
+        // Kanji pairs there too: transmission-faithful, never Shift JIS
+        let mut raw = KONNICHIWA_SJIS[..2].to_vec();
+        raw.push(b'a');
+        let reading = read(&raw, &located(&[(26, 2)]));
+        assert_eq!(reading.text, "\u{82}±a");
+        assert_eq!(reading.label, Label::Eci, "decoded without a mark");
     }
 
     #[test]
-    fn kanji_before_any_designator_is_shift_jis_and_after_one_is_bytes() {
-        // Kanji pairs ahead of every designator: their own set (Shift JIS)
-        let mut raw = KONNICHIWA_SJIS.to_vec();
-        raw.extend_from_slice("é".as_bytes());
-        let evidence = EciEvidence::Parsed(SegmentMap {
-            eci: vec![EciMark {
-                value: 26,
-                start: 10,
-            }],
-            double_byte: vec![DoubleByteSpan {
-                mode: DoubleByteMode::Kanji,
-                start: 0,
-                end: 10,
-            }],
-        });
-        let reading = read(&raw, &evidence);
-        assert_eq!(reading.text, "こんにちはé");
-        // two label families (Shift JIS + UTF-8): no single legacy label
-        assert_eq!(reading.status, ContentStatus::Declared(None));
-
-        // the same pairs AFTER ECI 26 are UTF-8 bytes (§7.4.2.1) — invalid
+    fn undecodable_bytes_are_marked_never_transcribed() {
+        // inside a supported set: one U+FFFD per maximal ill-formed subpart
+        let reading = read(&[0xA1], &located(&[(26, 0)]));
+        assert_eq!(reading.text, "\u{FFFD}");
+        assert_eq!(reading.label, Label::Unknown);
         let mut raw = "é".as_bytes().to_vec();
         raw.extend_from_slice(&KONNICHIWA_SJIS);
-        let evidence = EciEvidence::Parsed(SegmentMap {
-            eci: vec![EciMark {
-                value: 26,
-                start: 0,
-            }],
-            double_byte: vec![DoubleByteSpan {
-                mode: DoubleByteMode::Kanji,
-                start: 2,
-                end: 12,
-            }],
-        });
-        let reading = read(&raw, &evidence);
-        assert_eq!(reading.status, ContentStatus::Undecodable);
-        assert_eq!(reading.text, rendering(&raw));
-    }
-
-    #[test]
-    fn hanzi_before_any_designator_is_gb2312() {
-        // 0xB0A1 = '啊' in GB 2312, then ECI 26 'a'
-        let evidence = EciEvidence::Parsed(SegmentMap {
-            eci: vec![EciMark {
-                value: 26,
-                start: 2,
-            }],
-            double_byte: vec![DoubleByteSpan {
-                mode: DoubleByteMode::Hanzi,
-                start: 0,
-                end: 2,
-            }],
-        });
-        assert_eq!(read(&[0xB0, 0xA1, b'a'], &evidence).text, "啊a");
-    }
-
-    #[test]
-    fn declarations_the_scanner_cannot_honour_keep_every_byte() {
-        // unassigned / CP437 / past the character-set block: unsupported
-        for value in [0, 2, 14, 999, 999_999] {
-            let reading = read(&[0xA1], &declared(&[(value, 0)]));
-            assert_eq!(reading.status, ContentStatus::UnsupportedEci, "ECI {value}");
-            assert_eq!(reading.text, "¡", "lossless rendering, ECI {value}");
+        let reading = read(&raw, &located(&[(26, 0)]));
+        assert_eq!(reading.text, String::from_utf8_lossy(&raw));
+        // binary and designators outside the table: one U+FFFD per byte
+        for value in [899, 0, 2, 14, 19, 170, 999, 999_999] {
+            let reading = read(&[0x00, 0xFF], &located(&[(value, 0)]));
+            assert_eq!(reading.text, "\u{FFFD}\u{FFFD}", "ECI {value}");
+            assert_eq!(reading.label, Label::Unknown, "ECI {value}");
         }
-        // bytes invalid in the declared set
-        let reading = read(&[0xA1], &declared(&[(26, 0)]));
-        assert_eq!(reading.status, ContentStatus::Undecodable);
-        assert_eq!(reading.text, "¡");
-        // binary
-        let raw = [0x00, 0xFF, 0x80, 0x7F];
-        let reading = read(&raw, &declared(&[(899, 0)]));
-        assert_eq!(reading.status, ContentStatus::Binary);
-        assert_eq!(reading.text, rendering(&raw));
-        // unsupported wins over a decodable neighbour: the whole payload
-        // is rendered, never half a reading
-        let reading = read(b"ab\xA1", &declared(&[(26, 0), (999, 2)]));
-        assert_eq!(reading.status, ContentStatus::UnsupportedEci);
-        assert_eq!(reading.text, "ab¡");
+        // decodable segments keep their reading next to a marked one
+        let reading = read(b"ab\xA1", &located(&[(26, 0), (999, 2)]));
+        assert_eq!(reading.text, "ab\u{FFFD}");
+        assert_eq!(reading.label, Label::Unknown);
     }
 
     #[test]
-    fn a_declaration_governing_no_byte_claims_nothing() {
-        // ECI 999 immediately superseded by ECI 26: no byte is unsupported
-        let reading = read(b"ok", &declared(&[(999, 0), (26, 0)]));
-        assert_eq!(reading.status, ContentStatus::Declared(Some(Charset::Utf8)));
+    fn a_designator_governing_no_byte_still_decides_the_label() {
+        // ECI 999 immediately superseded: no byte is marked, but the content
+        // lists a designator outside the table
+        let reading = read(b"ok", &located(&[(999, 0), (26, 0)]));
         assert_eq!(reading.text, "ok");
+        assert_eq!(reading.label, Label::Unknown);
+        // same for binary
+        let reading = read(b"ok", &located(&[(26, 0), (899, 2)]));
+        assert_eq!(
+            (reading.text.as_str(), reading.label),
+            ("ok", Label::Unknown)
+        );
+        // and a zero-length designator of another family breaks the legacy
+        // label: utf8 + latin1 listed
+        let reading = read(b"ok", &located(&[(3, 0), (26, 0)]));
+        assert_eq!(reading.label, Label::Eci);
     }
 
     #[test]
-    fn iso_parts_modelled_by_a_windows_superset_keep_c1_controls() {
-        // ISO/IEC 8859-9 (ECI 11): 0xD0 is 'Ğ', 0x80 a C1 control — the
-        // windows-1254 superset would read '€'
-        let reading = read(&[0xD0, 0x80], &declared(&[(11, 0)]));
+    fn signalled_only_content_is_marked_unknown() {
+        let reading = read(&[0xA1, 0x42], &EciEvidence::Signalled);
+        assert_eq!(reading.text, "\u{FFFD}\u{FFFD}");
+        assert_eq!(reading.label, Label::Unknown);
+        assert_eq!(read(&[], &EciEvidence::Signalled).text, "");
+        // never published as latin1/shift_jis, even where the heuristic
+        // would pick them for the same bytes
+        for raw in [&[0xA1][..], &KONNICHIWA_SJIS, "é".as_bytes()] {
+            let reading = read(raw, &EciEvidence::Signalled);
+            assert_eq!(reading.text, replacement(raw.len()));
+            assert_eq!(reading.published(), Charset::Utf8, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn iso_8859_9_and_11_are_exact_in_crate_tables() {
+        // 8859-9: C1 controls stay controls; the A0-FF half equals the
+        // windows-1254 superset (independent oracle)
+        let reading = read(&[0xD0, 0x80], &located(&[(11, 0)]));
         assert_eq!(reading.text, "Ğ\u{80}");
-        // ISO/IEC 8859-11 (ECI 13): 0xA1 is 'ก'; 0xDB is unassigned
-        assert_eq!(read(&[0xA1], &declared(&[(13, 0)])).text, "ก");
+        let upper: Vec<u8> = (0xA0..=0xFF).collect();
+        let (oracle, _) = encoding_rs::WINDOWS_1254.decode_without_bom_handling(&upper);
+        assert_eq!(read(&upper, &located(&[(11, 0)])).text, oracle);
+        // 8859-11: Thai; DB-DE and FC-FF unassigned
+        assert_eq!(read(&[0xA1, 0xDF], &located(&[(13, 0)])).text, "ก฿");
+        let reading = read(&[0xDB], &located(&[(13, 0)]));
         assert_eq!(
-            read(&[0xDB], &declared(&[(13, 0)])).status,
-            ContentStatus::Undecodable
+            (reading.text.as_str(), reading.label),
+            ("\u{FFFD}", Label::Unknown)
+        );
+        let assigned: Vec<u8> = (0xA0..=0xFB)
+            .filter(|b| !(0xDB..=0xDE).contains(b))
+            .collect();
+        let (oracle, _) = encoding_rs::WINDOWS_874.decode_without_bom_handling(&assigned);
+        assert_eq!(read(&assigned, &located(&[(13, 0)])).text, oracle);
+        assert_eq!(read(&[0x80], &located(&[(13, 0)])).text, "\u{80}");
+    }
+
+    #[test]
+    fn the_rest_of_the_decode_table() {
+        // GB 2312 / GBK / GB 18030 through the gb18030 decoder
+        for value in [29, 31, 32] {
+            assert_eq!(read(&[0xB0, 0xA1], &located(&[(value, 0)])).text, "啊");
+        }
+        assert_eq!(read(&[0xA4, 0x40], &located(&[(28, 0)])).text, "一");
+        assert_eq!(read(&[0xB0, 0xA1], &located(&[(30, 0)])).text, "가");
+        assert_eq!(read(&[0xC1], &located(&[(21, 0)])).text, "Á");
+        assert_eq!(read(&[0xC0], &located(&[(22, 0)])).text, "А");
+        assert_eq!(read(&[0xC7], &located(&[(24, 0)])).text, "ا");
+        assert_eq!(read(&[0x00, 0x41], &located(&[(25, 0)])).text, "A");
+        assert_eq!(read(&[0x41, 0x00], &located(&[(33, 0)])).text, "A");
+        // an odd UTF-16 byte is one marked subpart
+        let reading = read(&[0x00, 0x41, 0x00], &located(&[(25, 0)]));
+        assert_eq!(
+            (reading.text.as_str(), reading.label),
+            ("A\u{FFFD}", Label::Unknown)
+        );
+        // UTF-32 in-crate: a surrogate and a truncated unit are marked
+        assert_eq!(read(&[0, 0, 0, 0x41], &located(&[(34, 0)])).text, "A");
+        assert_eq!(read(&[0x41, 0, 0, 0], &located(&[(35, 0)])).text, "A");
+        let reading = read(&[0, 0, 0xD8, 0, 0, 0], &located(&[(34, 0)]));
+        assert_eq!(
+            (reading.text.as_str(), reading.label),
+            ("\u{FFFD}\u{FFFD}", Label::Unknown)
+        );
+        // ASCII: bytes from 0x80 have no reading
+        let reading = read(&[0x41, 0xA1], &located(&[(27, 0)]));
+        assert_eq!(
+            (reading.text.as_str(), reading.label),
+            ("A\u{FFFD}", Label::Unknown)
+        );
+        // the WHATWG decoders never sniff a byte-order mark
+        assert_eq!(
+            read(&[0xEF, 0xBB, 0xBF, 0x41], &located(&[(26, 0)])).text,
+            "\u{FEFF}A"
         );
     }
 
     #[test]
-    fn multibyte_unit_sets_are_strict() {
-        assert_eq!(read(&[0x00, 0x41], &declared(&[(25, 0)])).text, "A");
-        assert_eq!(read(&[0x41, 0x00], &declared(&[(33, 0)])).text, "A");
-        assert_eq!(
-            read(&[0x00], &declared(&[(25, 0)])).status,
-            ContentStatus::Undecodable
-        );
-        assert_eq!(read(&[0, 0, 0, 0x41], &declared(&[(34, 0)])).text, "A");
-        assert_eq!(read(&[0x41, 0, 0, 0], &declared(&[(35, 0)])).text, "A");
-        // a surrogate code point is no character
-        assert_eq!(
-            read(&[0, 0, 0xD8, 0], &declared(&[(34, 0)])).status,
-            ContentStatus::Undecodable
-        );
-        // seven-bit sets
-        assert_eq!(read(b"A", &declared(&[(27, 0)])).text, "A");
-        assert_eq!(
-            read(&[0xA1], &declared(&[(27, 0)])).status,
-            ContentStatus::Undecodable
-        );
-        assert_eq!(
-            read(b"#", &declared(&[(170, 0)])).status,
-            ContentStatus::Undecodable
-        );
-    }
-
-    #[test]
-    fn engine_text_for_unlocated_designators_must_be_a_faithful_decode() {
-        let unlocated = |text: &str| EciEvidence::Unlocated {
-            engine_text: text.to_owned(),
-        };
-        // ISO/IEC 8859-2 reproduces 'Ą' from A1: kept, no legacy label
-        let reading = read(&[0xA1], &unlocated("\u{104}"));
-        assert_eq!(reading.text, "\u{104}");
-        assert_eq!(reading.status, ContentStatus::EngineReading(None));
-        // an engine that dropped an undecodable span: rendering, explicit
-        let reading = read(&[0xA1], &unlocated(""));
-        assert_eq!(reading.status, ContentStatus::UnlocatedEci);
-        assert_eq!(reading.text, "¡");
-        // two declarations no single set reproduces: explicit, not trusted
-        let reading = read(&[0xA1, 0xE2, 0x82, 0xAC], &unlocated("\u{104}€"));
-        assert_eq!(reading.status, ContentStatus::UnlocatedEci);
-        // ASCII: faithful under every label — utf8, as the heuristic says
-        let reading = read(b"abc", &unlocated("abc"));
-        assert_eq!(
-            reading.status,
-            ContentStatus::EngineReading(Some(Charset::Utf8))
-        );
-        // ECI 3 C1 text: ISO/IEC 8859-1 matches first — never a shift_jis
-        // claim (whose decoder happens to map 0x80 to U+0080 too)
-        let reading = read(&[0x35, 0x80], &unlocated("5\u{80}"));
-        assert_eq!(reading.status, ContentStatus::EngineReading(None));
-        // UTF-8 text under ECI 26
-        let reading = read("\u{104}".as_bytes(), &unlocated("\u{104}"));
-        assert_eq!(
-            reading.status,
-            ContentStatus::EngineReading(Some(Charset::Utf8))
-        );
-    }
-
-    #[test]
-    fn evidence_agreement_matrix() {
-        let none = EciEvidence::Parsed(SegmentMap::default());
-        let eci4 = declared(&[(4, 0)]);
-        let eci7 = declared(&[(7, 0)]);
-        let unlocated = EciEvidence::Unlocated {
-            engine_text: String::new(),
-        };
+    fn evidence_lattice_and_join() {
+        let none = EciEvidence::NoEci;
+        let eci4 = located(&[(4, 0)]);
+        let eci7 = located(&[(7, 0)]);
+        let signalled = EciEvidence::Signalled;
+        let unobserved = EciEvidence::Unobserved;
         let cases = [
-            (&EciEvidence::Unobserved, &eci4, true),
-            (&EciEvidence::Unobserved, &EciEvidence::Absent, true),
-            (&EciEvidence::Absent, &none, true),
-            (&EciEvidence::Absent, &eci4, false),
-            (&unlocated, &eci4, true),
-            (&unlocated, &none, false),
-            (&unlocated, &EciEvidence::Absent, false),
+            (&unobserved, &eci4, true),
+            (&unobserved, &none, true),
+            (&unobserved, &signalled, true),
+            (&none, &none, true),
+            (&none, &signalled, false),
+            (&none, &eci4, false),
+            (&signalled, &signalled, true),
+            (&signalled, &eci4, true),
             (&eci4, &eci4, true),
             (&eci4, &eci7, false),
-            (&none, &eci4, false),
         ];
         for (a, b, agree) in cases {
             assert_eq!(a.agrees_with(b), agree, "{a:?} vs {b:?}");
             assert_eq!(b.agrees_with(a), agree, "symmetric: {b:?} vs {a:?}");
         }
-        // the parsed structure is kept over a presence flag, never the
-        // reverse; ties keep the first account
-        let mut evidence = unlocated.clone();
-        evidence.absorb(eci4.clone());
-        assert_eq!(evidence, eci4);
-        evidence.absorb(unlocated.clone());
-        assert_eq!(evidence, eci4);
-        let mut evidence = EciEvidence::Unobserved;
-        evidence.absorb(EciEvidence::Absent);
-        assert_eq!(evidence, EciEvidence::Absent);
+        let mut key = ContentKey {
+            raw: vec![0xA1],
+            eci: EciEvidence::Signalled,
+            fnc1: Fnc1::None,
+        };
+        key.join(eci4.clone(), Fnc1::None);
+        assert_eq!(key.eci, eci4, "located over signalled");
+        key.join(EciEvidence::Signalled, Fnc1::None);
+        assert_eq!(key.eci, eci4, "never back to signalled");
+        let mut key = ContentKey {
+            raw: vec![0xA1],
+            eci: EciEvidence::Unobserved,
+            fnc1: Fnc1::None,
+        };
+        key.join(EciEvidence::NoEci, Fnc1::First);
+        assert_eq!((key.eci, key.fnc1), (EciEvidence::NoEci, Fnc1::First));
     }
 
     #[test]
-    fn inconsistent_offsets_never_panic_and_never_guess() {
-        // offsets past the payload or out of order: undecodable rendering
-        let reading = read(b"ab", &declared(&[(26, 5)]));
+    fn content_key_admits_same_bytes_agreeing_accounts_and_fnc1_positions() {
+        let hit = |raw: &[u8], eci: EciEvidence, fnc1: Fnc1| RawDetection {
+            symbology: Symbology::QrCode,
+            raw: raw.to_vec(),
+            eci,
+            masked_stream: None,
+            corners: None,
+            version: None,
+            ec: None,
+            mask: None,
+            fnc1,
+            engine: EngineKind::Rxing,
+        };
+        let key = ContentKey {
+            raw: vec![0xA1],
+            eci: located(&[(4, 0)]),
+            fnc1: Fnc1::None,
+        };
+        assert!(key.admits(&hit(&[0xA1], EciEvidence::Signalled, Fnc1::None)));
+        assert!(key.admits(&hit(&[0xA1], EciEvidence::Unobserved, Fnc1::None)));
+        assert!(!key.admits(&hit(&[0xA1], EciEvidence::NoEci, Fnc1::None)));
+        assert!(!key.admits(&hit(&[0xA2], EciEvidence::Signalled, Fnc1::None)));
+        let gs1 = ContentKey {
+            raw: b"10AB".to_vec(),
+            eci: EciEvidence::NoEci,
+            fnc1: Fnc1::First,
+        };
+        assert!(gs1.admits(&hit(b"10AB", EciEvidence::NoEci, Fnc1::First)));
+        assert!(gs1.admits(&hit(b"10AB", EciEvidence::NoEci, Fnc1::None)));
+        assert!(
+            !gs1.admits(&hit(b"10AB", EciEvidence::NoEci, Fnc1::Second)),
+            "first and second position are different symbols"
+        );
+    }
+
+    #[test]
+    fn inconsistent_offsets_never_panic() {
+        let reading = read(b"ab", &located(&[(26, 5)]));
+        assert_eq!(reading.text, "ab", "clamped: every byte before it");
+        let reading = read(b"ab", &located(&[(26, 1), (4, 0)]));
         assert_eq!(reading.text, "ab");
-        assert_eq!(reading.status, ContentStatus::Undecodable);
-        let reading = read(b"ab", &declared(&[(26, 1), (4, 0)]));
-        assert_eq!(reading.status, ContentStatus::Undecodable);
     }
 
     fn evidence_strategy() -> impl Strategy<Value = EciEvidence> {
@@ -790,41 +737,24 @@ mod tests {
             ],
             0usize..12,
         );
-        let span = (any::<bool>(), 0usize..12, 0usize..12);
         prop_oneof![
             Just(EciEvidence::Unobserved),
-            Just(EciEvidence::Absent),
-            ".{0,6}".prop_map(|engine_text| EciEvidence::Unlocated { engine_text }),
-            (
-                proptest::collection::vec(mark, 0..4),
-                proptest::collection::vec(span, 0..3)
-            )
-                .prop_map(|(marks, spans)| EciEvidence::Parsed(SegmentMap {
-                    eci: marks
-                        .into_iter()
-                        .map(|(value, start)| EciMark { value, start })
-                        .collect(),
-                    double_byte: spans
-                        .into_iter()
-                        .map(|(kanji, start, end)| DoubleByteSpan {
-                            mode: if kanji {
-                                DoubleByteMode::Kanji
-                            } else {
-                                DoubleByteMode::Hanzi
-                            },
-                            start,
-                            end,
-                        })
-                        .collect(),
-                })),
+            Just(EciEvidence::NoEci),
+            Just(EciEvidence::Signalled),
+            proptest::collection::vec(mark, 1..4).prop_map(|marks| EciEvidence::Located(
+                marks
+                    .into_iter()
+                    .map(|(value, start)| EciMark { value, start })
+                    .collect()
+            )),
         ]
     }
 
     proptest! {
-        /// Global invariants of the one interpretation, over arbitrary
-        /// bytes and arbitrary (even inconsistent) evidence: never empty
-        /// text over non-empty bytes, deterministic, and every published
-        /// legacy label reproduces the text from the bytes exactly.
+        /// Global invariants of the one interpretation, over arbitrary bytes
+        /// and arbitrary (even inconsistent) evidence: never empty text over
+        /// non-empty bytes, deterministic, and a legacy label always
+        /// reproduces the text from the bytes exactly.
         #[test]
         fn readings_are_total_deterministic_and_label_consistent(
             raw in proptest::collection::vec(any::<u8>(), 0..12),
@@ -833,13 +763,7 @@ mod tests {
             let reading = read(&raw, &evidence);
             prop_assert!(raw.is_empty() || !reading.text.is_empty());
             prop_assert_eq!(&reading, &read(&raw, &evidence));
-            let legacy = match reading.status {
-                ContentStatus::Heuristic(label)
-                | ContentStatus::Declared(Some(label))
-                | ContentStatus::EngineReading(Some(label)) => Some(label),
-                _ => None,
-            };
-            if let Some(label) = legacy {
+            if let Label::Legacy(label) = reading.label {
                 let decoded = charset::decode_legacy(&raw, label);
                 prop_assert_eq!(decoded.as_deref(), Some(reading.text.as_str()));
             }

@@ -3,16 +3,16 @@
 //! paths share it: the S5 rescue (its stream never reaches an engine), the
 //! rqrr re-derivation (rqrr parses ECI designators and throws them away)
 //! and rxing's general reader (whose raw bytes ARE data codewords). The
-//! engines expose payload bytes at best; which ECI governs which bytes,
-//! which bytes a Kanji pair wrote and the FNC1 position only exist here.
-//! Differentially pinned against rqrr's bytes on every clean corpus fixture.
+//! engines expose payload bytes at best; which ECI governs which bytes and
+//! the FNC1 position only exist here. Differentially pinned against rqrr's
+//! bytes on every clean corpus fixture.
 //!
 //! Refusal-biased: a structure ISO 18004 does not define (a `111xxxxx`
 //! designator, an assignment number above 999999, an unknown mode, an
 //! out-of-range numeric/alphanumeric value, an invalid AIM application
 //! indicator, a truncated count) returns `None` — never a best guess.
 
-use crate::engine::content::{DoubleByteMode, DoubleByteSpan, EciMark, SegmentMap};
+use crate::engine::content::{EciMark, Fnc1};
 
 /// MSB-first bit reader over the data codewords.
 struct Bits<'a> {
@@ -63,33 +63,24 @@ const ALPHANUMERIC: &[u8; 45] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:"
 /// Group separator — what an FNC1-mode `%` transmits (ISO 18004 §7.4.8.2).
 const GS: u8 = 0x1D;
 
-/// The FNC1 mode the stream declared (ISO 18004 §7.4.8).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Fnc1 {
-    /// No FNC1 mode indicator.
-    None,
-    /// FNC1 in first position — GS1 data (`]Q3`/`]Q4`).
-    First,
-    /// FNC1 in second position — an AIM application, NOT GS1 (`]Q5`/`]Q6`);
-    /// its application indicator leads the payload bytes.
-    Second,
-}
-
 /// One parsed data-segment stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Parsed {
     /// Payload bytes as transmitted: numeric/alphanumeric as ASCII, byte
-    /// mode verbatim, Kanji/Hanzi as their two-byte pairs, the FNC1-second
-    /// application indicator first. ECI designators are NOT payload.
+    /// mode verbatim, Kanji as Shift JIS pairs and Hanzi as GB 2312 pairs
+    /// whatever ECI applies, the FNC1-second application indicator first.
+    /// ECI designators and headers are NOT payload.
     pub(crate) bytes: Vec<u8>,
-    /// Which ECI governs which bytes, and which bytes a double-byte mode
-    /// wrote — the structure the interpretation needs.
-    pub(crate) segments: SegmentMap,
+    /// ECI designators, in stream order, with the payload offset where each
+    /// takes effect.
+    pub(crate) eci: Vec<EciMark>,
     /// The declared FNC1 mode.
     pub(crate) fnc1: Fnc1,
     /// A structured-append header was present: this symbol is one part of
-    /// a longer message.
+    /// a longer message (consumed, never reassembled).
     pub(crate) structured_append: bool,
+    /// A Hanzi (GB/T 18284) segment was present.
+    pub(crate) hanzi: bool,
 }
 
 /// Parse the data segment stream; `None` on any structure ISO 18004 does
@@ -101,9 +92,10 @@ pub(crate) fn parse(data: &[u8], version: u8) -> Option<Parsed> {
         cursor: 0,
     };
     let mut out = Vec::new();
-    let mut segments = SegmentMap::default();
+    let mut eci = Vec::new();
     let mut fnc1 = Fnc1::None;
     let mut structured_append = false;
+    let mut hanzi = false;
 
     while bits.remaining() >= 4 {
         let mode = bits.take(4)?;
@@ -133,7 +125,7 @@ pub(crate) fn parse(data: &[u8], version: u8) -> Option<Parsed> {
             }
             0b0111 => {
                 let value = eci_designator(&mut bits)?;
-                segments.eci.push(EciMark {
+                eci.push(EciMark {
                     value,
                     start: out.len(),
                 });
@@ -159,22 +151,18 @@ pub(crate) fn parse(data: &[u8], version: u8) -> Option<Parsed> {
                 }
             }
             0b1000 | 0b1101 => {
-                let start = out.len();
-                let kind = double_byte(&mut bits, mode, version, &mut out)?;
-                segments.double_byte.push(DoubleByteSpan {
-                    mode: kind,
-                    start,
-                    end: out.len(),
-                });
+                double_byte(&mut bits, mode, version, &mut out)?;
+                hanzi |= mode == 0b1101;
             }
             _ => return None, // mode indicators ISO 18004 does not assign
         }
     }
     Some(Parsed {
         bytes: out,
-        segments,
+        eci,
         fnc1,
         structured_append,
+        hanzi,
     })
 }
 
@@ -248,21 +236,16 @@ fn alphanumeric(bits: &mut Bits<'_>, count: usize) -> Option<Vec<u8>> {
 /// Kanji (`0b1000`, §7.4.6) or Hanzi (`0b1101`, GB/T 18284) mode: each
 /// 13-bit value is a two-byte pair `(v / split) << 8 | v % split`, plus
 /// the low offset below `boundary` and the high one above it.
-fn double_byte(
-    bits: &mut Bits<'_>,
-    mode: u32,
-    version: u8,
-    out: &mut Vec<u8>,
-) -> Option<DoubleByteMode> {
-    let (kind, split, boundary, low, high) = if mode == 0b1000 {
+fn double_byte(bits: &mut Bits<'_>, mode: u32, version: u8, out: &mut Vec<u8>) -> Option<()> {
+    let (split, boundary, low, high) = if mode == 0b1000 {
         // Shift JIS 8140-9FFC · E040-EBBF
-        (DoubleByteMode::Kanji, 0xC0, 0x1F00, 0x8140, 0xC140)
+        (0xC0, 0x1F00, 0x8140, 0xC140)
     } else {
         // GB 2312 subset (1) only: A1A1-AAFE · B0A1-FAFE
         if bits.take(4)? != 1 {
             return None;
         }
-        (DoubleByteMode::Hanzi, 0x60, 0x0A00, 0xA1A1, 0xA6A1)
+        (0x60, 0x0A00, 0xA1A1, 0xA6A1)
     };
     let count = bits.take(count_bits(version, mode)?)? as usize;
     for _ in 0..count {
@@ -275,7 +258,7 @@ fn double_byte(
             out.push((pair & 0xFF) as u8);
         }
     }
-    Some(kind)
+    Some(())
 }
 
 /// ECI assignment number per ISO 18004 Table 4: the leading 1-bits of the
@@ -341,12 +324,7 @@ mod tests {
     }
 
     fn marks(parsed: &Parsed) -> Vec<(u32, usize)> {
-        parsed
-            .segments
-            .eci
-            .iter()
-            .map(|m| (m.value, m.start))
-            .collect()
+        parsed.eci.iter().map(|m| (m.value, m.start)).collect()
     }
 
     /// One 13-bit double-byte value as a bit string.
@@ -363,8 +341,8 @@ mod tests {
         let parsed = parse(&stream("0001 0000000101 0000001100 0100010 0000"), 1).unwrap();
         assert_eq!(parsed.bytes, b"01234");
         assert_eq!(parsed.fnc1, Fnc1::None);
-        assert_eq!(parsed.segments, SegmentMap::default());
-        assert!(!parsed.structured_append);
+        assert!(parsed.eci.is_empty());
+        assert!(!parsed.structured_append && !parsed.hanzi);
     }
 
     #[test]
@@ -385,20 +363,13 @@ mod tests {
     #[test]
     fn kanji_roundtrip_against_shift_jis() {
         // 日 = SJIS 0x93FA: the forward ISO mapping builds the 13-bit
-        // value; the parser must invert it and record the Kanji span.
+        // value; the parser must invert it.
         let adj: u16 = 0x93FA - 0x8140;
         let value = u32::from(adj >> 8) * 0xC0 + u32::from(adj & 0xFF);
         let data = stream(&format!("1000 00000001 {} 0000", thirteen(value)));
         let parsed = parse(&data, 1).unwrap();
         assert_eq!(parsed.bytes, vec![0x93, 0xFA]);
-        assert_eq!(
-            parsed.segments.double_byte,
-            vec![DoubleByteSpan {
-                mode: DoubleByteMode::Kanji,
-                start: 0,
-                end: 2
-            }]
-        );
+        assert!(!parsed.hanzi);
     }
 
     #[test]
@@ -412,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn hanzi_gb2312_pairs_and_span() {
+    fn hanzi_gb2312_pairs() {
         // GB/T 18284: 0xB0A1 ('啊') sits past the 0x0A00 split: minus
         // 0xA6A1 = 0x0A00 → 0x0A * 0x60 + 0x00 = 960. 0xA1A1 is the first
         // pair of the low block: 0.
@@ -423,8 +394,7 @@ mod tests {
         ));
         let parsed = parse(&data, 1).unwrap();
         assert_eq!(parsed.bytes, vec![0xB0, 0xA1, 0xA1, 0xA1]);
-        assert_eq!(parsed.segments.double_byte[0].mode, DoubleByteMode::Hanzi);
-        assert_eq!(parsed.segments.double_byte[0].end, 4);
+        assert!(parsed.hanzi);
         // only the GB 2312 subset (1) is defined
         let other = stream(&format!("1101 0010 00000001 {} 0000", thirteen(960)));
         assert!(parse(&other, 1).is_none());
@@ -606,18 +576,13 @@ mod tests {
         ) {
             if let Some(parsed) = parse(&data, version) {
                 let mut previous = 0;
-                for mark in &parsed.segments.eci {
+                for mark in &parsed.eci {
                     proptest::prop_assert!(mark.value <= 999_999);
                     proptest::prop_assert!(previous <= mark.start);
                     proptest::prop_assert!(mark.start <= parsed.bytes.len());
                     previous = mark.start;
                 }
-                for span in &parsed.segments.double_byte {
-                    proptest::prop_assert!(span.start <= span.end);
-                    proptest::prop_assert!(span.end <= parsed.bytes.len());
-                    proptest::prop_assert_eq!((span.end - span.start) % 2, 0);
-                }
-                let evidence = crate::engine::content::EciEvidence::Parsed(parsed.segments);
+                let evidence = crate::engine::content::EciEvidence::from_marks(parsed.eci);
                 let reading = crate::engine::content::read(&parsed.bytes, &evidence);
                 proptest::prop_assert!(parsed.bytes.is_empty() || !reading.text.is_empty());
             }

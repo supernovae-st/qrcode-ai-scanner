@@ -4,25 +4,27 @@
 //! tries two QR readers in turn and `getRawBytes()` means something
 //! different for each (verified in the 0.9.1 and 0.9.3 sources):
 //!
-//! - its zxing-cpp port (the first try, and the only Micro QR / rMQR
-//!   reader): the ORIGINAL payload bytes, ECI designators excluded — exact,
-//!   but the designators themselves are not exposed (only their presence,
-//!   through the AIM modifier `]Q2`/`]Q4`/`]Q6`);
+//! - its zxing-cpp port (the first try for every image — it runs its
+//!   general finder-pattern detector unless `PureBarcode` is set — and the
+//!   only Micro QR / rMQR reader): the ORIGINAL payload bytes, ECI
+//!   designators excluded — exact, but the designators themselves are not
+//!   exposed (only their presence, through the AIM modifier `]Q2`/`]Q4`/
+//!   `]Q6`);
 //! - its `ZXing`-lineage reader (when the port fails): the RS-corrected
 //!   data codewords — parsed here with the scanner's segment parser.
 //!
-//! The decoded text is never the payload: it is kept only as the reading
-//! of an unlocated declaration (`engine::content`). Version/corners are NOT
-//! provided by the QR paths: rqrr supplies geometry.
+//! The decoded text is neither the payload nor the reading: content is
+//! interpreted once, in `engine::content`. Version/corners are NOT provided
+//! by the QR paths: rqrr supplies geometry.
 
 use rxing::RXingResultMetadataType as MetaKey;
 use rxing::RXingResultMetadataValue as MetaValue;
 
 use super::RawDetection;
-use super::content::EciEvidence;
+use super::content::{EciEvidence, Fnc1};
 use crate::input::LumaImage;
 use crate::report::{EcLevel, EngineKind, Symbology};
-use crate::rescue::bitstream::{self, Fnc1};
+use crate::rescue::bitstream;
 
 /// rxing format → our wire symbology. `None` = formats we refuse to
 /// publish unlabeled (extensions, unrecognized).
@@ -177,7 +179,7 @@ fn observe(result: &rxing::RXingResult) -> Option<RawDetection> {
         version: None,
         ec: ec_level.and_then(parse_ec),
         mask: None,
-        fnc1: false,
+        fnc1: Fnc1::None,
         engine: EngineKind::Rxing,
     };
     if !symbology.is_qr_family() {
@@ -188,7 +190,9 @@ fn observe(result: &rxing::RXingResult) -> Option<RawDetection> {
         };
         // GS1 carriers per ISO/IEC 15424 symbology identifiers: DataMatrix
         // "]d2" (ECC200 FNC1 first) · Code 128 "]C1" (GS1-128)
-        detection.fnc1 = matches!(identifier, "]d2" | "]C1");
+        if matches!(identifier, "]d2" | "]C1") {
+            detection.fnc1 = Fnc1::First;
+        }
         return Some(detection);
     }
     match reader(symbology, ec_level)? {
@@ -200,21 +204,23 @@ fn observe(result: &rxing::RXingResult) -> Option<RawDetection> {
                 .strip_prefix("]Q")
                 .and_then(|m| m.parse::<u8>().ok());
             detection.eci = match modifier {
-                Some(2 | 4 | 6) => EciEvidence::Unlocated {
-                    engine_text: result.getText().to_owned(),
-                },
-                Some(_) => EciEvidence::Absent,
+                Some(2 | 4 | 6) => EciEvidence::Signalled,
+                Some(_) => EciEvidence::NoEci,
                 None => EciEvidence::Unobserved,
             };
-            detection.fnc1 = matches!(modifier, Some(3 | 4));
+            detection.fnc1 = match modifier {
+                Some(3 | 4) => Fnc1::First,
+                Some(5 | 6) => Fnc1::Second,
+                _ => Fnc1::None,
+            };
         }
         Reader::Codewords(ec) => {
             let codewords = result.getRawBytes();
             let parsed = crate::rescue::version_of_data(codewords.len(), ec)
                 .and_then(|version| bitstream::parse(codewords, version))?;
             detection.raw = parsed.bytes;
-            detection.eci = EciEvidence::Parsed(parsed.segments);
-            detection.fnc1 = parsed.fnc1 == Fnc1::First;
+            detection.eci = EciEvidence::from_marks(parsed.eci);
+            detection.fnc1 = parsed.fnc1;
             // the EC level this reader states is not published: the
             // detection metadata stays exactly what it was before
             detection.ec = None;
@@ -229,7 +235,7 @@ mod tests {
 
     use super::{MetaKey, MetaValue, Reader, decode, observe, reader};
     use crate::engine::FormatFilter;
-    use crate::engine::content::{EciEvidence, SegmentMap};
+    use crate::engine::content::{EciEvidence, Fnc1};
     use crate::input::LumaImage;
     use crate::report::{EcLevel, EngineKind, Symbology};
     use crate::rescue::test_symbols;
@@ -274,13 +280,13 @@ mod tests {
         // the rxing 0.9.1 QR path supplies no geometry/stream — rqrr owns that
         assert_eq!(d.version, None);
         assert!(d.corners.is_none() && d.masked_stream.is_none() && d.mask.is_none());
-        assert!(!d.fnc1, "plain byte-mode QR is not FNC1");
+        assert_eq!(d.fnc1, Fnc1::None, "plain byte-mode QR is not FNC1");
     }
 
     #[test]
     fn surfaces_the_fnc1_flag_on_a_gs1_symbol() {
         // rxing is THE GS1 engine: it reads the ]Q3 symbology identifier and
-        // stamps fnc1=true so the payload router sends the bytes to the
+        // states FNC1 first so the payload router sends the bytes to the
         // element-string classifier. The raw bytes are the port's payload.
         let luma = render_fnc1(b"010950600013435210ABC123\x1d17261231");
         let found = decode(&luma, FormatFilter::All);
@@ -288,7 +294,7 @@ mod tests {
             .iter()
             .find(|d| d.symbology == Symbology::QrCode)
             .expect("rxing decodes the GS1 QR");
-        assert!(d.fnc1, "the ]Q3 identifier must surface as fnc1");
+        assert_eq!(d.fnc1, Fnc1::First, "the ]Q3 identifier states FNC1 first");
         assert!(
             d.raw.starts_with(b"0109506000134352"),
             "raw carries the element data: {:?}",
@@ -348,15 +354,10 @@ mod tests {
         let found = decode(&luma, FormatFilter::All);
         let d = qr(&found);
         assert_eq!(d.raw, vec![0xA1], "never the UTF-8 of rxing's text");
-        assert_eq!(
-            d.eci,
-            EciEvidence::Unlocated {
-                engine_text: "\u{104}".to_owned()
-            }
-        );
+        assert_eq!(d.eci, EciEvidence::Signalled);
         // a plain symbol: ]Q1 — no designator, stated
         let found = decode(&render(b"plain", qrcode::EcLevel::M), FormatFilter::All);
-        assert_eq!(qr(&found).eci, EciEvidence::Absent);
+        assert_eq!(qr(&found).eci, EciEvidence::NoEci);
     }
 
     #[test]
@@ -370,7 +371,7 @@ mod tests {
         let d = qr(&found);
         assert_eq!(d.symbology, Symbology::MicroQrCode);
         assert_eq!(d.raw, vec![0xE9]);
-        assert_eq!(d.eci, EciEvidence::Absent);
+        assert_eq!(d.eci, EciEvidence::NoEci);
     }
 
     #[test]
@@ -383,7 +384,7 @@ mod tests {
         let found = decode(&luma, FormatFilter::All);
         let d = qr(&found);
         assert_eq!(d.raw, b"37abc");
-        assert!(!d.fnc1, "]Q5 is an AIM application, never GS1 routing");
+        assert_eq!(d.fnc1, Fnc1::Second, "]Q5: an AIM application, never GS1");
     }
 
     /// Data codewords of `12345` (numeric) + `abc` (byte) in a v1-M symbol.
@@ -424,7 +425,7 @@ mod tests {
         // are the data codewords — re-parsed, the payload is all of it
         let d = observe(&general_reader_result(mixed_codewords(), "0")).expect("parses");
         assert_eq!(d.raw, b"12345abc", "never the byte segments alone");
-        assert_eq!(d.eci, EciEvidence::Parsed(SegmentMap::default()));
+        assert_eq!(d.eci, EciEvidence::NoEci, "observed: no designator");
         assert_eq!(d.ec, None, "the reader's EC digit stays unpublished");
         // a stream that does not parse is no observation — never a stand-in
         assert!(observe(&general_reader_result(vec![0xFF; 16], "0")).is_none());

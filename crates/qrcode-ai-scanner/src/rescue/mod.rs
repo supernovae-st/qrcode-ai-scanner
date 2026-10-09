@@ -25,14 +25,14 @@ mod ee;
 use std::sync::OnceLock;
 
 use crate::engine::MaskedStream;
-use crate::engine::content::{DoubleByteMode, SegmentMap};
+use crate::engine::content::{EciMark, Fnc1};
 use crate::input::LumaImage;
 use crate::matrix::deinterleave::{Block, deinterleave};
 use crate::matrix::sampler::GridSampler;
 use crate::matrix::version_db::format_bits_index;
 use crate::matrix::zigzag::{unmask_to_codewords, zigzag_positions};
 use crate::report::{EcLevel, Point};
-use bitstream::{Fnc1, Parsed};
+use bitstream::Parsed;
 
 /// A grid the engines detected but could not decode — the rescue input.
 #[derive(Debug, Clone)]
@@ -52,10 +52,10 @@ pub(crate) struct RescueCandidate {
 pub(crate) struct Rescued {
     /// Payload bytes, ECI designators excluded.
     pub raw: Vec<u8>,
-    /// FNC1 in first position (GS1).
-    pub fnc1: bool,
-    /// The segment structure the payload was parsed with (ECI declarations).
-    pub segments: SegmentMap,
+    /// The FNC1 position the stream declared.
+    pub fnc1: Fnc1,
+    /// The ECI designators the stream declared, with their payload offsets.
+    pub eci: Vec<EciMark>,
 }
 
 /// ISO/IEC 18004 Annex B misdecode-protection codewords `p` — only the low
@@ -168,20 +168,13 @@ pub(crate) fn attempt(luma: &LumaImage, candidate: &RescueCandidate) -> Option<R
     // append part or a Hanzi segment stays refused here, exactly as before
     // the shared parser learned them (the engines read those symbols when
     // they can).
-    if parsed.bytes.is_empty()
-        || parsed.structured_append
-        || parsed
-            .segments
-            .double_byte
-            .iter()
-            .any(|span| span.mode == DoubleByteMode::Hanzi)
-    {
+    if parsed.bytes.is_empty() || parsed.structured_append || parsed.hanzi {
         return None;
     }
     Some(Rescued {
         raw: parsed.bytes,
-        fnc1: parsed.fnc1 == Fnc1::First,
-        segments: parsed.segments,
+        fnc1: parsed.fnc1,
+        eci: parsed.eci,
     })
 }
 
@@ -291,17 +284,16 @@ fn data_capacity() -> &'static [[usize; 4]; 41] {
 pub(crate) mod fuzz_api {
     use crate::engine::content::{self, EciEvidence};
 
-    /// Parse data codewords into payload + segment structure, then read the
-    /// payload under that structure — and, separately, the raw input as an
-    /// engine reading of an unlocated declaration (the interpretation's
-    /// other attacker-shaped entry). Never panics: refusal is `None`, a
-    /// reading is total.
+    /// Parse data codewords into payload + designators, then read the
+    /// payload under them — and, separately, the raw input as unmarked and
+    /// as signalled-only content (the interpretation's other attacker-shaped
+    /// entries). Never panics: refusal is `None`, a reading is total.
     pub(crate) fn parse_bitstream(data: &[u8], version: u8) {
         if let Some(parsed) = super::bitstream::parse(data, version) {
-            let _ = content::read(&parsed.bytes, &EciEvidence::Parsed(parsed.segments));
+            let _ = content::read(&parsed.bytes, &EciEvidence::from_marks(parsed.eci));
         }
-        let engine_text = String::from_utf8_lossy(data).into_owned();
-        let _ = content::read(data, &EciEvidence::Unlocated { engine_text });
+        let _ = content::read(data, &EciEvidence::NoEci);
+        let _ = content::read(data, &EciEvidence::Signalled);
     }
 
     /// Errors-and-erasures correct one RS block in place over the QR field;
@@ -644,7 +636,7 @@ mod codewords {
             panic!("a clean stream re-derives");
         };
         assert_eq!(parsed.bytes, vec![0xA1], "same bytes as rqrr");
-        assert_eq!(parsed.segments.eci, vec![EciMark { value: 4, start: 0 }]);
+        assert_eq!(parsed.eci, vec![EciMark { value: 4, start: 0 }]);
     }
 
     #[test]
@@ -667,7 +659,7 @@ mod codewords {
             panic!("a well-formed designator re-derives");
         };
         assert_eq!(parsed.bytes, b"abc");
-        assert_eq!(parsed.segments.eci, vec![EciMark { value: 4, start: 0 }]);
+        assert_eq!(parsed.eci, vec![EciMark { value: 4, start: 0 }]);
     }
 
     #[test]
@@ -700,7 +692,7 @@ mod codewords {
         assert!(engine.is_none(), "rqrr refuses FNC1 symbols");
         let rescued = attempt(&luma, &candidate).expect("a clean stream rescues");
         assert_eq!(rescued.raw, b"37abc");
-        assert!(!rescued.fnc1, "FNC1 second position is not GS1");
+        assert_eq!(rescued.fnc1, Fnc1::Second, "an AIM application, not GS1");
 
         let luma = from_segments(qrcode::Version::Normal(3), qrcode::EcLevel::M, |b| {
             b.push_fnc1_first_position()?;
@@ -709,7 +701,7 @@ mod codewords {
         let (_, candidate) = grids(&luma).remove(0);
         let rescued = attempt(&luma, &candidate).expect("a clean stream rescues");
         assert_eq!(rescued.raw, b"10AB%C", "%% is one literal %, never two GS");
-        assert!(rescued.fnc1);
+        assert_eq!(rescued.fnc1, Fnc1::First);
     }
 
     #[test]
