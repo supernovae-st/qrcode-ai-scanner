@@ -21,7 +21,7 @@ use qrcode::types::QrResult;
 use qrcode::{EcLevel, QrCode, Version};
 use qrcode_ai_scanner::{
     Charset, Detection, EngineKind, ImageInput, Payload, ScanProfile, ScanReport, Scanner,
-    ScoreDepth,
+    ScoreDepth, Symbology,
 };
 
 // ------------------------------------------------------------ fixtures
@@ -142,6 +142,84 @@ fn png_from_bit_stream(bits: &str) -> Vec<u8> {
 fn png_from_bit_stream_mirrored(bits: &str) -> Vec<u8> {
     let (colors, width) = bit_stream_colors(bits, &[]);
     png_modules(&mirror(&colors, width), width, Version::Normal(1), false)
+}
+
+/// [`png_from_bit_stream`], light-on-dark (every pixel inverted).
+fn png_from_bit_stream_inverted(bits: &str) -> Vec<u8> {
+    invert_png(&png_from_bit_stream(bits))
+}
+
+/// Every pixel of a PNG inverted.
+fn invert_png(png: &[u8]) -> Vec<u8> {
+    let mut img = image::load_from_memory(png).unwrap().into_luma8();
+    image::imageops::invert(&mut img);
+    encode_png(img)
+}
+
+/// Symbols side by side on one canvas, left to right, from raw module
+/// colors (row-major, `width` per row): 4-module quiet zones around and
+/// between them.
+fn png_row(symbols: &[(Vec<qrcode::Color>, usize)]) -> Vec<u8> {
+    let quiet = 4usize;
+    let px = MODULE_PX as usize;
+    let tallest = symbols.iter().map(|(_, width)| *width).max().unwrap_or(0);
+    let width = (symbols.iter().map(|(_, width)| width + quiet).sum::<usize>() + quiet) * px;
+    let height = (tallest + 2 * quiet) * px;
+    let mut img = image::GrayImage::from_pixel(
+        u32::try_from(width).unwrap(),
+        u32::try_from(height).unwrap(),
+        image::Luma([255]),
+    );
+    let mut x0 = quiet;
+    for (colors, modules) in symbols {
+        for (i, color) in colors.iter().enumerate() {
+            if *color == qrcode::Color::Dark {
+                let (mx, my) = (x0 + i % modules, quiet + i / modules);
+                for dy in 0..px {
+                    for dx in 0..px {
+                        img.put_pixel(
+                            u32::try_from(mx * px + dx).unwrap(),
+                            u32::try_from(my * px + dy).unwrap(),
+                            image::Luma([0]),
+                        );
+                    }
+                }
+            }
+        }
+        x0 += modules + quiet;
+    }
+    encode_png(img)
+}
+
+/// A transparent design of a v1 symbol: dark modules opaque mid-gray
+/// (luma 120 — dark content, so the `auto` flatten goes over white first),
+/// every other pixel fully transparent. Over black — the fallback walk's
+/// background — the same symbol reads light-on-dark.
+fn png_transparent(colors: &[qrcode::Color], width: usize) -> Vec<u8> {
+    let modules = u32::try_from(width).unwrap();
+    let pad = 4 + MARGIN;
+    let side = (modules + 2 * pad) * MODULE_PX;
+    let mut img = image::RgbaImage::from_pixel(side, side, image::Rgba([0, 0, 0, 0]));
+    for (i, color) in colors.iter().enumerate() {
+        if *color == qrcode::Color::Dark {
+            let i = u32::try_from(i).unwrap();
+            let (mx, my) = (pad + i % modules, pad + i / modules);
+            for dy in 0..MODULE_PX {
+                for dx in 0..MODULE_PX {
+                    img.put_pixel(
+                        mx * MODULE_PX + dx,
+                        my * MODULE_PX + dy,
+                        image::Rgba([120, 120, 120, 255]),
+                    );
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .unwrap();
+    out
 }
 
 /// Content rows scan with the camera-frame stages and no wall clock: the
@@ -566,6 +644,22 @@ fn assert_refused(name: &str, png: &[u8]) {
 /// Byte mode "abc" after the designator, as a bit string.
 const BYTE_ABC: &str = "0100 00000011 01100001 01100010 01100011 0000";
 
+/// ECI 1000000 (the 110xxxxx form, above the register) then byte "abc":
+/// rqrr decodes "abc", rxing's port signals a designator and reads "abc",
+/// the scanner's parser refuses the stream.
+fn eci_above_the_register_abc() -> String {
+    format!("0111 11001111 01000010 01000000 {BYTE_ABC}")
+}
+
+/// FNC1 in second position (37), then in first position, then byte "abc":
+/// rxing's port reads it as GS1 "37abc", the scanner refuses it.
+fn fnc1_second_then_first_abc() -> String {
+    format!("1001 00100101 0101 {BYTE_ABC}")
+}
+
+/// Byte mode "hello", as a bit string.
+const BYTE_HELLO: &str = "0100 00000101 01101000 01100101 01101100 01101100 01101111 0000";
+
 #[test]
 fn a11_a_111xxxxx_designator_leaves_no_detection() {
     // ECI whose first codeword is 111xxxxx (no ISO 18004 Table 4 form),
@@ -628,6 +722,31 @@ fn a11c_a_mirrored_111xxxxx_designator_leaves_no_detection() {
 }
 
 #[test]
+fn a11d_a_refusal_spares_a_well_formed_neighbour_with_equal_bytes() {
+    // A refusal is the content rxing's port reports for the refused stream
+    // (its bytes, a signalled designator, its FNC1 position) and, for
+    // rqrr's own reads only, the bytes rqrr decoded — never the bytes
+    // alone. A plain "abc" symbol beside a refused one is another content:
+    // it keeps both engines, frame and walk alike.
+    let plain = bit_stream_colors(BYTE_ABC, &[]);
+    for (name, refused) in [
+        ("ECI 1000000", eci_above_the_register_abc()),
+        ("111xxxxx", format!("0111 11100000 {BYTE_ABC}")),
+    ] {
+        let png = png_row(&[bit_stream_colors(&refused, &[]), plain.clone()]);
+        for (profile, report) in [("frame", scan_content(&png)), ("walk", scan_walk(&png))] {
+            let d = one(&report);
+            assert_eq!(
+                (d.content.raw.as_slice(), d.content.text.as_str()),
+                (&b"abc"[..], "abc"),
+                "{name} ({profile})"
+            );
+            assert_both_engines(d);
+        }
+    }
+}
+
+#[test]
 fn a13_signalled_only_declaration_is_marked_not_guessed() {
     // A light-on-dark symbol under the camera-frame stages: rxing's port
     // reads it (inverted) and states that a designator exists without
@@ -676,6 +795,11 @@ fn a15_mirrored_declarations_are_located_on_the_transposed_grid() {
     let d = one(&report);
     assert_eq!(d.content.raw, vec![0xA1]);
     assert_eq!(d.content.text, "\u{104}");
+    assert_eq!(
+        d.content.charset,
+        Charset::Utf8,
+        "ISO/IEC 8859-2 has no legacy label: the utf8 placeholder, never latin1"
+    );
     assert_both_engines(d);
     assert!(d.corners.is_some());
 }
@@ -882,6 +1006,9 @@ fn c3_kanji_9ffd_to_9fff_keep_their_original_bytes() {
             .decode_without_bom_handling(&pair)
             .0
             .into_owned();
+        // the unmarked pair keeps the heuristic and its label; the declared
+        // readings have no legacy label (ISO/IEC 8859-2; invalid UTF-8):
+        // the utf8 placeholder until the wire can say `eci`/`unknown`
         let cases = [
             (
                 "unmarked",
@@ -890,6 +1017,7 @@ fn c3_kanji_9ffd_to_9fff_keep_their_original_bytes() {
                     .decode_without_bom_handling(&pair)
                     .0
                     .into_owned(),
+                Charset::Latin1,
             ),
             (
                 "ECI 4",
@@ -898,6 +1026,7 @@ fn c3_kanji_9ffd_to_9fff_keep_their_original_bytes() {
                     b.push_kanji_data(&pair)
                 }),
                 iso_8859_2,
+                Charset::Utf8,
             ),
             (
                 "ECI 26",
@@ -906,13 +1035,15 @@ fn c3_kanji_9ffd_to_9fff_keep_their_original_bytes() {
                     b.push_kanji_data(&pair)
                 }),
                 String::from_utf8_lossy(&pair).into_owned(),
+                Charset::Utf8,
             ),
         ];
-        for (name, code, text) in cases {
+        for (name, code, text, charset) in cases {
             let report = scan_content(&png(&code, false));
             let d = one(&report);
             assert_eq!(d.content.raw, pair.to_vec(), "{name} 9F {low:02X}");
             assert_eq!(d.content.text, text, "{name} 9F {low:02X}");
+            assert_eq!(d.content.charset, charset, "{name} 9F {low:02X}");
             assert_both_engines(d);
             assert!(d.corners.is_some(), "{name} 9F {low:02X}: rqrr geometry");
         }
@@ -965,21 +1096,23 @@ fn d3_fnc1_second_keeps_the_application_indicator_and_is_not_gs1() {
 /// The GTIN element string the GS1 rows carry.
 const GS1_GTIN: &str = "0109506000134352";
 
-#[test]
-fn d4_eci26_gs1_is_located_through_rqrrs_grid() {
-    // rqrr cannot decode FNC1 symbols, so its grid is a rescue candidate,
-    // and rxing's port only signals the ECI. Re-deriving that candidate
-    // (clean RS) locates ECI 26 over the port's bytes: the element string
-    // reads, the payload is GS1 with its GTIN.
-    let code = v3(|b| {
+/// ECI 26 + FNC1 in first position + the GTIN element string (numeric).
+fn eci26_gs1() -> QrCode {
+    v3(|b| {
         b.push_eci_designator(26)?;
         b.push_fnc1_first_position()?;
         b.push_numeric_data(GS1_GTIN.as_bytes())
-    });
-    let report = scan_content(&png(&code, false));
-    let d = one(&report);
+    })
+}
+
+/// The located ECI 26 GS1 symbol: the element string, conformant, its
+/// GTIN, the utf8 label (ECI 26 reproduces), rxing's read alone — the
+/// candidate's clean re-derivation adds the declaration and the grid, not
+/// an engine (`rescue` is the S5 stage) — with the candidate's geometry.
+fn assert_located_gs1(d: &Detection) {
     assert_eq!(d.content.raw, GS1_GTIN.as_bytes().to_vec());
     assert_eq!(d.content.text, GS1_GTIN);
+    assert_eq!(d.content.charset, Charset::Utf8);
     match &d.payload {
         Payload::Gs1 {
             gtin, conformant, ..
@@ -989,7 +1122,18 @@ fn d4_eci26_gs1_is_located_through_rqrrs_grid() {
         }
         other => panic!("not GS1: {other:?}"),
     }
+    assert_eq!(d.engines, vec![EngineKind::Rxing]);
     assert!(d.corners.is_some(), "the candidate's grid is the symbol");
+}
+
+#[test]
+fn d4_eci26_gs1_is_located_through_rqrrs_grid() {
+    // rqrr cannot decode FNC1 symbols, so its grid is a rescue candidate,
+    // and rxing's port only signals the ECI. Re-deriving that candidate
+    // (clean RS) locates ECI 26 over the port's bytes: the element string
+    // reads, the payload is GS1 with its GTIN.
+    let report = scan_content(&png(&eci26_gs1(), false));
+    assert_located_gs1(one(&report));
 }
 
 #[test]
@@ -998,13 +1142,77 @@ fn d5_fnc1_second_then_first_vetoes_the_port_read() {
     // 18004 defines. rxing's port publishes it as GS1 with the AIM digits
     // leading the element string — confidently wrong; rqrr cannot decode
     // FNC1, and the scanner's parser proves its grid malformed. The proof
-    // vetoes the port's read of the same bytes: no detection.
+    // vetoes the port's read of the same content: no detection.
     assert_refused(
         "FNC1 second then first",
-        &png_from_bit_stream(&format!("1001 00100101 0101 {BYTE_ABC}")),
+        &png_from_bit_stream(&fnc1_second_then_first_abc()),
     );
     // control: FNC1 second alone reads, indicator first, never GS1
     let report = scan_content(&png_from_bit_stream(&format!("1001 00100101 {BYTE_ABC}")));
+    let d = one(&report);
+    assert_eq!(d.content.raw, b"37abc".to_vec());
+    assert!(!matches!(d.payload, Payload::Gs1 { .. }), "{:?}", d.payload);
+}
+
+#[test]
+fn d8_a_refusal_spares_well_formed_fnc1_content_with_equal_bytes() {
+    // ECI 1000000 + "abc" (refused) beside FNC1 first + "abc" (well-formed
+    // GS1 data; rqrr cannot decode FNC1, so its grid is a candidate whose
+    // clean stream parses — evidence that protects the content, never a
+    // detection of its own), with and without a third symbol. The port
+    // reads the GS1 symbol as another content than the refused one: it is
+    // published, read by rxing — never handed to the rescue stage.
+    let refused = bit_stream_colors(&eci_above_the_register_abc(), &[]);
+    let gs1 = bit_stream_colors(&format!("0101 {BYTE_ABC}"), &[]);
+    let hello = bit_stream_colors(BYTE_HELLO, &[]);
+    for (name, symbols) in [
+        ("refused + gs1 + hello", vec![refused.clone(), gs1.clone(), hello]),
+        ("refused + gs1", vec![refused, gs1]),
+    ] {
+        let png = png_row(&symbols);
+        for (profile, report) in [("frame", scan_content(&png)), ("walk", scan_walk(&png))] {
+            let abc: Vec<&Detection> = report
+                .detections
+                .iter()
+                .filter(|d| d.content.raw == b"abc")
+                .collect();
+            assert_eq!(abc.len(), 1, "{name} ({profile}): {:?}", summary(&report));
+            assert!(
+                matches!(abc[0].payload, Payload::Gs1 { .. }),
+                "{name} ({profile}): {:?}",
+                abc[0].payload
+            );
+            assert_eq!(
+                abc[0].engines,
+                vec![EngineKind::Rxing],
+                "{name} ({profile}): {:?}",
+                report.trace.stages
+            );
+        }
+    }
+}
+
+#[test]
+fn d9_a_mirrored_eci26_gs1_is_located_on_the_transposed_grid() {
+    // rqrr reads a mirrored symbol's transpose; its RS accepts the FNC1
+    // symbol there and its parser refuses FNC1. That transposed grid is the
+    // candidate whose clean stream verifies: it locates ECI 26 over the
+    // port's bytes, exactly as for the unmirrored symbol (d4).
+    let report = scan_content(&png_mirrored(&eci26_gs1()));
+    assert_located_gs1(one(&report));
+}
+
+#[test]
+fn d10_a_mirrored_fnc1_second_then_first_is_refused() {
+    // the transposed candidate proves the mirrored stream malformed too
+    assert_refused(
+        "mirrored FNC1 second then first",
+        &png_from_bit_stream_mirrored(&fnc1_second_then_first_abc()),
+    );
+    // control: mirrored FNC1 second alone reads, indicator first
+    let report = scan_content(&png_from_bit_stream_mirrored(&format!(
+        "1001 00100101 {BYTE_ABC}"
+    )));
     let d = one(&report);
     assert_eq!(d.content.raw, b"37abc".to_vec());
     assert!(!matches!(d.payload, Payload::Gs1 { .. }), "{:?}", d.payload);
@@ -1165,6 +1373,7 @@ fn e5_artistic_eci26_urls_are_located_by_a_later_stage() {
         let d = one(&report);
         assert_eq!(d.content.raw, URL.as_bytes().to_vec(), "{name}");
         assert_eq!(d.content.text, URL, "{name}: {:?}", report.trace);
+        assert_eq!(d.content.charset, Charset::Utf8, "{name}: ECI 26 reproduces");
         assert!(
             matches!(&d.payload, Payload::Url { url } if url == URL),
             "{name}: {:?}",
@@ -1180,6 +1389,7 @@ fn e5_artistic_eci26_urls_are_located_by_a_later_stage() {
     let report = scan_content(&png_blurred(&eci26_url(), 2.5));
     let d = one(&report);
     assert_eq!(d.content.text, URL);
+    assert_eq!(d.content.charset, Charset::Utf8);
     assert_both_engines(d);
 }
 
@@ -1316,4 +1526,161 @@ fn f1_global_invariants_over_the_matrix() {
             );
         }
     }
+}
+
+/// Every stage of the trace as `(stage, detections_found)`.
+fn found_per_stage(report: &ScanReport) -> Vec<(&str, u32)> {
+    report
+        .trace
+        .stages
+        .iter()
+        .map(|s| (s.stage.as_str(), s.detections_found))
+        .collect()
+}
+
+#[test]
+fn f2_detections_found_counts_raw_engine_hits_before_any_veto() {
+    // spec/01: `detections_found` is RAW engine hits, pre-merge. rxing's
+    // port read of a refused symbol is such a hit — the scanner then
+    // refuses it; rqrr's refused decode never becomes a hit.
+    let report = scan_content(&png_from_bit_stream(&eci_above_the_register_abc()));
+    assert!(report.detections.is_empty(), "{:?}", summary(&report));
+    assert_eq!(found_per_stage(&report), vec![("direct", 1)]);
+}
+
+#[test]
+fn f3_a_refusal_survives_the_alpha_fallback_walk() {
+    // A transparent design: the auto flatten (over white) shows the symbol
+    // dark-on-light, the scanner proves its stream malformed and the first
+    // walk ends empty — so the fallback walk flattens over black, where the
+    // symbol reads light-on-dark (rxing alone at the camera-frame stages,
+    // no stream to prove it there). The first walk's proof still refuses
+    // it: no detection, and nothing was rescued by the fallback.
+    for (name, bits) in [
+        ("ECI 1000000", eci_above_the_register_abc()),
+        ("FNC1 second then first", fnc1_second_then_first_abc()),
+    ] {
+        let (colors, width) = bit_stream_colors(&bits, &[]);
+        let png = png_transparent(&colors, width);
+        for (profile, report) in [("frame", scan_content(&png)), ("walk", scan_walk(&png))] {
+            let stages = found_per_stage(&report);
+            let directs: Vec<u32> = stages
+                .iter()
+                .filter(|(stage, _)| *stage == "direct")
+                .map(|&(_, found)| found)
+                .collect();
+            assert_eq!(
+                directs.len(),
+                2,
+                "{name} ({profile}): both walks ran: {stages:?}"
+            );
+            assert!(
+                directs[1] >= 1,
+                "{name} ({profile}): the fallback walk reads the light-on-dark symbol: {stages:?}"
+            );
+            assert!(
+                report.detections.is_empty(),
+                "{name} ({profile}): {:?}",
+                summary(&report)
+            );
+            let alpha = report.alpha.as_ref().expect("a transparent input");
+            assert!(!alpha.fallback_used, "{name} ({profile})");
+            assert_eq!(alpha.background, "white", "{name} ({profile})");
+        }
+    }
+}
+
+// ------------------------------------- G · known residuals (contract v2)
+
+#[test]
+fn g1_light_on_dark_malformed_streams_wait_for_the_rxing_points_locator() {
+    // KNOWN RESIDUAL — these rows pin TODAY's behaviour. rqrr detects no
+    // light-on-dark grid at the pyramid and direct stages, so no
+    // designator-exposing parser sees these streams there and nothing
+    // proves them malformed: rxing's port read is published. Locating
+    // streams at rxing's own result points (contract v2) turns them into
+    // refusals.
+    //
+    // FNC1 second then first: the port's GS1 read is not signalled-only,
+    // so the walk settles where it found it — frame and walk alike.
+    let png = png_from_bit_stream_inverted(&fnc1_second_then_first_abc());
+    for (profile, report) in [("frame", scan_content(&png)), ("walk", scan_walk(&png))] {
+        let d = one(&report);
+        assert_eq!(d.engines, vec![EngineKind::Rxing], "{profile}");
+        assert_eq!(d.content.raw, b"37abc".to_vec(), "{profile}");
+        assert!(
+            matches!(d.payload, Payload::Gs1 { .. }),
+            "{profile}: {:?}",
+            d.payload
+        );
+    }
+    // ECI 1000000: the camera-frame stages publish the signalled-only read,
+    // marked; the walk goes on and its enhance invert attempt lets rqrr
+    // prove the stream malformed.
+    let png = png_from_bit_stream_inverted(&eci_above_the_register_abc());
+    let report = scan_content(&png);
+    let d = one(&report);
+    assert_eq!(d.engines, vec![EngineKind::Rxing]);
+    assert_eq!(
+        (d.content.raw.as_slice(), d.content.text.as_str()),
+        (&b"abc"[..], replacement(3).as_str())
+    );
+    let report = scan_walk(&png);
+    assert!(report.detections.is_empty(), "{:?}", summary(&report));
+}
+
+/// A flyer: the dot-style ECI 26 URL render (e5) above the EAN-13 fixture.
+fn png_flyer() -> Vec<u8> {
+    let qr = image::load_from_memory(&png_dots(&eci26_url()))
+        .unwrap()
+        .into_luma8();
+    let ean = image::open(format!(
+        "{}/../../fixtures/symbology/ean13.png",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+    .into_luma8();
+    let gap = 24;
+    let mut flyer = image::GrayImage::from_pixel(
+        qr.width().max(ean.width()),
+        qr.height() + gap + ean.height(),
+        image::Luma([255]),
+    );
+    image::imageops::overlay(&mut flyer, &qr, 0, 0);
+    image::imageops::overlay(&mut flyer, &ean, 0, i64::from(qr.height() + gap));
+    encode_png(flyer)
+}
+
+#[test]
+fn g2_a_qr_beside_a_retail_barcode_keeps_its_signalled_reading() {
+    // KNOWN RESIDUAL — pins TODAY's behaviour. The walk goes on only while
+    // EVERY detection is a signalled-only read (a QR among them); an EAN-13
+    // beside the dot-style ECI 26 URL (e5) settles it at the direct stage,
+    // so the QR keeps its marked text although a later stage would locate
+    // it. Whether to continue while any QR reading is signalled-only is a
+    // contract v2 pipeline decision.
+    let report = scan_walk(&png_flyer());
+    assert_eq!(
+        found_per_stage(&report).first().map(|&(stage, _)| stage),
+        Some("direct"),
+        "{:?}",
+        report.trace.stages
+    );
+    assert_eq!(report.trace.stages.len(), 1, "{:?}", report.trace.stages);
+    let qr = report
+        .detections
+        .iter()
+        .find(|d| d.symbology == Symbology::QrCode)
+        .expect("rxing reads the dot-style QR");
+    assert_eq!(qr.engines, vec![EngineKind::Rxing]);
+    assert_eq!(qr.content.raw, URL.as_bytes().to_vec());
+    assert_eq!(qr.content.text, replacement(URL.len()));
+    assert!(
+        report
+            .detections
+            .iter()
+            .any(|d| d.symbology == Symbology::Ean13 && d.content.text == "9506000134352"),
+        "{:?}",
+        summary(&report)
+    );
 }
