@@ -81,9 +81,10 @@ fn assert_honest(score: &Score) {
 /// The quiet-ring phase pair are REAL thin margins on the rqrr path — 5 and
 /// 6 corrected errors of 16 in the worst block (margins 0.375 · 0.25),
 /// capped at 85 and 70. Skipping `uec`, `iso15415` or both withholds those
-/// sections and the hints the margin drives; value, grade, weights and
-/// axes never move. (While the cap read only the PUBLISHED margin, `[uec]`
-/// lifted the pair to 100 and 88.)
+/// sections and the hints the margin drives; value, grade, weights, axes
+/// and the ISO `overall` (the minimum over every MEASURED parameter, a
+/// withheld one included) never move. (While the cap read only the
+/// PUBLISHED margin, `[uec]` lifted the pair to 100 and 88.)
 #[test]
 fn skip_checks_never_move_the_verdict() {
     for (rel, margin, value) in [
@@ -129,6 +130,11 @@ fn skip_checks_never_move_the_verdict() {
                     withheld,
                     "{rel} {checks:?}: the ISO parameter follows the section"
                 );
+                let published = score.iso15415.expect("the default checks grade ISO");
+                assert_eq!(
+                    iso.overall, published.overall,
+                    "{rel} {checks:?}: a skip never moves the ISO overall"
+                );
             }
             // the pair's axes alone compose ≥ 70, so the raise-EC hint here
             // is the margin's own — it speaks only through the section
@@ -147,6 +153,43 @@ fn skip_checks_never_move_the_verdict() {
             assert_eq!(hidden.hints, expected, "{rel} {checks:?}");
         }
     }
+}
+
+/// The Undecodable boundary: a symbol only the S5 rescue decodes (errors
+/// and erasures past both engines' RS limits) has no stress-cell decode
+/// class at all. That is a legitimately zero margin, not a missing
+/// judgment: unbudgeted, the score is present and whole — every axis
+/// judged, each failing at its first cell — and pins at 0 (poor).
+#[test]
+fn a_rescue_only_decode_is_still_judged_whole() {
+    let report = scan(
+        &fixture("degraded/logo-occluded-rescue.png"),
+        unbudgeted_full(),
+    );
+    let detection = report.detections.first().expect("the rescue decodes");
+    assert_eq!(
+        detection.engines,
+        vec![qrcode_ai_scanner::EngineKind::Rescue],
+        "precondition: a rescue-only decode"
+    );
+    let score = report
+        .score
+        .as_ref()
+        .expect("an undecodable base still judges");
+    assert_honest(score);
+    assert_eq!(score.weights_run, 100);
+    for axis in &score.axes {
+        assert_eq!(axis.passed, 0, "no stress cell reads it: {axis:?}");
+        assert_eq!(
+            axis.failed_at.as_deref(),
+            Some(cell_labels(axis.axis)[0]),
+            "it dies at the first cell: {axis:?}"
+        );
+    }
+    assert_eq!(
+        (score.value, score.grade),
+        (0, qrcode_ai_scanner::Grade::Poor)
+    );
 }
 
 /// Where a wall-clock cut lands depends on the machine, so the one

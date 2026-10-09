@@ -8,11 +8,17 @@
 //! Determinism: every stress cell is a pure transform of the normalized
 //! luma; ramps stop at the first failure (the knee). The lighting set is
 //! unordered — no knee-exit, though depth still picks the cell subset.
-//! Same input + same depth ⇒ same score, always.
+//! Same input + same depth ⇒ same score, as far as the decode engines are
+//! deterministic. Known exception until fixed upstream: rxing's PDF417
+//! decoder breaks codeword-confidence ties in `HashMap` iteration order
+//! (randomized per map), so a PDF417 cell near a decode threshold can pass
+//! on one run and fail on the next (`pdf417_*_repeatability` diagnostics).
 //!
 //! Budget: a judgment runs its calibration and EVERY planned cell, or it is
 //! absent. An unrun cell is not a failed one — read as a failure, a
-//! deadline cut would ship a pristine symbol as a fragile verdict.
+//! deadline cut would ship a pristine symbol as a fragile verdict. Only the
+//! deadline (or the test-only work quota) makes a judgment absent; a
+//! cancelled token stays an error (`QRS-005`, the scan-wide contract).
 
 pub(crate) mod iso15415;
 pub(crate) mod structural;
@@ -133,7 +139,9 @@ impl<'a> Bound<'a> {
     }
 
     /// Admit one probe step — `Ok(false)` once the deadline passed or the
-    /// quota is spent: the step must not run.
+    /// quota is spent: the step must not run and the judgment is absent. A
+    /// cancelled token is `Err(Cancelled)` instead — cancellation is the
+    /// caller's `QRS-005`, never an absent judgment.
     fn admit(&mut self) -> Result<bool> {
         if self.cancel.is_cancelled() {
             return Err(crate::error::ScanError::Cancelled);
@@ -168,7 +176,7 @@ enum Calibrated {
     /// No class reads the base at stress scale (the score then
     /// legitimately reads zero margin).
     Undecodable,
-    /// The bound cut the walk first.
+    /// The deadline or the quota cut the walk first.
     Interrupted,
 }
 
@@ -291,8 +299,8 @@ fn lighting_indices(depth: ScoreDepth) -> &'static [usize] {
 
 /// Run one ordered ramp with early-stop at the first failure (the knee):
 /// `(passed, knee)`. Stopping at a knee COMPLETES the ramp — intensities
-/// are ordered, later cells only get harder. `Ok(None)` = the bound cut a
-/// planned cell before the ramp could say where it breaks.
+/// are ordered, later cells only get harder. `Ok(None)` = the deadline or
+/// the quota cut a planned cell before the ramp could say where it breaks.
 fn run_ramp(
     base: &LumaImage,
     expected_text: &str,
@@ -343,7 +351,7 @@ fn cell_label(axis: StressAxis, i: usize) -> &'static str {
 
 /// One bisection probe tightens a knee (Full depth only): the report gains
 /// the tightest TESTED failing intensity, the composite reads nothing from
-/// it. Bound-cut / no knee / Reduced depth → honestly absent.
+/// it. Deadline or quota cut / no knee / Reduced depth → honestly absent.
 fn refine_knee(
     base: &LumaImage,
     expected_text: &str,
@@ -367,8 +375,8 @@ fn refine_knee(
 /// The lighting defect SET (unordered — no knee, no refinement): shadows,
 /// centred glare, exposure extremes. Split from `run_axes` for line-budget
 /// and because its pass-set semantics differ from the ordered ramps: the
-/// set is complete only once EVERY pick ran — `Ok(None)` when the bound
-/// cut one.
+/// set is complete only once EVERY pick ran — `Ok(None)` when the deadline
+/// or the quota cut one.
 fn run_lighting(
     base: &LumaImage,
     expected_text: &str,
@@ -425,7 +433,8 @@ fn run_lighting(
 /// bisect their knees. Axes in `skip` never run — their cells are never
 /// built (the integration perf win) and they are absent from the returned
 /// list (the report self-describes what was measured). `Ok(None)` = the
-/// bound cut a planned cell: no axis list, never a partial one.
+/// deadline or the quota cut a planned cell: no axis list, never a partial
+/// one.
 fn run_axes(
     base: &LumaImage,
     expected_text: &str,
@@ -652,6 +661,9 @@ fn compose(
     // of a Reed-Solomon miscorrection (caught live on the zxing blackbox
     // corpus: rqrr returned "photography" for a "photograph" ground truth
     // at 12/24 errors — this hint is the machine-readable distrust signal).
+    // It reads only the PUBLISHED section by design: its errors/capacity ARE
+    // the section's numbers, so a host that skips `uec` gets neither — the
+    // margin still capped the value (at most 40 at margin zero).
     if let Some(u) = &uec
         && u.margin <= 0.0
     {
@@ -678,7 +690,7 @@ fn compose(
 /// deadline. `None` when no cell is planned (every axis skipped — an
 /// axis-less composite would be fiction; callers treat it exactly like
 /// `ScoreDepth::Off`) and when the deadline cuts the judgment: absent,
-/// never partial.
+/// never partial. A cancelled token is `Err(Cancelled)` (`QRS-005`).
 pub(crate) fn evaluate(
     luma: &LumaImage,
     detection: &MergedDetection,
@@ -697,7 +709,8 @@ pub(crate) fn evaluate(
 
 /// Judge the primary detection under `bound`: calibration, every planned
 /// cell, then the knee bisections. Structural, UEC and ISO run only once
-/// every planned cell has run — a judgment the bound cuts is `Interrupted`.
+/// every planned cell has run — a judgment the deadline or the quota cuts is
+/// `Interrupted`, while a cancelled token is `Err(Cancelled)` (`QRS-005`).
 pub(crate) fn judge(
     luma: &LumaImage,
     detection: &MergedDetection,
@@ -738,10 +751,11 @@ pub(crate) fn judge(
         _ => None,
     };
     // The UEC replay runs whenever the bitstream exists: its margin caps the
-    // composite, and skipping a check never moves the value. A skipped `uec`
-    // withholds only what it shows — `score.uec`, the two hints it drives
-    // (compose) and the ISO block's unused_error_correction parameter. A
-    // skipped ISO block never runs (no parameter sweep).
+    // composite, and skipping a check never moves a published verdict. A
+    // skipped `uec` withholds only what it shows — `score.uec`, the two hints
+    // it drives (compose) and the ISO block's unused_error_correction
+    // parameter, whose grade still counts in the ISO `overall` (the minimum
+    // over every MEASURED parameter). A skipped ISO block never runs.
     let publish_uec = !skip_checks.contains(&crate::ladder::ScoreCheck::Uec);
     let skip_iso = skip_checks.contains(&crate::ladder::ScoreCheck::Iso15415);
     let uec_report = match (
@@ -759,13 +773,16 @@ pub(crate) fn judge(
         None
     } else {
         match (detection.corners, detection.version, &structural) {
-            (Some(corners), Some(version), Some(s)) => iso15415::compute(
-                sample_luma,
-                corners,
-                version,
-                s,
-                uec_report.as_ref().filter(|_| publish_uec),
-            ),
+            (Some(corners), Some(version), Some(s)) => {
+                iso15415::compute(sample_luma, corners, version, s, uec_report.as_ref()).map(
+                    |mut card| {
+                        if !publish_uec {
+                            card.unused_error_correction = None;
+                        }
+                        card
+                    },
+                )
+            }
             _ => None,
         }
     };
@@ -1730,13 +1747,22 @@ mod tests {
         );
         assert_eq!(hidden.axes, shown.axes);
         assert!(hidden.uec.is_none(), "the skipped section stays withheld");
+        let shown_iso = shown.iso15415.expect("the ISO block runs");
+        let hidden_iso = hidden.iso15415.expect("the ISO block still runs");
         assert!(
-            hidden
-                .iso15415
-                .expect("the ISO block still runs")
-                .unused_error_correction
-                .is_none(),
+            hidden_iso.unused_error_correction.is_none(),
             "the ISO UEC parameter follows the published section"
+        );
+        // the ISO verdict is the minimum over every MEASURED parameter: the
+        // grade-D margin keeps setting it while its parameter is withheld
+        let margin_grade = shown_iso
+            .unused_error_correction
+            .expect("published by default")
+            .grade;
+        assert_eq!(shown_iso.overall, margin_grade, "{shown_iso:?}");
+        assert_eq!(
+            hidden_iso.overall, shown_iso.overall,
+            "skipping a check never moves the ISO overall"
         );
         assert!(
             !hidden_hints.iter().any(|h| matches!(
@@ -1841,13 +1867,9 @@ mod tests {
         assert_eq!(bound.spent(), 0);
     }
 
-    /// The blob-style production template: it decodes only through a morph
-    /// rung and its ramps knee — decoded by the unbounded Full ladder.
-    fn kneed_example() -> (LumaImage, MergedDetection) {
-        let path = format!(
-            "{}/../../fixtures/artistic/blob-style-monkey-logo.webp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+    /// A committed fixture decoded by the unbounded Full ladder.
+    fn fixture_example(rel: &str) -> (LumaImage, MergedDetection) {
+        let path = format!("{}/../../fixtures/{rel}", env!("CARGO_MANIFEST_DIR"));
         let bytes = std::fs::read(&path).expect("fixture present");
         let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
         let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
@@ -1855,17 +1877,46 @@ mod tests {
         (planes.luma, detection)
     }
 
-    /// The probe steps a complete judgment needs, derived independently of
-    /// `judge`: the calibration walk, then every PLANNED cell — a ramp runs
-    /// through its knee, the lighting set runs whole.
-    fn complete_units(luma: &LumaImage, detection: &MergedDetection, score: &Score) -> u32 {
+    /// The blob-style production template: it decodes only through a morph
+    /// rung and its ramps knee.
+    fn kneed_example() -> (LumaImage, MergedDetection) {
+        fixture_example("artistic/blob-style-monkey-logo.webp")
+    }
+
+    /// The logo-occluded v5-H symbol only the S5 rescue decodes (errors and
+    /// erasures): no stress-cell decode class reads its base — the
+    /// Undecodable boundary, still a complete judgment.
+    fn rescue_example() -> (LumaImage, MergedDetection) {
+        let (luma, detection) = fixture_example("degraded/logo-occluded-rescue.png");
+        assert_eq!(
+            detection.engines,
+            vec![crate::report::EngineKind::Rescue],
+            "precondition: a rescue-only decode"
+        );
+        (luma, detection)
+    }
+
+    /// The unbounded calibration walk: how it ended and the steps it took.
+    fn calibration_walk(luma: &LumaImage, detection: &MergedDetection) -> (Calibrated, u32) {
         let base = transform::downscale_to(luma, STRESS_BASE_SIDE);
         let cancel = CancelToken::new();
         let mut walk = Bound::new(&cancel, None);
         let calibrated =
             CellProbe::calibrate_within(&base, &detection.text, detection.symbology, &mut walk)
                 .unwrap();
-        assert!(matches!(calibrated, Calibrated::Class(_)));
+        (calibrated, walk.spent())
+    }
+
+    /// The probe steps a complete judgment needs, derived independently of
+    /// `judge`: the calibration walk (to a class, or through every class when
+    /// none reads the base), then every PLANNED cell — a ramp runs through
+    /// its knee, the lighting set runs whole.
+    fn complete_units(luma: &LumaImage, detection: &MergedDetection, score: &Score) -> u32 {
+        let (calibrated, walk) = calibration_walk(luma, detection);
+        assert!(
+            !matches!(calibrated, Calibrated::Interrupted),
+            "an unbounded walk ends"
+        );
         let cells: u32 = score
             .axes
             .iter()
@@ -1877,7 +1928,31 @@ mod tests {
                 }
             })
             .sum();
-        walk.spent() + cells
+        walk + cells
+    }
+
+    /// Fixture-specific preconditions of the quota sweep: the kneed symbol
+    /// has knees to bisect; the rescue-only one sits on the Undecodable
+    /// boundary — its walk tries EVERY decode class and finds none, yet the
+    /// judgment completes (every cell judged, value 0).
+    fn assert_sweep_preconditions(
+        name: &str,
+        luma: &LumaImage,
+        detection: &MergedDetection,
+        reference: &Score,
+        bisections: usize,
+    ) {
+        match name {
+            "kneed" => assert!(bisections > 0, "precondition: knees to bisect"),
+            "undecodable" => {
+                let (calibrated, walk) = calibration_walk(luma, detection);
+                assert!(matches!(calibrated, Calibrated::Undecodable));
+                let every_class = u32::try_from(crate::ladder::DEEP_RUNGS.len()).unwrap() + 1;
+                assert_eq!(walk, every_class, "shallow class + every deep rung tried");
+                assert_eq!(reference.value, 0, "{:?}", reference.axes);
+            }
+            _ => {}
+        }
     }
 
     /// The deterministic stand-in for a wall-clock cut, landed on EVERY step
@@ -1885,13 +1960,15 @@ mod tests {
     /// or above it the judgment is the unbounded one — value, grade,
     /// weights, axes and hints — and only a knee bisection the quota could
     /// not reach may be absent (bisections run last, so at exactly the
-    /// complete count none ran).
+    /// complete count none ran). Three shapes: a pristine symbol, a kneed
+    /// one, and a rescue-only decode no stress cell can read.
     #[test]
     fn work_quota_cuts_are_absent_never_partial() {
         let cancel = CancelToken::new();
         for (name, (luma, detection)) in [
             ("pristine", pristine_q_example()),
             ("kneed", kneed_example()),
+            ("undecodable", rescue_example()),
         ] {
             let mut free = Bound::new(&cancel, None);
             let Judgment::Complete(reference, reference_hints) =
@@ -1908,9 +1985,7 @@ mod tests {
                 .count();
             let total = complete + u32::try_from(bisections).unwrap();
             assert_eq!(free.spent(), total, "{name}: no hidden step");
-            if name == "kneed" {
-                assert!(bisections > 0, "precondition: knees to bisect");
-            }
+            assert_sweep_preconditions(name, &luma, &detection, &reference, bisections);
             for quota in 0..=total + 1 {
                 let mut bound = Bound::new(&cancel, None).with_quota(quota);
                 let outcome = judge(&luma, &detection, ScoreDepth::Full, &[], &[], &mut bound);

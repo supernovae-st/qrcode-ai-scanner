@@ -818,19 +818,23 @@ fn skip_axes_config_reaches_the_report_and_the_hints() {
 /// with a ±4px ring change while decoding identically everywhere.
 ///
 /// The committed pair proves it: identical symbol pixels (35px modules,
-/// dark-gradient ink), bare 1015px frame vs +4px white ring. Today the
-/// bare frame scores 100 (perspective 5/5) and the ringed one 88
-/// (perspective 2/5, knee 26°; axis weight 20 × 3/5 = the 12 points).
-/// Pure-black 6px/module symbols sit far from the knee and do not move.
+/// dark-gradient ink), bare 1015px frame vs +4px white ring. The bare
+/// frame keeps perspective 5/5, the ringed one 2/5 (knee 26°) — 12
+/// composite points of axis weight (20 × 3/5). The published values read
+/// 85 vs 70 because each frame's RS margin also caps the composite (the two
+/// samplings correct 5 and 6 errors of 16), so the sentinel reads the
+/// perspective axis itself, not the capped composite. Pure-black
+/// 6px/module symbols sit far from the knee and do not move.
 ///
 /// This test is the finding's sentinel, not a floor: it asserts the
-/// sensitivity EXISTS (spread ≥ 8) and decode never flips. If a future
-/// score-contract change stabilizes the perspective sampling and this
-/// fails, retire it deliberately and note the band is closed.
+/// sensitivity EXISTS (≥ 2 perspective cells, i.e. ≥ 8 composite points of
+/// axis weight) and decode never flips. If a future score-contract change
+/// stabilizes the perspective sampling and this fails, retire it
+/// deliberately and note the band is closed.
 #[test]
 fn quiet_ring_shifts_perspective_cells_near_the_knee() {
     let expected = "https://qrcode-ai.com";
-    let mut scores = Vec::new();
+    let mut perspective = Vec::new();
     for name in ["quiet-ring-phase-1015.png", "quiet-ring-phase-1023.png"] {
         let bytes = fixture(&format!("degraded/{name}"));
         let report = unbudgeted(ScanProfile::Full)
@@ -838,11 +842,19 @@ fn quiet_ring_shifts_perspective_cells_near_the_knee() {
             .unwrap();
         let d = report.detections.first().expect("decodes");
         assert_eq!(d.content.text, expected, "{name}: decode never flips");
-        scores.push(report.score.expect("Full profile scores").value);
+        let score = report.score.expect("Full profile scores");
+        let axis = score
+            .axes
+            .iter()
+            .find(|a| a.axis == qrcode_ai_scanner::StressAxis::Perspective)
+            .expect("the perspective axis runs");
+        perspective.push(axis.passed);
     }
-    let spread = scores[0].abs_diff(scores[1]);
+    let shift = perspective[0].abs_diff(perspective[1]);
     assert!(
-        spread >= 8,
-        "the quiet-ring sensitivity is characterized at ≥8 composite          points (measured 12 on 2026-07-17); got {scores:?} — if a score          contract change closed the band, retire this sentinel deliberately"
+        shift >= 2,
+        "the quiet-ring sensitivity is characterized at >= 2 perspective cells \
+         (>= 8 composite points; measured 3 on 2026-07-17); got {perspective:?} \
+         — if a score-contract change closed the band, retire this sentinel deliberately"
     );
 }
