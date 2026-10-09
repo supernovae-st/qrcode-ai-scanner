@@ -168,6 +168,7 @@ def test_score_skip_checks_null_sections_and_reject_typos():
     report = qr.scan(
         CLEAN[0].read_bytes(),
         "full",
+        budget_ms=0,
         score_skip_checks=["uec", "iso15415"],
     )
     assert report["score"]["uec"] is None

@@ -71,11 +71,14 @@ fn not_found_is_exit_1_in_every_output_mode() {
     }
 }
 
+/// Budget-free (`--budget-ms 0`): a score judgment the wall-clock budget
+/// cannot complete is absent, and `--score-only` has no value to print —
+/// under the default budget a loaded machine would flip this test.
 #[test]
 fn score_only_prints_bare_value_on_found() {
     let out = qrscan()
         .arg(fixture("clean/gen_v2_l.png"))
-        .arg("--score-only")
+        .args(["--score-only", "--budget-ms", "0"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
