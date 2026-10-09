@@ -698,8 +698,8 @@ MUTATIONS = (
      "9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2\n        with:\n          name: npm-native-tarballs", 1,
      "[versions-printed]"),
     ("versions gate removed", "mobile.yml", "      - run: python3 scripts/package-inspect.py versions --tag "
-     "\"$GITHUB_REF\" --strict --quiet\n      - uses: actions/download-artifact@v8", "      - uses: "
-     "actions/download-artifact@v8", 1, "mobile.yml › ios-release [gate]"),
+     "\"$GITHUB_REF\" --strict --quiet\n      - uses: actions/download-artifact@", "      - uses: "
+     "actions/download-artifact@", 1, "mobile.yml › ios-release [gate]"),
     ("concurrency removed", "python.yml", "    concurrency:\n      group: publish-${{ github.workflow }}-${{ "
      "github.ref }}\n      cancel-in-progress: false\n    permissions:", "    permissions:", 1,
      "python.yml › release [concurrency]"),

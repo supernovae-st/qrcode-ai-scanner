@@ -55,6 +55,12 @@ jobs:
         with:
           channel: stable
       - run: flutter pub get
+      # What pub.dev would receive (`pub publish --dry-run`), read back on
+      # every PR: the AGPL text, the file set, no stray file. BLOCKED (the
+      # crate's path dependency outside the package) is reported, not failed.
+      - name: inspect the pub.dev package
+        working-directory: .
+        run: python3 scripts/package-inspect.py flutter --strict --quiet
       - run: flutter analyze
       - name: report.dart contract tests (host)
         run: flutter test
@@ -141,7 +147,9 @@ jobs:
       contents: read
       id-token: write # OIDC — pub.dev automated publishing, no token
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # The tag must name the version being published, and the CHANGELOG
       # must carry its dated section.
       - name: the tag names the version being published
@@ -164,5 +172,10 @@ jobs:
         with:
           channel: stable
       - run: flutter pub get
+      # The package about to be uploaded, read back first (`pub publish
+      # --dry-run`, which runs no package code), as flutter › test does.
+      - name: inspect the pub.dev package about to be uploaded
+        working-directory: .
+        run: python3 scripts/package-inspect.py flutter --strict --quiet
       - name: publish (OIDC)
         run: flutter pub publish --force

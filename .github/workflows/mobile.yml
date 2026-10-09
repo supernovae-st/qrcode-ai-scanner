@@ -43,10 +43,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-10
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # The uniffi + py crates are workspace-EXCLUDED, so they can't inherit
       # `version.workspace = true` — their versions (and the Kotlin module's) are
       # hand-spelled and silently drift from the workspace SSOT. Catch it here on
@@ -107,11 +107,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-10
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # SHA-pinned third-party action (nttld/setup-ndk v1.6.0). NDK r27: 16 KB
       # page-size safe for Android 15+ (plan §7 gotcha #8).
       - uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
@@ -180,11 +180,14 @@ jobs:
             echo "::error::the url+checksum Package.swift it produces BEFORE pushing the tag."
             exit 1
           fi
-      - uses: dtolnay/rust-toolchain@master
+      # The xcframework this job zips can ship: third-party actions pinned
+      # by commit, and no build cache on a tag.
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-10
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: build static libs (device + both simulator arches)
         run: |
           cargo build --release --locked --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml --target aarch64-apple-ios
@@ -236,48 +239,58 @@ jobs:
     permissions:
       contents: write # create the GitHub release + attach the asset
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # As in every other publishing job: the tag must name the version, and
       # the CHANGELOG must carry its dated section. mobile › test checks it
       # too, but neither ios nor this job waits for test.
       - run: python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ios-xcframework
           path: build
-      # Make sure the release carries the xcframework, then VERIFY the
-      # published asset's checksum equals the one Package.swift pins — so a
-      # SwiftPM consumer's url+checksum resolution is guaranteed to succeed.
-      # bindings/swift/release.sh is the authoritative publisher (it builds the
-      # exact asset whose checksum it pins); this step is the safety net + the
-      # CI-built fallback when no asset was attached yet.
+      # The release carries the xcframework whose checksum Package.swift
+      # pins, so a SwiftPM consumer's url+checksum resolution succeeds.
+      # bindings/swift/release.sh is the authoritative publisher (it builds
+      # the exact asset whose checksum it pins). The CI-built zip is attached
+      # only where no asset is, and only when it IS the pinned archive: the
+      # comparison comes before the release is created or touched, so a
+      # mismatch leaves nothing behind.
       - name: publish + verify the xcframework asset
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # 1. The release must exist — create if absent, else confirm. Never mask
-          #    a real create failure behind `|| true` (that yields a confusing
-          #    "release not found" on the next line instead of the root cause).
-          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes 2>/dev/null \
-            || gh release view "$GITHUB_REF_NAME" >/dev/null
-          # 2. Attach the CI-built asset ONLY if none is present — never clobber a
-          #    release.sh-published artifact, whose checksum is what Package.swift pins.
-          if gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' \
+          zip=build/QrcodeAiScannerFFI.xcframework.zip
+          # SwiftPM's checksum is the archive's SHA-256 (what `swift package
+          # compute-checksum` prints), so sha256sum checks it on Linux.
+          pinned="$(grep -oE '[a-f0-9]{64}' bindings/swift/Package.swift | head -n1 || true)"
+          echo "Package.swift   : ${pinned:-<none>}"
+          # 1. Never clobber an attached asset (release.sh's, whose checksum
+          #    Package.swift pins); attach the CI-built one only on a match.
+          if gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' 2>/dev/null \
                | grep -qx 'QrcodeAiScannerFFI.xcframework.zip'; then
             echo "::notice::xcframework asset already attached — leaving it untouched."
           else
-            gh release upload "$GITHUB_REF_NAME" build/QrcodeAiScannerFFI.xcframework.zip build/checksum.txt
+            built="$(sha256sum "$zip" | cut -d' ' -f1)"
+            echo "CI-built asset  : $built"
+            if [ "$built" != "${pinned:-}" ]; then
+              echo "::error::the CI-built xcframework is not the archive Package.swift pins: nothing was created or uploaded."
+              echo "::error::Attach the zip  bindings/swift/release.sh $GITHUB_REF_NAME  built, then re-run this job."
+              exit 1
+            fi
+            # The release must exist — create if absent, else confirm. Never
+            # mask a real create failure behind `|| true`.
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes 2>/dev/null \
+              || gh release view "$GITHUB_REF_NAME" >/dev/null
+            gh release upload "$GITHUB_REF_NAME" "$zip" build/checksum.txt
             echo "::notice::attached the CI-built xcframework."
           fi
-          # 3. VERIFY the PUBLISHED asset (whoever uploaded it) matches the pin.
-          #    SwiftPM's checksum is the archive's SHA-256 (what `swift package
-          #    compute-checksum` prints), so sha256sum checks it on Linux.
+          # 2. VERIFY the PUBLISHED asset (whoever uploaded it) matches the pin.
           gh release download "$GITHUB_REF_NAME" -p QrcodeAiScannerFFI.xcframework.zip -O "$RUNNER_TEMP/published.zip" --clobber
           published="$(sha256sum "$RUNNER_TEMP/published.zip" | cut -d' ' -f1)"
-          pinned="$(grep -oE '[a-f0-9]{64}' bindings/swift/Package.swift | head -n1 || true)"
           echo "published asset : $published"
-          echo "Package.swift   : ${pinned:-<none>}"
           if [ "$published" != "${pinned:-}" ]; then
             echo "::error::checksum mismatch — SwiftPM would reject this release."
             echo "::error::Re-run  bindings/swift/release.sh $GITHUB_REF_NAME  so the pin matches the asset."
