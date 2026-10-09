@@ -178,9 +178,12 @@ try {
       for (let e = err; e; e = e.cause) chain.push(e.message);
       console.log(JSON.stringify({ error: chain }));
     }`;
-  const load = (platformVersion, enforce) => {
+  const load = (platformVersion, enforce, { manifest = true } = {}) => {
     writeFileSync(join(platformDir, "package.json"),
       JSON.stringify({ name: platform, version: platformVersion, main: binary }));
+    // A loader vendored or bundled without this package's package.json.
+    if (manifest) copyFileSync(here("./package.json"), join(mainDir, "package.json"));
+    else rmSync(join(mainDir, "package.json"), { force: true });
     const env = { ...process.env };
     delete env.NAPI_RS_NATIVE_LIBRARY_PATH;
     delete env.NAPI_RS_ENFORCE_VERSION_CHECK;
@@ -200,6 +203,15 @@ try {
   ), `the cause names this package's own version: ${JSON.stringify(mismatch.error)}`);
   assert.deepEqual(load("0.0.0-mismatch", undefined), loaded, "check off by default");
   assert.deepEqual(load("0.0.0-mismatch", "0"), loaded, "NAPI_RS_ENFORCE_VERSION_CHECK=0 is off");
+  // The manifest is read only once the check is on: without it, the loader
+  // still loads with the check off, and refuses (naming the manifest) with it on.
+  assert.deepEqual(load(pkg.version, undefined, { manifest: false }), loaded,
+    "check off, no package.json beside the loader: loads and scans");
+  const unchecked = load(pkg.version, "1", { manifest: false });
+  assert.ok(Array.isArray(unchecked.error), `check on, no package.json to compare against: ${JSON.stringify(unchecked)}`);
+  assert.match(unchecked.error[0], /^Cannot find native binding\./);
+  assert.ok(unchecked.error.some((message) => /Cannot find module '\.\/package\.json'/.test(message)),
+    `the cause names the missing manifest: ${JSON.stringify(unchecked.error)}`);
 } finally {
   rmSync(scratch, { recursive: true, force: true });
 }
