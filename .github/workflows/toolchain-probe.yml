@@ -37,5 +37,5 @@ jobs:
           rustc --version --verbose
           df -h / && free -m
           ulimit -v 12582912
-          RUST_BACKTRACE=full cargo build --release -p xtask -j 1
+          RUST_BACKTRACE=full cargo build --release --locked -p xtask -j 1
           echo "BUILD OK — cache poisoning confirmed by elimination"
