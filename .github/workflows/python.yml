@@ -60,10 +60,20 @@ jobs:
           fi
           pip install "${wheels[0]}[test]"
           pytest python/tests -q
-      # the wheel read back: the AGPL text in .dist-info/licenses/, METADATA
-      # version + license expression, the type stubs, no stray files
-      - name: inspect the wheel
-        run: python3 ../../scripts/package-inspect.py archive dist/*.whl --strict --quiet
+      # The sdist on every PR too: its file set and its PEP 639 license files
+      # are judged here, not first at the tag.
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/qrcode-ai-scanner-py
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          command: sdist
+          args: --out dist
+      # the wheel and the sdist read back: the AGPL text where PEP 639 puts it,
+      # METADATA version + license expression, the type stubs, the exact wheel
+      # file set, only git-tracked files in the sdist
+      - name: inspect the wheel and the sdist
+        run: python3 ../../scripts/package-inspect.py archive dist/*.whl dist/*.tar.gz --strict --quiet
 
   wheels:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
@@ -104,6 +114,7 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: crates/qrcode-ai-scanner-py
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
           maturin-version: ${{ env.MATURIN_VERSION }}
           command: sdist
           args: --out dist
@@ -114,8 +125,8 @@ jobs:
 
   # Every archive PyPI would receive, read back before anything publishes —
   # on a branch dispatch too: the AGPL text in each wheel's
-  # .dist-info/licenses/ and in the sdist, the METADATA version and license
-  # expression, the type stubs, no stray files.
+  # .dist-info/licenses/ and at the sdist root (PEP 639), the METADATA version
+  # and license expression, the type stubs, the exact file sets.
   inspect:
     name: inspect wheels + sdist
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
@@ -132,6 +143,19 @@ jobs:
           path: dist
           merge-multiple: true
       - run: python3 scripts/package-inspect.py archive dist/* --strict --quiet
+      # The sdist as pip uses it where no wheel fits: a PEP 517 build in an
+      # isolated environment (the maturin floor of its pyproject.toml), whose
+      # wheel must carry the AGPL text like the ones built above.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: build a wheel from the sdist + inspect it
+        run: |
+          python -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/from-sdist" dist/*.tar.gz
+          python scripts/package-inspect.py archive "$RUNNER_TEMP"/from-sdist/*.whl --strict --quiet
 
   release:
     name: publish to PyPI
