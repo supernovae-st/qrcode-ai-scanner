@@ -54,6 +54,12 @@ jobs:
             echo "::error::a literal Rust version bypasses RUST_TOOLCHAIN: only the MSRV leg names one (dtolnay/rust-toolchain@$msrv)"
             exit 1
           fi
+      # The publishing-job policy (scripts/check-publish-guards.py): every job
+      # that publishes or holds a write permission runs from a v* tag only, in
+      # a named environment, with minimal permissions, no secret, pinned code
+      # and the versions gate first. Its mutated-copy scenarios run first.
+      - run: python3 scripts/check-publish-guards.py --self-test
+      - run: python3 scripts/check-publish-guards.py
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
