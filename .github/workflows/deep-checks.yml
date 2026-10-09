@@ -20,6 +20,11 @@ jobs:
   # kills the upload-artifact step too — `if: always()` cannot save it —
   # and a timed-out shard then reports NOTHING (shards 0+5 vanished from
   # two consecutive runs before this split).
+  #
+  # The VERDICT lives in mutants-summary, not in the shards. The work step
+  # used to run under continue-on-error, which read 12 shards exiting 2 or 3
+  # as one green run (2026-10-05: 2097 mutants, 77 missed, 5 timeouts,
+  # conclusion success); a baseline failure (exit 4) read green the same way.
   mutants:
     runs-on: ubuntu-latest
     timeout-minutes: 100
@@ -60,20 +65,69 @@ jobs:
       # peak far below 6 GB (largest fixture ≈ 64 MP ≈ hundreds of MB).
       # If a BASELINE build ever ENOMEMs under this cap, raise the build
       # headroom deliberately — never by re-opening the test-phase hole.
-      - run: |
+      #
+      # Exit 2 (missed) and 3 (timeouts) are verdicts: recorded in
+      # mutants-exit-code.txt for mutants-summary to judge against
+      # .cargo/mutants-dispositions.toml. Anything else (1 usage · 4 baseline
+      # failure · 70 internal error) fails the shard on the spot — no
+      # disposition can excuse it. fail-fast off + the always() upload already
+      # let every shard finish and report, so no continue-on-error is needed.
+      - name: cargo mutants (shard ${{ matrix.shard }}/16)
+        run: |
           ulimit -v 6291456
-          cargo mutants -p qrcode-ai-scanner --in-place --shard ${{ matrix.shard }}/16 --minimum-test-timeout 120 -- --all-features
+          status=0
+          cargo mutants -p qrcode-ai-scanner --in-place --shard ${{ matrix.shard }}/16 --minimum-test-timeout 120 -- --all-features || status=$?
+          echo "$status" > mutants-exit-code.txt
+          case "$status" in
+            0|2|3)
+              echo "cargo-mutants exited $status: judged by mutants-summary"
+              ;;
+            *)
+              echo "::error::cargo-mutants exited $status on shard ${{ matrix.shard }} (1 usage, 4 baseline failure, 70 internal error)"
+              exit "$status"
+              ;;
+          esac
         env:
           NEXTEST_TEST_THREADS: "2"
         timeout-minutes: 85
-        continue-on-error: true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: mutants-report-shard-${{ matrix.shard }}
           path: |
             mutants.out
+            mutants-exit-code.txt
             mem-telemetry.log
+
+  # The mutation verdict: all 16 shards judged together. A missing or
+  # unfinished shard, a baseline failure, a tool-level exit code, or any
+  # MISSED / TIMEOUT mutant without a covering entry in
+  # .cargo/mutants-dispositions.toml fails this job, and with it the run.
+  # Entries are exact line:col anchors — drift resurfaces a mutant, it never
+  # hides one. `!cancelled()`, not `always()`: red shards still get judged,
+  # a cancelled run has nothing to judge.
+  mutants-summary:
+    needs: mutants
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mutants-report-shard-*
+          path: mutants-shards
+      - name: the gate's own scenarios
+        run: python3 scripts/check-mutants-outcome.py --self-test
+      # 0..15 spelled out (= the matrix): a shard whose artifact never
+      # arrived is a named failure, not a silently shorter list.
+      - name: every missed or timed-out mutant is dispositioned
+        if: ${{ !cancelled() }}
+        run: >
+          python3 scripts/check-mutants-outcome.py
+          --dispositions .cargo/mutants-dispositions.toml
+          --markdown "$GITHUB_STEP_SUMMARY"
+          mutants-shards/mutants-report-shard-{0..15}
 
   fuzz:
     runs-on: ubuntu-latest
@@ -105,13 +159,20 @@ jobs:
           done
 
   # The QD-2 measurement as a standing instrument: 2304 deterministic
-  # occlusion scans. Two invariants gate:
+  # occlusion scans per pass — uncapped, then a capped pass at
+  # max_engine_side 400 that sends the v6/v10 canvases to the engines
+  # downscaled, so the rescue's capped-geometry branch is measured too.
+  # Two invariants gate:
   #   1. same-machine determinism — two runs must be byte-identical
   #      (cross-machine byte-parity is NOT asserted; f32 warp sampling may
   #      differ in the last ulp across platforms, spec/04 determinism note)
-  #   2. rescue_wrong == 0 — the refusal-safety claim (measured 0/82 at
-  #      2026-07-06 baseline, commit 51af645). A platform where the rescue
-  #      miscorrects is a REAL finding, not a flake — this stays a hard gate.
+  #   2. rescue_wrong == 0 in BOTH passes — the refusal-safety claim
+  #      (measured 0/82 at 2026-07-06 baseline, commit 51af645). Each pass
+  #      has its own gate line (`rescue_succeeded …` uncapped,
+  #      `capped_rescue_decodes …` capped; neither grep can match the other)
+  #      and must also show a non-empty rescue population: 0 wrong out of 0
+  #      decodes measures nothing. A platform where the rescue miscorrects
+  #      is a REAL finding, not a flake — this stays a hard gate.
   # The full table uploads as an artifact for trend reading.
   rescue-stress:
     runs-on: ubuntu-latest
@@ -129,19 +190,43 @@ jobs:
           ( while true; do echo "$(date +%T) $(free -m | sed -n 2p)"; sleep 15; done > mem-telemetry.log 2>&1 & )
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: two runs, byte-identical, zero rescue-wrong
+      - name: two runs, byte-identical, zero rescue-wrong in both passes
         timeout-minutes: 60
         run: |
           set -euo pipefail
           ulimit -v 12582912
-          cargo run --release -p xtask -- rescue-stress > run1.txt
+          # The binary gates itself too: exit 1 on a rescue-path wrong decode
+          # in EITHER pass. Capture it instead of dying on the redirect under
+          # -e, so the log still shows which pass failed.
+          rc=0
+          cargo run --release -p xtask -- rescue-stress > run1.txt || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::rescue-stress exited $rc (1: a rescue-path WRONG decode in either pass; otherwise a crash)"
+            grep -E 'rescue_' run1.txt || true
+            exit 1
+          fi
           cargo run --release -p xtask -- rescue-stress > run2.txt
           diff run1.txt run2.txt
+          {
+            echo '### rescue-stress gate lines'
+            echo '```'
+            grep -E 'rescue_succeeded|capped_rescue_decodes' run1.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           grep -E 'rescue_succeeded.*wrong 0\)' run1.txt || {
-            echo "::error::rescue path produced a WRONG decode — refusal-safety violated"
+            echo "::error::uncapped pass: no zero-wrong rescue_succeeded line — a WRONG rescue decode (refusal-safety violated) or a lost gate line"
             grep -E 'rescue_' run1.txt || true
             exit 1
           }
+          grep -E 'capped_rescue_decodes.*wrong 0\)' run1.txt || {
+            echo "::error::capped pass (max_engine_side 400): no zero-wrong capped_rescue_decodes line — a WRONG rescue decode (refusal-safety violated) or a lost gate line"
+            grep -E 'capped_rescue_' run1.txt || true
+            exit 1
+          }
+          if grep -E '(rescue_succeeded|capped_rescue_decodes) += 0 ' run1.txt; then
+            echo "::error::a pass produced ZERO rescue decodes — its zero-wrong gate would measure nothing"
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -154,13 +239,14 @@ jobs:
   # published on a day nothing changed here and the push-gated deny job only
   # caught it because pushes happened to land the same day. This weekly sweep
   # is the floor — a quiet repo learns about a new advisory within a week,
-  # not at the next feature push. Same action + config as ci.yml's hard gate
-  # (workspace graph; the foreign binding trees stay report-only over there).
+  # not at the next feature push. Same pinned action (cargo-deny 0.20.2) +
+  # config as ci.yml's hard gate (workspace graph; the foreign binding trees
+  # are scanned over there, findings report-only).
   advisories:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1 · cargo-deny 0.20.2
         with:
           command: check advisories
