@@ -23,7 +23,9 @@
 //! (symbology, text) set.
 //!
 //! The corpus root is `<repo>/corpus-external` unless overridden — see
-//! [`corpus_dir`] (a worktree or CI cache rarely holds the corpus itself).
+//! [`corpus_root`] (a worktree or CI cache rarely holds the corpus itself).
+//! Only that default may be absent quietly: a configured root that does
+//! not exist fails with exit 2 and names the override.
 //!
 //! The files themselves are machine-bound (untracked) and CAN vanish or rot —
 //! 2026-07-08: ten gallery files were found deleted on disk and the gate went
@@ -132,18 +134,98 @@ pub(crate) struct Row {
 
 // ------------------------------------------------------------------ shared
 
+/// What chose the external corpus root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RootSource {
+    /// `oracle --corpus-root`.
+    Explicit,
+    /// `QRSCAN_EXTERNAL_CORPUS`.
+    Env,
+    /// `<repo>/corpus-external` — nothing was configured.
+    Default,
+}
+
+impl RootSource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "--corpus-root",
+            Self::Env => CORPUS_ENV,
+            Self::Default => "default",
+        }
+    }
+}
+
+/// A resolved external corpus root, and what every gate must do with it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CorpusRoot {
+    /// The directory exists — measure it.
+    Present(PathBuf),
+    /// Nothing configured and `<repo>/corpus-external` is absent: the loud
+    /// skip CI relies on (the corpus is not vendored).
+    DefaultAbsent(PathBuf),
+    /// A configured root does not exist: a misconfiguration, never a skip —
+    /// a mistyped override must not let a gate pass green.
+    OverrideAbsent { dir: PathBuf, source: RootSource },
+}
+
+/// The external corpus directory, or exit 2 with the reason — for the
+/// instruments (`gen-external-manifest`, `rotation-sweep`) that cannot skip.
+pub(crate) fn corpus_dir(explicit: Option<&Path>) -> PathBuf {
+    corpus_root(explicit).require()
+}
+
+impl CorpusRoot {
+    /// The directory, or exit 2 with the reason.
+    fn require(self) -> PathBuf {
+        match self {
+            Self::Present(dir) => dir,
+            Self::DefaultAbsent(dir) => {
+                eprintln!(
+                    "no external corpus at {} — fetch the corpora first \
+                     (README « Reproducing the headline numbers »).",
+                    dir.display()
+                );
+                std::process::exit(2);
+            }
+            Self::OverrideAbsent { dir, source } => {
+                eprintln!("{}", override_absent(&dir, source));
+                std::process::exit(2);
+            }
+        }
+    }
+}
+
+/// The error for a configured root that does not exist — names the
+/// variable or flag that pointed there.
+pub(crate) fn override_absent(dir: &Path, source: RootSource) -> String {
+    let named = match source {
+        RootSource::Env => format!("{CORPUS_ENV}={}", dir.display()),
+        RootSource::Explicit | RootSource::Default => {
+            format!("{} {}", source.as_str(), dir.display())
+        }
+    };
+    format!(
+        "{named} is not a directory — a configured corpus root never skips; \
+         fix the path, or drop the override to take the default"
+    )
+}
+
 /// The external corpus root, in priority order: `explicit` (`oracle
 /// --corpus-root`), the absolute path in `QRSCAN_EXTERNAL_CORPUS`, then
 /// `<repo>/corpus-external`. The root used is printed — a gate whose input
 /// location is implicit cannot be audited. A relative override exits 2:
 /// resolving it against cargo's cwd would make the measured corpus depend
 /// on the caller's shell.
-pub(crate) fn corpus_dir(explicit: Option<&Path>) -> PathBuf {
+pub(crate) fn corpus_root(explicit: Option<&Path>) -> CorpusRoot {
     let env = std::env::var_os(CORPUS_ENV);
     match resolve_corpus_dir(explicit, env.as_deref(), &crate::repo_root()) {
         Ok((dir, source)) => {
-            println!("external corpus root: {} ({source})", dir.display());
-            dir
+            println!(
+                "external corpus root: {} ({})",
+                dir.display(),
+                source.as_str()
+            );
+            classify_root(dir, source, Path::is_dir)
         }
         Err(e) => {
             eprintln!("{e}");
@@ -152,24 +234,37 @@ pub(crate) fn corpus_dir(explicit: Option<&Path>) -> PathBuf {
     }
 }
 
-/// [`corpus_dir`]'s pure half: the root plus the name of what chose it.
+/// [`corpus_root`]'s pure half: the root plus what chose it.
 fn resolve_corpus_dir(
     explicit: Option<&Path>,
     env: Option<&OsStr>,
     repo: &Path,
-) -> Result<(PathBuf, &'static str), String> {
+) -> Result<(PathBuf, RootSource), String> {
     let (dir, source) = match (explicit, env) {
-        (Some(dir), _) => (dir, "--corpus-root"),
-        (None, Some(value)) => (Path::new(value), CORPUS_ENV),
-        (None, None) => return Ok((repo.join(CORPUS_DIR), "default")),
+        (Some(dir), _) => (dir, RootSource::Explicit),
+        (None, Some(value)) => (Path::new(value), RootSource::Env),
+        (None, None) => return Ok((repo.join(CORPUS_DIR), RootSource::Default)),
     };
     if dir.is_absolute() {
         Ok((dir.to_path_buf(), source))
     } else {
         Err(format!(
-            "{source} must be an absolute path, got \"{}\"",
+            "{} must be an absolute path, got \"{}\"",
+            source.as_str(),
             dir.display()
         ))
+    }
+}
+
+/// Presence decides the gate's path; only the default may be absent
+/// quietly. `is_dir` is injected so the rule is testable without a corpus.
+fn classify_root(dir: PathBuf, source: RootSource, is_dir: impl Fn(&Path) -> bool) -> CorpusRoot {
+    if is_dir(&dir) {
+        CorpusRoot::Present(dir)
+    } else if source == RootSource::Default {
+        CorpusRoot::DefaultAbsent(dir)
+    } else {
+        CorpusRoot::OverrideAbsent { dir, source }
     }
 }
 
@@ -402,14 +497,6 @@ fn print_summary(rows: &[Row]) {
 pub(crate) fn generate() {
     let root = crate::repo_root();
     let dir = corpus_dir(None);
-    if !dir.is_dir() {
-        eprintln!(
-            "no external corpus at {} — nothing to pin.\n\
-             Fetch the corpora first (README « Reproducing the headline numbers »).",
-            dir.display()
-        );
-        std::process::exit(2);
-    }
     let rels = walk_sorted(&dir);
     let scanner = scanner();
     let rows: Vec<Row> = rels
@@ -532,22 +619,30 @@ pub(crate) fn verify() {
         std::process::exit(2);
     });
 
-    let dir = corpus_dir(None);
-    if !dir.is_dir() {
-        // Graceful for CI checkouts (the corpus is not vendored) but LOUD:
-        // the exact count of unverified pins is printed, never silently 0.
-        let images = pinned.iter().filter(|r| r.status != Status::Aux).count();
-        println!("corpus-external/ not present — external corpus gate SKIPPED");
-        println!(
-            "  {} manifested files NOT verified ({images} images unscanned · {} aux)",
-            pinned.len(),
-            pinned.len() - images
-        );
-        println!(
-            "  fetch the corpora to run this gate — README « Reproducing the headline numbers »"
-        );
-        return;
-    }
+    let dir = match corpus_root(None) {
+        CorpusRoot::Present(dir) => dir,
+        CorpusRoot::DefaultAbsent(_) => {
+            // Graceful for CI checkouts (the corpus is not vendored) but LOUD:
+            // the exact count of unverified pins is printed, never silently 0.
+            let images = pinned.iter().filter(|r| r.status != Status::Aux).count();
+            println!("corpus-external/ not present — external corpus gate SKIPPED");
+            println!(
+                "  {} manifested files NOT verified ({images} images unscanned · {} aux)",
+                pinned.len(),
+                pinned.len() - images
+            );
+            println!(
+                "  fetch the corpora to run this gate — README « Reproducing the headline numbers »"
+            );
+            return;
+        }
+        // Someone pointed the gate at a corpus: its absence is a mistake to
+        // surface (exit 2, configuration error), never a green skip.
+        CorpusRoot::OverrideAbsent { dir, source } => {
+            eprintln!("external gate: {}", override_absent(&dir, source));
+            std::process::exit(2);
+        }
+    };
 
     let on_disk = walk_sorted(&dir);
     let disk_set: BTreeSet<&str> = on_disk.iter().map(String::as_str).collect();
@@ -686,8 +781,7 @@ mod tests {
     }
 
     /// Explicit root > env > `<repo>/corpus-external`; overrides must be
-    /// absolute. The default arm is the CI path: no override and no corpus
-    /// means `verify` reaches its unchanged loud skip (exit 0).
+    /// absolute.
     #[test]
     fn corpus_root_resolution_order() {
         // repo_root() is absolute on every platform (CARGO_MANIFEST_DIR).
@@ -695,15 +789,15 @@ mod tests {
         let (env_dir, explicit_dir) = (repo.join("env-corpus"), repo.join("explicit-corpus"));
         assert_eq!(
             resolve_corpus_dir(None, None, &repo),
-            Ok((repo.join(CORPUS_DIR), "default"))
+            Ok((repo.join(CORPUS_DIR), RootSource::Default))
         );
         assert_eq!(
             resolve_corpus_dir(None, Some(env_dir.as_os_str()), &repo),
-            Ok((env_dir.clone(), CORPUS_ENV))
+            Ok((env_dir.clone(), RootSource::Env))
         );
         assert_eq!(
             resolve_corpus_dir(Some(&explicit_dir), Some(env_dir.as_os_str()), &repo),
-            Ok((explicit_dir, "--corpus-root"))
+            Ok((explicit_dir, RootSource::Explicit))
         );
         for relative in ["corpus-external", ""] {
             assert!(
@@ -713,6 +807,53 @@ mod tests {
             assert!(
                 resolve_corpus_dir(Some(Path::new(relative)), None, &repo).is_err(),
                 "--corpus-root {relative:?} must be refused"
+            );
+        }
+    }
+
+    /// The CI path: nothing configured and no `<repo>/corpus-external` is
+    /// the quiet case `verify` turns into its loud skip (exit 0). `is_dir`
+    /// is a stub — no filesystem, no corpus.
+    #[test]
+    fn absent_default_root_is_the_skip_case() {
+        let dir = crate::repo_root().join(CORPUS_DIR);
+        assert_eq!(
+            classify_root(dir.clone(), RootSource::Default, |_| false),
+            CorpusRoot::DefaultAbsent(dir.clone())
+        );
+        assert_eq!(
+            classify_root(dir.clone(), RootSource::Default, |_| true),
+            CorpusRoot::Present(dir)
+        );
+    }
+
+    /// A configured root that does not exist is a misconfiguration, never
+    /// a skip, and the error names the variable or flag that pointed there.
+    #[test]
+    fn absent_configured_root_is_an_error_naming_its_source() {
+        let dir = crate::repo_root().join("mistyped-corpus");
+        for (source, named) in [
+            (RootSource::Env, format!("{CORPUS_ENV}={}", dir.display())),
+            (
+                RootSource::Explicit,
+                format!("--corpus-root {}", dir.display()),
+            ),
+        ] {
+            let root = classify_root(dir.clone(), source, |_| false);
+            assert_eq!(
+                root,
+                CorpusRoot::OverrideAbsent {
+                    dir: dir.clone(),
+                    source
+                }
+            );
+            let message = override_absent(&dir, source);
+            assert!(message.starts_with(&named), "{message}");
+            assert!(message.contains("never skips"), "{message}");
+            assert_eq!(
+                classify_root(dir.clone(), source, |_| true),
+                CorpusRoot::Present(dir.clone()),
+                "a configured root that exists is measured"
             );
         }
     }

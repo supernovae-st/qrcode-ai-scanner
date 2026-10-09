@@ -24,10 +24,11 @@
 //!
 //! Exit 0 = pass. Exit 1 = any `wrong`/`extra`/`mixed`/`false_positive`
 //! (a `known_wrong` disposition still counts), any `error`, any contract
-//! or integrity failure, or a stale disposition. Exit 2 = usage error,
-//! unreadable committed input or unwritable receipt. Exit 3 = no external
-//! corpus: `SKIPPED (not a pass)`. `missed` and `partial` lower the exact
-//! rate without blocking.
+//! or integrity failure, a stale disposition, or a configured corpus root
+//! (`--corpus-root`, `QRSCAN_EXTERNAL_CORPUS`) that does not exist. Exit 2
+//! = usage error, unreadable committed input or unwritable receipt. Exit 3
+//! = no corpus at the default root: `SKIPPED (not a pass)`. `missed` and
+//! `partial` lower the exact rate without blocking.
 //!
 //! Scans are budget-free with scoring off ([`external::scanner`]), so no
 //! verdict depends on host load. The `--json` receipt holds no timing and
@@ -43,7 +44,7 @@ use rayon::prelude::*;
 use serde::ser::SerializeMap as _;
 use serde::{Serialize, Serializer};
 
-use crate::external::{self, Row, Status};
+use crate::external::{self, CorpusRoot, Row, Status};
 
 /// Judge-rules identifier carried by every receipt — bump it with any rule
 /// change so receipts made under different rules never compare silently.
@@ -649,7 +650,10 @@ fn external_row(
 /// `corpus.toml` → expected set: `expected` is text-only truth; no
 /// `expected` is a negative sample, unless the entry is a frontier pin
 /// (`expect = "fail"`), which has no truth at all.
-fn vendored_expectation(expected: Option<&str>, expect: Option<&str>) -> Option<Vec<Unit>> {
+pub(crate) fn vendored_expectation(
+    expected: Option<&str>,
+    expect: Option<&str>,
+) -> Option<Vec<Unit>> {
     match (expected, expect) {
         (Some(text), _) => Some(vec![Unit {
             symbology: None,
@@ -1031,7 +1035,7 @@ fn write_receipt(path: &Path, receipt: &Receipt) -> Result<(), String> {
 // ----------------------------------------------------------------- stdout
 
 /// Wire spelling of a serde enum (`qr_code`, `rqrr`).
-fn wire<T: Serialize>(value: &T) -> String {
+pub(crate) fn wire<T: Serialize>(value: &T) -> String {
     if let Ok(serde_json::Value::String(name)) = serde_json::to_value(value) {
         name
     } else {
@@ -1221,7 +1225,7 @@ fn new_receipt(manifest_text: &str, vendored_text: &str, integrity: Integrity) -
         oracle: RULES_ID,
         status: "skipped",
         exit_code: 3,
-        reason: Some("no external corpus at the resolved root"),
+        reason: Some("no external corpus at the default root"),
         versions: Versions::current(),
         scan: SCAN_ECHO,
         inputs: Inputs {
@@ -1241,6 +1245,33 @@ fn new_receipt(manifest_text: &str, vendored_text: &str, integrity: Integrity) -
         dispositions: Vec::new(),
         blockers: Vec::new(),
         rows: Vec::new(),
+    }
+}
+
+/// The corpus directory to measure, or the verdict line of a run that has
+/// none, with the receipt settled to match: the absent default is a skip
+/// (exit 3, never a pass); an absent configured root is a failure (exit 1)
+/// — a mistyped override must not read as a skip either.
+fn measurable(root: CorpusRoot, receipt: &mut Receipt) -> Result<PathBuf, String> {
+    match root {
+        CorpusRoot::Present(dir) => Ok(dir),
+        CorpusRoot::DefaultAbsent(dir) => Err(format!(
+            "oracle: SKIPPED (not a pass) — no external corpus at {}",
+            dir.display()
+        )),
+        CorpusRoot::OverrideAbsent { dir, source } => {
+            receipt.status = "fail";
+            receipt.exit_code = 1;
+            receipt.reason = Some("the configured external corpus root does not exist");
+            receipt.blockers = vec![format!(
+                "integrity — the external corpus root set by {} does not exist",
+                source.as_str()
+            )];
+            Err(format!(
+                "oracle: FAIL (exit 1) — {}",
+                external::override_absent(&dir, source)
+            ))
+        }
     }
 }
 
@@ -1315,25 +1346,27 @@ pub(crate) fn run(args: Vec<String>) {
         eprintln!("oracle: {VENDORED}: {e}");
         std::process::exit(2);
     });
-    let mut integrity = Integrity {
+    let integrity = Integrity {
         manifest_rows: pinned.len(),
         vendored_entries: corpus.entry.len(),
         ..Integrity::default()
     };
+    let mut receipt = new_receipt(&manifest_text, &vendored_text, integrity);
 
-    let dir = external::corpus_dir(args.corpus_root.as_deref());
-    if !dir.is_dir() {
-        println!(
-            "oracle: SKIPPED (not a pass) — no external corpus at {}; {} manifest rows and \
-             {} vendored entries NOT evaluated",
-            dir.display(),
-            pinned.len(),
-            corpus.entry.len()
-        );
-        let receipt = new_receipt(&manifest_text, &vendored_text, integrity);
-        emit_receipt(args.json.as_deref(), &receipt);
-        std::process::exit(3);
-    }
+    let corpus_root = external::corpus_root(args.corpus_root.as_deref());
+    let dir = match measurable(corpus_root, &mut receipt) {
+        Ok(dir) => dir,
+        Err(verdict) => {
+            println!(
+                "{verdict}; {} manifest rows and {} vendored entries NOT evaluated",
+                pinned.len(),
+                corpus.entry.len()
+            );
+            emit_receipt(args.json.as_deref(), &receipt);
+            std::process::exit(receipt.exit_code);
+        }
+    };
+    let mut integrity = std::mem::take(&mut receipt.integrity);
 
     let scanner = external::scanner();
     let mut rows = evaluate_external(&dir, &pinned, &scanner, &mut integrity);
@@ -1356,7 +1389,7 @@ pub(crate) fn run(args: Vec<String>) {
     print_dispositions(&checks);
     print_labelled_misses(&rows);
 
-    let mut receipt = new_receipt(&manifest_text, &vendored_text, integrity);
+    receipt.integrity = integrity;
     fill_receipt(&mut receipt, &rows, (groups, sets), &checks, blockers);
     emit_receipt(args.json.as_deref(), &receipt);
     print_verdict(&receipt.blockers);
@@ -1368,6 +1401,7 @@ pub(crate) fn run(args: Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::external::RootSource;
     use qrcode_ai_scanner::Symbology::{Ean13, MicroQrCode, QrCode};
 
     fn qr(text: &str) -> Unit {
@@ -1751,6 +1785,51 @@ mod tests {
             Some(QrCode)
         );
         assert_eq!(suite_symbology("zxing-blackbox/aztec-1/1.png"), None);
+    }
+
+    /// No corpus at the default root is a skip (exit 3, never a pass); a
+    /// configured root that does not exist is a failure (exit 1) whose
+    /// receipt names the source but carries no path. No filesystem access.
+    #[test]
+    fn absent_roots_skip_only_at_the_default() {
+        let dir = crate::repo_root().join("absent-corpus");
+        let fresh = || new_receipt("manifest", "vendored", Integrity::default());
+
+        let mut receipt = fresh();
+        let verdict = measurable(CorpusRoot::DefaultAbsent(dir.clone()), &mut receipt)
+            .expect_err("nothing to measure");
+        assert!(
+            verdict.starts_with("oracle: SKIPPED (not a pass)"),
+            "{verdict}"
+        );
+        assert_eq!((receipt.status, receipt.exit_code), ("skipped", 3));
+
+        for source in [RootSource::Env, RootSource::Explicit] {
+            let mut receipt = fresh();
+            let root = CorpusRoot::OverrideAbsent {
+                dir: dir.clone(),
+                source,
+            };
+            let verdict = measurable(root, &mut receipt).expect_err("nothing to measure");
+            assert!(
+                verdict.starts_with("oracle: FAIL (exit 1)") && verdict.contains(source.as_str()),
+                "{verdict}"
+            );
+            assert_eq!((receipt.status, receipt.exit_code), ("fail", 1));
+            assert_eq!(receipt.blockers.len(), 1, "{:?}", receipt.blockers);
+            let json = serde_json::to_string(&receipt).expect("receipt serialises");
+            assert!(!json.contains("absent-corpus"), "a path leaked: {json}");
+        }
+
+        let mut receipt = fresh();
+        assert_eq!(
+            measurable(CorpusRoot::Present(dir.clone()), &mut receipt),
+            Ok(dir)
+        );
+        assert_eq!(
+            receipt.status, "skipped",
+            "the run, not the root, settles it"
+        );
     }
 
     #[test]
