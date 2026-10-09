@@ -698,6 +698,21 @@ def cmd_licenses(host: Host) -> None:
             art.notes.append(f"synced {copy}")
         art.check(f"{copy} byte-identical to LICENSE", same, "" if same else "missing or different (--sync)")
     art.listing = list(LICENSE_COPIES)
+    # A Windows checkout (core.autocrlf=true, Git for Windows' default) would
+    # write every copy with CRLF, and the win_amd64 wheel would ship that text,
+    # which no longer matches the LF root. .gitattributes pins them to LF.
+    paths = ["LICENSE", *LICENSE_COPIES]
+    proc = subprocess.run(["git", "check-attr", "text", "eol", "--", *paths],
+                          cwd=ROOT, capture_output=True, text=True)
+    attrs: dict = {}
+    for line in proc.stdout.splitlines():
+        path, attr, value = line.rsplit(": ", 2)
+        attrs.setdefault(path, {})[attr] = value
+    loose = [p for p in paths if attrs.get(p) != {"text": "set", "eol": "lf"}]
+    art.check("every copy checks out with LF on every platform (.gitattributes: LICENSE text eol=lf)",
+              proc.returncode == 0 and not loose,
+              f"git check-attr exit {proc.returncode}: {proc.stderr.strip()}" if proc.returncode
+              else "; ".join(f"{p}: {attrs.get(p)}" for p in loose))
 
 
 def _toml_version(path: str, *keys: str):
