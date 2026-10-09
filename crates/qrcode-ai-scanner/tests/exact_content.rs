@@ -1146,14 +1146,21 @@ fn e4_rescue_only_eci4_reads_the_declaration() {
 
 #[test]
 fn e5_artistic_eci26_urls_are_located_by_a_later_stage() {
-    // rxing reads these renders first and only signals the ECI; rqrr reads
-    // them in a later stage. The walk does not stop on signalled-only
-    // reads, so the declaration is located and the URL publishes.
+    // At the direct stage rxing alone reads these renders and only signals
+    // the ECI: the text is marked. rqrr reads them in a later stage, and
+    // the walk no longer stops on signalled-only reads, so the declaration
+    // is located and the URL publishes.
     for (name, png) in [
         ("dots", png_dots(&eci26_url())),
-        ("blur 2.5", png_blurred(&eci26_url(), 2.5)),
         ("blur 3.5", png_blurred(&eci26_url(), 3.5)),
     ] {
+        let direct = scan_content(&png);
+        let d = one(&direct);
+        assert_eq!(
+            (d.engines.as_slice(), d.content.text.as_str()),
+            (&[EngineKind::Rxing][..], replacement(URL.len()).as_str()),
+            "{name}: the render must stay signalled-only at the direct stage"
+        );
         let report = scan_walk(&png);
         let d = one(&report);
         assert_eq!(d.content.raw, URL.as_bytes().to_vec(), "{name}");
@@ -1163,7 +1170,17 @@ fn e5_artistic_eci26_urls_are_located_by_a_later_stage() {
             "{name}: {:?}",
             d.payload
         );
+        assert!(
+            d.engines.contains(&EngineKind::Rqrr) && d.corners.is_some(),
+            "{name}: {:?}",
+            d.engines
+        );
     }
+    // control: a lighter blur both engines already read at the direct stage
+    let report = scan_content(&png_blurred(&eci26_url(), 2.5));
+    let d = one(&report);
+    assert_eq!(d.content.text, URL);
+    assert_both_engines(d);
 }
 
 // ---------------------------------------------------- F · invariants
