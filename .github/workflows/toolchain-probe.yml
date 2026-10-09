@@ -13,8 +13,12 @@ on:
   workflow_dispatch:
     inputs:
       toolchain:
-        description: "rust toolchain to probe"
-        default: "stable"
+        description: "rust toolchain to probe (empty: the pinned RUST_TOOLCHAIN)"
+        default: ""
+
+env:
+  # The toolchain CI tests (ci.yml RUST_TOOLCHAIN; RELEASING.md § toolchain).
+  RUST_TOOLCHAIN: "1.97.0"
 
 jobs:
   build-no-cache:
@@ -24,7 +28,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ inputs.toolchain }}
+          toolchain: ${{ inputs.toolchain || env.RUST_TOOLCHAIN }}
       - name: serialized uncached release build under the OOM guard
         run: |
           rustc --version --verbose

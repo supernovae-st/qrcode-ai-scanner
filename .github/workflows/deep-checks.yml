@@ -7,6 +7,12 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # The deep gates judge the compiler CI tests and the publishers build with
+  # (ci.yml's RUST_TOOLCHAIN, RELEASING.md § toolchain) — never moving stable.
+  RUST_TOOLCHAIN: "1.97.0"
+  # cargo-fuzz needs nightly: one dated nightly instead of whatever nightly
+  # the run day brings.
+  FUZZ_TOOLCHAIN: nightly-2026-08-24
 
 jobs:
   # Sharded: the suite outgrew a single runner (the un-sharded job hit the
@@ -51,7 +57,9 @@ jobs:
         run: |
           df -h / && free -m
           ( while true; do echo "$(date +%T) $(free -m | sed -n 2p)"; sleep 15; done > mem-telemetry.log 2>&1 & )
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
@@ -72,11 +80,13 @@ jobs:
       # failure · 70 internal error) fails the shard on the spot — no
       # disposition can excuse it. fail-fast off + the always() upload already
       # let every shard finish and report, so no continue-on-error is needed.
+      # --cargo-arg=--locked reaches every cargo call cargo-mutants makes: a
+      # stale lockfile is a baseline failure, never a silent re-resolution.
       - name: cargo mutants (shard ${{ matrix.shard }}/16)
         run: |
           ulimit -v 6291456
           status=0
-          cargo mutants -p qrcode-ai-scanner --in-place --shard ${{ matrix.shard }}/16 --minimum-test-timeout 120 -- --all-features || status=$?
+          cargo mutants -p qrcode-ai-scanner --in-place --cargo-arg=--locked --shard ${{ matrix.shard }}/16 --minimum-test-timeout 120 -- --all-features || status=$?
           echo "$status" > mutants-exit-code.txt
           case "$status" in
             0|2|3)
@@ -134,7 +144,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
@@ -150,11 +162,14 @@ jobs:
       # without this the job builds x86_64-unknown-linux-musl — where ASAN
       # is incompatible with static libc and the std isn't installed
       # (the 14s red of run 28735462680).
+      #
+      # cargo-fuzz takes no --locked: its build reads the committed
+      # fuzz/Cargo.lock, which only a manifest edit without a relock moves.
       - name: fuzz targets
         run: |
           for target in fuzz_scan_encoded fuzz_scan_full fuzz_rescue_bitstream fuzz_classify_text; do
             mkdir -p "fuzz/corpus/$target"
-            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu \
+            cargo "+$FUZZ_TOOLCHAIN" fuzz run --target x86_64-unknown-linux-gnu \
               "$target" "fuzz/corpus/$target" fixtures -- -max_total_time=300
           done
 
@@ -188,7 +203,9 @@ jobs:
         run: |
           df -h / && free -m
           ( while true; do echo "$(date +%T) $(free -m | sed -n 2p)"; sleep 15; done > mem-telemetry.log 2>&1 & )
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - name: two runs, byte-identical, zero rescue-wrong in both passes
         timeout-minutes: 60
@@ -199,13 +216,13 @@ jobs:
           # in EITHER pass. Capture it instead of dying on the redirect under
           # -e, so the log still shows which pass failed.
           rc=0
-          cargo run --release -p xtask -- rescue-stress > run1.txt || rc=$?
+          cargo run --release --locked -p xtask -- rescue-stress > run1.txt || rc=$?
           if [ "$rc" -ne 0 ]; then
             echo "::error::rescue-stress exited $rc (1: a rescue-path WRONG decode in either pass; otherwise a crash)"
             grep -E 'rescue_' run1.txt || true
             exit 1
           fi
-          cargo run --release -p xtask -- rescue-stress > run2.txt
+          cargo run --release --locked -p xtask -- rescue-stress > run2.txt
           diff run1.txt run2.txt
           {
             echo '### rescue-stress gate lines'

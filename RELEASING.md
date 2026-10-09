@@ -41,16 +41,18 @@ dated section matching the workspace version (mobile.yml, shipped after
 
 ## 3 · Pre-tag gates, locally first
 
+On the pinned compiler (§ Toolchain), against the committed lockfiles:
+
 ```bash
-cargo fmt --all --check
-RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
-cargo nextest run --workspace && cargo test --doc --workspace
+cargo +1.97.0 fmt --all --check
+RUSTFLAGS="-D warnings" cargo +1.97.0 clippy --workspace --all-targets --all-features --locked
+cargo +1.97.0 nextest run --workspace --locked && cargo +1.97.0 test --doc --workspace --locked
 python3 scripts/check-type-parity.py
 cargo +1.88 check -p qrcode-ai-scanner --all-features --locked   # MSRV
 ```
 
-Foreign trees when their code changed: `cargo test --manifest-path
-crates/qrcode-ai-scanner-{py,uniffi}/Cargo.toml`.
+Foreign trees when their code changed: `cargo +1.97.0 test --locked
+--manifest-path crates/qrcode-ai-scanner-{py,uniffi}/Cargo.toml`.
 
 ## 4 · Push, then gate CI **per-workflow-latest** before tagging
 
@@ -100,3 +102,43 @@ Linux-gnu (2026-07-20) — a toolchain must never move under a tag.
 - Downstream: the landing/app pins a caret 0.x range — **the caret freezes
   the minor** (`^0.7.0` never takes 0.8.0); minor bumps need a manual edit
   in the consumer.
+
+## Toolchain — one compiler, pinned
+
+Every leg that builds, tests or publishes runs **Rust 1.97.0**:
+`RUST_TOOLCHAIN` at the top of each workflow (ci · deep-checks ·
+crates-publish · npm-publish · python · mobile · flutter · toolchain-probe),
+and `ci › lint` fails when two workflows disagree or a moving channel
+(`rust-toolchain@stable`, `toolchain: stable`, …) comes back.
+
+Why 1.97.0: it is the compiler the PR gate has proven (fmt, clippy
+`-D warnings`, the suite on three OSes). Before, every publisher and binding
+build took whatever `stable` was that day (1.99.0 on 2026-10-09), so the
+compiler that judged a release was not the one that built it. A compiler bump
+is one deliberate commit that moves every `RUST_TOOLCHAIN` together, then
+reruns the gates, rescue-stress included (f32 warp sampling may move in the
+last ulp across compilers, and its gate is same-machine determinism).
+
+Named exceptions, each documented where it lives:
+- **MSRV** — `ci › msrv` checks the 1.88 floor that every `rust-version`
+  declares; jitpack.yml builds the JitPack AAR with 1.88.0, outside Actions.
+- **Fuzzing** — one dated nightly (`FUZZ_TOOLCHAIN` in deep-checks.yml):
+  cargo-fuzz needs nightly sanitizers.
+- **cargokit** — Flutter device builds (and every consuming app's build) can
+  only name the stable / beta / nightly channels; pub.dev ships sources.
+- **bindings/swift/release.sh** — builds with the caller's toolchain: run it
+  as `RUSTUP_TOOLCHAIN=1.97.0 bindings/swift/release.sh vX.Y.Z`.
+
+`--locked` wherever a lockfile exists: every cargo build, test, run and
+publish in the workflows, `napi build -- --locked`, `wasm-pack build --
+--locked` (scripts/build-wasm.sh), `maturin build --locked`, and cargo-mutants
+`--cargo-arg=--locked`. A stale lockfile fails the leg instead of being
+silently re-resolved. Not covered: cargo-fuzz (no such flag; it reads the
+committed fuzz/Cargo.lock), the cargokit builds, and the Node package's pnpm
+install (no pnpm lockfile is committed, so `@napi-rs/cli` is pinned exact and
+its own dependencies float).
+
+Pinned build tools: maturin v1.15.0 (`MATURIN_VERSION`, python.yml), wasm-pack
+0.13.1 (taiki-e/install-action, SHA-verified), binaryen version_130 (and
+scripts/build-wasm.sh refuses a wasm-opt older than 130), `@napi-rs/cli`
+3.7.3 (package.json).

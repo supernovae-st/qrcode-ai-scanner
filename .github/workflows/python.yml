@@ -15,6 +15,13 @@ on:
 permissions:
   contents: read
 
+env:
+  # The toolchain CI tests (ci.yml RUST_TOOLCHAIN; RELEASING.md § toolchain),
+  # handed to maturin-action, which installs it (inside the manylinux
+  # container too). maturin pinned exact: the version PR CI already resolved.
+  RUST_TOOLCHAIN: "1.97.0"
+  MATURIN_VERSION: v1.15.0
+
 defaults:
   run:
     working-directory: crates/qrcode-ai-scanner-py
@@ -30,8 +37,10 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: crates/qrcode-ai-scanner-py
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+          maturin-version: ${{ env.MATURIN_VERSION }}
           command: build
-          args: --release --out dist
+          args: --release --locked --out dist
           sccache: "true"
       - name: install + pytest
         run: |
@@ -58,9 +67,11 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: crates/qrcode-ai-scanner-py
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+          maturin-version: ${{ env.MATURIN_VERSION }}
           target: ${{ matrix.platform.target }}
           manylinux: ${{ matrix.platform.manylinux }}
-          args: --release --out dist
+          args: --release --locked --out dist
           sccache: "true"
       - uses: actions/upload-artifact@v7
         with:
@@ -75,6 +86,7 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: crates/qrcode-ai-scanner-py
+          maturin-version: ${{ env.MATURIN_VERSION }}
           command: sdist
           args: --out dist
       - uses: actions/upload-artifact@v7

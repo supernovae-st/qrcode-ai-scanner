@@ -27,6 +27,14 @@ defaults:
 
 env:
   CARGO_TERM_COLOR: always
+  # The toolchain CI tests (ci.yml RUST_TOOLCHAIN; RELEASING.md § toolchain),
+  # for every plain cargo call here. The one exception is cargokit: `flutter
+  # build` compiles the crate through `rustup run <channel> cargo`, and
+  # cargokit only knows the stable / beta / nightly channels
+  # (cargokit/build_tool/lib/src/options.dart), so the device builds below
+  # use the moving stable — as does every consuming app's build. pub.dev
+  # ships the sources, not those binaries.
+  RUST_TOOLCHAIN: "1.97.0"
 
 jobs:
   # Host gate: analyze + the report.dart contract tests, plus a FRB regen-drift
@@ -35,7 +43,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bindings/flutter/rust
@@ -61,8 +71,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
       - uses: Swatinem/rust-cache@v2
         with:
@@ -86,8 +97,9 @@ jobs:
     runs-on: macos-15 # Xcode 16, Apple silicon
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
       - uses: Swatinem/rust-cache@v2
         with:

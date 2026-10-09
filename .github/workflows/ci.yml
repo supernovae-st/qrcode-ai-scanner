@@ -8,22 +8,39 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # The one Rust toolchain, pinned, never @stable: every build, test and
+  # publish leg in every workflow names this same version (the lint job
+  # checks it), so an upstream lint or codegen change lands on a deliberate
+  # bump, not on a random Tuesday (the repo's probe wrote that down after the
+  # 1.96 runner deaths). MSRV (1.88) and fuzzing (a dated nightly) are the
+  # named exceptions. RELEASING.md § toolchain has the why.
+  RUST_TOOLCHAIN: "1.97.0"
 
 jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+      - name: one Rust toolchain across every workflow
+        run: |
+          set -euo pipefail
+          pins=$(grep -h -E '^  RUST_TOOLCHAIN: ' .github/workflows/*.yml | sort -u)
+          echo "$pins"
+          if [ "$(printf '%s\n' "$pins" | wc -l)" -ne 1 ]; then
+            echo "::error::the workflows pin more than one RUST_TOOLCHAIN"
+            exit 1
+          fi
+          if grep -n -E 'rust-toolchain@(stable|beta|nightly)|toolchain: *"?(stable|beta|nightly)"? *$' .github/workflows/*.yml; then
+            echo "::error::a moving Rust channel is back: pin it through RUST_TOOLCHAIN"
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@master
         with:
-          # épinglé, jamais @stable · une lint qui arrive en amont doit casser
-          # sur un bump délibéré, pas un mardi. Le probe de ce repo l'avait
-          # écrit noir sur blanc après les morts de runner de 1.96.
-          toolchain: "1.97.0"
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --all-features
+      - run: cargo clippy --workspace --all-targets --all-features --locked
 
   test:
     strategy:
@@ -34,15 +51,12 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          # épinglé, jamais @stable · une lint qui arrive en amont doit casser
-          # sur un bump délibéré, pas un mardi. Le probe de ce repo l'avait
-          # écrit noir sur blanc après les morts de runner de 1.96.
-          toolchain: "1.97.0"
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       - run: python3 scripts/check-type-parity.py
-      - run: cargo nextest run --workspace
-      - run: cargo test --doc --workspace
+      - run: cargo nextest run --workspace --locked
+      - run: cargo test --doc --workspace --locked
 
   # MSRV floor — every manifest says rust-version 1.88 and jitpack.yml PINS
   # 1.88.0; stable-only CI lets MSRV rot land silently and break JitPack at
@@ -67,23 +81,20 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          # épinglé, jamais @stable · une lint qui arrive en amont doit casser
-          # sur un bump délibéré, pas un mardi. Le probe de ce repo l'avait
-          # écrit noir sur blanc après les morts de runner de 1.96.
-          toolchain: "1.97.0"
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       # rxing needs its wasm_support feature on wasm targets (chrono dep) —
       # the wasm binding crate (phase C) owns that wiring; the core shape
       # check runs rqrr-only to pin "core compiles single-thread, no rayon".
       - run: >
-          cargo check -p qrcode-ai-scanner
+          cargo check -p qrcode-ai-scanner --locked
           --target wasm32-unknown-unknown
           --no-default-features --features engine-rqrr,serde
       # The PUBLISHED wasm crate was previously never built on PRs — breakage
       # only surfaced at tag time (npm-publish.yml). Cheap check here.
       - run: >
-          cargo check -p qrcode-ai-scanner-wasm
+          cargo check -p qrcode-ai-scanner-wasm --locked
           --target wasm32-unknown-unknown
 
   corpus:
@@ -92,14 +103,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          # épinglé, jamais @stable · une lint qui arrive en amont doit casser
-          # sur un bump délibéré, pas un mardi. Le probe de ce repo l'avait
-          # écrit noir sur blanc après les morts de runner de 1.96.
-          toolchain: "1.97.0"
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       # set -o pipefail: the default `bash -e {0}` run shell has NO pipefail —
       # `| tee` was swallowing a red corpus-report's exit 1 (gate held by luck).
-      - run: set -o pipefail; cargo run -p xtask -- corpus-report | tee corpus-report.txt
+      - run: set -o pipefail; cargo run --locked -p xtask -- corpus-report | tee corpus-report.txt
       # corpus-external/ is not vendored (third-party suites + production
       # assets): on CI this exercises the manifest parse (exit 2 on a broken
       # corpus-external.tsv) and the loud-skip path, which exits 0 — so a
@@ -110,7 +118,7 @@ jobs:
       - name: external corpus · manifest parse only (truth NOT verified in CI)
         run: |
           set -o pipefail
-          cargo run -p xtask -- corpus-report --external | tee -a corpus-report.txt
+          cargo run --locked -p xtask -- corpus-report --external | tee -a corpus-report.txt
           if [ -d corpus-external ]; then
             echo "### external corpus truth: gated on this runner (corpus-external/ present)" >> "$GITHUB_STEP_SUMMARY"
           else
