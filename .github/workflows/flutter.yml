@@ -139,10 +139,11 @@ jobs:
       cancel-in-progress: false
     # The one privileged job on floating tools: the Flutter and Dart SDKs come
     # from the stable channel, and `flutter pub get` resolves without a
-    # lockfile. A named exception in scripts/check-publish-guards.py while the
-    # job is dormant (pub.dev's first upload is manual and the package's crate
-    # still depends on a path outside it); it ends before the pub.dev trusted
-    # publisher is configured (RELEASING.md § Publishing).
+    # lockfile. A named exception in scripts/check-publish-guards.py, keyed to
+    # exactly those three steps, while the job is dormant (pub.dev's first
+    # upload is manual and the package's crate still depends on a path outside
+    # it); it ends before the pub.dev trusted publisher is configured
+    # (RELEASING.md § Publishing).
     permissions:
       contents: read
       id-token: write # OIDC — pub.dev automated publishing, no token

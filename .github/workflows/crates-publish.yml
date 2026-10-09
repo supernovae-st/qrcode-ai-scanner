@@ -71,8 +71,9 @@ jobs:
       # must carry its dated section: a forgotten bump otherwise turns the
       # skip-if-live probe below into a silent non-release.
       - run: python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet
-      # This job can mint a crates.io token, so only pinned code runs in it:
-      # the toolchain comes from rustup itself, at the pinned version.
+      # This job can mint a crates.io token: its actions are pinned by commit,
+      # nothing is installed, and the toolchain comes from rustup itself, at
+      # the pinned version.
       - name: Rust ${{ env.RUST_TOOLCHAIN }} through rustup
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal

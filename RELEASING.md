@@ -53,8 +53,10 @@ RUSTFLAGS="-D warnings" cargo +1.97.0 clippy --workspace --all-targets --all-fea
 cargo +1.97.0 nextest run --workspace --locked && cargo +1.97.0 test --doc --workspace --locked
 python3 scripts/check-type-parity.py
 cargo +1.88 check -p qrcode-ai-scanner --all-features --locked   # MSRV
-python3 scripts/check-publish-guards.py            # the publishing-job policy (§ Publishing)
-python3 scripts/package-inspect.py selftest        # the archive inspector's own scenarios
+python3 scripts/check-publish-guards.py --self-test   # both workflow policies' own scenarios
+python3 scripts/check-publish-guards.py               # the publishing-job policy (§ Publishing)
+python3 scripts/check-publish-guards.py --toolchains  # one Rust toolchain (§ Toolchain)
+python3 scripts/package-inspect.py selftest           # the archive inspector's own scenarios
 ```
 
 Foreign trees when their code changed: `cargo +1.97.0 test --locked
@@ -92,7 +94,11 @@ running (one concurrency group per workflow and tag). pub.dev is the
 exception: it accepts only a pushed tag, so flutter › publish re-runs as
 failed jobs only. npm-publish › publish-native uploads each platform package
 missing at this version and the main package only once every one it pins
-resolves on the registry: a re-run uploads exactly what is still missing.
+resolves on the registry: a re-run uploads exactly what is still missing,
+and a version npm calls "previously published" (a probe that still answered
+404 after an earlier upload) counts as live. crates-publish compares each
+upload with the archive it inspected; a difference stops the job before the
+next crate, with that crate live (yank it if it must not stay).
 A defect in the workflow itself can no longer be fixed on main and
 re-dispatched from main (that is how 0.9.0's Node packages came to be built
 from post-tag commit 9f8bbcf, 2026-07-20): fix it on main and cut the next
@@ -128,10 +134,18 @@ from a branch included — stops before the registry: crates-publish,
 npm-publish and python build their artifacts and read them back
 (`scripts/package-inspect.py`), mobile and flutter build theirs. Each
 publishing job is its own job, guarded by `if: startsWith(github.ref,
-'refs/tags/v')`, holding the only write-capable permission in its workflow,
-naming a GitHub environment and running the versions gate first;
-`scripts/check-publish-guards.py` (ci › lint) fails any workflow change that
-drops one of these rules.
+'refs/tags/v')`, needing the job that inspects what it uploads, holding the
+only write-capable permission in its workflow, naming a GitHub environment
+and running the versions gate first.
+
+`scripts/check-publish-guards.py` (ci › lint) holds the workflows to these
+rules, and to the ones below. It is a static lint over the files in
+.github/workflows of the revision under test: it reads their YAML and
+matches the commands of every `run:` script, so it fails a change that drops
+a rule in a form it can read. It does not see what a script or a tool a step
+calls goes on to do, the workflows of another branch or tag, or a repository
+setting. The environments' deployment rules and the tag ruleset (owner
+steps 0 and 1) backstop what it misses.
 
 **What that guarantees, and what it does not.** The `if:` guards prevent
 accidental publishing by this revision of the workflows; they are not the
@@ -141,19 +155,19 @@ copy without the guard. The crates.io, npm and PyPI trusted publishers match
 the repository, the workflow file name and the environment, not the ref
 (pub.dev alone also checks the pushed tag). The security boundary is the
 environments' deployment policy (`v*` tags only) together with the tag
-ruleset (who may create a `v*` tag): owner steps 0, 1 and 4 below. And "no
+ruleset (who may create a `v*` tag): owner steps 0 and 1 below. And "no
 branch dispatch can publish" holds only for revisions that contain this
 change: every branch and tag cut before it (v0.1.0 to v0.9.0 included) still
 carries the old jobs, which publish on any dispatch with the long-lived
 repository tokens — hence step 0, at merge.
 
-| Workflow › job | Environment | Credential |
-|---|---|---|
-| crates-publish › publish | `crates-io` | crates.io trusted publishing: `rust-lang/crates-io-auth-action` trades the OIDC token for a 30-minute crates.io token |
-| npm-publish › publish-native · publish-wasm | `npm` | npm trusted publishing (npm CLI ≥ 11.5.1 on Node 24), provenance attested automatically; publish-native uploads the very tarballs pack-native packed and inspected |
-| python › release | `release` | PyPI trusted publishing (already live: 0.9.0 carries PEP 740 attestations) |
-| flutter › publish | `pub` | pub.dev automated publishing; a pushed tag only (pub.dev accepts no other trigger) |
-| mobile › ios-release | `release` | the workflow's own `GITHUB_TOKEN`, `contents: write` |
+| Workflow › job | Environment | Credential | What it uploads |
+|---|---|---|---|
+| crates-publish › publish | `crates-io` | crates.io trusted publishing: `rust-lang/crates-io-auth-action` trades the OIDC token for a 30-minute crates.io token | both crates, packed (`cargo package --locked --no-verify`) and inspected in the job before the token is minted; each upload compared with its inspected archive, byte for byte |
+| npm-publish › publish-native · publish-wasm | `npm` | npm trusted publishing (npm CLI ≥ 11.5.1 on Node 24), provenance attested automatically | the very tarballs pack-native and build-wasm packed and inspected, read back again in the job and uploaded unchanged with `npm publish <tarball> --ignore-scripts` |
+| python › release | `release` | PyPI trusted publishing (already live: 0.9.0 carries PEP 740 attestations) | `dist/`, read back in the job: exactly one wheel per row of the wheels matrix and the sdist |
+| flutter › publish | `pub` | pub.dev automated publishing; a pushed tag only (pub.dev accepts no other trigger) | the package `package-inspect.py flutter` read back in the job (dormant) |
+| mobile › ios-release | `release` | the workflow's own `GITHUB_TOKEN`, `contents: write` | the CI-built xcframework zip only when its sha256 is the one Package.swift pins, compared before the release is created or touched; an attached asset is verified, never replaced |
 
 No registry token is read by any workflow. A token (or a person) is still
 required only where a registry has no OIDC path: the first version of a NEW
@@ -162,24 +176,38 @@ target, say — or `npm stage publish`), and pub.dev's first upload, which
 must be a user's.
 
 **What a publishing job may run.** A job holding `id-token: write` exposes
-the OIDC token request to every one of its steps, so it runs only pinned code
-(scripts/check-publish-guards.py checks each point):
-- Rust through rustup at `RUST_TOOLCHAIN`, third-party actions by commit
-  SHA, pnpm at an exact version;
-- no dependency installation: the crates go up with `cargo publish --locked
-  --no-verify` once `package` built each crate from its own archive at the
-  same commit, and publish-native runs no pnpm, napi or install;
+the OIDC token request to every one of its steps, and ios-release holds
+`contents: write`. In these six jobs (the policy check reads each point):
+- every action by commit SHA, first-party actions included, and no local
+  action; container and service images by digest; the checkout keeps no
+  credential (`persist-credentials: false`); scripts run in bash and
+  interpolate no `${{ }}` expression;
+- Rust through rustup at `RUST_TOOLCHAIN`, an exact x.y.z resolved step >
+  job > workflow and never set in a script; pnpm, Flutter, Dart and every
+  other setup action or installer tool at an exact version;
+- nothing installed or fetched on demand: no npm/pnpm/yarn install, exec or
+  dlx, no pip, uv tool, cargo install or binstall, pub global or dart run;
+  the crates go up with `cargo publish --locked --no-verify` (no build
+  script runs), and the npm packages with `npm publish <tarball>
+  --ignore-scripts` (no lifecycle script runs, nothing is repacked);
 - `actions/setup-node` and `actions/setup-python` are the one relaxation:
   pinned by SHA, on a release line (Node 24) or an exact version, never
   `lts/*`, `latest`, `current` or a range. Security point releases of the line
   arrive without a repository change, and the action and its version manifest
-  are first-party; the job prints the resolved versions before uploading, and
-  npm-publish asserts npm ≥ 11.5.1;
+  are first-party; a step after the setup prints the resolved versions before
+  anything is uploaded, and for npm asserts npm ≥ 11.5.1;
+- no secret: no workflow references the `secrets` context at all;
 - one publish per workflow and tag at a time (the concurrency group
   `publish-<workflow>-<ref>`, never cancelling);
-- one named exception, flutter › publish: its Flutter and Dart SDKs come from
-  the stable channel and `flutter pub get` resolves without a lockfile, while
-  the job is dormant (owner step 7 ends it).
+- one named exception, keyed to three exact steps of flutter › publish: its
+  setup-dart and flutter-action steps (stable-channel SDKs) and its `flutter
+  pub get` (no lockfile), while the job is dormant (owner step 6 ends it).
+
+The jobs whose outputs the publishing jobs upload (build-native,
+pack-native, build-wasm, wheels, sdist, ios) pin their third-party actions by
+commit and restore no build cache (rust-cache, sccache) on a tag; they are
+not privileged, and the inspections read file sets and texts, not compiled
+binaries.
 
 **Named exceptions** to "every distributed archive carries the AGPL text, and
 only a tag publishes":
@@ -190,18 +218,54 @@ only a tag publishes":
   included, outside Actions (jitpack.yml: Rust 1.88.0, no `--locked`): neither
   the tag guard nor the inspection applies to it.
 
+**Accepted residuals**, each with its reason:
+- `pypa/gh-action-pypi-publish` is pinned by commit, but at run time it pulls
+  its container image `ghcr.io/pypa/gh-action-pypi-publish:<ref>` by tag, not
+  by digest (create-docker-action.py at the pinned commit), inside the job
+  holding the OIDC token. pypa controls both the commit and the image; the
+  alternative, a hash-locked twine after an explicit OIDC exchange, would
+  replace the action PyPI documents.
+- The Node build (build-native, pack-native, ci › node-smoke) runs `pnpm
+  install` without a lockfile: `@napi-rs/cli` is pinned exact, its own
+  dependencies float. Committing a pnpm lockfile needs an install to
+  generate it; it is the next step for the package's owner, after which
+  these installs take `--frozen-lockfile`.
+- The packed binaries (.node, .so, .pyd, .a, .wasm) are built by those
+  non-privileged jobs from the tag's checkout; no inspection can tell a
+  tampered binary from a sound one, so their pinned actions and the absence
+  of caches on a tag are what holds there.
+
 **Owner steps, in this order** (repository and registry settings; no workflow
 performs them):
 
-0. **At merge, at once.** Revoke `CARGO_REGISTRY_TOKEN` at crates.io (Account
-   Settings › API Tokens) and `NPM_TOKEN` at npmjs.com (Access Tokens), then
-   delete both repository secrets (Settings › Secrets and variables ›
-   Actions): nothing at this revision reads them, while every older ref's
-   crates and npm jobs publish with them on any dispatch. At the same time,
-   add the tag rule `v*` to the existing `release` environment (Settings ›
-   Environments › release › Deployment branches and tags › Selected branches
-   and tags): it also gates the pre-change python.yml, which publishes to
-   PyPI on any dispatch from an older ref.
+0. **At merge, at once, all of it.**
+   - Revoke `CARGO_REGISTRY_TOKEN` at crates.io (Account Settings › API
+     Tokens) and `NPM_TOKEN` at npmjs.com (Access Tokens), then delete both
+     repository secrets (Settings › Secrets and variables › Actions): nothing
+     at this revision reads them, while every older ref's crates and npm jobs
+     publish with them on any dispatch.
+   - Look for the same two names at the organization and in every
+     environment (`gh secret list --org supernovae-st`, `gh secret list --env
+     <name>` for each environment): once the repository secret is gone, an
+     older workflow's `secrets.NPM_TOKEN` resolves to an organization or
+     environment secret of that name. Revoke and delete any found.
+   - Add the tag rule `v*` to the existing `release` environment (Settings ›
+     Environments › release › Deployment branches and tags › Selected
+     branches and tags): it also gates the pre-change python.yml, which
+     publishes to PyPI on any dispatch from an older ref.
+   - **Tag ruleset.** Settings › Rules › Rulesets › New tag ruleset: target
+     `refs/tags/v*`, restrict creations, updates and deletions, with the
+     release maintainers alone on the bypass list. Until it exists, anyone
+     with write access can create a `v*` tag on any commit, a modified
+     python.yml included, and the `release` environment admits it.
+   - Retire the stale remote branches: every branch cut before this change
+     carries the old publishing jobs (python › release on any dispatch, the
+     crates and npm jobs reading the tokens, mobile › ios with `contents:
+     write` on any dispatch). List them (`git ls-remote --heads origin`, then
+     `git show origin/<branch>:.github/workflows/npm-publish.yml`) and delete
+     or archive each one not needed. The tags v0.1.0 to v0.9.0 stay: their
+     versions are live, and once the tokens are gone their old jobs fail at
+     authentication.
 1. **Environments, before steps 2 and 3.** `crates-io`, `npm`, `release` and
    `pub`, each limited to the tag rule `v*` (`release` has it since step 0;
    create the other three). Mandatory before any trusted publisher is
@@ -221,24 +285,22 @@ performs them):
    `qrcode-ai-scanner`, workflow `npm-publish.yml`, environment `npm`; then
    Settings › Publishing access › *Require two-factor authentication and
    disallow tokens*.
-4. **Tag ruleset.** Settings › Rules › Rulesets › New tag ruleset: target
-   `refs/tags/v*`, restrict creations, updates and deletions, with the
-   release maintainers alone on the bypass list.
-5. **Recommended: required reviewers** on `crates-io` and `npm` (with
+4. **Recommended: required reviewers** on `crates-io` and `npm` (with
    *Prevent self-review* where staffing allows), so every publish waits for a
    second person.
-6. PyPI: confirm the existing trusted publisher still reads owner
+5. PyPI: confirm the existing trusted publisher still reads owner
    `supernovae-st`, repository `qrcode-ai-scanner`, workflow `python.yml`,
    environment `release` (unchanged here).
-7. pub.dev, once a user has made the first upload. Before its trusted
+6. pub.dev, once a user has made the first upload. Before its trusted
    publisher is configured, in one change: pin the Flutter and Dart SDKs of
    flutter › publish to exact versions, take the lockfile decision for its
    `flutter pub get` (a tracked pubspec.lock with `--enforce-lockfile`, or a
    recorded no), and delete the named exception from
-   scripts/check-publish-guards.py. Then Admin › Automated publishing ›
-   enable GitHub Actions: repository `supernovae-st/qrcode-ai-scanner`, tag
-   pattern `v{{version}}`, require environment `pub`.
-8. Branch protection: the matrix check `ci / test (ubuntu-latest)` is now
+   scripts/check-publish-guards.py (the check fails on a waiver left with
+   nothing to waive). Then Admin › Automated publishing › enable GitHub
+   Actions: repository `supernovae-st/qrcode-ai-scanner`, tag pattern
+   `v{{version}}`, require environment `pub`.
+7. Branch protection: the matrix check `ci / test (ubuntu-latest)` is now
    `test (ubuntu-24.04)`; if it is a required check, update the rule (and
    add `node-smoke`, `wasm-smoke` and `packaging` if they should be).
 
@@ -246,11 +308,19 @@ performs them):
 
 Every leg that builds, tests or publishes runs **Rust 1.97.0**:
 `RUST_TOOLCHAIN` at the top of each workflow (ci · deep-checks ·
-crates-publish · npm-publish · python · mobile · flutter · toolchain-probe),
-and `ci › lint` fails when two workflows disagree, when a moving channel
-(`rust-toolchain@stable`, `toolchain: stable`, …) comes back, or when a leg
-names a literal version: only the MSRV leg may, and only the `rust-version`
-the manifests declare.
+crates-publish · npm-publish · python · mobile · flutter · toolchain-probe).
+`ci › lint` runs `scripts/check-publish-guards.py --toolchains`, which reads
+the parsed YAML of every *.yml and *.yaml workflow and fails when a
+RUST_TOOLCHAIN assignment, at any level (workflow, job or step env), holds
+another value or anything but an exact x.y.z; when a script assigns a
+toolchain (`RUST_TOOLCHAIN=…`, a `$GITHUB_ENV` write, RUSTUP_TOOLCHAIN); when
+FUZZ_TOOLCHAIN is not a dated nightly-YYYY-MM-DD; when a leg names its
+toolchain other than through those variables (an action's toolchain or
+rust-toolchain input, flow mappings included, a rustup, `cargo +` or
+--toolchain argument, a moving channel); or when a rust-toolchain(.toml)
+file exists anywhere in the tree, where it would outrank `rustup default`.
+The one literal is the MSRV leg, at the `rust-version` the root manifest
+declares (pinned by SHA, it says so in its toolchain input).
 
 Why 1.97.0: it is the compiler the PR gate has proven (fmt, clippy
 `-D warnings`, the suite on three OSes). Before, every publisher and binding
@@ -272,19 +342,28 @@ Named exceptions, each documented where it lives:
 
 `--locked` wherever a lockfile exists: every cargo build, test, run and
 publish in the workflows, `napi build -- --locked`, `wasm-pack build --
---locked` (scripts/build-wasm.sh), `maturin build --locked`, and cargo-mutants
-`--cargo-arg=--locked`. A stale lockfile fails the leg instead of being
-silently re-resolved. Not covered: cargo-fuzz (no such flag; it reads the
-committed fuzz/Cargo.lock), the cargokit builds, and the Node package's pnpm
-install in the build and pack jobs (no pnpm lockfile is committed, so
-`@napi-rs/cli` is pinned exact and its own dependencies float); no publishing
-job installs anything.
+--locked` (scripts/build-wasm.sh), `maturin build --locked`, the wheel python
+› inspect builds from the sdist (`MATURIN_PEP517_ARGS=--locked`, against the
+Cargo.lock the sdist ships), and cargo-mutants `--cargo-arg=--locked`. A
+stale lockfile fails the leg instead of being silently re-resolved. Not
+covered: cargo-fuzz (no such flag; it reads the committed fuzz/Cargo.lock),
+the cargokit builds, and the Node package's pnpm install in the build and
+pack jobs (no pnpm lockfile is committed, so `@napi-rs/cli` is pinned exact
+and its own dependencies float: § Publishing, residuals); no publishing job
+installs anything.
 
-Pinned build tools: maturin v1.15.0 (`MATURIN_VERSION`, python.yml) and, for
-builds from the sdist, the build requirement `maturin>=1.9.3,<2.0` (the first
-maturin that puts PEP 639 license files into source distributions); wasm-pack
-0.13.1 (taiki-e/install-action, SHA-verified); binaryen version_130, checked
-against the sha256 binaryen publishes with the release (and
-scripts/build-wasm.sh refuses a wasm-opt older than 130); pnpm 10.34.6
-through pnpm/action-setup pinned by commit (v6.0.10); `@napi-rs/cli` 3.7.3
-(package.json).
+Pinned build tools: maturin v1.15.0 (`MATURIN_VERSION`, python.yml), also
+for the wheel built from the sdist, through a build constraint
+(`maturin==1.15.0` in PIP_BUILD_CONSTRAINT and, for pip older than 25.3,
+PIP_CONSTRAINT; the wheel's `Generator:` line must name it). The sdist's own
+build requirement is `maturin>=1.9.3,<2.0` (the first maturin that puts PEP
+639 license files into source distributions); that floor itself is not
+exercised in CI. wasm-pack 0.13.1 and cargo-zigbuild 0.23.4
+(taiki-e/install-action, SHA-verified); binaryen version_130, checked against
+the sha256 binaryen publishes with the release (and scripts/build-wasm.sh
+refuses a wasm-opt older than 130); pnpm 10.34.6 through pnpm/action-setup
+pinned by commit (v6.0.10); `@napi-rs/cli` 3.7.3 (package.json). The jobs
+whose outputs are published take every third-party action by commit
+(dtolnay/rust-toolchain, Swatinem/rust-cache, mlugg/setup-zig,
+taiki-e/install-action, PyO3/maturin-action), with the release tag (for
+dtolnay/rust-toolchain, the branch and the date) in a comment.
