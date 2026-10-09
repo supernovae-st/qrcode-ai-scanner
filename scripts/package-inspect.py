@@ -96,7 +96,7 @@ WASM_FILES = frozenset({
 # Never in a published archive, whatever its kind.
 STRAY = (
     (re.compile(r"(^|/)\.qrscan-lane(/|$)"), "lane scratch"),
-    (re.compile(r"(^|/)plans/"), "private plans"),
+    (re.compile(r"(^|/)plans/"), "planning docs"),
     (re.compile(r"(^|/)\.env($|\.)|\.env$"), "environment file"),
     (re.compile(r"\.(pem|key|p12)$"), "key material"),
     (re.compile(r"(^|/)\.npmrc$"), "npm credentials file"),
