@@ -34,6 +34,11 @@ use crate::matrix::zigzag::{unmask_to_codewords, zigzag_positions};
 use crate::report::{EcLevel, Point};
 use bitstream::{Parsed, PortRead};
 
+/// Rescue candidates a walk keeps (S5 cost is per candidate), re-derives per
+/// attempt — and the undecodable grids per rqrr pass whose orientation is
+/// decided (two clean RS passes each, inside the engine call).
+pub(crate) const MAX_CANDIDATES: usize = 4;
+
 /// A grid the engines detected but could not decode — the rescue input.
 #[derive(Debug, Clone)]
 pub(crate) struct RescueCandidate {
@@ -49,6 +54,10 @@ pub(crate) struct RescueCandidate {
     /// the corners stay the detected grid's, so the rescue samples module
     /// margins transposed too.
     pub transposed: bool,
+    /// The clean re-derivation (plain RS) that chose this orientation, when
+    /// the engine pass decided it — the ladder reuses it instead of running
+    /// the same RS again. `None`: not decided there (the grid as sampled).
+    pub rederived: Option<Rederived>,
 }
 
 /// A successful rescue — feeds the normal merge/report path.
@@ -146,7 +155,7 @@ pub(crate) fn attempt(luma: &LumaImage, candidate: &RescueCandidate) -> Option<R
     )?;
     let margins = codeword_margins(sample_luma, candidate, codewords.len())?;
 
-    let p = protection(candidate.version, candidate.ec);
+    let p = Acceptance::Scanner.reserve(candidate.version, candidate.ec);
     let data = corrected_data(&codewords, candidate.version, candidate.ec, p, |block| {
         let len = block.bytes.len();
         // rank this block's codewords by confidence, worst first
@@ -215,25 +224,36 @@ fn corrected_data(
 /// Who accepts a re-derived stream — it sets the RS budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Acceptance {
-    /// The scanner itself (a rescue candidate no engine decoded): the
-    /// ISO/IEC 18004 Annex B misdecode-protection codewords stay reserved,
-    /// `2t + p ≤ npar` — the guard of [`attempt`].
+    /// The S5 rescue alone, whose stream no engine read: the ISO/IEC 18004
+    /// Annex B misdecode-protection codewords stay reserved, `2t + e + p ≤
+    /// npar` — the guard of [`attempt`].
     Scanner,
-    /// An engine already decoded these codewords with plain RS (rqrr): the
-    /// re-derivation corrects within `2t ≤ npar` too — only `p` is relaxed
-    /// (v1-L 3, v1-M 2, v1-Q/H 1, v2-L 1, v3-L 1 codewords). Sound for the
-    /// orientation the engine decoded, and for no other: a block is within
+    /// Plain RS, `2t ≤ npar` — only `p` is relaxed (v1-L 3, v1-M 2, v1-Q/H
+    /// 1, v2-L 1, v3-L 1 codewords) — for every stream an engine read or
+    /// detected: the grid rqrr decoded, a grid it detected but could not
+    /// decode, the re-read at an engine's corner points. A block is within
     /// `⌊npar/2⌋` of at most one codeword, which rqrr's decoder (Berlekamp-
-    /// Massey, then a syndrome re-check) takes too, so a stream verifying
-    /// in that orientation reproduces the codewords the engine accepted and
-    /// the misdecode risk Annex B reserves against is the engine's, already
-    /// taken. Which orientation that was is checked, never assumed (the rqrr
-    /// adapter's `settle`): a grid verifying both ways stays unverified.
+    /// Massey, then a syndrome re-check) takes too, so a stream verifying in
+    /// the orientation rqrr decoded reproduces the codewords it accepted.
+    /// Elsewhere a re-derivation only ever adds declarations to, or refuses,
+    /// a read of the very bytes it parses: it never publishes bytes no
+    /// engine read. Which orientation verifies is checked, never assumed
+    /// (the rqrr adapter's `settle`): two different results decide nothing.
     Engine,
 }
 
+impl Acceptance {
+    /// The codewords per block kept out of the correction budget.
+    fn reserve(self, version: u8, ec: EcLevel) -> usize {
+        match self {
+            Self::Scanner => protection(version, ec),
+            Self::Engine => 0,
+        }
+    }
+}
+
 /// What re-deriving a sampled stream found.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Rederived {
     /// The RS-verified data codewords, parsed.
     Parsed(Parsed),
@@ -270,10 +290,7 @@ pub(crate) fn rederive(
     else {
         return Rederived::Unverified;
     };
-    let reserved = match acceptance {
-        Acceptance::Scanner => protection(version, ec),
-        Acceptance::Engine => 0,
-    };
+    let reserved = acceptance.reserve(version, ec);
     let Some(data) = corrected_data(&codewords, version, ec, reserved, |_| Vec::new()) else {
         return Rederived::Unverified;
     };
@@ -399,6 +416,7 @@ mod probe {
                 mask: u8::try_from(meta.mask).unwrap(),
                 inverted: false,
                 transposed: false,
+                rederived: None,
             };
             println!(
                 "candidate: v{} ec={:?} mask={} bit_len={}",
@@ -499,6 +517,7 @@ mod differential {
                     mask: u8::try_from(meta.mask).unwrap(),
                     inverted: false,
                     transposed: false,
+                    rederived: None,
                 };
                 let rescued = attempt(luma, &candidate)
                     .unwrap_or_else(|| panic!("rescue pipeline failed on clean {path:?}"));
@@ -659,6 +678,57 @@ pub(crate) mod test_symbols {
         (canvas.apply_best_mask().into_colors(), width)
     }
 
+    /// The module colors of a symbol from an explicit segment stream with
+    /// its mask pattern forced (a chosen format word), and its width.
+    pub(crate) fn masked_colors(
+        version: qrcode::Version,
+        ec: qrcode::EcLevel,
+        mask: qrcode::canvas::MaskPattern,
+        push: impl FnOnce(&mut qrcode::bits::Bits) -> qrcode::types::QrResult<()>,
+    ) -> (Vec<qrcode::Color>, usize) {
+        let mut bits = qrcode::bits::Bits::new(version);
+        push(&mut bits).unwrap();
+        bits.push_terminator(ec).unwrap();
+        let (data_codewords, ec_codewords) =
+            qrcode::ec::construct_codewords(&bits.into_bytes(), version, ec).unwrap();
+        let mut canvas = qrcode::canvas::Canvas::new(version, ec);
+        canvas.draw_all_functional_patterns();
+        canvas.draw_data(&data_codewords, &ec_codewords);
+        canvas.apply_mask(mask);
+        let width = usize::try_from(version.width()).unwrap();
+        (canvas.into_colors(), width)
+    }
+
+    /// Symbols of equal width side by side on one canvas (6 px modules,
+    /// 4-module quiet zones around and between them).
+    pub(crate) fn row(symbols: &[(Vec<qrcode::Color>, usize)]) -> LumaImage {
+        const SCALE: usize = 6;
+        const QUIET: usize = 4;
+        let width = symbols.iter().map(|(_, w)| w + QUIET).sum::<usize>() + QUIET;
+        let height = symbols.iter().map(|(_, w)| *w).max().unwrap_or(0) + 2 * QUIET;
+        let (w_px, h_px) = (width * SCALE, height * SCALE);
+        let mut data = vec![255u8; w_px * h_px];
+        let mut x0 = QUIET;
+        for (colors, modules) in symbols {
+            for (i, color) in colors.iter().enumerate() {
+                if *color == qrcode::Color::Dark {
+                    let (mx, my) = (x0 + i % modules, QUIET + i / modules);
+                    for dy in 0..SCALE {
+                        for dx in 0..SCALE {
+                            data[(my * SCALE + dy) * w_px + mx * SCALE + dx] = 0;
+                        }
+                    }
+                }
+            }
+            x0 += modules + QUIET;
+        }
+        LumaImage::new(
+            data,
+            u32::try_from(w_px).unwrap(),
+            u32::try_from(h_px).unwrap(),
+        )
+    }
+
     /// Hand-assembled MSB-first bit string → bytes (zero-padded to a byte).
     pub(crate) fn stream(bits: &str) -> Vec<u8> {
         let clean: Vec<u8> = bits.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
@@ -719,6 +789,7 @@ mod codewords {
                     mask: u8::try_from(meta.mask).unwrap(),
                     inverted: false,
                     transposed: false,
+                    rederived: None,
                 };
                 (engine, candidate)
             })
@@ -944,6 +1015,7 @@ mod codewords {
             mask: u8::try_from(meta.mask).unwrap(),
             inverted: false,
             transposed: true,
+            rederived: None,
         };
         // the same symbol read the same way (rqrr's thresholding of graded
         // modules may flip a bit or two — the margins read the luma itself)
@@ -1097,6 +1169,7 @@ mod pins {
             mask: 0,
             inverted: false,
             transposed: false,
+            rederived: None,
         };
         (LumaImage::new(data, DIM, DIM), candidate)
     }

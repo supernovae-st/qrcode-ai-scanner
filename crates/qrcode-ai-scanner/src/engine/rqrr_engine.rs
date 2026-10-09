@@ -7,16 +7,18 @@
 //! `engine::content`. The verified stream decides the payload bytes too:
 //! rqrr's own conversion is not the truth (0.10.1 writes the Kanji values
 //! 5949-5951 as Shift JIS DF FD..DF FF — `value + 0x8140 <= 0x9FFC` —
-//! where ISO 18004 §7.4.6 gives 9F FD..9F FF). Which orientation verifies —
-//! the one rqrr decoded — is checked, never assumed ([`settle`]), and a grid
-//! rqrr cannot decode is the rescue input in the orientation whose
-//! codewords verify ([`rescue_input`]: a mirrored FNC1 symbol).
+//! where ISO 18004 §7.4.6 gives 9F FD..9F FF). Which orientation verifies is
+//! checked, never assumed ([`settle`]); the read publishes the stream and
+//! format of that orientation, and none when no orientation decides. A grid
+//! rqrr cannot decode is the rescue input in the orientation whose codewords
+//! verify ([`rescue_input`]: a mirrored FNC1 symbol), decided once for at
+//! most [`MAX_CANDIDATES`] grids per pass.
 
 use super::content::{EciEvidence, Fnc1};
 use super::{MaskedStream, RawDetection, Veto};
 use crate::input::LumaImage;
 use crate::report::{EcLevel, EngineKind, Point, Symbology};
-use crate::rescue::{Acceptance, Rederived, RescueCandidate};
+use crate::rescue::{Acceptance, MAX_CANDIDATES, Rederived, RescueCandidate};
 
 /// rqrr `ecc_level` is the QR format-info two-bit field: M=0 · L=1 · H=2 · Q=3.
 /// Pinned empirically by the engine tests (generated at known EC levels).
@@ -40,7 +42,12 @@ pub(super) struct Pass {
     pub(super) refused: Vec<Veto>,
 }
 
-pub(super) fn decode(luma: &LumaImage) -> Pass {
+/// One rqrr pass. `orient_candidates`: the caller consumes the rescue
+/// candidates (the ladder), so the first [`MAX_CANDIDATES`] undecodable grids
+/// get their orientation decided here — once, carried in the candidate. A
+/// caller that discards them (score cells, envelope probes) pays no RS for
+/// them: the grid as sampled, as before.
+pub(super) fn decode(luma: &LumaImage, orient_candidates: bool) -> Pass {
     let width = luma.width() as usize;
     let data = luma.data();
     let mut prepared =
@@ -53,17 +60,22 @@ pub(super) fn decode(luma: &LumaImage) -> Pass {
         rescue: Vec::new(),
         refused: Vec::new(),
     };
+    let mut oriented = 0;
     for grid in prepared.detect_grids() {
         let mut decoded = Vec::new();
-        let Ok(meta) = grid.decode_to(&mut decoded) else {
+        if grid.decode_to(&mut decoded).is_err() {
             // RS or the parser gave up — but the grid + format info may
             // still read: that stream is the S5 erasure-rescue input
-            pass.rescue.extend(rescue_input(&grid));
+            let input = if orient_candidates && oriented < MAX_CANDIDATES {
+                oriented += 1;
+                rescue_input(&grid)
+            } else {
+                sampled_input(&grid)
+            };
+            pass.rescue.extend(input);
             continue;
-        };
-        // the grid as sampled, still masked — the synthetic-UEC input
-        let sampled = grid.get_raw_data().ok();
-        let derived = rederive_decoded(&grid, sampled.as_ref(), &decoded);
+        }
+        let (derived, orientation) = rederive_decoded(&grid, &decoded);
         let (raw, eci, fnc1, parsed) = match account(decoded, derived) {
             Account::Read {
                 raw,
@@ -76,21 +88,36 @@ pub(super) fn decode(luma: &LumaImage) -> Pass {
                 continue;
             }
         };
-        pass.found.push(RawDetection {
+        let mut read = RawDetection {
             symbology: Symbology::QrCode,
             raw,
             eci,
-            masked_stream: sampled.map(|(_, raw_data)| masked(&raw_data)),
+            masked_stream: None,
             corners: Some(corners(&grid)),
-            version: u8::try_from(meta.version.0).ok(),
-            ec: map_ec(meta.ecc_level),
-            mask: u8::try_from(meta.mask).ok(),
+            version: None,
+            ec: None,
+            mask: None,
             fnc1,
             parsed,
             engine: EngineKind::Rqrr,
-        });
+        };
+        publish_orientation(&mut read, orientation);
+        pass.found.push(read);
     }
     pass
+}
+
+/// The stream and format of the orientation that decided an rqrr read —
+/// none when nothing did: the synthetic-UEC input must error-correct under
+/// the version/EC/mask published beside it.
+fn publish_orientation(read: &mut RawDetection, orientation: Option<Oriented>) {
+    let Some((meta, raw_data)) = orientation else {
+        return;
+    };
+    read.masked_stream = Some(masked(&raw_data));
+    read.version = u8::try_from(meta.version.0).ok();
+    read.ec = map_ec(meta.ecc_level);
+    read.mask = u8::try_from(meta.mask).ok();
 }
 
 /// The detected grid's corners, in attempt-image pixels.
@@ -105,47 +132,95 @@ fn corners<G>(grid: &rqrr::Grid<G>) -> [Point; 4] {
     })
 }
 
-/// The S5 input of a grid rqrr detected but could not decode: the grid as
-/// sampled, or its transpose when only that one carries codewords that
-/// verify (clean RS under the scanner's own acceptance). rqrr's mirrored
-/// retry decodes a mirrored symbol's transpose and its parser may then
-/// refuse it (FNC1 modes): the candidate must be that orientation for its
-/// re-derivation to locate the symbol's declarations or prove it malformed.
-/// When neither verifies — the erasure case S5 exists for — the sampled
-/// grid stays the input. At most one extra raw read and two clean RS
-/// passes per undecoded grid, no image sampling beyond rqrr's grid.
+/// A grid rqrr detected but could not decode, read in one orientation —
+/// `None` when its format information does not read there.
+fn candidate<G>(
+    grid: &rqrr::Grid<G>,
+    read: Result<(rqrr::MetaData, rqrr::RawData), rqrr::DeQRError>,
+    transposed: bool,
+) -> Option<RescueCandidate> {
+    let (meta, raw_data) = read.ok()?;
+    Some(RescueCandidate {
+        stream: masked(&raw_data),
+        corners: corners(grid),
+        version: u8::try_from(meta.version.0).ok()?,
+        ec: map_ec(meta.ecc_level)?,
+        mask: u8::try_from(meta.mask).ok()?,
+        inverted: false, // stamped by the ladder per attempt
+        transposed,
+        rederived: None,
+    })
+}
+
+/// The S5 input of a grid the caller does not re-derive: as sampled, no
+/// RS spent on it.
+fn sampled_input<G: rqrr::BitGrid>(grid: &rqrr::Grid<G>) -> Option<RescueCandidate> {
+    candidate(grid, grid.get_raw_data(), false)
+}
+
+/// The input of a grid rqrr detected but could not decode, in the
+/// orientation whose codewords error-correct (plain RS, as every
+/// re-derivation outside S5 accepts them), carrying that re-derivation so
+/// the ladder never repeats it. rqrr's mirrored retry decodes a mirrored
+/// symbol's transpose and its parser may then refuse it (FNC1 modes): the
+/// candidate must be that orientation to locate the symbol's declarations or
+/// prove it malformed. A sampled grid that parses stands; one that parses
+/// malformed stands only when the transpose does not error-correct to
+/// another result — two different verifying orientations decide nothing
+/// (no parse, no refusal). When neither verifies — the erasure case S5
+/// exists for — the sampled grid stays the input. Per grid: at most one
+/// extra raw read of rqrr's own grid and two clean RS passes, no image
+/// sampling.
 fn rescue_input<G: rqrr::BitGrid>(grid: &rqrr::Grid<G>) -> Option<RescueCandidate> {
-    let candidate = |read: Result<(rqrr::MetaData, rqrr::RawData), rqrr::DeQRError>,
-                     transposed: bool| {
-        let (meta, raw_data) = read.ok()?;
-        Some(RescueCandidate {
-            stream: masked(&raw_data),
-            corners: corners(grid),
-            version: u8::try_from(meta.version.0).ok()?,
-            ec: map_ec(meta.ecc_level)?,
-            mask: u8::try_from(meta.mask).ok()?,
-            inverted: false, // stamped by the ladder per attempt
-            transposed,
-        })
-    };
-    let verifies = |candidate: &RescueCandidate| {
+    let rederive = |candidate: &RescueCandidate| {
         crate::rescue::rederive(
             &candidate.stream,
             candidate.version,
             candidate.ec,
             candidate.mask,
-            Acceptance::Scanner,
-        ) != Rederived::Unverified
+            Acceptance::Engine,
+        )
     };
-    let sampled = candidate(grid.get_raw_data(), false);
-    if sampled.as_ref().is_some_and(verifies) {
-        return sampled;
+    let decided = |mut candidate: RescueCandidate, derived: Rederived| {
+        candidate.rederived = Some(derived);
+        candidate
+    };
+    let sampled = sampled_input(grid);
+    let sampled_derived = sampled.as_ref().map(rederive);
+    if matches!(sampled_derived, Some(Rederived::Parsed(_))) {
+        return sampled
+            .zip(sampled_derived)
+            .map(|(candidate, derived)| decided(candidate, derived));
     }
-    let transposed = candidate(rqrr::Grid::new(Transposed(&grid.grid)).get_raw_data(), true);
-    if transposed.as_ref().is_some_and(verifies) {
-        return transposed;
+    let transposed = candidate(
+        grid,
+        rqrr::Grid::new(Transposed(&grid.grid)).get_raw_data(),
+        true,
+    );
+    let transposed_derived = transposed.as_ref().map(rederive);
+    match (sampled, sampled_derived, transposed, transposed_derived) {
+        // malformed as sampled: it stands unless the transpose verifies to
+        // another result
+        (Some(sampled), Some(malformed @ Rederived::Malformed { .. }), _, other) => {
+            let stands = match &other {
+                None | Some(Rederived::Unverified) => true,
+                Some(other) => *other == malformed,
+            };
+            Some(decided(
+                sampled,
+                if stands {
+                    malformed
+                } else {
+                    Rederived::Unverified
+                },
+            ))
+        }
+        // the sampled grid does not verify: the transpose when it does
+        (_, _, Some(transposed), Some(derived)) if derived != Rederived::Unverified => {
+            Some(decided(transposed, derived))
+        }
+        (sampled, _, _, _) => sampled.map(|candidate| decided(candidate, Rederived::Unverified)),
     }
-    sampled
 }
 
 /// What the scanner makes of one rqrr decode.
@@ -193,48 +268,82 @@ fn account(decoded: Vec<u8>, derived: Rederived) -> Account {
     }
 }
 
-/// Re-derive what rqrr decoded: the grid as sampled and, when [`settle`]
-/// needs it, its transpose — the orientation rqrr's mirrored retry decodes
-/// (`MirroredGrid` swaps x and y). Each is unmasked with the format
-/// information read from it.
-fn rederive_decoded<G: rqrr::BitGrid>(
-    grid: &rqrr::Grid<G>,
-    sampled: Option<&(rqrr::MetaData, rqrr::RawData)>,
-    decoded: &[u8],
-) -> Rederived {
-    settle(
-        sampled.map_or(Rederived::Unverified, |(meta, raw_data)| {
-            rederive_sampled(meta, raw_data)
-        }),
-        || {
-            rqrr::Grid::new(Transposed(&grid.grid))
-                .get_raw_data()
-                .map_or(Rederived::Unverified, |(meta, raw_data)| {
-                    rederive_sampled(&meta, &raw_data)
-                })
-        },
-        decoded,
-    )
+/// One orientation of rqrr's grid as read: its format information and its
+/// still-masked stream.
+type Oriented = (rqrr::MetaData, rqrr::RawData);
+
+/// Which orientation of rqrr's grid decided ([`settle`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decision {
+    /// The grid as sampled.
+    Sampled,
+    /// Its transpose — the orientation rqrr's mirrored retry decodes.
+    Transposed,
+    /// Neither: no orientation verifies, or both verify to different
+    /// results.
+    Neither,
 }
 
-/// Which re-derivation of an rqrr decode stands — the premise "the
-/// orientation that verifies is the one rqrr decoded", checked instead of
-/// assumed. rqrr reads the sampled grid and retries its transpose only when
-/// that fails, so a sampled stream reproducing rqrr's bytes (up to rqrr's
-/// Kanji conversion) is the one it decoded. A sampled stream that verifies
-/// otherwise — malformed, or other bytes — sends the check to the transpose
-/// too: when both verify, neither stands (`Unverified`), never a refusal
-/// on ambiguity. The transpose is read only when needed.
-fn settle(sampled: Rederived, transposed: impl FnOnce() -> Rederived, decoded: &[u8]) -> Rederived {
+/// Re-derive what rqrr decoded: the grid as sampled and, when [`settle`]
+/// needs it, its transpose (`MirroredGrid` swaps x and y). Each is unmasked
+/// with the format information read from it. Returns what stands and the
+/// orientation that decided it, as read — its stream and format are the
+/// ones published beside the read.
+fn rederive_decoded<G: rqrr::BitGrid>(
+    grid: &rqrr::Grid<G>,
+    decoded: &[u8],
+) -> (Rederived, Option<Oriented>) {
+    let derive = |read: &Option<Oriented>| {
+        read.as_ref()
+            .map_or(Rederived::Unverified, |(meta, raw_data)| {
+                rederive_sampled(meta, raw_data)
+            })
+    };
+    let sampled = grid.get_raw_data().ok();
+    let mut transposed = None;
+    let (derived, decision) = settle(
+        derive(&sampled),
+        || {
+            transposed = rqrr::Grid::new(Transposed(&grid.grid)).get_raw_data().ok();
+            derive(&transposed)
+        },
+        decoded,
+    );
+    let orientation = match decision {
+        Decision::Sampled => sampled,
+        Decision::Transposed => transposed,
+        Decision::Neither => None,
+    };
+    (derived, orientation)
+}
+
+/// Which re-derivation of an rqrr decode stands. The RS-verified grid is
+/// the truth: a sampled stream reproducing rqrr's bytes (up to rqrr's Kanji
+/// conversion) is the one it decoded; otherwise the transpose is read too.
+/// When exactly one orientation verifies, its parse decides — whatever rqrr
+/// wrote: a transposed parse is deliberately NOT checked against rqrr's
+/// bytes (rqrr's correction has no degree bound; the scanner's bounded RS
+/// is the stricter evidence), and a malformed one refuses. The same result
+/// both ways is no ambiguity (a transpose-symmetric grid): it stands. Two
+/// different results decide nothing (`Unverified`) — never a refusal on
+/// ambiguity. The transpose is read only when needed.
+fn settle(
+    sampled: Rederived,
+    transposed: impl FnOnce() -> Rederived,
+    decoded: &[u8],
+) -> (Rederived, Decision) {
     if matches!(&sampled, Rederived::Parsed(parsed) if rqrr_converts_to(&parsed.bytes, decoded)) {
-        return sampled;
+        return (sampled, Decision::Sampled);
     }
-    if sampled == Rederived::Unverified {
-        return transposed();
-    }
-    match transposed() {
-        Rederived::Unverified => sampled,
-        Rederived::Parsed(_) | Rederived::Malformed { .. } => Rederived::Unverified,
+    let other = transposed();
+    match (sampled, other) {
+        (Rederived::Unverified, Rederived::Unverified) => {
+            (Rederived::Unverified, Decision::Neither)
+        }
+        (Rederived::Unverified, other) => (other, Decision::Transposed),
+        (sampled, Rederived::Unverified) => (sampled, Decision::Sampled),
+        (sampled, other) if other == sampled => (sampled, Decision::Sampled),
+        _ => (Rederived::Unverified, Decision::Neither),
     }
 }
 
@@ -293,7 +402,9 @@ impl<G: rqrr::BitGrid> rqrr::BitGrid for Transposed<'_, G> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_precision_loss)]
 
-    use super::{Account, Transposed, account, decode, rederive_sampled, rescue_input, settle};
+    use super::{
+        Account, Decision, Transposed, account, decode, rederive_sampled, rescue_input, settle,
+    };
     use crate::engine::Veto;
     use crate::engine::content::{ContentKey, EciEvidence, EciMark, Fnc1};
     use crate::input::LumaImage;
@@ -336,17 +447,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_ambiguous_orientation_is_unverified_never_refused() {
-        // The RS-verified grid is the truth: when one orientation verifies,
-        // its parse decides — whatever rqrr wrote — and a malformed one
-        // refuses. Nothing is decided when no orientation verifies, or when
-        // both verify with DIFFERENT results (crafted grids only); never a
-        // refusal on ambiguity. The same result both ways is no ambiguity (a
-        // transpose-symmetric grid). The transpose is read only when the
-        // sampled stream does not reproduce rqrr's decode.
+    /// The orientation table: how the sampled grid and its transpose settle
+    /// rqrr's decode.
+    fn settle_cases() -> Vec<SettleCase> {
+        [one_orientation_cases(), both_orientation_cases()].concat()
+    }
+
+    /// Cases one orientation settles (or neither does).
+    fn one_orientation_cases() -> Vec<SettleCase> {
         let abc: &[u8] = b"abc";
-        let cases: Vec<SettleCase> = vec![
+        vec![
             (
                 "reproduces",
                 parsed_bytes(abc),
@@ -389,6 +499,14 @@ mod tests {
                 abc.to_vec(),
                 Rederived::Unverified,
             ),
+        ]
+    }
+
+    /// Cases where the sampled grid verifies without reproducing rqrr's
+    /// decode, so the transpose is read too.
+    fn both_orientation_cases() -> Vec<SettleCase> {
+        let abc: &[u8] = b"abc";
+        vec![
             (
                 "malformed, transpose parses",
                 malformed(),
@@ -453,15 +571,40 @@ mod tests {
                 vec![0xDF, 0xFC],
                 Rederived::Unverified,
             ),
-        ];
-        for (name, sampled, transposed, decoded, stands) in cases {
+        ]
+    }
+
+    #[test]
+    fn an_ambiguous_orientation_is_unverified_never_refused() {
+        // The RS-verified grid is the truth: when one orientation verifies,
+        // its parse decides — whatever rqrr wrote — and a malformed one
+        // refuses. Nothing is decided when no orientation verifies, or when
+        // both verify with DIFFERENT results (crafted grids only); never a
+        // refusal on ambiguity. The same result both ways is no ambiguity (a
+        // transpose-symmetric grid). The transpose is read only when the
+        // sampled stream does not reproduce rqrr's decode.
+        for (name, sampled, transposed, decoded, stands) in settle_cases() {
             let consulted = transposed.is_some();
-            let settled = settle(
-                sampled,
-                || transposed.unwrap_or_else(|| panic!("{name}: the transpose is not needed")),
+            let (settled, decision) = settle(
+                sampled.clone(),
+                || {
+                    transposed
+                        .clone()
+                        .unwrap_or_else(|| panic!("{name}: the transpose is not needed"))
+                },
                 &decoded,
             );
             assert_eq!(settled, stands, "{name} (transpose consulted: {consulted})");
+            // the orientation published beside the read is the one that
+            // decided: none when nothing did
+            let expected = if settled == Rederived::Unverified {
+                Decision::Neither
+            } else if settled == sampled {
+                Decision::Sampled
+            } else {
+                Decision::Transposed
+            };
+            assert_eq!(decision, expected, "{name}");
         }
     }
 
@@ -553,7 +696,14 @@ mod tests {
             let (again_decoded, sampled, transposed) = orientations(&luma);
             assert_eq!(
                 settle(sampled, || transposed, &again_decoded),
-                verified,
+                (
+                    verified,
+                    if mirrored {
+                        Decision::Transposed
+                    } else {
+                        Decision::Sampled
+                    }
+                ),
                 "{name}"
             );
         }
@@ -582,7 +732,7 @@ mod tests {
         // measured here (the rxing QR path leaves them None).
         let (luma, version) = render(b"https://qrc-ai.com/v2", qrcode::EcLevel::M);
         assert!(version >= 2, "want a v2+ symbol, got v{version}");
-        let pass = decode(&luma);
+        let pass = decode(&luma, true);
         let d = pass.found.first().expect("rqrr decodes a clean QR");
         assert_eq!(d.raw, b"https://qrc-ai.com/v2");
         assert_eq!(d.symbology, Symbology::QrCode);
@@ -621,7 +771,7 @@ mod tests {
             .build();
         let (w, h) = (img.width(), img.height());
         let luma = LumaImage::new(img.into_raw(), w, h);
-        let pass = decode(&luma);
+        let pass = decode(&luma, true);
         assert!(
             pass.found.is_empty(),
             "rqrr must not decode FNC1: {:?}",
@@ -635,7 +785,7 @@ mod tests {
         // boundary itself lives in engine::run_isolated, exercised in mod.rs;
         // the adapter's own job is to return empty on a QR-less image.)
         let blank = LumaImage::new(vec![255u8; 48 * 48], 48, 48);
-        let pass = decode(&blank);
+        let pass = decode(&blank, true);
         assert!(pass.found.is_empty() && pass.rescue.is_empty() && pass.refused.is_empty());
     }
 
@@ -649,7 +799,7 @@ mod tests {
                 b.push_eci_designator(4)?;
                 b.push_byte_data(&[0xA1])
             });
-        let pass = decode(&luma);
+        let pass = decode(&luma, true);
         let d = pass.found.first().expect("rqrr decodes the clean render");
         assert_eq!(d.raw, b"12345\xA1");
         assert_eq!(
@@ -748,7 +898,7 @@ mod tests {
                 b.push_kanji_data(&[0x9F, 0xFD])
             });
         assert_eq!(rqrr_bytes(&luma), vec![vec![0xDF, 0xFD]], "rqrr's bytes");
-        let pass = decode(&luma);
+        let pass = decode(&luma, true);
         let d = pass.found.first().expect("rqrr decodes the clean render");
         assert_eq!(d.raw, vec![0x9F, 0xFD]);
         assert_eq!(d.eci, EciEvidence::NoEci);
@@ -767,7 +917,7 @@ mod tests {
                 b.push_byte_data(&[0xA1])
             },
         );
-        let pass = decode(&luma);
+        let pass = decode(&luma, true);
         let d = pass
             .found
             .first()
@@ -778,6 +928,139 @@ mod tests {
             EciEvidence::Located(vec![EciMark { value: 4, start: 0 }])
         );
         assert!(d.parsed);
+    }
+
+    /// The raw reads of the one grid rqrr detects in `luma`: as sampled and
+    /// transposed.
+    fn raw_reads(luma: &LumaImage) -> (Option<super::Oriented>, Option<super::Oriented>) {
+        let width = luma.width() as usize;
+        let data = luma.data();
+        let mut prepared =
+            rqrr::PreparedImage::prepare_from_greyscale(width, luma.height() as usize, |x, y| {
+                data[y * width + x]
+            });
+        let grid = prepared.detect_grids().remove(0);
+        (
+            grid.get_raw_data().ok(),
+            rqrr::Grid::new(Transposed(&grid.grid)).get_raw_data().ok(),
+        )
+    }
+
+    #[test]
+    fn a_mirrored_decode_publishes_the_verified_stream() {
+        // The read publishes the stream and format of the orientation that
+        // decided — the transpose for a mirrored symbol — and they
+        // error-correct errors-only under the published version/EC/mask
+        // (the synthetic-UEC input). As sampled, a mirrored format word
+        // still decodes, to another word (rqrr's format decoder corrects
+        // past three bit errors: L/mask 0 reads as H/mask 2): the decode
+        // published that format with the unmirrored stream before.
+        let eci4 = |b: &mut qrcode::bits::Bits| {
+            b.push_eci_designator(4)?;
+            b.push_byte_data(&[0xA1])
+        };
+        let (v3, m) = (qrcode::Version::Normal(3), qrcode::EcLevel::M);
+        let (l0, width) = test_symbols::masked_colors(
+            qrcode::Version::Normal(2),
+            qrcode::EcLevel::L,
+            qrcode::canvas::MaskPattern::Checkerboard,
+            eci4,
+        );
+        let cases = [
+            ("upright", test_symbols::from_segments(v3, m, eci4), false),
+            (
+                "mirrored",
+                test_symbols::from_segments_mirrored(v3, m, eci4),
+                true,
+            ),
+            (
+                "mirrored L0",
+                test_symbols::render(&test_symbols::mirror(&l0, width), width),
+                true,
+            ),
+        ];
+        for (name, luma, mirrored) in cases {
+            let (sampled, transposed) = raw_reads(&luma);
+            let (_, expected) = (if mirrored { &transposed } else { &sampled })
+                .as_ref()
+                .unwrap();
+            let pass = decode(&luma, true);
+            let d = pass.found.first().expect("rqrr decodes the render");
+            let stream = d.masked_stream.as_ref().expect("the verified stream");
+            assert_eq!(stream.bits, super::masked(expected).bits, "{name}");
+            let (version, ec, mask) = (d.version.unwrap(), d.ec.unwrap(), d.mask.unwrap());
+            let Rederived::Parsed(parsed) =
+                crate::rescue::rederive(stream, version, ec, mask, Acceptance::Engine)
+            else {
+                panic!("{name}: the published stream error-corrects");
+            };
+            assert_eq!(parsed.bytes, vec![0xA1], "{name}");
+            if name == "mirrored L0" {
+                let (meta, _) = sampled.as_ref().expect("the sampled format decodes");
+                assert_eq!(
+                    (meta.ecc_level, meta.mask),
+                    (2, 2),
+                    "{name}: H/2 as sampled"
+                );
+                assert_eq!((ec, mask), (EcLevel::L, 0), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_read_nothing_decided_publishes_no_stream_or_format() {
+        let mut read = crate::engine::RawDetection {
+            symbology: Symbology::QrCode,
+            raw: b"abc".to_vec(),
+            eci: EciEvidence::Unobserved,
+            masked_stream: None,
+            corners: None,
+            version: None,
+            ec: None,
+            mask: None,
+            fnc1: Fnc1::None,
+            parsed: false,
+            engine: EngineKind::Rqrr,
+        };
+        super::publish_orientation(&mut read, None);
+        assert!(read.masked_stream.is_none());
+        assert_eq!((read.version, read.ec, read.mask), (None, None, None));
+    }
+
+    #[test]
+    fn orientation_is_decided_for_at_most_four_grids_per_pass() {
+        // Six FNC1 symbols rqrr detects but cannot decode: the first four
+        // grids get their orientation decided (and carry that
+        // re-derivation), the rest stay as sampled with no RS spent — and a
+        // pass whose caller discards candidates spends none at all.
+        let gs1 = |b: &mut qrcode::bits::Bits| {
+            b.push_fnc1_first_position()?;
+            b.push_numeric_data(b"0109506000134352")
+        };
+        let symbol = test_symbols::masked_colors(
+            qrcode::Version::Normal(2),
+            qrcode::EcLevel::M,
+            qrcode::canvas::MaskPattern::Checkerboard,
+            gs1,
+        );
+        let luma = test_symbols::row(&vec![symbol; 6]);
+        let pass = decode(&luma, true);
+        assert!(pass.found.is_empty());
+        assert_eq!(pass.rescue.len(), 6, "rqrr detects every grid");
+        let decided = pass
+            .rescue
+            .iter()
+            .filter(|candidate| candidate.rederived.is_some())
+            .count();
+        assert_eq!(decided, crate::rescue::MAX_CANDIDATES);
+        assert!(
+            pass.rescue[..crate::rescue::MAX_CANDIDATES]
+                .iter()
+                .all(|candidate| matches!(candidate.rederived, Some(Rederived::Parsed(_))))
+        );
+        let discarded = decode(&luma, false);
+        assert_eq!(discarded.rescue.len(), 6);
+        assert!(discarded.rescue.iter().all(|c| c.rederived.is_none()));
     }
 
     #[test]
@@ -796,7 +1079,7 @@ mod tests {
                 &data,
             ),
         ] {
-            let pass = decode(&luma);
+            let pass = decode(&luma, true);
             assert!(pass.found.is_empty(), "{:?}", pass.found);
             assert!(pass.rescue.is_empty());
             assert_eq!(pass.refused, vec![Veto::Rqrr(b"abc".to_vec())]);
@@ -808,7 +1091,7 @@ mod tests {
         );
         let luma =
             test_symbols::from_codewords(qrcode::Version::Normal(1), qrcode::EcLevel::M, &data);
-        let pass = decode(&luma);
+        let pass = decode(&luma, true);
         assert!(pass.found.is_empty());
         assert_eq!(
             pass.refused,
@@ -853,7 +1136,7 @@ mod tests {
             ),
         ];
         for (name, luma, transposed) in cases {
-            let pass = decode(&luma);
+            let pass = decode(&luma, true);
             assert!(pass.found.is_empty() && pass.refused.is_empty(), "{name}");
             assert_eq!(pass.rescue.len(), 1, "{name}");
             let candidate = &pass.rescue[0];
@@ -900,7 +1183,7 @@ mod tests {
             &test_symbols::stream("0101 0100 00000011 01100001 01100010 01100011 0000"),
             &[0, 2, 4, 6, 8, 10],
         );
-        let pass = decode(&luma);
+        let pass = decode(&luma, true);
         assert!(pass.found.is_empty(), "{:?}", pass.found);
         assert_eq!(pass.rescue.len(), 1);
         assert!(!pass.rescue[0].transposed);

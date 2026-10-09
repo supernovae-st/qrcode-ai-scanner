@@ -189,12 +189,15 @@ pub(crate) fn decode_filtered(luma: &LumaImage, filter: FormatFilter) -> EngineO
         outcome.detections.extend(found);
     }
 
+    // a single-symbology pass (score cells, envelope probes) discards the
+    // rescue candidates: their orientation is never worth an RS there
     #[cfg(feature = "engine-rqrr")]
     if matches!(
         filter,
         FormatFilter::All | FormatFilter::QrFamily | FormatFilter::Only(Symbology::QrCode)
-    ) && let Some(pass) = run_engine(&mut outcome.panics, || rqrr_engine::decode(luma))
-    {
+    ) && let Some(pass) = run_engine(&mut outcome.panics, || {
+        rqrr_engine::decode(luma, !matches!(filter, FormatFilter::Only(_)))
+    }) {
         outcome.detections.extend(pass.found);
         outcome.rescue.extend(pass.rescue);
         outcome.refused.extend(pass.refused);

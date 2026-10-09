@@ -386,7 +386,7 @@ const MAX_DETECTIONS: usize = 16;
 
 /// Rescue candidates kept per walk (S5 cost is per candidate) and
 /// re-derived per attempt.
-const MAX_RESCUE_CANDIDATES: usize = 4;
+const MAX_RESCUE_CANDIDATES: usize = crate::rescue::MAX_CANDIDATES;
 
 /// The walk's proof capacity: refusals of proven-malformed streams it
 /// remembers (every hit is checked against them). A proof past capacity
@@ -1018,13 +1018,14 @@ impl Run<'_> {
         });
     }
 
-    /// Re-derive rescue candidates (clean RS under the scanner's own
-    /// acceptance, no luma sampling) while an unparsed QR read is in play —
-    /// in `found` or already absorbed. Every stream that parses shields its
-    /// content; one with a located declaration may also locate a
-    /// signalled-only read; one proven malformed refuses what rxing's port
-    /// reports for it. At most `MAX_RESCUE_CANDIDATES` candidates, in the
-    /// order given (original-space corners, photometry stamped).
+    /// Re-derive rescue candidates (plain RS, no luma sampling — or the
+    /// re-derivation the engine pass already chose their orientation with)
+    /// while an unparsed QR read is in play — in `found` or already
+    /// absorbed. Every stream that parses shields its content; one with a
+    /// located declaration may also locate a signalled-only read; one proven
+    /// malformed refuses what rxing's port reports for it. At most
+    /// `MAX_RESCUE_CANDIDATES` candidates, in the order given (original-space
+    /// corners, photometry stamped).
     fn rederive_candidates(
         &self,
         found: &[RawDetection],
@@ -1044,13 +1045,17 @@ impl Run<'_> {
             return out;
         }
         for candidate in candidates.iter().take(MAX_RESCUE_CANDIDATES) {
-            match crate::rescue::rederive(
-                &candidate.stream,
-                candidate.version,
-                candidate.ec,
-                candidate.mask,
-                Acceptance::Scanner,
-            ) {
+            // the engine pass may have decided it already (its orientation)
+            let derived = candidate.rederived.clone().unwrap_or_else(|| {
+                crate::rescue::rederive(
+                    &candidate.stream,
+                    candidate.version,
+                    candidate.ec,
+                    candidate.mask,
+                    Acceptance::Engine,
+                )
+            });
+            match derived {
                 Rederived::Parsed(parsed) => {
                     let key = ContentKey {
                         raw: parsed.bytes,
@@ -2741,6 +2746,7 @@ mod ladder_mutant_kills {
             mask: 0,
             inverted: false,
             transposed: false,
+            rederived: None,
         };
         let mut candidates = vec![dud; MAX_RESCUE_CANDIDATES];
         candidates.push(outcome.rescue[0].clone());
@@ -2908,6 +2914,7 @@ mod ladder_mutant_kills {
             mask: 2,
             inverted: false,
             transposed: false,
+            rederived: None,
         };
         run.collect_rescue(vec![twin(), twin()], (100, 100), false);
         assert_eq!(
@@ -2936,6 +2943,7 @@ mod ladder_mutant_kills {
             mask: 0,
             inverted: false,
             transposed: false,
+            rederived: None,
         };
         run.collect_rescue(vec![candidate], (50, 50), false);
         assert_eq!(run.rescue_candidates.len(), 1);
@@ -2970,6 +2978,7 @@ mod ladder_mutant_kills {
             mask: 0,
             inverted: false,
             transposed: false,
+            rederived: None,
         };
         run.collect_rescue(vec![candidate], (120, 90), false);
         let corner = run.rescue_candidates[0].corners[0];
@@ -2997,6 +3006,7 @@ mod ladder_mutant_kills {
             mask: 0,
             inverted: false,
             transposed: false,
+            rederived: None,
         };
         let mut run = Run {
             cancel: &cancel,
