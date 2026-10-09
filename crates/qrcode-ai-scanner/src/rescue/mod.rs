@@ -107,8 +107,8 @@ fn codeword_margins(
     Some(margins)
 }
 
-/// Attempt the rescue. `luma` is the ORIGINAL (engine-capped) plane the
-/// candidate's corners live in.
+/// Attempt the rescue. `luma` and the candidate's corners must share
+/// the same coordinate space.
 pub(crate) fn attempt(luma: &LumaImage, candidate: &RescueCandidate) -> Option<Rescued> {
     let version = usize::from(candidate.version);
     if !(1..=40).contains(&version) {
