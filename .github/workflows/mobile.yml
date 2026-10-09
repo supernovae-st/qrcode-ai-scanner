@@ -230,10 +230,17 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     environment: release
+    concurrency:
+      group: publish-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: write # create the GitHub release + attach the asset
     steps:
       - uses: actions/checkout@v7
+      # As in every other publishing job: the tag must name the version, and
+      # the CHANGELOG must carry its dated section. mobile › test checks it
+      # too, but neither ios nor this job waits for test.
+      - run: python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet
       - uses: actions/download-artifact@v8
         with:
           name: ios-xcframework
