@@ -35,9 +35,13 @@ twin of the mobile.yml version gate, which stays the CI enforcement.
 
 ## 2 · Cut the changelog
 
-`## Unreleased` → `## X.Y.Z — YYYY-MM-DD`. The tag-time gate REQUIRES a
-dated section matching the workspace version (mobile.yml, shipped after
-0.5.0 stale-notes) — a tag without it fails `test` before any publish.
+`## Unreleased` → `## X.Y.Z — YYYY-MM-DD`. The tag-time gates REQUIRE a
+dated section matching the workspace version: mobile.yml's version gate
+(shipped after 0.5.0 stale-notes) and, since crates, npm and PyPI used to
+publish in parallel regardless of it, every publishing job itself —
+`scripts/package-inspect.py versions --tag` checks the tag against every
+publish surface and the CHANGELOG before the job touches a registry. A tag
+without the section publishes nowhere.
 
 ## 3 · Pre-tag gates, locally first
 
@@ -76,32 +80,96 @@ Annotated tag `vX.Y.Z` (headline + expected-red note), `git push origin vX.Y.Z`.
 ## 6 · What fires, and what to expect (state: 2026-07-08)
 
 Every publish leg is **idempotent** (skips versions already on the
-registry): if a leg dies, fix the workflow on main and re-run it with
-`gh workflow run <name>` — nothing double-publishes. And the release
-tooling itself is **pinned exact** (`@napi-rs/cli`): the v0.9.0 train
-lost its first two npm-publish runs to an unpinned caret resolving a
-new CLI whose host validation rejected `--use-napi-cross` outside
-Linux-gnu (2026-07-20) — a toolchain must never move under a tag.
+registry) and **tag-only** (§ Publishing): a run on anything but a
+`refs/tags/v*` ref builds and inspects, never publishes. If a leg dies on a
+transient failure, re-run its failed jobs (`gh run rerun <run-id> --failed`)
+or dispatch the workflow ON THE TAG (`gh workflow run <name> --ref vX.Y.Z`):
+the tag's own commit and workflow file run again, nothing double-publishes.
+A defect in the workflow itself can no longer be fixed on main and
+re-dispatched from main (that is how 0.9.0's Node packages came to be built
+from post-tag commit 9f8bbcf, 2026-07-20): fix it on main and cut the next
+patch tag. And the release tooling itself is **pinned exact** (§ Toolchain):
+the v0.9.0 train lost its first two npm-publish runs to an unpinned caret
+resolving a new CLI whose host validation rejected `--use-napi-cross`
+outside Linux-gnu (2026-07-20) — a toolchain must never move under a tag.
 
 | Leg | Expectation |
 |---|---|
-| crates-publish · npm-publish · python | green; registries live in ~10-15 min |
+| crates-publish · npm-publish · python | green; registries live in ~10-15 min — once the one-time trusted-publisher setup is done (§ Publishing); before it, the publish jobs stop at authentication and nothing half-publishes |
 | mobile › test + android | green (JitPack chain proven since v0.6.0) |
-| mobile › ios | **expected red** at the dev-mode guard until the one-time Xcode leg (`bindings/swift/release.sh`) runs |
-| flutter › publish to pub.dev | **expected red** until the one-time manual first publish |
+| mobile › ios | **expected red** at the dev-mode guard until the one-time Xcode leg (`bindings/swift/release.sh`) runs; `ios-release` is then skipped |
+| flutter › publish to pub.dev | **expected red** until the one-time manual first publish (and the package can only build its core once its Rust crate stops depending on a path outside the package) |
 | JitPack | builds on demand — trigger with a GET on the artifact URL |
 
 ## 7 · The steps no pipeline does
 
 - **Create the GitHub Release by hand** (`gh release create vX.Y.Z
-  --notes-file <changelog-section>`): the ios leg that would create it dies
-  at its own guard by design — nobody else will (three hand-created
-  releases on 2026-07-08).
+  --notes-file <changelog-section>`): `mobile › ios-release`, which would
+  create it, never runs while the ios leg dies at its own guard by design —
+  nobody else will (three hand-created releases on 2026-07-08).
 - Verify registries: `npm view @supernovae-st/qrcode-ai-scanner-wasm
   version` (this is the builder's bump signal) + crates.io + PyPI.
 - Downstream: the landing/app pins a caret 0.x range — **the caret freezes
   the minor** (`^0.7.0` never takes 0.8.0); minor bumps need a manual edit
   in the consumer.
+
+## Publishing — tag-only, trusted, one environment per registry
+
+Only a `refs/tags/v*` ref publishes. Every other run — a `workflow_dispatch`
+from a branch included — builds every artifact and inspects it
+(`scripts/package-inspect.py`), then stops before the registry. Each
+publishing job is its own job, guarded by `if: startsWith(github.ref,
+'refs/tags/v')`, holding the only write-capable permission in its workflow
+and naming a GitHub environment, so protection rules can be attached:
+
+| Workflow › job | Environment | Credential |
+|---|---|---|
+| crates-publish › publish | `crates-io` | crates.io trusted publishing: `rust-lang/crates-io-auth-action` trades the OIDC token for a 30-minute crates.io token |
+| npm-publish › publish-native · publish-wasm | `npm` | npm trusted publishing (npm CLI ≥ 11.5.1 on Node 24), provenance attested automatically |
+| python › release | `release` | PyPI trusted publishing (already live: 0.9.0 carries PEP 740 attestations) |
+| flutter › publish | `pub` | pub.dev automated publishing; a pushed tag only (pub.dev accepts no other trigger) |
+| mobile › ios-release | `release` | the workflow's own `GITHUB_TOKEN`, `contents: write` |
+
+No registry token is read by any workflow. A token (or a person) is still
+required only where a registry has no OIDC path: the first version of a NEW
+crate on crates.io, the first version of a NEW npm package (a new napi
+target, say — or `npm stage publish`), and pub.dev's first upload, which
+must be a user's.
+
+**One-time setup, by the package owner, before the next tag** (until then
+the crates and npm publish jobs fail at authentication, before publishing
+anything):
+
+1. GitHub › Settings › Environments: create `crates-io`, `npm`, `release`
+   and `pub`, each with *Deployment branches and tags* → *Selected* → tag
+   rule `v*` (required reviewers optional). A referenced environment that
+   does not exist is created on first use WITHOUT protection rules. The old
+   `pub.dev` environment is no longer referenced and can go.
+2. crates.io, for `qrcode-ai-scanner` and for `qrcode-ai-scanner-cli`:
+   Settings › Trusted Publishing › add GitHub: owner `supernovae-st`,
+   repository `qrcode-ai-scanner`, workflow `crates-publish.yml`,
+   environment `crates-io`.
+3. npmjs.com, for each of the eight packages —
+   `@supernovae-st/qrcode-ai-scanner`, `-darwin-arm64`, `-darwin-x64`,
+   `-linux-x64-gnu`, `-linux-arm64-gnu`, `-linux-x64-musl`,
+   `-win32-x64-msvc` and `-wasm`: Settings › Trusted Publisher › GitHub
+   Actions: organization or user `supernovae-st`, repository
+   `qrcode-ai-scanner`, workflow `npm-publish.yml`, environment `npm`.
+4. PyPI: confirm the existing trusted publisher still reads owner
+   `supernovae-st`, repository `qrcode-ai-scanner`, workflow `python.yml`,
+   environment `release` (unchanged here).
+5. pub.dev, once a user has made the first upload: Admin › Automated
+   publishing › enable GitHub Actions: repository
+   `supernovae-st/qrcode-ai-scanner`, tag pattern `v{{version}}`, require
+   environment `pub`.
+6. After the first release published through OIDC: delete the
+   `CARGO_REGISTRY_TOKEN` and `NPM_TOKEN` repository secrets; on crates.io
+   restrict both crates to trusted publishing, on npm set each package's
+   publishing access to *Require two-factor authentication and disallow
+   tokens*.
+7. Branch protection: the matrix check `ci / test (ubuntu-latest)` is now
+   `test (ubuntu-24.04)`; if it is a required check, update the rule (and
+   add `node-smoke` and `wasm-smoke` if they should be).
 
 ## Toolchain — one compiler, pinned
 

@@ -16,6 +16,9 @@ on:
         description: "rust toolchain to probe (empty: the pinned RUST_TOOLCHAIN)"
         default: ""
 
+permissions:
+  contents: read
+
 env:
   # The toolchain CI tests (ci.yml RUST_TOOLCHAIN; RELEASING.md § toolchain).
   RUST_TOOLCHAIN: "1.97.0"

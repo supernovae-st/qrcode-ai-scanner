@@ -5,8 +5,10 @@ name: flutter
 # runs on every push/PR; the native build jobs + pub.dev publish are tag-gated.
 #
 # pub.dev publish uses OIDC automated publishing (no token) — configure it on the
-# package admin page first (bind this repo + tag pattern `v{{version}}`). Unlike
-# npm/PyPI there is NO skip-existing: bump the pubspec version before tagging.
+# package admin page first (bind this repo + tag pattern `v{{version}}` + the
+# `pub` environment). Unlike npm/PyPI there is NO skip-existing: bump the
+# pubspec version before tagging. Publishing is tag-push-only; every other run
+# stops at the builds.
 #
 # This workflow takes no untrusted event input into any run: step (github.ref /
 # github.event_name are used only in if: conditions), so it is injection-safe.
@@ -115,18 +117,27 @@ jobs:
 
   publish:
     name: publish to pub.dev
-    if: startsWith(github.ref, 'refs/tags/')
+    # A pushed v* tag only. pub.dev accepts automated publishing solely from
+    # the push of a tag matching the configured pattern, so a dispatch could
+    # not publish anyway — and must not try.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [test, build-android, build-ios]
     runs-on: ubuntu-24.04
     # v0.5.0 post-mortem: without the token exchange below, `pub publish` falls
     # back to INTERACTIVE auth and hangs on stdin forever (the job sat 2 h and
     # was hand-cancelled). Cap the whole job well under the 6 h runner default.
     timeout-minutes: 15
-    environment: pub.dev
+    environment: pub
     permissions:
+      contents: read
       id-token: write # OIDC — pub.dev automated publishing, no token
     steps:
       - uses: actions/checkout@v7
+      # The tag must name the version being published, and the CHANGELOG
+      # must carry its dated section.
+      - name: the tag names the version being published
+        working-directory: .
+        run: python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet
       # The OIDC→pub.dev temporary-credential exchange. subosito/flutter-action
       # does NOT perform it; dart-lang/setup-dart does (its documented
       # publishing support). Order matters: exchange first, then the Flutter
@@ -137,8 +148,8 @@ jobs:
       # publishing — a setting that exists only once the package exists. The
       # first `flutter pub publish` is a manual operator act (Google account),
       # then enable automated publishing (repo supernovae-st/qrcode-ai-scanner,
-      # tag pattern v{{version}}, environment pub.dev) and every later tag
-      # publishes hands-free.
+      # tag pattern v{{version}}, required environment `pub`) and every later
+      # tag publishes hands-free.
       - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
       - uses: subosito/flutter-action@e938fdf56512cc96ef2f93601a5a40bde3801046 # v2.19.0
         with:

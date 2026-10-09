@@ -5,6 +5,10 @@ on:
     - cron: "0 4 * * 1" # weekly, monday 04:00 UTC
   workflow_dispatch:
 
+# Read-only token: the deep gates judge, they never write or publish.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # The deep gates judge the compiler CI tests and the publishers build with

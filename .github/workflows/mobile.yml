@@ -12,7 +12,9 @@ name: mobile
 # Mobile does NOT use PyPI OIDC — there are no trusted-publisher artifacts here.
 # v0.1 publish targets: JitPack (Android, see repo-root jitpack.yml) + a GitHub
 # release asset (iOS xcframework zip, consumed by SwiftPM url+checksum). Maven
-# Central + GPG signing is deferred to v0.2 (plan §4.3).
+# Central + GPG signing is deferred to v0.2 (plan §4.3). The one publishing
+# job, `ios-release`, runs for refs/tags/v* alone in the `release`
+# environment; every other job only builds (read-only token).
 #
 # Third-party (non actions/*) actions are SHA-pinned, like python.yml pins
 # pypa/gh-action-pypi-publish.
@@ -164,8 +166,6 @@ jobs:
   ios:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: macos-15 # Xcode 16, Apple silicon
-    permissions:
-      contents: write # attach the xcframework to the GitHub release on tags
     steps:
       - uses: actions/checkout@v7
       # A committed Package.swift in dev (local-path) mode does NOT resolve for a
@@ -222,14 +222,29 @@ jobs:
             build/QrcodeAiScannerFFI.xcframework.zip
             build/checksum.txt
           if-no-files-found: error
-      # On a tag: make sure the release carries the xcframework, then VERIFY the
+
+  # Tag-only, and its own job: the build above never holds a write token, and
+  # no branch dispatch reaches the GitHub release.
+  ios-release:
+    needs: ios
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write # create the GitHub release + attach the asset
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: ios-xcframework
+          path: build
+      # Make sure the release carries the xcframework, then VERIFY the
       # published asset's checksum equals the one Package.swift pins — so a
       # SwiftPM consumer's url+checksum resolution is guaranteed to succeed.
       # bindings/swift/release.sh is the authoritative publisher (it builds the
       # exact asset whose checksum it pins); this step is the safety net + the
       # CI-built fallback when no asset was attached yet.
-      - name: publish + verify the xcframework asset (tags only)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: publish + verify the xcframework asset
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -249,8 +264,10 @@ jobs:
             echo "::notice::attached the CI-built xcframework."
           fi
           # 3. VERIFY the PUBLISHED asset (whoever uploaded it) matches the pin.
-          gh release download "$GITHUB_REF_NAME" -p QrcodeAiScannerFFI.xcframework.zip -O /tmp/published.zip --clobber
-          published="$(swift package compute-checksum /tmp/published.zip)"
+          #    SwiftPM's checksum is the archive's SHA-256 (what `swift package
+          #    compute-checksum` prints), so sha256sum checks it on Linux.
+          gh release download "$GITHUB_REF_NAME" -p QrcodeAiScannerFFI.xcframework.zip -O "$RUNNER_TEMP/published.zip" --clobber
+          published="$(sha256sum "$RUNNER_TEMP/published.zip" | cut -d' ' -f1)"
           pinned="$(grep -oE '[a-f0-9]{64}' bindings/swift/Package.swift | head -n1 || true)"
           echo "published asset : $published"
           echo "Package.swift   : ${pinned:-<none>}"

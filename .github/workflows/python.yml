@@ -4,6 +4,11 @@ name: python
 # tag, build wheels for the common platforms + sdist and publish to PyPI via
 # trusted publishing (OIDC — no token). The crate is excluded from the cargo
 # workspace, so the core `ci` workflow doesn't cover it; this does.
+#
+# Publishing is tag-only: `release` runs for refs/tags/v* alone. A
+# workflow_dispatch from a branch builds every wheel + the sdist and inspects
+# them (`inspect`), then stops. PyPI's trusted publisher is bound to this
+# file and the `release` environment (RELEASING.md § Publishing).
 
 on:
   push:
@@ -103,15 +108,47 @@ jobs:
           name: wheels-sdist
           path: crates/qrcode-ai-scanner-py/dist
 
+  # Every archive PyPI would receive, read back before anything publishes —
+  # on a branch dispatch too: the AGPL text in each wheel's
+  # .dist-info/licenses/ and in the sdist, the METADATA version and license
+  # expression, the type stubs, no stray files.
+  inspect:
+    name: inspect wheels + sdist
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    needs: [wheels, sdist]
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - run: python3 scripts/package-inspect.py archive dist/* --strict --quiet
+
   release:
     name: publish to PyPI
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    needs: [test, wheels, sdist]
+    # refs/tags/v* only: a workflow_dispatch from a branch builds and
+    # inspects above, and stops before the registry.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, inspect]
     runs-on: ubuntu-24.04
     environment: release
     permissions:
+      contents: read
       id-token: write # trusted publishing (OIDC) — no PyPI token needed
+    defaults:
+      run:
+        working-directory: .
     steps:
+      - uses: actions/checkout@v7
+      # The tag must name the version being published, and the CHANGELOG
+      # must carry its dated section (skip-existing would otherwise turn a
+      # forgotten bump into a silent non-release).
+      - run: python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet
       - uses: actions/download-artifact@v8
         with:
           pattern: wheels-*
