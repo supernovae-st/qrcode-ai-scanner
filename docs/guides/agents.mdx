@@ -21,11 +21,20 @@ workflows, CI bots) consuming the scanner.
    resolved Promise elsewhere. Only `QRS-\d{3}` faults are errors.
 2. The JSON shape is identical on every surface and evolves additively —
    tolerate unknown fields/kinds/hints.
-3. `content.raw` (base64) is the byte truth; `text`+`charset` are one
-   consistent resolution of it.
-4. Determinism: unbounded budget ⇒ same input → same report (per
+3. `content.raw` (base64) is the byte truth; `text` is its one reading
+   and `charset` says how. `charset === "unknown"` is the ONLY lossy value,
+   now and in every later version: then `text` is not a complete decoding
+   — never act on it; use `raw` (with `content.eci`). Any other value,
+   even one newer than your types, is a complete decoding the scanner
+   checked byte for byte.
+4. A content's identity is (`symbology`, `raw`, `fnc1`, compatible
+   `eci`), never `text`: to check a symbol you generated, compare `raw`
+   (and `eci`, `fnc1`) with what you encoded. `eci` is present only when
+   the symbol declares an ECI (`[]` when it could not be located); `fnc1`
+   only for GS1 (`first`) or AIM-application (`second`) data.
+5. Determinism: unbounded budget ⇒ same input → same report (per
    platform/build). Safe to cache by input hash + `versions`.
-5. `meta`/`corners` are measured or `null` — never fabricated.
+6. `meta`/`corners` are measured or `null` — never fabricated.
 
 ## The regenerate loop
 
@@ -59,9 +68,13 @@ agent can drive generation parameters from the report alone.
 
 ```bash
 qrscan in.png | jq '{text: .detections[0].content.text,
+                     charset: .detections[0].content.charset,
                      kind: .detections[0].payload.kind,
                      score: .score.value,
                      hints: [.hints[].hint]}'
 ```
+
+Gate on `charset` before acting on `text`: `"unknown"` means the scanner
+could not read every byte.
 
 Exit codes are the branch signal: `0` decoded · `1` nothing · `2` fault.

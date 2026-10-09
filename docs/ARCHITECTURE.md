@@ -31,9 +31,19 @@ skips them by design — see the root `Cargo.toml` comment):
 3. **Sync by design**: async belongs to the bindings.
 4. **Engine-isolated**: third-party decoder panics are caught at the engine
    boundary (`catch_unwind`), counted in the trace, never propagated.
-5. **Raw bytes are the truth**: charset (UTF-8 → Shift-JIS → Windows-1252)
-   is resolved ONCE from raw payload bytes; `DecodedContent.raw` always
-   carries the unmodified bytes.
+5. **Raw bytes are the truth**: `DecodedContent.raw` carries the original
+   payload bytes (QR family: designators excluded, never an engine's text).
+   What the data declares — ECI designators and where each takes effect,
+   the FNC1 position, Kanji/Hanzi segments — is observed by the scanner's
+   own parser over error-corrected codewords, and the text is decoded ONCE
+   from the bytes (spec/01 § Content): located designators decide it, else
+   the observed segments, the decoding engine's mode-aware reading or the
+   legacy order (UTF-8 → `Shift_JIS` → Windows-1252). `charset` says how;
+   `unknown` marks a text that is not a complete decoding.
+6. **Distinct contents, not merged text**: every read of a walk is collected
+   and reconciled once at the end — identical reads fold; reads of one
+   content join by their account and where they lie (spec/07 property 6).
+   Text is never an identity.
 
 ## Decode pipeline
 
@@ -52,14 +62,21 @@ ImageInput (Encoded | Rgba8 | Luma8)
        S5 rescue     engines failed but a grid was read: errors-and-erasures
                      RS (Forney 1965) with confidence-marked erasures —
                      e + 2t ≤ d − p, twice the budget where the art lives
-  → merge            cross-engine, keyed by raw payload bytes → engines consensus
+                     per attempt: engines → re-derived grids (candidate
+                     parses) → the re-read at rxing's corner points →
+                     refusals → the read set
+  → reconcile        the walk's read set → the distinct contents the scanner
+                     can tell apart; each content read once → engines consensus
   → score            contract v3 (see SCORING.md) — Full/Fast profiles only
   → ScanReport       versioned serde contract (snake_case · raw as base64)
 ```
 
 Engines: rxing (ZXing lineage — TryHarder + AlsoInverted, QR-only feature
-build) and rqrr (quirc lineage — geometry: corners, version, EC, mask, and
-the raw sampled bitstream that feeds the synthetic UEC).
+build; its result points frame the scanner's re-read, `engine::locate`) and
+rqrr (quirc lineage — geometry: corners, version, EC, mask, and the raw
+sampled bitstream of the orientation that verified, which feeds the
+synthetic UEC). Neither decides text: the scanner error-corrects and
+parses the streams itself (`rescue::bitstream`, the one segment parser).
 
 ## Error model
 

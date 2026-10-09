@@ -17,8 +17,11 @@ Machine-readable mirrors — load these directly in tools and agents:
 ## Top level
 
 <ResponseField name="detections" type="Detection[]" required>
-  Decoded symbols. **Empty = no QR found** — a valid result, not an
-  error. Max 16; merged by decoded text across engines/attempts.
+  The distinct contents the scanner can tell apart. **Empty = no QR
+  found** — a valid result, not an error. Every read of every attempt is
+  reconciled: one content is one detection, identified by symbology, raw
+  bytes, FNC1 position and compatible ECI declarations — never by text.
+  Max 16.
 </ResponseField>
 
 <ResponseField name="score" type="Score | null" required>
@@ -51,7 +54,9 @@ Machine-readable mirrors — load these directly in tools and agents:
 <ResponseField name="trace" type="PipelineTrace" required>
   Per-stage execution trace (`pyramid`·`direct`·`enhance`·`deep`·`rescue`)
   — why the scan succeeded or came back empty. `detections_found` counts
-  RAW pre-merge engine hits.
+  the reads the engines delivered, before reconciliation; it includes hits
+  the scanner refuses or holds for confirmation — read `detections`, not
+  the counter.
 </ResponseField>
 
 <ResponseField name="versions" type="Versions" required>
@@ -72,9 +77,17 @@ Machine-readable mirrors — load these directly in tools and agents:
 </ResponseField>
 
 <ResponseField name="content" type="object" required>
-  `text` (decoded string) · `raw` (base64 — the ORIGINAL bytes, the
-  truth) · `charset` (`utf8` | `shift_jis` | `latin1`). The text/charset
-  pair is resolved once over `raw`.
+  One exact reading of the symbol's data. `raw` (base64 — the ORIGINAL
+  bytes, the truth) · `text` (`raw` decoded once) · `charset`, how `text`
+  relates to `raw`: `utf8` · `shift_jis` · `latin1` · `gb18030` (exactly
+  that decoder over all of `raw`), `eci` (decoded under the listed
+  designators), `unknown` — the ONLY lossy value, now and later: `text` is
+  not a complete decoding, use `raw`. Optional keys: `eci` — the ECI
+  designators observed, `[{ "designator", "start" }]` in symbol order
+  (`[]`: an ECI is signalled but could not be located); `fnc1` — `first`
+  (GS1) or `second` (AIM application). Compare contents by identity
+  (symbology, `raw`, `fnc1`, compatible `eci`), never by `text`. Rules:
+  [`spec/01-report.md` § Content](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/01-report.md).
 </ResponseField>
 
 <ResponseField name="payload" type="Payload" required>
@@ -85,8 +98,10 @@ Machine-readable mirrors — load these directly in tools and agents:
 </ResponseField>
 
 <ResponseField name="corners" type="[Point ×4] | null" required>
-  Clockwise from top-left, ORIGINAL-image pixels (sub-pixel). `null` on
-  the rxing-only path (no geometry measured).
+  Clockwise from top-left, ORIGINAL-image pixels (sub-pixel). From rqrr —
+  its decode, or a grid it detected that the scanner error-corrected
+  itself (`engines` may then list `rxing` alone) — or the rescue stage.
+  `null` when only rxing read the symbol (no geometry measured).
 </ResponseField>
 
 <ResponseField name="meta" type="QrMeta" required>
