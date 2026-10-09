@@ -13,6 +13,10 @@ name: npm-publish
 # the eight packages binds this workflow file and the `npm` environment on
 # npmjs.com first (RELEASING.md § Publishing). npm's CLI must be >= 11.5.1,
 # which Node 24 ships, hence node-version 24 in the publish jobs.
+#
+# The publish jobs hold the OIDC token, so they run only pinned code: no
+# dependency installation, no napi, no pnpm. `pack-native` prepares and
+# inspects every native tarball; `publish-native` uploads those very bytes.
 
 on:
   push:
@@ -53,9 +57,10 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.settings.target }}
-      - uses: pnpm/action-setup@v6
+      # pnpm pinned exact (RELEASING.md § Toolchain), by a SHA-pinned action
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
-          version: 10
+          version: 10.34.6
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -86,8 +91,9 @@ jobs:
 
   # The npm packages assembled exactly as they publish, on every run: the
   # per-target dirs napi generates — each given the AGPL LICENSE, since
-  # `napi create-npm-dirs` writes only package.json + README — then the main
-  # tarball and every platform tarball packed and read back.
+  # `napi create-npm-dirs` writes only package.json + README — the main
+  # package pinning every one of them, then every tarball packed once and read
+  # back. The tarballs are the artifact `publish-native` uploads, unchanged.
   pack-native:
     needs: build-native
     runs-on: ubuntu-24.04
@@ -96,15 +102,17 @@ jobs:
         working-directory: crates/qrcode-ai-scanner-node
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
-          version: 10
+          version: 10.34.6
       - uses: actions/setup-node@v7
         with:
           node-version: 22
       - run: pnpm install --frozen-lockfile=false
+      # The native binaries only: build-wasm uploads its package in this run too.
       - uses: actions/download-artifact@v8
         with:
+          pattern: binding-*
           path: crates/qrcode-ai-scanner-node/artifacts
       # napi v3: scaffold the per-platform npm/<triple>/ dirs before artifacts
       - run: pnpm exec napi create-npm-dirs
@@ -115,13 +123,22 @@ jobs:
           for dir in npm/*/; do
             cp LICENSE "$dir"
           done
-      - name: pack + inspect the main tarball and every platform tarball
+      # What `napi pre-publish` writes, with nothing published: every platform
+      # package.json at this version, and the main package's optionalDependencies
+      # pinning every napi target at it (napi 3.7.3: --skip-optional-publish
+      # skips only the uploads; --no-gh-release, no GitHub release).
+      - run: pnpm exec napi pre-publish -t npm --no-gh-release --skip-optional-publish
+      # The release set, packed once and read back: the main package with its
+      # pins (all six, this version) and exactly one platform package per pin.
+      - name: pack + inspect the release set
         working-directory: .
-        run: python3 scripts/package-inspect.py node --platform-dirs crates/qrcode-ai-scanner-node/npm --strict --quiet
+        run: >
+          python3 scripts/package-inspect.py node --platform-dirs crates/qrcode-ai-scanner-node/npm
+          --release-set --strict --quiet --out "$RUNNER_TEMP/npm-release"
       - uses: actions/upload-artifact@v7
         with:
-          name: npm-native-packages
-          path: crates/qrcode-ai-scanner-node/npm
+          name: npm-native-tarballs
+          path: ${{ runner.temp }}/npm-release/archives/*/*.tgz
           if-no-files-found: error
 
   publish-native:
@@ -130,69 +147,85 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     environment: npm
+    # One publish per tag at a time: a dispatch on the tag waits for the
+    # tag-push run instead of racing its registry probes.
+    concurrency:
+      group: publish-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write # npm trusted publishing (OIDC) + automatic provenance
-    defaults:
-      run:
-        working-directory: crates/qrcode-ai-scanner-node
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 10
-      - uses: actions/setup-node@v7
+      # The tag must name the version being published, and the CHANGELOG
+      # must carry its dated section: a forgotten bump otherwise turns the
+      # skip-if-live checks below into a silent non-release.
+      - run: python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet
+      # Node 24 for npm >= 11.5.1: a major line from the SHA-pinned first-party
+      # action, so security releases arrive without a repository change; the
+      # versions are printed below, before anything is uploaded.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
-      # The tag must name the version being published, and the CHANGELOG
-      # must carry its dated section: a forgotten bump otherwise turns the
-      # skip-if-live checks below into a silent non-release.
-      - run: python3 ../../scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet
-      - name: npm >= 11.5.1 (trusted publishing)
+      - name: node + npm versions (npm >= 11.5.1 for trusted publishing)
         run: |
+          node --version
           v=$(npm --version)
+          echo "npm $v"
           if [ "$(printf '%s\n' 11.5.1 "$v" | sort -V | head -n1)" != 11.5.1 ]; then
             echo "::error::npm $v cannot publish through trusted publishing (needs >= 11.5.1)"
             exit 1
           fi
-          echo "npm $v"
-      - run: pnpm install --frozen-lockfile=false
       - uses: actions/download-artifact@v8
         with:
-          name: npm-native-packages
-          path: crates/qrcode-ai-scanner-node/npm
-      # Self-detecting + idempotent: if the platform packages for THIS version are
-      # already on npm (re-run / partial-publish recovery), skip re-publishing them;
-      # otherwise publish fresh. No version-specific flag to remember. The
-      # probes read the public registry directly: no credential involved.
-      - name: detect already-published platform packages
+          name: npm-native-tarballs
+          path: npm-release
+      # The very tarballs pack-native inspected, read back once more before
+      # anything is uploaded (their bytes, no repacking).
+      - name: re-inspect the release set about to be uploaded
+        run: python3 scripts/package-inspect.py archive npm-release/*/*.tgz --release-set --strict --quiet
+      # Every platform package missing at this version is uploaded, and one
+      # that cannot be stops the job before the main package. Then every pin
+      # must resolve on the registry; only then does the main package go up.
+      # A re-run uploads exactly what is still missing. The probes read the
+      # public registry: no credential involved.
+      - name: publish the platform packages missing at this version, then the main package
         run: |
-          VER=$(node -p "require('./package.json').version")
-          if curl -fsS -o /dev/null "https://registry.npmjs.org/@supernovae-st%2fqrcode-ai-scanner-darwin-arm64/$VER"; then
-            echo "platform packages already on npm @$VER - will skip optional publish"
-            echo "SKIP_OPTIONAL=--skip-optional-publish" >> "$GITHUB_ENV"
-          else
-            echo "fresh release @$VER - platform packages will publish"
-            echo "SKIP_OPTIONAL=" >> "$GITHUB_ENV"
+          set -euo pipefail
+          field() { tar -xzOf "$1" package/package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).$2"; }
+          status() { curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${1/\//%2f}/$2"; }
+          publish_missing() {
+            local name version
+            name=$(field "$1" name)
+            version=$(field "$1" version)
+            case "$(status "$name" "$version")" in
+              200) echo "$name@$version already on npm - skipping" ;;
+              404) echo "publishing $name@$version"; npm publish "$1" --access public ;;
+              *) echo "::error::registry probe for $name@$version failed"; exit 1 ;;
+            esac
+          }
+          main=$(echo npm-release/node-main/*.tgz)
+          for tgz in npm-release/*/*.tgz; do
+            if [ "$tgz" != "$main" ]; then publish_missing "$tgz"; fi
+          done
+          pins=$(tar -xzOf "$main" package/package.json \
+            | node -p "Object.entries(JSON.parse(require('fs').readFileSync(0, 'utf8')).optionalDependencies || {}).map(([n, v]) => n + '@' + v).join('\n')")
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            absent=""
+            for pin in $pins; do
+              if [ "$(status "${pin%@*}" "${pin##*@}")" != 200 ]; then absent="$absent $pin"; fi
+            done
+            if [ -z "$absent" ]; then break; fi
+            echo "not resolvable yet (attempt $attempt):$absent"
+            sleep 10
+          done
+          if [ -n "$absent" ]; then
+            echo "::error::the main package would pin versions the registry does not serve:$absent"
+            exit 1
           fi
-      # pre-publish runs `npm publish` in every npm/<target>/ dir and pins
-      # them in the main package's optionalDependencies.
-      - run: pnpm exec napi pre-publish -t npm --no-gh-release ${SKIP_OPTIONAL:+"$SKIP_OPTIONAL"}
-      # pre-publish rewrote package.json: read the tarballs back once more
-      - name: re-inspect the tarballs about to publish
-        working-directory: .
-        run: python3 scripts/package-inspect.py node --platform-dirs crates/qrcode-ai-scanner-node/npm --strict --quiet
-      # Idempotent: skip the main package if this version is already on npm
-      - name: publish node main (skip if version already on npm)
-        run: |
-          VER=$(node -p "require('./package.json').version")
-          if curl -fsS -o /dev/null "https://registry.npmjs.org/@supernovae-st%2fqrcode-ai-scanner/$VER"; then
-            echo "already published @$VER - skipping"
-          else
-            npm publish --access public
-          fi
+          publish_missing "$main"
 
   build-wasm:
     runs-on: ubuntu-24.04
@@ -212,9 +245,15 @@ jobs:
           tool: wasm-pack@0.13.1
       # apt's binaryen is too old for Rust >=1.87 wasm output (the same
       # reason build-wasm.sh refuses wasm-pack's bundled wasm-opt) - pin the
-      # release proven locally
-      - run: |
-          curl -sSfL https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz | tar xz -C "$RUNNER_TEMP"
+      # release proven locally, and check the download against its digest
+      # (the .sha256 binaryen publishes with the release)
+      - name: binaryen version_130, sha256-verified
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/binaryen-version_130-x86_64-linux.tar.gz"
+          curl -sSfL -o "$archive" https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz
+          echo "0a18362361ad05465118cd8eeb72edaeec89de6894bc283576ef4e07aa3babcc  $archive" | sha256sum -c -
+          tar xzf "$archive" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/binaryen-version_130/bin" >> "$GITHUB_PATH"
       # build · wasm-opt · patch · type sync · test.mjs
       - run: ./scripts/build-wasm.sh
@@ -232,25 +271,29 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     environment: npm
+    concurrency:
+      group: publish-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write # npm trusted publishing (OIDC) + automatic provenance
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - run: python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
-      - run: python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet
-      - name: npm >= 11.5.1 (trusted publishing)
+      - name: node + npm versions (npm >= 11.5.1 for trusted publishing)
         run: |
+          node --version
           v=$(npm --version)
+          echo "npm $v"
           if [ "$(printf '%s\n' 11.5.1 "$v" | sort -V | head -n1)" != 11.5.1 ]; then
             echo "::error::npm $v cannot publish through trusted publishing (needs >= 11.5.1)"
             exit 1
           fi
-          echo "npm $v"
       # the very pkg/ build-wasm built, smoke-tested and inspected
       - uses: actions/download-artifact@v8
         with:
