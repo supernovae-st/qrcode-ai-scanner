@@ -14,9 +14,14 @@ name: npm-publish
 # npmjs.com first (RELEASING.md § Publishing). npm's CLI must be >= 11.5.1,
 # which Node 24 ships, hence node-version 24 in the publish jobs.
 #
-# The publish jobs hold the OIDC token, so they run only pinned code: no
-# dependency installation, no napi, no pnpm. `pack-native` prepares and
-# inspects every native tarball; `publish-native` uploads those very bytes.
+# The publish jobs hold the OIDC token, so they install nothing and run no
+# napi, no pnpm and no package script. `pack-native` and `build-wasm` pack
+# and inspect every tarball; the publish jobs read those very files back and
+# upload them with `npm publish <tarball> --ignore-scripts`: npm repacks
+# nothing and runs no lifecycle script. Every action they use is pinned by
+# commit; setup-node's Node 24 line is the one relaxation (RELEASING.md §
+# Publishing). The build jobs whose outputs ship pin their third-party
+# actions by commit and restore no build cache on a tag.
 
 on:
   push:
@@ -53,7 +58,7 @@ jobs:
         working-directory: crates/qrcode-ai-scanner-node
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-10
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.settings.target }}
@@ -64,20 +69,23 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-      - uses: Swatinem/rust-cache@v2
+      # No cache on a tag: the binaries that ship build from the tag alone,
+      # never from a cache a branch run wrote.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
       # The one action here still declaring node20 (no node24 release yet):
       # since the runner dropped Node 20 it runs on Node 24 regardless.
-      - uses: mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         if: ${{ contains(matrix.settings.target, 'musl') }}
         with:
           version: 0.14.1
       - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         if: ${{ contains(matrix.settings.target, 'musl') }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
-          tool: cargo-zigbuild
+          tool: cargo-zigbuild@0.23.4
       - run: pnpm install --frozen-lockfile=false
       # `-- --locked`: napi hands what follows `--` to cargo build. --no-js:
       # the committed native.js is what ships (it reads its own version);
@@ -156,7 +164,9 @@ jobs:
       contents: read
       id-token: write # npm trusted publishing (OIDC) + automatic provenance
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # The tag must name the version being published, and the CHANGELOG
       # must carry its dated section: a forgotten bump otherwise turns the
       # skip-if-live checks below into a silent non-release.
@@ -178,35 +188,55 @@ jobs:
             echo "::error::npm $v cannot publish through trusted publishing (needs >= 11.5.1)"
             exit 1
           fi
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: npm-native-tarballs
           path: npm-release
       # The very tarballs pack-native inspected, read back once more before
-      # anything is uploaded (their bytes, no repacking).
+      # anything is uploaded (their bytes, no repacking): the committed
+      # loader and manifest, no install script, the main package and one
+      # platform package per pin, nothing else.
       - name: re-inspect the release set about to be uploaded
         run: python3 scripts/package-inspect.py archive npm-release/*/*.tgz --release-set --strict --quiet
       # Every platform package missing at this version is uploaded, and one
       # that cannot be stops the job before the main package. Then every pin
       # must resolve on the registry; only then does the main package go up.
-      # A re-run uploads exactly what is still missing. The probes read the
-      # public registry: no credential involved.
+      # A re-run uploads exactly what is still missing; a version the probe
+      # still missed but npm calls "previously published" is live already.
+      # The probes read the public registry: no credential involved.
       - name: publish the platform packages missing at this version, then the main package
         run: |
           set -euo pipefail
           field() { tar -xzOf "$1" package/package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).$2"; }
           status() { curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${1/\//%2f}/$2"; }
           publish_missing() {
-            local name version
-            name=$(field "$1" name)
-            version=$(field "$1" version)
+            local tgz=$1 name version out
+            name=$(field "$tgz" name)
+            version=$(field "$tgz" version)
             case "$(status "$name" "$version")" in
               200) echo "$name@$version already on npm - skipping" ;;
-              404) echo "publishing $name@$version"; npm publish "$1" --access public ;;
+              404)
+                echo "publishing $name@$version"
+                if out=$(npm publish "$tgz" --access public --ignore-scripts 2>&1); then
+                  echo "$out"
+                else
+                  echo "$out"
+                  grep -q -e EPUBLISHCONFLICT -e 'previously published' <<<"$out" || exit 1
+                  echo "$name@$version is live already (previously published) - continuing"
+                fi
+                ;;
               *) echo "::error::registry probe for $name@$version failed"; exit 1 ;;
             esac
           }
-          main=$(echo npm-release/node-main/*.tgz)
+          # The main package by its name, never by its directory: exactly one.
+          main=""
+          for tgz in npm-release/*/*.tgz; do
+            if [ "$(field "$tgz" name)" = "@supernovae-st/qrcode-ai-scanner" ]; then
+              if [ -n "$main" ]; then echo "::error::two main package tarballs: $main, $tgz"; exit 1; fi
+              main=$tgz
+            fi
+          done
+          if [ -z "$main" ]; then echo "::error::no main package tarball"; exit 1; fi
           for tgz in npm-release/*/*.tgz; do
             if [ "$tgz" != "$main" ]; then publish_missing "$tgz"; fi
           done
@@ -231,7 +261,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-10
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: wasm32-unknown-unknown
@@ -240,7 +270,7 @@ jobs:
           node-version: 22
       # wasm-pack pinned exact, SHA-verified by install-action: the archived
       # rustwasm installer script it replaces silently served v0.13.1.
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
           tool: wasm-pack@0.13.1
       # apt's binaryen is too old for Rust >=1.87 wasm output (the same
@@ -257,12 +287,14 @@ jobs:
           echo "$RUNNER_TEMP/binaryen-version_130/bin" >> "$GITHUB_PATH"
       # build · wasm-opt · patch · type sync · test.mjs
       - run: ./scripts/build-wasm.sh
+      # The tarball packed once (no lifecycle script) and read back; it is
+      # the artifact publish-wasm uploads, unchanged.
       - name: pack + inspect the wasm tarball
-        run: python3 scripts/package-inspect.py wasm --no-build --strict --quiet
+        run: python3 scripts/package-inspect.py wasm --no-build --strict --quiet --out "$RUNNER_TEMP/npm-wasm"
       - uses: actions/upload-artifact@v7
         with:
-          name: npm-wasm-package
-          path: crates/qrcode-ai-scanner-wasm/pkg
+          name: npm-wasm-tarball
+          path: ${{ runner.temp }}/npm-wasm/archives/wasm/*.tgz
           if-no-files-found: error
 
   publish-wasm:
@@ -278,7 +310,9 @@ jobs:
       contents: read
       id-token: write # npm trusted publishing (OIDC) + automatic provenance
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -294,18 +328,43 @@ jobs:
             echo "::error::npm $v cannot publish through trusted publishing (needs >= 11.5.1)"
             exit 1
           fi
-      # the very pkg/ build-wasm built, smoke-tested and inspected
-      - uses: actions/download-artifact@v8
+      # the very tarball build-wasm packed, smoke-tested and inspected
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: npm-wasm-package
-          path: wasm-pkg
-      # idempotent: skip publish if this version is already on npm (safe re-runs)
-      - name: publish wasm (skip if version already on npm)
-        working-directory: wasm-pkg
+          name: npm-wasm-tarball
+          path: npm-wasm
+      - name: re-inspect the wasm tarball about to be uploaded
+        run: python3 scripts/package-inspect.py archive npm-wasm/*.tgz --strict --quiet
+      # Idempotent: a version already on npm is skipped (safe re-runs), and
+      # one npm calls "previously published" is live already.
+      - name: publish the wasm tarball (skip if this version is on npm)
         run: |
-          VER=$(node -p "require('./package.json').version")
-          if curl -fsS -o /dev/null "https://registry.npmjs.org/@supernovae-st%2fqrcode-ai-scanner-wasm/$VER"; then
-            echo "already published @$VER - skipping"
-          else
-            npm publish --access public
+          set -euo pipefail
+          shopt -s nullglob
+          tarballs=(npm-wasm/*.tgz)
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one wasm tarball, found: ${tarballs[*]}"
+            exit 1
           fi
+          tgz=${tarballs[0]}
+          field() { tar -xzOf "$tgz" package/package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).$1"; }
+          name=$(field name)
+          version=$(field version)
+          if [ "$name" != "@supernovae-st/qrcode-ai-scanner-wasm" ]; then
+            echo "::error::$tgz is $name, not the wasm package"
+            exit 1
+          fi
+          case "$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${name/\//%2f}/$version")" in
+            200) echo "$name@$version already on npm - skipping" ;;
+            404)
+              echo "publishing $name@$version"
+              if out=$(npm publish "$tgz" --access public --ignore-scripts 2>&1); then
+                echo "$out"
+              else
+                echo "$out"
+                grep -q -e EPUBLISHCONFLICT -e 'previously published' <<<"$out" || exit 1
+                echo "$name@$version is live already (previously published) - continuing"
+              fi
+              ;;
+            *) echo "::error::registry probe for $name@$version failed"; exit 1 ;;
+          esac

@@ -693,9 +693,10 @@ MUTATIONS = (
     ("node versions not printed", "npm-publish.yml", PRINT_STEP + "          echo \"npm $v\"\n"
      "          if [ \"$(printf '%s\\n' 11.5.1 \"$v\" | sort -V | head -n1)\" != 11.5.1 ]; then\n"
      "            echo \"::error::npm $v cannot publish through trusted publishing (needs >= 11.5.1)\"\n"
-     "            exit 1\n          fi\n      - uses: actions/download-artifact@v8\n        with:\n"
-     "          name: npm-native-tarballs", "      - uses: actions/download-artifact@v8\n        with:\n"
-     "          name: npm-native-tarballs", 1, "[versions-printed]"),
+     "            exit 1\n          fi\n      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"
+     " # v8.0.2\n        with:\n          name: npm-native-tarballs", "      - uses: actions/download-artifact@"
+     "9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2\n        with:\n          name: npm-native-tarballs", 1,
+     "[versions-printed]"),
     ("versions gate removed", "mobile.yml", "      - run: python3 scripts/package-inspect.py versions --tag "
      "\"$GITHUB_REF\" --strict --quiet\n      - uses: actions/download-artifact@v8", "      - uses: "
      "actions/download-artifact@v8", 1, "mobile.yml › ios-release [gate]"),

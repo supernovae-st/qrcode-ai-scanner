@@ -631,14 +631,18 @@ def check_npm_release_set(host: Host) -> None:
     if not art.check("exactly one main package", len(mains) == 1, f"{len(mains)} found"):
         return
     pins = mains[0].package.get("optionalDependencies") or {}
-    platforms = {a.package["name"]: a.package.get("version") for a in npm
-                 if a.package["name"].startswith(NODE_NAME + "-") and a.package["name"] != WASM_NAME}
-    problems = [f"no {dep}@{version} platform package" for dep, version in sorted(pins.items())
-                if platforms.get(dep) != version]
-    problems += [f"{dep} is not pinned by the main package" for dep in sorted(set(platforms) - set(pins))]
+    # publish-native uploads every tarball of the set: anything that is not
+    # the main package or one of its pins (the wasm package, a second copy
+    # of a platform package) has no place in it.
+    names = [a.package["name"] for a in npm if a.package["name"] != NODE_NAME]
+    platforms = {a.package["name"]: a.package.get("version") for a in npm if a.package["name"] != NODE_NAME}
+    problems = [f"{name} appears {names.count(name)} times" for name in sorted(set(names)) if names.count(name) > 1]
+    problems += [f"no {dep}@{version} platform package" for dep, version in sorted(pins.items())
+                 if platforms.get(dep) != version]
+    problems += [f"{dep} is neither the main package nor pinned by it" for dep in sorted(set(platforms) - set(pins))]
     art.listing = sorted(f"{dep}@{version}" for dep, version in platforms.items())
-    art.check(f"one platform package per pin ({len(pins)}), at the pinned version", bool(pins) and not problems,
-              "; ".join(problems))
+    art.check(f"one platform package per pin ({len(pins)}), at the pinned version, and nothing else",
+              bool(pins) and not problems, "; ".join(problems))
 
 
 NAPI_SUFFIX = {
@@ -1527,6 +1531,11 @@ def self_test() -> int:
         judge("release set: main + one tarball per pin", [main, *platforms], PASS, release_set=True)
         judge("release set: a pinned platform tarball missing", [main, *platforms[:-1]], FAIL,
               napi_suffixes()[-1], release_set=True)
+        judge("release set + the wasm tarball", [main, *platforms, npm("set-wasm", _npm_wasm(version))], FAIL,
+              f"{WASM_NAME} is neither the main package nor pinned by it", release_set=True)
+        twin = _npm_platform(version, napi_suffixes()[0]) | {"README.md": b"# a second build\n"}
+        judge("release set + a second copy of a platform package", [main, *platforms, npm("set-twin", twin)], FAIL,
+              f"{NODE_NAME}-{napi_suffixes()[0]} appears 2 times", release_set=True)
 
     for failure in failures:
         print(f"SELF-TEST FAILED · {failure}", file=sys.stderr)
