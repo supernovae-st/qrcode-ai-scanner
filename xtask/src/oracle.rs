@@ -9,30 +9,37 @@
 //!
 //! The unit is (symbology, text). A zxing row expects `{(qr_code, .txt)}`:
 //! the exact file bytes (UTF-8, ISO-8859-1 fallback), never trimmed.
-//! `corpus.toml` truth is text only, so its unit accepts any symbology; an
-//! entry without `expected` is a negative sample unless it is a frontier
-//! pin (`expect = "fail"`). Gallery and frontier rows have no truth: they
-//! are `unlabelled_*` and never enter a rate denominator. Every report must
+//! `corpus.toml` truth is text only, so its unit accepts any symbology —
+//! but, like every unit, it is satisfied by ONE observed group: the same
+//! text under a second symbology is extra output. An entry without
+//! `expected` is a negative sample unless it is a frontier pin
+//! (`expect = "fail"`). Gallery and frontier rows have no truth: they are
+//! `unlabelled_*` and never enter a rate denominator. Every report must
 //! also meet the grouping contract of `spec/01-report.md`: at most 16
 //! groups, QR family first, no duplicate (symbology, text).
 //!
 //! [`DISPOSITIONS`] holds the judgments a truth file cannot express,
-//! pinned by image AND truth sha256 plus the verdict they were written
-//! against: a changed verdict makes an entry stale and fails the run, so
-//! the table is edited deliberately. Expected values are never relabelled
-//! to match current output.
+//! pinned by image AND truth sha256 and by exactly what they excuse: a
+//! `known_wrong` entry pins the misread's output signature, a
+//! `truth_incomplete` entry pins the unnamed symbol it allows next to the
+//! truth (any other output is still judged). An output the pin does not
+//! describe makes the entry stale and fails the run, so the table is edited
+//! deliberately. Expected values are never relabelled to match current
+//! output.
 //!
-//! Exit 0 = pass. Exit 1 = any `wrong`/`extra`/`mixed`/`false_positive`
-//! (a `known_wrong` disposition still counts), any `error`, any contract
-//! or integrity failure, a stale disposition, or a configured corpus root
-//! (`--corpus-root`, `QRSCAN_EXTERNAL_CORPUS`) that does not exist. Exit 2
-//! = usage error, unreadable committed input or unwritable receipt. Exit 3
-//! = no corpus at the default root: `SKIPPED (not a pass)`. `missed` and
-//! `partial` lower the exact rate without blocking.
+//! Exit codes (the family `external.rs` shares): 0 pass · 1 gate failure —
+//! any `wrong`/`extra`/`mixed`/`false_positive` (a `known_wrong` disposition
+//! still counts), any `error`, contract or integrity failure, or a stale
+//! disposition · 2 usage or configuration error — bad flags, an unreadable
+//! committed input, a relative or absent configured corpus root
+//! (`--corpus-root`, `QRSCAN_EXTERNAL_CORPUS`), an unwritable receipt · 3
+//! skipped — no corpus at the default root: `SKIPPED (not a pass)`.
+//! `missed` and `partial` lower the exact rate without blocking.
 //!
 //! Scans are budget-free with scoring off ([`external::scanner`]), so no
-//! verdict depends on host load. The `--json` receipt holds no timing and
-//! no absolute path, and payloads only as text sha256 + byte length +
+//! verdict depends on host load. The `--json` receipt names the scanned
+//! tree (git SHA and clean/dirty, read at run time), holds no timing and no
+//! absolute path, and payloads only as text sha256 + byte length +
 //! engines: two runs over the same inputs are byte-identical.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -148,7 +155,9 @@ pub(crate) struct Unit {
 
 /// The strict verdict for one image. `observed` is the report's complete
 /// (symbology, text) list: an image is `exact` only when every expected
-/// unit is found AND nothing else came back.
+/// unit is found AND nothing else came back. Matching is one-to-one: a
+/// unit consumes at most one observed group, so a text-only unit met by
+/// the same text under two symbologies leaves one group over — `extra`.
 pub(crate) fn judge(expected: &[Unit], observed: &[(Symbology, &str)]) -> Outcome {
     let hit =
         |e: &Unit, o: &(Symbology, &str)| e.text == o.1 && e.symbology.is_none_or(|s| s == o.0);
@@ -162,11 +171,23 @@ pub(crate) fn judge(expected: &[Unit], observed: &[(Symbology, &str)]) -> Outcom
     if observed.is_empty() {
         return Outcome::Missed;
     }
-    let found = expected
+    // Symbology-pinned units choose first: a text-only unit can take any
+    // group a pinned one leaves, so this greedy order finds a maximum
+    // matching (units only compete within one text).
+    let pinned_first = expected
         .iter()
-        .filter(|e| observed.iter().any(|o| hit(e, o)))
-        .count();
-    let extra = observed.iter().any(|o| !expected.iter().any(|e| hit(e, o)));
+        .filter(|e| e.symbology.is_some())
+        .chain(expected.iter().filter(|e| e.symbology.is_none()));
+    let mut consumed = vec![false; observed.len()];
+    let mut found = 0;
+    for unit in pinned_first {
+        let free = (0..observed.len()).find(|&i| !consumed[i] && hit(unit, &observed[i]));
+        if let Some(i) = free {
+            consumed[i] = true;
+            found += 1;
+        }
+    }
+    let extra = consumed.contains(&false);
     match (found, found == expected.len(), extra) {
         (0, _, _) => Outcome::Wrong,
         (_, true, false) => Outcome::Exact,
@@ -208,31 +229,38 @@ pub(crate) fn contract_violations(observed: &[(Symbology, &str)]) -> Vec<String>
 
 // ----------------------------------------------------------- dispositions
 
-/// What a disposition says about its row.
+/// What a disposition says about its row — and exactly what it excuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DispositionKind {
     /// A confident decode the truth contradicts: stays `wrong` and blocks
-    /// until fixed or honestly refused.
-    KnownWrong,
-    /// The truth names fewer symbols than the image holds: `ambiguous` —
-    /// never `exact`, never `wrong` — until the truth is amended with
-    /// independent confirmation.
-    TruthIncomplete,
+    /// until fixed or honestly refused. `signature` pins the misread
+    /// ([`observed_signature`] at pin time): any other output — even
+    /// another wrong text — makes the entry stale.
+    KnownWrong { signature: &'static str },
+    /// The truth names fewer symbols than the image holds. `excused` pins
+    /// the unnamed symbol as (symbology, text sha256): it may appear once
+    /// beside the truth, anything else is judged as usual (so a new wrong
+    /// output is still `extra`). Reading only truth and excused units is
+    /// `ambiguous` — never `exact`, never `wrong` — until the truth is
+    /// amended with independent confirmation.
+    TruthIncomplete { excused: (Symbology, &'static str) },
 }
 
 impl DispositionKind {
     fn as_str(self) -> &'static str {
         match self {
-            Self::KnownWrong => "known_wrong",
-            Self::TruthIncomplete => "truth_incomplete",
+            Self::KnownWrong { .. } => "known_wrong",
+            Self::TruthIncomplete { .. } => "truth_incomplete",
         }
     }
 
-    /// The outcome a holding disposition reports.
-    fn outcome(self) -> Outcome {
+    /// The pin in canonical text, for the table hash.
+    fn pin(self) -> String {
         match self {
-            Self::KnownWrong => Outcome::Wrong,
-            Self::TruthIncomplete => Outcome::Ambiguous,
+            Self::KnownWrong { signature } => format!("signature={signature}"),
+            Self::TruthIncomplete {
+                excused: (symbology, text_sha256),
+            } => format!("excused={}:{text_sha256}", wire(&symbology)),
         }
     }
 }
@@ -250,13 +278,17 @@ pub(crate) struct Disposition {
     pub(crate) note: &'static str,
 }
 
-/// Pinned dispositions; hashes copied from the committed manifest.
+/// Pinned dispositions; hashes copied from the committed manifest, pins
+/// from the accepted receipt of the base scan.
 pub(crate) const DISPOSITIONS: [Disposition; 2] = [
     Disposition {
         path: "zxing-blackbox/qrcode-2/13.png",
         image_sha256: "a8d498d6d2d6a3e27e24fd75ed023cd5b8b6b42cb4996674e88e555d68855ec1",
         truth_sha256: "c19d2dcb13469aae263a41cd73add68c45e086223a04c41368128c47143c0e5a",
-        kind: DispositionKind::KnownWrong,
+        // [(qr_code, sha256 of the 72-byte "…photography…" misread)]
+        kind: DispositionKind::KnownWrong {
+            signature: "1aae7f6958dc301435f86f4de43c5e9dc4a62f6885d6f83dbdab39b35d96cb55",
+        },
         verdict: Outcome::Wrong,
         note: "one letter off: the decode reads \"photography\" where the truth reads \"photograph\"",
     },
@@ -264,7 +296,13 @@ pub(crate) const DISPOSITIONS: [Disposition; 2] = [
         path: "zxing-blackbox/qrcode-2/16.png",
         image_sha256: "24fef8babbb2862f2f37fe05b74b45daaa87f1b0c5d7610c0f40eb63becfe9e1",
         truth_sha256: "c93aaefb0b894232954b026da265394fedffd76a1ac251704ff83095b3b183be",
-        kind: DispositionKind::TruthIncomplete,
+        // the inner symbol: its 57-byte "[内側QRコード]…" payload
+        kind: DispositionKind::TruthIncomplete {
+            excused: (
+                Symbology::QrCode,
+                "dd992cf99bdb39989fb2b58d9d6ed0ae26c5b6a891982402985a4fcad1c8ee21",
+            ),
+        },
         verdict: Outcome::Extra,
         note: "double QR (one symbol nested in another): the truth names the outer one only",
     },
@@ -273,9 +311,10 @@ pub(crate) const DISPOSITIONS: [Disposition; 2] = [
 /// How a disposition met its row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispositionState {
-    /// Hashes and verdict as pinned — the disposition's outcome applies.
+    /// Hashes and pin as written — the disposition's outcome applies.
     Holds,
-    /// Hashes as pinned, verdict changed — edit the table deliberately.
+    /// Hashes as pinned, but the output is not what the pin excuses —
+    /// edit the table deliberately.
     Stale,
     /// The row's image or truth sha256 differs from the pinned one.
     Void,
@@ -302,35 +341,97 @@ struct DispositionCheck {
     observed: Option<Outcome>,
 }
 
-/// Final outcome of a judged row under its disposition.
-fn settle(
-    verdict: Outcome,
-    disposition: &Disposition,
-    image_sha256: &str,
-    truth_sha256: &str,
-) -> (Outcome, DispositionState) {
-    if disposition.image_sha256 != image_sha256 || disposition.truth_sha256 != truth_sha256 {
-        (verdict, DispositionState::Void)
-    } else if verdict == disposition.verdict {
-        (disposition.kind.outcome(), DispositionState::Holds)
-    } else {
-        (verdict, DispositionState::Stale)
+/// sha256 over the ordered `symbology<TAB>text_sha256` lines of a report —
+/// the output a `known_wrong` disposition pins.
+fn observed_signature(observed: &[(Symbology, &str)]) -> String {
+    let mut lines = String::new();
+    for (symbology, text) in observed {
+        writeln!(
+            lines,
+            "{}\t{}",
+            wire(symbology),
+            external::sha256_bytes(text.as_bytes())
+        )
+        .expect("write to string");
+    }
+    external::sha256_bytes(lines.as_bytes())
+}
+
+/// A truth-incomplete row judged against its truth plus the excused unit,
+/// which may stand in for one observed group. Truth and excused units
+/// only → `ambiguous`; nothing at all → `missed`; any other output keeps
+/// its strict verdict (`extra`, `mixed`, `wrong`).
+fn excused_outcome(
+    expected: &[Unit],
+    observed: &[(Symbology, &str)],
+    (symbology, text_sha256): (Symbology, &str),
+) -> Outcome {
+    if observed.is_empty() {
+        return Outcome::Missed;
+    }
+    let mut rest = observed.to_vec();
+    if let Some(at) = rest
+        .iter()
+        .position(|(s, t)| *s == symbology && external::sha256_bytes(t.as_bytes()) == text_sha256)
+    {
+        rest.remove(at);
+    }
+    match judge(expected, &rest) {
+        Outcome::Exact | Outcome::Missed => Outcome::Ambiguous,
+        other => other,
     }
 }
 
-/// sha256 of the table's canonical text — a receipt names the exact table
-/// its verdicts were settled under.
+/// Final outcome and state of a judged row (raw `verdict`) under its
+/// disposition.
+fn settle(
+    row: &Judged,
+    verdict: Outcome,
+    disposition: &Disposition,
+) -> (Outcome, DispositionState) {
+    let truth_sha256 = row.truth_sha256.as_deref().unwrap_or_default();
+    if disposition.image_sha256 != row.image_sha256 || disposition.truth_sha256 != truth_sha256 {
+        return (verdict, DispositionState::Void);
+    }
+    let observed = units_of(&row.scan);
+    let pinned_verdict = verdict == disposition.verdict;
+    match disposition.kind {
+        DispositionKind::KnownWrong { signature } => {
+            let holds = pinned_verdict && observed_signature(&observed) == signature;
+            let state = if holds {
+                DispositionState::Holds
+            } else {
+                DispositionState::Stale
+            };
+            (verdict, state)
+        }
+        DispositionKind::TruthIncomplete { excused } => {
+            let expected = row.expected.as_deref().unwrap_or_default();
+            let outcome = excused_outcome(expected, &observed, excused);
+            let state = if pinned_verdict && outcome == Outcome::Ambiguous {
+                DispositionState::Holds
+            } else {
+                DispositionState::Stale
+            };
+            (outcome, state)
+        }
+    }
+}
+
+/// sha256 of the table's canonical text, pins included — a receipt names
+/// the exact table its verdicts were settled under.
 fn dispositions_sha256() -> String {
     let mut canon = String::new();
     for d in &DISPOSITIONS {
         writeln!(
             canon,
-            "{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}",
             d.path,
             d.image_sha256,
             d.truth_sha256,
             d.kind.as_str(),
-            d.verdict.as_str()
+            d.verdict.as_str(),
+            d.kind.pin()
         )
         .expect("write to string");
     }
@@ -353,8 +454,7 @@ fn apply_dispositions(rows: &mut [Judged]) -> Vec<DispositionCheck> {
             let Some(verdict) = row.verdict else {
                 return unevaluated;
             };
-            let truth_sha256 = row.truth_sha256.as_deref().unwrap_or_default();
-            let (outcome, state) = settle(verdict, &disposition, &row.image_sha256, truth_sha256);
+            let (outcome, state) = settle(row, verdict, &disposition);
             row.outcome = outcome;
             row.disposition = Some((disposition.kind, state));
             DispositionCheck {
@@ -457,16 +557,25 @@ struct Judged {
     contract: Vec<String>,
 }
 
+/// The (symbology, text) groups of a scan, in report order — none for a
+/// failed scan.
+fn units_of(scan: &Scan) -> Vec<(Symbology, &str)> {
+    match scan {
+        Scan::Report { detections, .. } => detections
+            .iter()
+            .map(|d| (d.symbology, d.text.as_str()))
+            .collect(),
+        Scan::Failed { .. } => Vec::new(),
+    }
+}
+
 /// Raw verdict (labelled rows), outcome before dispositions, and the
 /// grouping-contract violations of one scan.
 fn verdict_of(expected: Option<&[Unit]>, scan: &Scan) -> (Option<Outcome>, Outcome, Vec<String>) {
-    let Scan::Report { detections, .. } = scan else {
+    if matches!(scan, Scan::Failed { .. }) {
         return (None, Outcome::Error, Vec::new());
-    };
-    let observed: Vec<(Symbology, &str)> = detections
-        .iter()
-        .map(|d| (d.symbology, d.text.as_str()))
-        .collect();
+    }
+    let observed = units_of(scan);
     let contract = contract_violations(&observed);
     match expected {
         Some(units) => {
@@ -541,7 +650,14 @@ fn evaluate_external(
     scanner: &Scanner,
     integrity: &mut Integrity,
 ) -> Vec<Judged> {
-    let on_disk: BTreeSet<String> = external::walk_sorted(dir).into_iter().collect();
+    let on_disk: BTreeSet<String> = match external::walk_sorted(dir) {
+        Ok(paths) => paths.into_iter().collect(),
+        Err(e) => {
+            // an unwalkable corpus cannot be verified: a gate failure
+            integrity.problems.push(format!("corpus walk failed: {e}"));
+            return Vec::new();
+        }
+    };
     let manifested: BTreeSet<&str> = pinned.iter().map(|row| row.path.as_str()).collect();
     for path in on_disk.iter().filter(|p| !manifested.contains(p.as_str())) {
         integrity.problems.push(format!(
@@ -730,7 +846,7 @@ fn blockers(integrity: &Integrity, rows: &[Judged], checks: &[DispositionCheck])
         if row.outcome.is_wrong_class() {
             let known_wrong = matches!(
                 row.disposition,
-                Some((DispositionKind::KnownWrong, DispositionState::Holds))
+                Some((DispositionKind::KnownWrong { .. }, DispositionState::Holds))
             );
             let label = if known_wrong {
                 " [known_wrong: counted wrong until fixed or honestly refused]"
@@ -948,6 +1064,43 @@ struct RowReceipt {
     contract: Vec<String>,
 }
 
+/// The scanned tree, read from git at run time — strings, `unknown` when
+/// git cannot tell (never fatal).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SourceEcho {
+    git_sha: String,
+    /// `clean` · `dirty` (uncommitted or untracked changes) · `unknown`.
+    tree: String,
+}
+
+fn git_stdout(repo: &Path, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn source_identity(repo: &Path) -> SourceEcho {
+    let git_sha = git_stdout(repo, &["rev-parse", "HEAD"])
+        .map(|sha| sha.trim().to_owned())
+        .filter(|sha| !sha.is_empty())
+        .unwrap_or_else(|| String::from("unknown"));
+    let tree = match git_stdout(repo, &["status", "--porcelain"]) {
+        Some(status) if status.trim().is_empty() => "clean",
+        Some(_) => "dirty",
+        None => "unknown",
+    };
+    SourceEcho {
+        git_sha,
+        tree: tree.to_owned(),
+    }
+}
+
 #[derive(Serialize)]
 struct Receipt {
     oracle: &'static str,
@@ -955,6 +1108,7 @@ struct Receipt {
     exit_code: i32,
     reason: Option<&'static str>,
     versions: Versions,
+    source: SourceEcho,
     scan: ScanEcho,
     inputs: Inputs,
     integrity: Integrity,
@@ -1220,13 +1374,19 @@ fn emit_receipt(path: Option<&Path>, receipt: &Receipt) {
 
 /// The receipt as known before any scan — identity, inputs, integrity
 /// denominators — and `skipped` until [`fill_receipt`] records a run.
-fn new_receipt(manifest_text: &str, vendored_text: &str, integrity: Integrity) -> Receipt {
+fn new_receipt(
+    source: SourceEcho,
+    manifest_text: &str,
+    vendored_text: &str,
+    integrity: Integrity,
+) -> Receipt {
     Receipt {
         oracle: RULES_ID,
         status: "skipped",
         exit_code: 3,
         reason: Some("no external corpus at the default root"),
         versions: Versions::current(),
+        source,
         scan: SCAN_ECHO,
         inputs: Inputs {
             manifest: FileEcho {
@@ -1250,8 +1410,8 @@ fn new_receipt(manifest_text: &str, vendored_text: &str, integrity: Integrity) -
 
 /// The corpus directory to measure, or the verdict line of a run that has
 /// none, with the receipt settled to match: the absent default is a skip
-/// (exit 3, never a pass); an absent configured root is a failure (exit 1)
-/// — a mistyped override must not read as a skip either.
+/// (exit 3, never a pass); an absent configured root is a configuration
+/// error (exit 2) — a mistyped override must not read as a skip either.
 fn measurable(root: CorpusRoot, receipt: &mut Receipt) -> Result<PathBuf, String> {
     match root {
         CorpusRoot::Present(dir) => Ok(dir),
@@ -1260,15 +1420,15 @@ fn measurable(root: CorpusRoot, receipt: &mut Receipt) -> Result<PathBuf, String
             dir.display()
         )),
         CorpusRoot::OverrideAbsent { dir, source } => {
-            receipt.status = "fail";
-            receipt.exit_code = 1;
+            receipt.status = "error";
+            receipt.exit_code = 2;
             receipt.reason = Some("the configured external corpus root does not exist");
             receipt.blockers = vec![format!(
-                "integrity — the external corpus root set by {} does not exist",
+                "configuration — the external corpus root set by {} does not exist",
                 source.as_str()
             )];
             Err(format!(
-                "oracle: FAIL (exit 1) — {}",
+                "oracle: ERROR (exit 2) — {}",
                 external::override_absent(&dir, source)
             ))
         }
@@ -1351,7 +1511,8 @@ pub(crate) fn run(args: Vec<String>) {
         vendored_entries: corpus.entry.len(),
         ..Integrity::default()
     };
-    let mut receipt = new_receipt(&manifest_text, &vendored_text, integrity);
+    let source = source_identity(&root);
+    let mut receipt = new_receipt(source, &manifest_text, &vendored_text, integrity);
 
     let corpus_root = external::corpus_root(args.corpus_root.as_deref());
     let dir = match measurable(corpus_root, &mut receipt) {
@@ -1376,10 +1537,12 @@ pub(crate) fn run(args: Vec<String>) {
 
     let versions = Versions::current();
     println!(
-        "oracle {RULES_ID} · scanner {} (pipeline {}) · Full, budget-free, scoring off · \
-         {} external images + {} vendored entries",
+        "oracle {RULES_ID} · scanner {} (pipeline {}) · source {} ({}) · Full, budget-free, \
+         scoring off · {} external images + {} vendored entries",
         versions.scanner,
         versions.pipeline,
+        receipt.source.git_sha,
+        receipt.source.tree,
         rows.iter().filter(|r| r.set != Set::Vendored).count(),
         corpus.entry.len()
     );
@@ -1424,6 +1587,18 @@ mod tests {
             engine_panics: 0,
         }
     }
+
+    /// Public payloads of the two disposition rows (zxing blackbox suite
+    /// `qrcode-2`): 13's truth and the misread it is pinned to, 16's outer
+    /// truth and the unnamed inner symbol it excuses.
+    const TRUTH_13: &str =
+        "The 2005 USGS aerial photograph of the Washington Monument is censored.";
+    const MISREAD_13: &str =
+        "The 2005 USGS aerial photography of the Washington Monument is censored.";
+    const OUTER_16: &str = "[\u{5916}\u{5074}QR\u{30b3}\u{30fc}\u{30c9}]\r\n \r\n\
+                            *\u{ff80}\u{ff9e}\u{ff8c}\u{ff9e}\u{ff99}QR*\r\nhttp://d-qr.net/ex/";
+    const INNER_16: &str = "[\u{5185}\u{5074}QR\u{30b3}\u{30fc}\u{30c9}]\r\n\r\n\
+                            *\u{30c0}\u{30d6}\u{30eb}QR*\r\nhttp://d-qr.net/ex/";
 
     /// A zxing-shaped row for `disposition`'s path and pinned hashes.
     fn zxing_row(disposition: &Disposition, truth: &str, observed: &[&str]) -> Judged {
@@ -1613,51 +1788,138 @@ mod tests {
         assert_eq!(pin("zxing-blackbox/qrcode-2/16.png").status, Status::Match);
     }
 
+    /// The pins are the public payloads' own hashes, nothing typed by hand.
+    #[test]
+    fn disposition_pins_match_the_public_payloads() {
+        let [known_wrong, double_qr] = DISPOSITIONS;
+        assert_eq!(
+            external::sha256_bytes(TRUTH_13.as_bytes()),
+            known_wrong.truth_sha256
+        );
+        assert_eq!(
+            external::sha256_bytes(OUTER_16.as_bytes()),
+            double_qr.truth_sha256
+        );
+        let DispositionKind::KnownWrong { signature } = known_wrong.kind else {
+            panic!("13 is known_wrong");
+        };
+        assert_eq!(observed_signature(&[(QrCode, MISREAD_13)]), signature);
+        let DispositionKind::TruthIncomplete { excused } = double_qr.kind else {
+            panic!("16 is truth_incomplete");
+        };
+        let inner = external::sha256_bytes(INNER_16.as_bytes());
+        assert_eq!(excused, (QrCode, inner.as_str()));
+        // the table hash covers the pins
+        assert_ne!(dispositions_sha256(), external::sha256_bytes(b""));
+    }
+
     #[test]
     fn dispositions_hold_or_go_stale() {
         let [known_wrong, double_qr] = DISPOSITIONS;
-        let (image, truth) = (known_wrong.image_sha256, known_wrong.truth_sha256);
+        let settled =
+            |d: &Disposition, row: &Judged| settle(row, row.verdict.expect("labelled"), d);
         assert_eq!(
-            settle(Outcome::Wrong, &known_wrong, image, truth),
+            settled(
+                &known_wrong,
+                &zxing_row(&known_wrong, TRUTH_13, &[MISREAD_13])
+            ),
             (Outcome::Wrong, DispositionState::Holds)
         );
         // fixed (exact) or honestly refused (missed): stale, never silent
-        for now in [Outcome::Exact, Outcome::Missed] {
+        for observed in [&[TRUTH_13][..], &[]] {
+            let row = zxing_row(&known_wrong, TRUTH_13, observed);
             assert_eq!(
-                settle(now, &known_wrong, image, truth),
-                (now, DispositionState::Stale)
+                settled(&known_wrong, &row),
+                (row.verdict.expect("labelled"), DispositionState::Stale)
             );
         }
         // a re-shot image or an amended truth voids the pin
-        let other = "0".repeat(64);
+        let mut redrawn = zxing_row(&known_wrong, TRUTH_13, &[MISREAD_13]);
+        redrawn.image_sha256 = "0".repeat(64);
         assert_eq!(
-            settle(Outcome::Wrong, &known_wrong, image, &other),
+            settled(&known_wrong, &redrawn),
             (Outcome::Wrong, DispositionState::Void)
         );
+        let mut amended = zxing_row(&known_wrong, TRUTH_13, &[MISREAD_13]);
+        amended.truth_sha256 = Some("0".repeat(64));
+        assert_eq!(settled(&known_wrong, &amended).1, DispositionState::Void);
+        // the truth plus the excused inner symbol: ambiguous, as pinned
+        let both = zxing_row(&double_qr, OUTER_16, &[INNER_16, OUTER_16]);
         assert_eq!(
-            settle(Outcome::Wrong, &known_wrong, &other, truth),
-            (Outcome::Wrong, DispositionState::Void)
-        );
-        let (image, truth) = (double_qr.image_sha256, double_qr.truth_sha256);
-        assert_eq!(
-            settle(Outcome::Extra, &double_qr, image, truth),
+            settled(&double_qr, &both),
             (Outcome::Ambiguous, DispositionState::Holds)
-        );
-        assert_eq!(
-            settle(Outcome::Exact, &double_qr, image, truth),
-            (Outcome::Exact, DispositionState::Stale)
         );
     }
 
+    /// The review finding on 13: a DIFFERENT wrong text is not the misread
+    /// the entry excuses — stale, even though the verdict class is the same.
+    #[test]
+    fn known_wrong_holds_only_for_the_pinned_misread() {
+        let [known_wrong, _] = DISPOSITIONS;
+        let other = "The 2005 USGS aerial photographs of the Washington Monument is censored.";
+        let mut rows = vec![zxing_row(&known_wrong, TRUTH_13, &[other])];
+        assert_eq!(rows[0].verdict, Some(Outcome::Wrong));
+        let checks = apply_dispositions(&mut rows);
+        assert_eq!(checks[0].state, DispositionState::Stale);
+        assert_eq!(rows[0].outcome, Outcome::Wrong);
+        let found = blockers(&Integrity::default(), &rows, &checks);
+        assert!(
+            found
+                .iter()
+                .any(|b| b.starts_with("stale disposition [known_wrong]")),
+            "{found:?}"
+        );
+        assert!(
+            !found.iter().any(|b| b.contains("[known_wrong:")),
+            "a stale entry no longer labels the row: {found:?}"
+        );
+    }
+
+    /// The review finding on 16: a wrong extra output next to the outer
+    /// truth must not hide behind `truth_incomplete` — never `ambiguous`.
+    #[test]
+    fn truth_incomplete_excuses_only_its_pinned_symbol() {
+        let [_, double_qr] = DISPOSITIONS;
+        for observed in [
+            &["garbage", OUTER_16][..],
+            &[INNER_16, OUTER_16, "garbage"],
+            &["garbage"],
+        ] {
+            let mut rows = vec![zxing_row(&double_qr, OUTER_16, observed)];
+            let checks = apply_dispositions(&mut rows);
+            let outcome = rows[0].outcome;
+            assert!(outcome.is_wrong_class(), "{observed:?}: {outcome:?}");
+            assert_eq!(checks[1].state, DispositionState::Stale, "{observed:?}");
+            let found = blockers(&Integrity::default(), &rows, &checks);
+            assert!(
+                found
+                    .iter()
+                    .any(|b| b.starts_with(outcome.as_str()) && b.contains(double_qr.path)),
+                "{found:?}"
+            );
+        }
+        // the truth alone, or the excused symbol alone: still ambiguous (the
+        // truth is incomplete) but not the pinned reading — stale
+        for observed in [&[OUTER_16][..], &[INNER_16]] {
+            let mut rows = vec![zxing_row(&double_qr, OUTER_16, observed)];
+            let checks = apply_dispositions(&mut rows);
+            assert_eq!(
+                (rows[0].outcome, checks[1].state),
+                (Outcome::Ambiguous, DispositionState::Stale),
+                "{observed:?}"
+            );
+        }
+    }
+
     /// End to end on real-shaped rows: `known_wrong` stays wrong AND
-    /// blocks; `truth_incomplete` turns a raw `extra` into a non-blocking
-    /// `ambiguous`.
+    /// blocks; `truth_incomplete` turns the pinned reading into a
+    /// non-blocking `ambiguous`.
     #[test]
     fn holding_dispositions_settle_rows_and_known_wrong_blocks() {
         let [known_wrong, double_qr] = DISPOSITIONS;
         let mut rows = vec![
-            zxing_row(&known_wrong, "photograph", &["photography"]),
-            zxing_row(&double_qr, "outer", &["inner", "outer"]),
+            zxing_row(&known_wrong, TRUTH_13, &[MISREAD_13]),
+            zxing_row(&double_qr, OUTER_16, &[INNER_16, OUTER_16]),
         ];
         let checks = apply_dispositions(&mut rows);
         assert!(checks.iter().all(|c| c.state == DispositionState::Holds));
@@ -1680,7 +1942,7 @@ mod tests {
     #[test]
     fn a_changed_verdict_or_a_missing_row_blocks_as_stale() {
         let [known_wrong, double_qr] = DISPOSITIONS;
-        let mut rows = vec![zxing_row(&known_wrong, "photograph", &["photograph"])];
+        let mut rows = vec![zxing_row(&known_wrong, TRUTH_13, &[TRUTH_13])];
         let checks = apply_dispositions(&mut rows);
         assert_eq!(
             rows[0].outcome,
@@ -1712,16 +1974,230 @@ mod tests {
             (None, Outcome::Error, 0)
         );
         (errored.verdict, errored.outcome) = (verdict, outcome);
+        // one unit consumes one group: the duplicate is unconsumed output
+        // AND a grouping-contract violation
         let duplicated = zxing_row(&known_wrong, "x", &["x", "x"]);
-        assert_eq!(
-            duplicated.outcome,
-            Outcome::Exact,
-            "duplicates are a contract matter"
-        );
+        assert_eq!(duplicated.outcome, Outcome::Extra);
         let found = blockers(&Integrity::default(), &[errored, duplicated], &[]);
-        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found.len(), 3, "{found:?}");
         assert!(found[0].starts_with("error (QRS-001)"), "{found:?}");
-        assert!(found[1].starts_with("contract"), "{found:?}");
+        assert!(found[1].starts_with("extra"), "{found:?}");
+        assert!(found[2].starts_with("contract"), "{found:?}");
+    }
+
+    /// A text-only unit is ONE content unit: the same text under a second
+    /// symbology is extra output, never exact.
+    #[test]
+    fn a_text_only_unit_consumes_one_group() {
+        let text_only = [Unit {
+            symbology: None,
+            text: "E".to_owned(),
+        }];
+        assert_eq!(
+            judge(&text_only, &[(QrCode, "E"), (MicroQrCode, "E")]),
+            Outcome::Extra
+        );
+        assert_eq!(judge(&text_only, &[(MicroQrCode, "E")]), Outcome::Exact);
+        // pinned units choose first: a mixed set still matches exactly in
+        // either order
+        let mixed = [text_only[0].clone(), qr("E")];
+        assert_eq!(
+            judge(&mixed, &[(QrCode, "E"), (MicroQrCode, "E")]),
+            Outcome::Exact
+        );
+        assert_eq!(
+            judge(&mixed, &[(MicroQrCode, "E"), (QrCode, "E")]),
+            Outcome::Exact
+        );
+        assert_eq!(judge(&mixed, &[(MicroQrCode, "E")]), Outcome::Partial);
+    }
+
+    #[test]
+    fn source_identity_is_read_from_git_or_unknown() {
+        let here = source_identity(&crate::repo_root());
+        let hex = |s: &str| matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit());
+        assert!(here.git_sha == "unknown" || hex(&here.git_sha), "{here:?}");
+        assert!(
+            ["clean", "dirty", "unknown"].contains(&here.tree.as_str()),
+            "{here:?}"
+        );
+        let nowhere = std::env::temp_dir().join(format!("qrscan-no-repo-{}", std::process::id()));
+        assert_eq!(
+            source_identity(&nowhere),
+            SourceEcho {
+                git_sha: String::from("unknown"),
+                tree: String::from("unknown"),
+            },
+            "git failing is recorded, never fatal"
+        );
+    }
+
+    /// A throwaway corpus root under the system temp dir, removed on drop —
+    /// the real corpus stays out of unit tests.
+    struct TempCorpus(PathBuf);
+
+    impl TempCorpus {
+        fn new(tag: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("qrscan-oracle-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("temp corpus");
+            Self(dir)
+        }
+
+        /// Write `bytes` at `rel`; the manifest row pinning them.
+        fn put(&self, rel: &str, bytes: &[u8], status: Status) -> Row {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+            std::fs::write(&path, bytes).expect("write");
+            Row {
+                status,
+                sha256: external::sha256_bytes(bytes),
+                path: rel.to_owned(),
+            }
+        }
+    }
+
+    impl Drop for TempCorpus {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn png(image: image::GrayImage) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageLuma8(image)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .expect("png");
+        bytes
+    }
+
+    fn qr_png(text: &str) -> Vec<u8> {
+        let code = qrcode::QrCode::new(text.as_bytes()).expect("encodes");
+        png(code
+            .render::<image::Luma<u8>>()
+            .module_dimensions(4, 4)
+            .build())
+    }
+
+    fn blank_png() -> Vec<u8> {
+        png(image::GrayImage::from_pixel(64, 64, image::Luma([255])))
+    }
+
+    /// A generated corpus through probe → `external_row` → judge: hashes
+    /// verified, truth read from its manifested `.txt`, every set judged.
+    #[test]
+    fn a_synthetic_corpus_is_verified_and_judged_end_to_end() {
+        let corpus = TempCorpus::new("e2e");
+        let truth = "https://example.invalid/synthetic-truth";
+        let rows = vec![
+            corpus.put("qrcode-ai/wild/a.png", &qr_png("gallery"), Status::Decode),
+            corpus.put(
+                "zxing-blackbox/qrcode-9/1.png",
+                &qr_png(truth),
+                Status::Match,
+            ),
+            corpus.put(
+                "zxing-blackbox/qrcode-9/1.txt",
+                truth.as_bytes(),
+                Status::Aux,
+            ),
+            corpus.put("zxing-blackbox/qrcode-9/2.png", &blank_png(), Status::Blind),
+            corpus.put(
+                "zxing-blackbox/qrcode-9/2.txt",
+                b"never decoded",
+                Status::Aux,
+            ),
+        ];
+        let scanner = external::scanner();
+        let mut integrity = Integrity::default();
+        let judged = evaluate_external(&corpus.0, &rows, &scanner, &mut integrity);
+        assert!(integrity.problems.is_empty(), "{:?}", integrity.problems);
+        assert_eq!(integrity.verified, rows.len());
+        let outcomes: Vec<(&str, Outcome)> = judged
+            .iter()
+            .map(|row| (row.path.as_str(), row.outcome))
+            .collect();
+        assert_eq!(
+            outcomes,
+            [
+                ("qrcode-ai/wild/a.png", Outcome::UnlabelledDecoded),
+                ("zxing-blackbox/qrcode-9/1.png", Outcome::Exact),
+                ("zxing-blackbox/qrcode-9/2.png", Outcome::Missed),
+            ]
+        );
+        let truth_sha256 = external::sha256_bytes(truth.as_bytes());
+        assert_eq!(
+            judged[1].truth_sha256.as_deref(),
+            Some(truth_sha256.as_str())
+        );
+        assert_eq!(judged[1].pin, Some(Status::Match));
+    }
+
+    #[test]
+    fn integrity_flags_drift_missing_and_unmanifested_files() {
+        let corpus = TempCorpus::new("integrity");
+        let good = corpus.put("qrcode-ai/wild/a.png", &blank_png(), Status::Blind);
+        let mut drifted = corpus.put("qrcode-ai/wild/b.png", &blank_png(), Status::Blind);
+        drifted.sha256 = "0".repeat(64);
+        corpus.put("qrcode-ai/wild/stray.png", &blank_png(), Status::Blind);
+        let missing = Row {
+            status: Status::Blind,
+            sha256: "1".repeat(64),
+            path: String::from("qrcode-ai/wild/gone.png"),
+        };
+        let rows = vec![good, drifted, missing];
+        let scanner = external::scanner();
+        let mut integrity = Integrity::default();
+        let judged = evaluate_external(&corpus.0, &rows, &scanner, &mut integrity);
+        assert_eq!(judged.len(), 1, "only the verified image is judged");
+        assert_eq!(integrity.verified, 1);
+        let problems = integrity.problems.join("\n");
+        for needle in [
+            "unmanifested file on disk (regenerate the manifest): qrcode-ai/wild/stray.png",
+            "manifested file missing on disk: qrcode-ai/wild/gone.png",
+            "sha256 drift (corpus file changed — regenerate or restore): qrcode-ai/wild/b.png",
+        ] {
+            assert!(problems.contains(needle), "{problems}");
+        }
+        let found = blockers(&integrity, &judged, &[]);
+        assert_eq!(found.len(), 3, "integrity problems block: {found:?}");
+    }
+
+    #[test]
+    fn a_labelled_image_without_verified_truth_is_not_judged() {
+        let corpus = TempCorpus::new("no-truth");
+        let rows = vec![corpus.put("zxing-blackbox/qrcode-9/1.png", &blank_png(), Status::Blind)];
+        let scanner = external::scanner();
+        let mut integrity = Integrity::default();
+        let judged = evaluate_external(&corpus.0, &rows, &scanner, &mut integrity);
+        assert!(judged.is_empty());
+        assert_eq!(
+            integrity.problems,
+            [
+                "labelled image without a verified zxing-blackbox/qrcode-9/1.txt or a pinned \
+                 symbology: zxing-blackbox/qrcode-9/1.png"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unwalkable_corpus_is_an_integrity_failure() {
+        let absent =
+            std::env::temp_dir().join(format!("qrscan-oracle-gone-{}", std::process::id()));
+        let scanner = external::scanner();
+        let mut integrity = Integrity::default();
+        let judged = evaluate_external(&absent, &[], &scanner, &mut integrity);
+        assert!(judged.is_empty());
+        assert_eq!(integrity.problems.len(), 1);
+        assert!(
+            integrity.problems[0].starts_with("corpus walk failed:"),
+            "{:?}",
+            integrity.problems
+        );
     }
 
     #[test]
@@ -1788,12 +2264,17 @@ mod tests {
     }
 
     /// No corpus at the default root is a skip (exit 3, never a pass); a
-    /// configured root that does not exist is a failure (exit 1) whose
-    /// receipt names the source but carries no path. No filesystem access.
+    /// configured root that does not exist is a configuration error
+    /// (exit 2) whose receipt names the source but carries no path. No
+    /// filesystem access.
     #[test]
     fn absent_roots_skip_only_at_the_default() {
         let dir = crate::repo_root().join("absent-corpus");
-        let fresh = || new_receipt("manifest", "vendored", Integrity::default());
+        let source = SourceEcho {
+            git_sha: String::from("unknown"),
+            tree: String::from("unknown"),
+        };
+        let fresh = || new_receipt(source.clone(), "manifest", "vendored", Integrity::default());
 
         let mut receipt = fresh();
         let verdict = measurable(CorpusRoot::DefaultAbsent(dir.clone()), &mut receipt)
@@ -1812,10 +2293,10 @@ mod tests {
             };
             let verdict = measurable(root, &mut receipt).expect_err("nothing to measure");
             assert!(
-                verdict.starts_with("oracle: FAIL (exit 1)") && verdict.contains(source.as_str()),
+                verdict.starts_with("oracle: ERROR (exit 2)") && verdict.contains(source.as_str()),
                 "{verdict}"
             );
-            assert_eq!((receipt.status, receipt.exit_code), ("fail", 1));
+            assert_eq!((receipt.status, receipt.exit_code), ("error", 2));
             assert_eq!(receipt.blockers.len(), 1, "{:?}", receipt.blockers);
             let json = serde_json::to_string(&receipt).expect("receipt serialises");
             assert!(!json.contains("absent-corpus"), "a path leaked: {json}");

@@ -27,6 +27,15 @@
 //! Only that default may be absent quietly: a configured root that does
 //! not exist fails with exit 2 and names the override.
 //!
+//! Exit codes (the family `oracle.rs` shares): 0 pass — and, for the gate
+//! only, the loud CI skip when nothing is configured and the default
+//! corpus is absent (the oracle reports that case as 3, skipped) · 1 gate
+//! failure — regression, capability gained, integrity problem, an
+//! unwalkable corpus · 2 usage or configuration error — an unreadable or
+//! malformed committed manifest, a relative or absent configured corpus
+//! root, an instrument (`gen-external-manifest`, `rotation-sweep`) that
+//! cannot read its corpus.
+//!
 //! The files themselves are machine-bound (untracked) and CAN vanish or rot —
 //! 2026-07-08: ten gallery files were found deleted on disk and the gate went
 //! red exactly as designed. Restore procedure, proven that day: every gallery
@@ -288,33 +297,35 @@ pub(crate) fn group_of(path: &str) -> String {
 
 /// All files under `dir`, as sorted forward-slash paths relative to `dir`.
 /// Dotfiles (`.DS_Store` and friends) are ignored — they are OS noise, not
-/// corpus content.
-pub(crate) fn walk_sorted(dir: &Path) -> Vec<String> {
-    fn recurse(dir: &Path, base: &Path, out: &mut Vec<String>) {
-        for entry in std::fs::read_dir(dir).expect("read corpus dir") {
-            let entry = entry.expect("dir entry");
+/// corpus content. An unreadable directory or a non-UTF-8 name is an error
+/// naming the path, for the caller to report — never a panic.
+pub(crate) fn walk_sorted(dir: &Path) -> Result<Vec<String>, String> {
+    fn recurse(dir: &Path, base: &Path, out: &mut Vec<String>) -> Result<(), String> {
+        let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
             let name = entry.file_name();
             if name.to_string_lossy().starts_with('.') {
                 continue;
             }
             let path = entry.path();
             if path.is_dir() {
-                recurse(&path, base, out);
+                recurse(&path, base, out)?;
             } else {
                 let rel = path
                     .strip_prefix(base)
-                    .expect("under base")
+                    .map_err(|e| format!("{}: {e}", path.display()))?
                     .to_str()
-                    .expect("utf-8 corpus path")
-                    .replace('\\', "/");
-                out.push(rel);
+                    .ok_or_else(|| format!("non-UTF-8 corpus path: {}", path.display()))?;
+                out.push(rel.replace('\\', "/"));
             }
         }
+        Ok(())
     }
     let mut out = Vec::new();
-    recurse(dir, dir, &mut out);
+    recurse(dir, dir, &mut out)?;
     out.sort();
-    out
+    Ok(out)
 }
 
 fn sha256_hex(path: &Path) -> String {
@@ -497,7 +508,10 @@ fn print_summary(rows: &[Row]) {
 pub(crate) fn generate() {
     let root = crate::repo_root();
     let dir = corpus_dir(None);
-    let rels = walk_sorted(&dir);
+    let rels = walk_sorted(&dir).unwrap_or_else(|e| {
+        eprintln!("gen-external-manifest: cannot read the corpus: {e}");
+        std::process::exit(2);
+    });
     let scanner = scanner();
     let rows: Vec<Row> = rels
         .par_iter()
@@ -644,7 +658,11 @@ pub(crate) fn verify() {
         }
     };
 
-    let on_disk = walk_sorted(&dir);
+    let on_disk = walk_sorted(&dir).unwrap_or_else(|e| {
+        // an unwalkable corpus cannot be verified: a gate failure
+        eprintln!("problem: corpus walk failed: {e}");
+        std::process::exit(1);
+    });
     let disk_set: BTreeSet<&str> = on_disk.iter().map(String::as_str).collect();
     let pinned_set: BTreeSet<&str> = pinned.iter().map(|r| r.path.as_str()).collect();
 
@@ -809,6 +827,32 @@ mod tests {
                 "--corpus-root {relative:?} must be refused"
             );
         }
+    }
+
+    /// An unwalkable corpus is a reported error naming the path — never a
+    /// panic (exit 101).
+    #[test]
+    fn walking_a_missing_corpus_is_an_error_naming_it() {
+        let dir = std::env::temp_dir().join(format!("qrscan-walk-missing-{}", std::process::id()));
+        let err = walk_sorted(&dir).expect_err("nothing to walk");
+        assert!(err.contains("qrscan-walk-missing"), "{err}");
+    }
+
+    #[test]
+    fn walking_lists_sorted_relative_paths_without_dotfiles() {
+        let dir = std::env::temp_dir().join(format!("qrscan-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for rel in ["b/2.png", "a/1.txt", ".DS_Store", "a/.hidden", ".git/HEAD"] {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+            std::fs::write(&path, b"x").expect("write");
+        }
+        let walked = walk_sorted(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            walked,
+            Ok(vec![String::from("a/1.txt"), String::from("b/2.png")])
+        );
     }
 
     /// The CI path: nothing configured and no `<repo>/corpus-external` is

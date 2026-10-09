@@ -529,6 +529,22 @@ mod tests {
         );
     }
 
+    /// corpus.toml truth is text-only (any symbology), but ONE unit: the
+    /// same text under a second symbology is extra output — a miss.
+    #[test]
+    fn a_text_only_truth_is_met_once() {
+        use qrcode_ai_scanner::Symbology::MicroQrCode;
+        let truth = entry(Some("E"), None);
+        assert_eq!(
+            entry_state(&truth, &[(QrCode, "E"), (MicroQrCode, "E")]),
+            (EntryState::Miss, Some(oracle::Outcome::Extra))
+        );
+        assert_eq!(
+            entry_state(&truth, &[(MicroQrCode, "E")]).0,
+            EntryState::Pass
+        );
+    }
+
     #[test]
     fn negative_rows_stay_negative() {
         let negative = entry(None, None);
