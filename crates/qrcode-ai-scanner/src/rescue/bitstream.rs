@@ -11,8 +11,8 @@
 //! designator, an assignment number above 999999, an unknown mode, an
 //! out-of-range numeric/alphanumeric value, an invalid AIM application
 //! indicator, a truncated count) returns `None` — never a best guess.
-//! [`port_payload`] names what a more tolerant reader transmits for such a
-//! stream: the bytes a refusal must veto in that reader's output.
+//! [`port_read`] names what a more tolerant reader reports for such a
+//! stream: the content a refusal must veto in that reader's output.
 
 use crate::engine::content::{EciMark, Fnc1};
 
@@ -105,12 +105,28 @@ pub(crate) fn parse(data: &[u8], version: u8) -> Option<Parsed> {
     parse_with(data, version, Rules::Iso)
 }
 
-/// The payload rxing's zxing-cpp port transmits for a stream [`parse`]
-/// refuses — an assignment number above 999999, FNC1 indicators in both
-/// positions. `None` when that reader refuses the stream too. A refusal
-/// vetoes the port's read of exactly these bytes.
-pub(crate) fn port_payload(data: &[u8], version: u8) -> Option<Vec<u8>> {
-    parse_with(data, version, Rules::Port).map(|parsed| parsed.bytes)
+/// What rxing's zxing-cpp port reports for a stream: the payload it
+/// transmits and what its symbology identifier states (ISO 18004 Annex F).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PortRead {
+    /// The payload bytes it transmits.
+    pub(crate) bytes: Vec<u8>,
+    /// It read a designator, whatever its number: `]Q2`/`]Q4`/`]Q6`.
+    pub(crate) signalled: bool,
+    /// The FNC1 position its modifier states — the last indicator wins.
+    pub(crate) fnc1: Fnc1,
+}
+
+/// What rxing's zxing-cpp port reports for a stream [`parse`] refuses — an
+/// assignment number above 999999, FNC1 indicators in both positions.
+/// `None` when that reader refuses the stream too. A refusal vetoes the
+/// port's reads of exactly this content.
+pub(crate) fn port_read(data: &[u8], version: u8) -> Option<PortRead> {
+    parse_with(data, version, Rules::Port).map(|parsed| PortRead {
+        bytes: parsed.bytes,
+        signalled: !parsed.eci.is_empty(),
+        fnc1: parsed.fnc1,
+    })
 }
 
 fn parse_with(data: &[u8], version: u8, rules: Rules) -> Option<Parsed> {
@@ -503,19 +519,29 @@ mod tests {
     }
 
     #[test]
-    fn port_payload_names_what_the_port_transmits_for_a_refused_stream() {
+    fn port_read_names_what_the_port_reports_for_a_refused_stream() {
         let abc = "0100 00000011 01100001 01100010 01100011 0000";
-        // above the register (1000000): refused, the port reads "abc"
+        let read = |bytes: &[u8], signalled: bool, fnc1: Fnc1| PortRead {
+            bytes: bytes.to_vec(),
+            signalled,
+            fnc1,
+        };
+        // above the register (1000000): refused, the port signals a
+        // designator and reads "abc"
         let above = stream(&format!("0111 11001111 01000010 01000000 {abc}"));
         assert!(parse(&above, 1).is_none());
-        assert_eq!(port_payload(&above, 1).as_deref(), Some(&b"abc"[..]));
-        // FNC1 in both positions, either order: the indicator leads
-        for order in ["1001 00100101 0101", "0101 1001 00100101"] {
+        assert_eq!(port_read(&above, 1), Some(read(b"abc", true, Fnc1::None)));
+        // FNC1 in both positions, either order: the indicator leads, the
+        // last indicator states the position
+        for (order, fnc1) in [
+            ("1001 00100101 0101", Fnc1::First),
+            ("0101 1001 00100101", Fnc1::Second),
+        ] {
             let both = stream(&format!("{order} {abc}"));
             assert!(parse(&both, 1).is_none(), "{order}");
             assert_eq!(
-                port_payload(&both, 1).as_deref(),
-                Some(&b"37abc"[..]),
+                port_read(&both, 1),
+                Some(read(b"37abc", false, fnc1)),
                 "{order}"
             );
         }
@@ -527,13 +553,13 @@ mod tests {
             format!("1001 00100101 1001 00100101 {abc}"),
             "1001 01100100 0000".to_owned(),
         ] {
-            assert!(port_payload(&stream(&refused), 1).is_none(), "{refused}");
+            assert!(port_read(&stream(&refused), 1).is_none(), "{refused}");
         }
-        // a well-formed stream transmits its own payload
+        // a well-formed stream reports its own content
         let declared = stream("0111 00000100 0100 00000001 10100001 0000");
         assert_eq!(
-            port_payload(&declared, 1),
-            parse(&declared, 1).map(|p| p.bytes)
+            port_read(&declared, 1),
+            Some(read(&[0xA1], true, Fnc1::None))
         );
     }
 
@@ -632,16 +658,23 @@ mod tests {
         /// Total over attacker-shaped codewords: refuse or parse, never
         /// panic; every recorded offset lies inside the returned payload,
         /// in stream order; the interpretation of what parsed is total; and
-        /// the port's tolerance only ever adds payloads (a well-formed
-        /// stream transmits the same bytes through it).
+        /// the port's tolerance only ever adds contents (a well-formed
+        /// stream reports the same bytes, designators and FNC1 through it).
         #[test]
         fn parse_is_total_and_its_offsets_stay_in_bounds(
             data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..48),
             version in 0u8..42,
         ) {
-            let tolerant = port_payload(&data, version);
+            let tolerant = port_read(&data, version);
             if let Some(parsed) = parse(&data, version) {
-                proptest::prop_assert_eq!(tolerant.as_deref(), Some(parsed.bytes.as_slice()));
+                proptest::prop_assert_eq!(
+                    tolerant,
+                    Some(PortRead {
+                        bytes: parsed.bytes.clone(),
+                        signalled: !parsed.eci.is_empty(),
+                        fnc1: parsed.fnc1,
+                    })
+                );
                 let mut previous = 0;
                 for mark in &parsed.eci {
                     proptest::prop_assert!(mark.value <= 999_999);

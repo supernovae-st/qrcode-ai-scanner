@@ -127,7 +127,9 @@ impl Scanner {
         // OPPOSITE background and walks the ladder once more (within the
         // same budget) — a mis-called content mean must never turn a
         // decodable design into a false "no detection". Both walks stay in
-        // the trace; `fallback_used` marks a RESCUE, not an attempt.
+        // the trace; `fallback_used` marks a RESCUE, not an attempt. A
+        // stream the first walk proved malformed stays refused in the second
+        // (`fold_fallback` applies the first walk's proofs).
         let mut fallback_used = false;
         if outcome.merged.is_empty()
             && let Some(context) = &mut alpha_context

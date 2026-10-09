@@ -8,6 +8,12 @@
 //! still completes, so consensus data within that stage is preserved — and
 //! a stage that found only QR reads whose ECI declarations are signalled,
 //! never located, does not end the walk (a later stage may locate them).
+//!
+//! The walk ends with one pass over the rescue candidates collected in
+//! every attempt — at most `MAX_RESCUE_CANDIDATES` clean RS re-derivations,
+//! no sampling — so a grid detected in another attempt than the read it
+//! locates or refuses still counts. That pass runs after the deadline too
+//! (a refusal stays a refusal); cancellation is checked before it.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,11 +21,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use web_time::Instant;
 
 use crate::engine::content::{self, ContentKey, EciEvidence, Fnc1, Reading};
-use crate::engine::{self, MaskedStream, RawDetection};
+use crate::engine::{self, MaskedStream, RawDetection, Veto};
 use crate::error::{Result, ScanError};
 use crate::input::LumaImage;
 use crate::report::{EcLevel, EngineKind, PipelineTrace, Point, StageTrace, Symbology};
-use crate::rescue::{Acceptance, Rederived};
+use crate::rescue::{Acceptance, Rederived, RescueCandidate};
 use crate::transform::{self, Channel, SourcePlanes};
 
 /// Cooperative cancellation handle. Cheap to clone; `Send + Sync`.
@@ -382,9 +388,17 @@ const MAX_DETECTIONS: usize = 16;
 /// re-derived per attempt.
 const MAX_RESCUE_CANDIDATES: usize = 4;
 
-/// Proven-malformed payloads remembered per walk (every hit is checked
-/// against them).
+/// The walk's proof capacity: refusals of proven-malformed streams it
+/// remembers (every hit is checked against them). A proof past capacity
+/// still refuses in the attempt that found it — the detections it covers
+/// and that attempt's reads — then lapses: its symbol's reads in later
+/// attempts stay refused only where a stream proves it again.
 const MAX_VETOED: usize = 16;
+
+/// Contents of well-formed streams (re-derived rescue candidates) a walk
+/// remembers as shields: no refusal covers a read they admit. Past
+/// capacity a shield is dropped — the walk refuses rather than publishes.
+const MAX_SHIELDS: usize = 16;
 
 /// One S4 deep-recovery transform recipe. The SAME enumeration drives the
 /// ladder and the score probe ([`crate::score`]'s `CellProbe`) — a symbol
@@ -586,6 +600,11 @@ pub(crate) struct MergedDetection {
 #[derive(Debug)]
 pub(crate) struct LadderOutcome {
     pub merged: Vec<MergedDetection>,
+    /// What each merged detection is made of, aligned with `merged` — what
+    /// another walk's refusals look at ([`LadderOutcome::fold_fallback`]).
+    footings: Vec<Footing>,
+    /// The walk's proofs of malformed streams and its shields.
+    refusals: Refusals,
     /// Each merged detection's content key and single reading, aligned with
     /// `merged` — what the score/alpha matchers compare engine hits against
     /// (`ContentKey::admits`) and what the content wire contract will
@@ -597,24 +616,136 @@ pub(crate) struct LadderOutcome {
 
 impl LadderOutcome {
     /// Fold a second walk (the alpha fallback) in: both walks stay in the
-    /// trace, its detections replace these only when it found some.
-    /// Returns whether it did.
+    /// trace, its detections replace these only when it found some. This
+    /// walk's proofs still refuse there — the fallback flattened the same
+    /// symbols over another background without them, so a detection they
+    /// cover is dropped (unless either walk shields its content). Returns
+    /// whether the fallback found any detection that stands.
     pub(crate) fn fold_fallback(&mut self, fallback: LadderOutcome) -> bool {
-        let found = !fallback.merged.is_empty();
         self.trace.stages.extend(fallback.trace.stages);
         self.trace.engine_panics = self
             .trace
             .engine_panics
             .saturating_add(fallback.trace.engine_panics);
         self.trace.total_ms += fallback.trace.total_ms;
+        let shields: Vec<&ContentKey> = fallback
+            .refusals
+            .shields
+            .iter()
+            .chain(
+                fallback
+                    .footings
+                    .iter()
+                    .filter(|footing| footing.parsed)
+                    .map(|footing| &footing.key),
+            )
+            .collect();
+        let stands: Vec<bool> = fallback
+            .footings
+            .iter()
+            .map(|footing| {
+                !self.refusals.refuses_detection(footing)
+                    || shields.iter().any(|key| key.agrees(&footing.key))
+            })
+            .collect();
+        let kept = |index: usize| stands.get(index).copied().unwrap_or(false);
+        let merged: Vec<MergedDetection> = fallback
+            .merged
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, detection)| kept(index).then_some(detection))
+            .collect();
+        let found = !merged.is_empty();
         if found {
-            self.merged = fallback.merged;
+            self.merged = merged;
+            self.footings = fallback
+                .footings
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, footing)| kept(index).then_some(footing))
+                .collect();
             #[cfg(test)]
             {
-                self.contents = fallback.contents;
+                self.contents = fallback
+                    .contents
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(index, content)| kept(index).then_some(content))
+                    .collect();
             }
         }
         found
+    }
+}
+
+/// What a refusal looks at in a detection: its content, and whether the
+/// scanner's own parser read it or only engines did (and which).
+#[derive(Debug, Clone)]
+struct Footing {
+    symbology: Symbology,
+    key: ContentKey,
+    /// Some admitted read came from the scanner's own segment parser.
+    parsed: bool,
+    engines: Vec<EngineKind>,
+}
+
+/// A walk's account of malformed and well-formed streams.
+#[derive(Debug, Clone, Default)]
+struct Refusals {
+    /// Proofs of malformed streams the walk remembers (`MAX_VETOED`).
+    vetoes: Vec<Veto>,
+    /// The current attempt's proofs past that capacity: they refuse in
+    /// their attempt, then lapse ([`Refusals::next_attempt`]).
+    overflow: Vec<Veto>,
+    /// Contents of well-formed streams — re-derived rescue candidates that
+    /// parse — no veto covers a read they admit (`MAX_SHIELDS`).
+    shields: Vec<ContentKey>,
+}
+
+impl Refusals {
+    /// Record a proof; past capacity it still applies to this attempt.
+    fn record(&mut self, veto: Veto) {
+        if self.vetoes.contains(&veto) || self.overflow.contains(&veto) {
+            return;
+        }
+        if self.vetoes.len() < MAX_VETOED {
+            self.vetoes.push(veto);
+        } else {
+            self.overflow.push(veto);
+        }
+    }
+
+    /// Remember a well-formed stream's content.
+    fn shield(&mut self, key: ContentKey) {
+        if self.shields.len() < MAX_SHIELDS && !self.shields.contains(&key) {
+            self.shields.push(key);
+        }
+    }
+
+    /// A new attempt: the last one's proofs past capacity lapse.
+    fn next_attempt(&mut self) {
+        self.overflow.clear();
+    }
+
+    fn proofs(&self) -> impl Iterator<Item = &Veto> {
+        self.vetoes.iter().chain(&self.overflow)
+    }
+
+    /// Whether a proof covers this engine hit and no shield admits it.
+    fn refuses(&self, hit: &RawDetection) -> bool {
+        self.proofs().any(|veto| veto.refuses(hit))
+            && !self.shields.iter().any(|key| key.admits(hit))
+    }
+
+    /// The same for a detection: a QR Code made only of unparsed reads
+    /// whose content a proof covers and no shield agrees with.
+    fn refuses_detection(&self, footing: &Footing) -> bool {
+        footing.symbology == Symbology::QrCode
+            && !footing.parsed
+            && self
+                .proofs()
+                .any(|veto| veto.refuses_content(&footing.key, &footing.engines))
+            && !self.shields.iter().any(|key| key.agrees(&footing.key))
     }
 }
 
@@ -664,6 +795,35 @@ impl Observation {
     /// Its declarations are signalled, never located.
     fn signalled_only(&self) -> bool {
         self.key.eci == EciEvidence::Signalled
+    }
+
+    /// What a refusal looks at.
+    fn footing(&self) -> Footing {
+        Footing {
+            symbology: self.symbology,
+            key: self.key.clone(),
+            parsed: self.parsed,
+            engines: self.engines.clone(),
+        }
+    }
+
+    /// A rescue candidate's well-formed stream that locates this detection:
+    /// its account and the grid it measured (the stream with the format
+    /// read from it, the corners with their photometry) — never an engine:
+    /// no engine read it, and `rescue` names the S5 stage alone.
+    fn adopt_location(&mut self, location: Location) {
+        self.key.join(location.key.eci, location.key.fnc1);
+        self.parsed = true;
+        if self.masked_stream.is_none() {
+            self.masked_stream = Some(location.stream);
+            self.version = Some(location.version);
+            self.ec = Some(location.ec);
+            self.mask = Some(location.mask);
+        }
+        if self.corners.is_none() {
+            self.corners = Some(location.corners);
+            self.photometric_inverted = location.inverts;
+        }
     }
 
     /// Fold an admitted hit in: the most specific content account, and the
@@ -729,13 +889,39 @@ struct Run<'a> {
     observations: Vec<Observation>,
     /// Grids detected but not decoded (rqrr stream readable) — S5 inputs.
     /// Corners already rescaled to original space; capped to bound cost.
-    rescue_candidates: Vec<crate::rescue::RescueCandidate>,
-    /// QR payloads a designator-exposing parser proved malformed in some
-    /// attempt (capped). Unparsed reads of these bytes are vetoed for the
-    /// rest of the walk: the symbol is refused whichever engine reads it
-    /// where rqrr does not.
-    vetoed: Vec<Vec<u8>>,
+    rescue_candidates: Vec<RescueCandidate>,
+    /// Streams a designator-exposing parser proved malformed in some
+    /// attempt, as the contents they refuse for the rest of the walk
+    /// (whichever engine reads the symbol where rqrr does not), and the
+    /// well-formed contents that shield equal reads.
+    refusals: Refusals,
     panics: u8,
+}
+
+/// A rescue candidate's well-formed stream with a located declaration: the
+/// content and grid it brings to the signalled-only detection it locates.
+#[derive(Debug, Clone)]
+struct Location {
+    key: ContentKey,
+    stream: MaskedStream,
+    /// ORIGINAL image space.
+    corners: [Point; 4],
+    version: u8,
+    ec: EcLevel,
+    mask: u8,
+    /// The candidate's attempt photometrically inverted the symbol.
+    inverts: bool,
+}
+
+/// What re-deriving rescue candidates (clean RS) established.
+#[derive(Debug, Default)]
+struct Rederivations {
+    /// Well-formed streams with a located declaration.
+    located: Vec<Location>,
+    /// The contents of every well-formed stream: shields.
+    shields: Vec<ContentKey>,
+    /// What the port reports for each stream proven malformed.
+    vetoes: Vec<Veto>,
 }
 
 impl Run<'_> {
@@ -755,16 +941,22 @@ impl Run<'_> {
     /// tiny, order deterministic). A hit joins a detection of its symbology
     /// whose content key admits it (same bytes, agreeing ECI accounts and
     /// FNC1 positions) — an EAN-13 and a QR carrying the same digits stay
-    /// two, and so do two contents that read the same text. Unparsed reads
-    /// of a vetoed payload are dropped. Returns the hit count kept
-    /// (pre-merge, the trace's `detections_found`).
+    /// two, and so do two contents that read the same text. Reads a proof
+    /// refuses are dropped. Returns the raw hit count, pre-merge and
+    /// pre-veto: the trace's `detections_found`.
     fn absorb(&mut self, found: Vec<RawDetection>, attempt_inverts: bool) -> u32 {
-        let mut count = 0u32;
+        let count = u32::try_from(found.len()).unwrap_or(u32::MAX);
+        // the pass's own parsed reads shield what they admit before they
+        // are absorbed
+        let parsed: Vec<ContentKey> = found
+            .iter()
+            .filter(|hit| hit.parsed)
+            .map(ContentKey::of)
+            .collect();
         for detection in found {
-            if self.is_vetoed(&detection) {
+            if self.is_vetoed(&detection, &parsed) {
                 continue;
             }
-            count = count.saturating_add(1);
             match self.slot_for(&detection) {
                 Some(index) => self.observations[index].fold(detection, attempt_inverts),
                 None if self.observations.len() >= MAX_DETECTIONS => {}
@@ -794,40 +986,50 @@ impl Run<'_> {
             .or_else(|| self.observations.iter().position(admits))
     }
 
-    /// An unparsed QR read of a payload proven malformed.
-    fn is_vetoed(&self, detection: &RawDetection) -> bool {
-        detection.symbology == Symbology::QrCode
-            && !detection.parsed
-            && self.vetoed.contains(&detection.raw)
+    /// A hit some proof refuses and nothing shields: no re-derived
+    /// candidate's content, no parsed read of this pass (`pass`) or of a
+    /// detection admits it — a well-formed stream carries those bytes.
+    fn is_vetoed(&self, hit: &RawDetection, pass: &[ContentKey]) -> bool {
+        self.refusals.refuses(hit)
+            && !pass.iter().any(|key| key.admits(hit))
+            && !self
+                .observations
+                .iter()
+                .any(|seen| seen.parsed && seen.symbology == hit.symbology && seen.key.admits(hit))
     }
 
-    /// Record payloads proven malformed (a stream ISO 18004 does not define
-    /// refuses the symbol) and drop the detections only unparsed reads of
-    /// them made — whichever attempt made them.
-    fn veto(&mut self, payloads: impl IntoIterator<Item = Vec<u8>>) {
-        for payload in payloads {
-            if self.vetoed.len() < MAX_VETOED && !self.vetoed.contains(&payload) {
-                self.vetoed.push(payload);
-            }
+    /// Record proofs of malformed streams (ISO 18004 defines no symbol for
+    /// them) and drop the detections only refused reads made — whichever
+    /// attempt made them — unless a parsed detection's content agrees.
+    fn veto(&mut self, vetoes: impl IntoIterator<Item = Veto>) {
+        for veto in vetoes {
+            self.refusals.record(veto);
         }
-        let vetoed = &self.vetoed;
+        let parsed: Vec<ContentKey> = self
+            .observations
+            .iter()
+            .filter(|seen| seen.parsed)
+            .map(|seen| seen.key.clone())
+            .collect();
+        let refusals = &self.refusals;
         self.observations.retain(|seen| {
-            seen.symbology != Symbology::QrCode || seen.parsed || !vetoed.contains(&seen.key.raw)
+            !refusals.refuses_detection(&seen.footing())
+                || parsed.iter().any(|key| key.agrees(&seen.key))
         });
     }
 
     /// Re-derive rescue candidates (clean RS under the scanner's own
     /// acceptance, no luma sampling) while an unparsed QR read is in play —
-    /// in `found` or already absorbed. A candidate whose stream parses with
-    /// a located declaration may locate a signalled-only read; one proven
-    /// malformed names what rxing's port reads of it (a veto). At most
-    /// `MAX_RESCUE_CANDIDATES` candidates, in the order given, each paired
-    /// with the photometry of its attempt.
-    fn rederive_candidates<'c>(
+    /// in `found` or already absorbed. Every stream that parses shields its
+    /// content; one with a located declaration may also locate a
+    /// signalled-only read; one proven malformed refuses what rxing's port
+    /// reports for it. At most `MAX_RESCUE_CANDIDATES` candidates, in the
+    /// order given (original-space corners, photometry stamped).
+    fn rederive_candidates(
         &self,
         found: &[RawDetection],
-        candidates: impl IntoIterator<Item = (&'c crate::rescue::RescueCandidate, bool)>,
-    ) -> (Vec<(RawDetection, bool)>, Vec<Vec<u8>>) {
+        candidates: &[RescueCandidate],
+    ) -> Rederivations {
         let unparsed_qr =
             |symbology: Symbology, parsed: bool| symbology == Symbology::QrCode && !parsed;
         let in_play = found
@@ -837,12 +1039,11 @@ impl Run<'_> {
                 .observations
                 .iter()
                 .any(|seen| unparsed_qr(seen.symbology, seen.parsed));
-        let mut located = Vec::new();
-        let mut malformed = Vec::new();
+        let mut out = Rederivations::default();
         if !in_play {
-            return (located, malformed);
+            return out;
         }
-        for (candidate, inverts) in candidates.into_iter().take(MAX_RESCUE_CANDIDATES) {
+        for candidate in candidates.iter().take(MAX_RESCUE_CANDIDATES) {
             match crate::rescue::rederive(
                 &candidate.stream,
                 candidate.version,
@@ -850,40 +1051,58 @@ impl Run<'_> {
                 candidate.mask,
                 Acceptance::Scanner,
             ) {
-                Rederived::Parsed(parsed) if !parsed.eci.is_empty() => located.push((
-                    RawDetection {
-                        symbology: Symbology::QrCode,
+                Rederived::Parsed(parsed) => {
+                    let key = ContentKey {
                         raw: parsed.bytes,
                         eci: EciEvidence::from_marks(parsed.eci),
-                        masked_stream: Some(candidate.stream.clone()),
-                        corners: Some(candidate.corners),
-                        version: Some(candidate.version),
-                        ec: Some(candidate.ec),
-                        mask: Some(candidate.mask),
                         fnc1: parsed.fnc1,
-                        parsed: true,
-                        engine: EngineKind::Rescue,
-                    },
-                    inverts,
-                )),
-                Rederived::Malformed { port_payload } => malformed.extend(port_payload),
-                Rederived::Parsed(_) | Rederived::Unverified => {}
+                    };
+                    if matches!(key.eci, EciEvidence::Located(_)) {
+                        out.located.push(Location {
+                            key: key.clone(),
+                            stream: candidate.stream.clone(),
+                            corners: candidate.corners,
+                            version: candidate.version,
+                            ec: candidate.ec,
+                            mask: candidate.mask,
+                            inverts: candidate.inverted,
+                        });
+                    }
+                    out.shields.push(key);
+                }
+                Rederived::Malformed { port } => out.vetoes.extend(port.map(Veto::port)),
+                Rederived::Unverified => {}
             }
         }
-        (located, malformed)
+        out
     }
 
-    /// Absorb the re-derived reads that locate a signalled-only detection
-    /// (equal bytes, agreeing accounts); the others are left to S5.
-    fn locate(&mut self, reads: impl IntoIterator<Item = (RawDetection, bool)>) {
-        for (read, inverts) in reads {
-            let locates = self.observations.iter().any(|seen| {
-                seen.signalled_only() && seen.symbology == read.symbology && seen.key.admits(&read)
-            });
-            if locates {
-                self.absorb(vec![read], inverts);
+    /// Fold each location into the first signalled-only QR detection whose
+    /// content it agrees with (equal bytes, agreeing accounts); the others
+    /// are left to S5.
+    fn locate(&mut self, locations: Vec<Location>) {
+        for location in locations {
+            if let Some(seen) = self.observations.iter_mut().find(|seen| {
+                seen.signalled_only()
+                    && seen.symbology == Symbology::QrCode
+                    && seen.key.agrees(&location.key)
+            }) {
+                seen.adopt_location(location);
             }
         }
+    }
+
+    /// One pass's evidence, before its reads are absorbed: a new attempt
+    /// (the last one's proofs past capacity lapse), its shields, then its
+    /// proofs — the engines' refusals and the candidates'. Returns the
+    /// locations, folded in once the pass's reads are absorbed.
+    fn prove(&mut self, rederived: Rederivations, refused: Vec<Veto>) -> Vec<Location> {
+        self.refusals.next_attempt();
+        for key in rederived.shields {
+            self.refusals.shield(key);
+        }
+        self.veto(refused.into_iter().chain(rederived.vetoes));
+        rederived.located
     }
 
     /// Whether the walk may stop after a stage: something was found, and
@@ -904,16 +1123,9 @@ impl Run<'_> {
     /// the same re-derivation — rqrr may have detected the grid in another
     /// attempt than the one an engine read the symbol in.
     fn rederive_collected(&mut self) {
-        let candidates = std::mem::take(&mut self.rescue_candidates);
-        let (located, malformed) = self.rederive_candidates(
-            &[],
-            candidates
-                .iter()
-                .map(|candidate| (candidate, candidate.inverted)),
-        );
-        self.veto(malformed);
+        let rederived = self.rederive_candidates(&[], &self.rescue_candidates);
+        let located = self.prove(rederived, Vec::new());
         self.locate(located);
-        self.rescue_candidates = candidates;
     }
 
     /// S5 — try the collected rescue candidates; first success absorbs.
@@ -982,11 +1194,11 @@ impl Run<'_> {
     }
 
     /// Keep a bounded set of rescue inputs (S5 cost is per-candidate);
-    /// dedupe by symbol identity (version/ec/mask) — the same physical
-    /// symbol surfaces across many attempts.
+    /// dedupe by symbol identity (version/ec/mask, photometry, orientation)
+    /// — the same physical symbol surfaces across many attempts.
     fn collect_rescue(
         &mut self,
-        candidates: Vec<crate::rescue::RescueCandidate>,
+        candidates: Vec<RescueCandidate>,
         attempt_dims: (u32, u32),
         inverts: bool,
     ) {
@@ -995,24 +1207,19 @@ impl Run<'_> {
                 return;
             }
             if self.rescue_candidates.iter().any(|c| {
-                (c.version, c.ec, c.mask, c.inverted)
-                    == (candidate.version, candidate.ec, candidate.mask, inverts)
+                (c.version, c.ec, c.mask, c.inverted, c.transposed)
+                    == (
+                        candidate.version,
+                        candidate.ec,
+                        candidate.mask,
+                        inverts,
+                        candidate.transposed,
+                    )
             }) {
                 continue;
             }
             if attempt_dims != self.orig {
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "dimensions bounded by Limits::max_dimension — exact in f32"
-                )]
-                let (fx, fy) = (
-                    self.orig.0 as f32 / attempt_dims.0 as f32,
-                    self.orig.1 as f32 / attempt_dims.1 as f32,
-                );
-                for p in &mut candidate.corners {
-                    p.x *= fx;
-                    p.y *= fy;
-                }
+                candidate.corners = rescaled(candidate.corners, attempt_dims, self.orig);
             }
             candidate.inverted = inverts;
             self.rescue_candidates.push(candidate);
@@ -1042,23 +1249,22 @@ impl Run<'_> {
             let outcome = engine::decode_filtered(&img, filter);
             self.panics = self.panics.saturating_add(outcome.panics);
             let dims = (img.width(), img.height());
-            // the attempt's own proofs come first, so they veto its reads
-            let (located, malformed) = self.rederive_candidates(
-                &outcome.detections,
-                outcome
-                    .rescue
-                    .iter()
-                    .map(|candidate| (candidate, attempt.inverts)),
-            );
-            self.veto(outcome.refused.into_iter().chain(malformed));
-            let rescaled = rescale_corners(outcome.detections, dims, self.orig);
-            found_total += self.absorb(rescaled, attempt.inverts);
-            let (reads, photometry): (Vec<_>, Vec<_>) = located.into_iter().unzip();
-            self.locate(
-                rescale_corners(reads, dims, self.orig)
-                    .into_iter()
-                    .zip(photometry),
-            );
+            // the attempt's grids in original space; its proofs come first,
+            // so they veto its reads
+            let candidates: Vec<RescueCandidate> = outcome
+                .rescue
+                .iter()
+                .map(|candidate| RescueCandidate {
+                    corners: rescaled(candidate.corners, dims, self.orig),
+                    inverted: attempt.inverts,
+                    ..candidate.clone()
+                })
+                .collect();
+            let rederived = self.rederive_candidates(&outcome.detections, &candidates);
+            let located = self.prove(rederived, outcome.refused);
+            let hits = rescale_corners(outcome.detections, dims, self.orig);
+            found_total += self.absorb(hits, attempt.inverts);
+            self.locate(located);
             self.collect_rescue(outcome.rescue, dims, attempt.inverts);
             tried += 1;
         }
@@ -1172,10 +1378,6 @@ fn same_place(own: &[Point; 4], read: &[Point; 4]) -> bool {
 /// Map detection corners from the attempt image's coordinate space back to
 /// the original input's (decodes run on downscales; consumers — overlays,
 /// structural sampling — need original-space geometry).
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "dimensions bounded by Limits::max_dimension — exact in f32"
-)]
 fn rescale_corners(
     mut found: Vec<RawDetection>,
     attempt_dims: (u32, u32),
@@ -1184,17 +1386,29 @@ fn rescale_corners(
     if attempt_dims == orig_dims {
         return found;
     }
-    let fx = orig_dims.0 as f32 / attempt_dims.0 as f32;
-    let fy = orig_dims.1 as f32 / attempt_dims.1 as f32;
     for detection in &mut found {
         if let Some(corners) = &mut detection.corners {
-            for p in corners.iter_mut() {
-                p.x *= fx;
-                p.y *= fy;
-            }
+            *corners = rescaled(*corners, attempt_dims, orig_dims);
         }
     }
     found
+}
+
+/// Four corners from one image's coordinate space to another's.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "dimensions bounded by Limits::max_dimension — exact in f32"
+)]
+fn rescaled(mut corners: [Point; 4], from: (u32, u32), to: (u32, u32)) -> [Point; 4] {
+    if from != to {
+        let fx = to.0 as f32 / from.0 as f32;
+        let fy = to.1 as f32 / from.1 as f32;
+        for p in &mut corners {
+            p.x *= fx;
+            p.y *= fy;
+        }
+    }
+    corners
 }
 
 /// Execute the ladder over normalized planes. `deadline` is the WHOLE-scan
@@ -1215,7 +1429,7 @@ pub(crate) fn run(
         orig: (planes.luma.width(), planes.luma.height()),
         observations: Vec::new(),
         rescue_candidates: Vec::new(),
-        vetoed: Vec::new(),
+        refusals: Refusals::default(),
         panics: 0,
     };
     let mut stages = Vec::new();
@@ -1294,39 +1508,59 @@ pub(crate) fn run(
         // ladder came up empty — a decoded symbol never needs rescuing.
         run.rescue_stage(luma, &mut stages)?;
     }
-    // Every early exit included: candidates collected in other attempts
-    // than the reads they locate or veto (at most MAX_RESCUE_CANDIDATES
-    // clean re-derivations, no sampling).
-    run.rederive_collected();
+    run.finish(stages, started)
+}
 
-    // Content is interpreted ONCE per detection, after every stage (S5
-    // included). PRIMARY-detection contract: detections order is QR-family
-    // first (stable). On a flyer carrying a QR + a retail barcode, the
-    // product cares about the QR — and the scored "primary" (detections[0])
-    // must not depend on detector-internal iteration order.
-    let mut detected: Vec<_> = run
-        .observations
-        .into_iter()
-        .map(Observation::into_detection)
-        .collect();
-    detected.sort_by_key(|(merged, _, _)| !merged.symbology.is_qr_family());
-    #[cfg(test)]
-    let contents = detected
-        .iter()
-        .map(|(_, key, reading)| (key.clone(), reading.clone()))
-        .collect();
-    let merged = detected.into_iter().map(|(merged, _, _)| merged).collect();
+impl Run<'_> {
+    /// End of the walk, every early exit included: the candidates collected
+    /// in other attempts than the reads they locate or refuse (at most
+    /// `MAX_RESCUE_CANDIDATES` clean re-derivations, no sampling — past the
+    /// deadline too, after a last cancellation check), then the content of
+    /// each detection, interpreted ONCE.
+    fn finish(mut self, stages: Vec<StageTrace>, started: Instant) -> Result<LadderOutcome> {
+        self.check_cancel()?;
+        self.rederive_collected();
+        // the end pass's proofs past capacity lapse with it: another walk
+        // sees the recorded ones
+        self.refusals.next_attempt();
 
-    Ok(LadderOutcome {
-        merged,
+        // PRIMARY-detection contract: detections order is QR-family first
+        // (stable). On a flyer carrying a QR + a retail barcode, the product
+        // cares about the QR — and the scored "primary" (detections[0])
+        // must not depend on detector-internal iteration order.
+        let mut detected: Vec<_> = self
+            .observations
+            .into_iter()
+            .map(|seen| {
+                let footing = seen.footing();
+                let (merged, key, reading) = seen.into_detection();
+                (merged, key, reading, footing)
+            })
+            .collect();
+        detected.sort_by_key(|(merged, ..)| !merged.symbology.is_qr_family());
         #[cfg(test)]
-        contents,
-        trace: PipelineTrace {
-            stages,
-            engine_panics: run.panics,
-            total_ms: started.elapsed().as_secs_f64() * 1_000.0,
-        },
-    })
+        let contents = detected
+            .iter()
+            .map(|(_, key, reading, _)| (key.clone(), reading.clone()))
+            .collect();
+        let (merged, footings) = detected
+            .into_iter()
+            .map(|(merged, _, _, footing)| (merged, footing))
+            .unzip();
+
+        Ok(LadderOutcome {
+            merged,
+            footings,
+            refusals: self.refusals,
+            #[cfg(test)]
+            contents,
+            trace: PipelineTrace {
+                stages,
+                engine_panics: self.panics,
+                total_ms: started.elapsed().as_secs_f64() * 1_000.0,
+            },
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1879,7 +2113,7 @@ mod ladder_mutant_kills {
             orig,
             observations: Vec::new(),
             rescue_candidates: Vec::new(),
-            vetoed: Vec::new(),
+            refusals: Refusals::default(),
             panics: 0,
         }
     }
@@ -2268,8 +2502,18 @@ mod ladder_mutant_kills {
         );
     }
 
+    /// The refusal of what the port reports for a stream that signals a
+    /// designator (ECI 1000000 + `raw`).
+    fn port_veto(raw: &[u8]) -> Veto {
+        Veto::Port(ContentKey {
+            raw: raw.to_vec(),
+            eci: EciEvidence::Signalled,
+            fnc1: Fnc1::None,
+        })
+    }
+
     #[test]
-    fn a_proven_malformed_payload_vetoes_unparsed_qr_reads_only() {
+    fn a_proof_refuses_the_reads_its_content_admits_and_nothing_else() {
         let cancel = CancelToken::new();
         let mut run = fresh_run(&cancel, (100, 100));
         // a port read absorbed before the proof is removed by it…
@@ -2277,34 +2521,99 @@ mod ladder_mutant_kills {
             vec![hit(b"abc", EciEvidence::Signalled, EngineKind::Rxing)],
             false,
         );
-        run.veto([b"abc".to_vec()]);
+        run.veto([port_veto(b"abc")]);
         assert!(run.observations.is_empty());
-        // …and later unparsed reads of the bytes are dropped (and not
-        // counted), whatever their account
+        // …later reads it covers are dropped — and still counted: the
+        // trace counts raw engine hits
         assert_eq!(
             run.absorb(
                 vec![
-                    hit(b"abc", EciEvidence::NoEci, EngineKind::Rxing),
+                    hit(b"abc", EciEvidence::Signalled, EngineKind::Rxing),
                     hit(b"abc", EciEvidence::Unobserved, EngineKind::Rqrr),
                 ],
                 false,
             ),
-            0
+            2
         );
         assert!(run.observations.is_empty());
-        // a parsed read of equal bytes is another, well-formed symbol; so
-        // is any read outside the QR Code symbology
-        let mut parsed = hit(b"abc", EciEvidence::NoEci, EngineKind::Rqrr);
-        parsed.parsed = true;
-        let mut micro = hit(b"abc", EciEvidence::NoEci, EngineKind::Rxing);
+        // equal bytes under another account are another symbol: a plain
+        // port read, a GS1 one; so is any read outside the QR Code
+        let mut gs1 = hit(b"abc", EciEvidence::NoEci, EngineKind::Rxing);
+        gs1.fnc1 = Fnc1::First;
+        let mut micro = hit(b"abc", EciEvidence::Signalled, EngineKind::Rxing);
         micro.symbology = Symbology::MicroQrCode;
-        assert_eq!(run.absorb(vec![parsed, micro], false), 2);
-        // a later proof leaves a detection with a parsed read in place
-        run.veto([b"abc".to_vec()]);
-        assert_eq!(run.observations.len(), 2);
-        // the memory is bounded
-        run.veto((0..2 * MAX_VETOED).map(|i| vec![u8::try_from(i).unwrap()]));
-        assert_eq!(run.vetoed.len(), MAX_VETOED);
+        run.absorb(
+            vec![
+                hit(b"abc", EciEvidence::NoEci, EngineKind::Rxing),
+                gs1,
+                micro,
+            ],
+            false,
+        );
+        assert_eq!(run.observations.len(), 3);
+        // rqrr's own bytes refuse rqrr's unparsed reads only
+        run.veto([Veto::Rqrr(b"xyz".to_vec())]);
+        run.absorb(
+            vec![
+                hit(b"xyz", EciEvidence::Unobserved, EngineKind::Rqrr),
+                hit(b"xyz", EciEvidence::NoEci, EngineKind::Rxing),
+            ],
+            false,
+        );
+        let xyz: Vec<MergedDetection> = merged(&run)
+            .into_iter()
+            .filter(|m| m.raw == b"xyz")
+            .collect();
+        assert_eq!(xyz.len(), 1);
+        assert_eq!(xyz[0].engines, vec![EngineKind::Rxing]);
+    }
+
+    #[test]
+    fn well_formed_streams_shield_the_reads_they_admit() {
+        let cancel = CancelToken::new();
+        // a parsed read shields its content in its own pass…
+        let mut run = fresh_run(&cancel, (100, 100));
+        run.veto([port_veto(b"abc")]);
+        let mut parsed = hit(b"abc", eci_mark(4, 0), EngineKind::Rqrr);
+        parsed.parsed = true;
+        run.absorb(
+            vec![
+                hit(b"abc", EciEvidence::Signalled, EngineKind::Rxing),
+                parsed,
+            ],
+            false,
+        );
+        let found = merged(&run);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].engines, vec![EngineKind::Rxing, EngineKind::Rqrr]);
+        // …and a detection holding one survives a later proof
+        run.veto([port_veto(b"abc")]);
+        assert_eq!(run.observations.len(), 1);
+        // a re-derived candidate's content shields too: FNC1 second then
+        // first + "37abc" reads like a well-formed FNC1-first "37abc"
+        let gs1 = ContentKey {
+            raw: b"37abc".to_vec(),
+            eci: EciEvidence::NoEci,
+            fnc1: Fnc1::First,
+        };
+        let mut read = hit(b"37abc", EciEvidence::NoEci, EngineKind::Rxing);
+        read.fnc1 = Fnc1::First;
+        let mut run = fresh_run(&cancel, (100, 100));
+        run.veto([Veto::Port(gs1.clone())]);
+        run.absorb(vec![read.clone()], false);
+        assert!(run.observations.is_empty(), "nothing well-formed in sight");
+        run.refusals.shield(gs1);
+        run.absorb(vec![read], false);
+        assert_eq!(run.observations.len(), 1, "a well-formed stream carries it");
+        // the shields are bounded
+        for i in 0..2 * MAX_SHIELDS {
+            run.refusals.shield(ContentKey {
+                raw: vec![u8::try_from(i).unwrap()],
+                eci: EciEvidence::NoEci,
+                fnc1: Fnc1::None,
+            });
+        }
+        assert_eq!(run.refusals.shields.len(), MAX_SHIELDS);
     }
 
     #[test]
@@ -2322,29 +2631,162 @@ mod ladder_mutant_kills {
         );
         let outcome = engine::decode_filtered(&luma, engine::FormatFilter::All);
         assert_eq!(outcome.rescue.len(), 1, "rqrr's grid");
-        let candidates = || outcome.rescue.iter().map(|candidate| (candidate, false));
         let cancel = CancelToken::new();
         let mut run = fresh_run(&cancel, (luma.width(), luma.height()));
         // no unparsed QR read in play: nothing is re-derived
-        assert_eq!(run.rederive_candidates(&[], candidates()).0.len(), 0);
-        let (located, malformed) = run.rederive_candidates(&outcome.detections, candidates());
-        assert!(malformed.is_empty());
-        assert_eq!(located.len(), 1);
-        assert_eq!(located[0].0.eci, eci_mark(26, 0));
-        assert_eq!(located[0].0.fnc1, Fnc1::First);
+        let idle = run.rederive_candidates(&[], &outcome.rescue);
+        assert!(idle.located.is_empty() && idle.shields.is_empty());
+        let rederived = run.rederive_candidates(&outcome.detections, &outcome.rescue);
+        assert!(rederived.vetoes.is_empty());
+        assert_eq!(rederived.located.len(), 1);
+        let location = &rederived.located[0];
+        assert_eq!(location.key.eci, eci_mark(26, 0));
+        assert_eq!(location.key.fnc1, Fnc1::First);
+        assert_eq!(rederived.shields, vec![location.key.clone()]);
         // before the port's read exists, it locates nothing
-        run.locate(located.clone());
+        run.locate(rederived.located.clone());
         assert!(run.observations.is_empty());
         run.absorb(outcome.detections.clone(), false);
         assert!(run.observations[0].signalled_only());
-        run.locate(located);
+        run.locate(rederived.located);
         let found = detected(&run);
         assert_eq!(found.len(), 1);
         let (merged, key, _) = &found[0];
         assert_eq!(key.eci, eci_mark(26, 0), "located over signalled");
         assert_eq!(merged.text, "0109506000134352");
-        assert_eq!(merged.engines, vec![EngineKind::Rxing, EngineKind::Rescue]);
-        assert!(merged.fnc1 && merged.corners.is_some());
+        assert_eq!(
+            merged.engines,
+            vec![EngineKind::Rxing],
+            "a location is no engine read"
+        );
+        assert!(merged.fnc1 && merged.corners.is_some() && merged.masked_stream.is_some());
+        assert!(
+            run.observations[0].parsed,
+            "a well-formed stream carries it"
+        );
+    }
+
+    /// The ECI 26 + FNC1-first GTIN symbol (rqrr's grid is a candidate).
+    fn eci26_gs1() -> LumaImage {
+        crate::rescue::test_symbols::from_segments(
+            qrcode::Version::Normal(3),
+            qrcode::EcLevel::M,
+            |b| {
+                b.push_eci_designator(26)?;
+                b.push_fnc1_first_position()?;
+                b.push_numeric_data(b"0109506000134352")
+            },
+        )
+    }
+
+    #[test]
+    fn the_end_of_walk_pass_locates_and_refuses_across_attempts() {
+        // rqrr's grid collected in one attempt, rxing's read absorbed in
+        // another: only the end-of-walk pass brings them together
+        let cancel = CancelToken::new();
+        let luma = eci26_gs1();
+        let dims = (luma.width(), luma.height());
+        let outcome = engine::decode_filtered(&luma, engine::FormatFilter::All);
+        let mut run = fresh_run(&cancel, dims);
+        run.collect_rescue(outcome.rescue, dims, false);
+        run.absorb(outcome.detections, false);
+        assert!(run.observations[0].signalled_only());
+        let walked = run.finish(Vec::new(), Instant::now()).unwrap();
+        assert_eq!(walked.merged.len(), 1);
+        let d = &walked.merged[0];
+        assert_eq!(d.text, "0109506000134352");
+        assert_eq!(d.engines, vec![EngineKind::Rxing]);
+        assert!(d.fnc1 && d.corners.is_some());
+        assert_eq!(walked.contents[0].0.eci, eci_mark(26, 0));
+        // FNC1 second then first: the collected grid proves the stream
+        // malformed and refuses the port's GS1 read
+        let data = crate::rescue::test_symbols::stream(
+            "1001 00100101 0101 0100 00000011 01100001 01100010 01100011 0000",
+        );
+        let luma = crate::rescue::test_symbols::from_codewords(
+            qrcode::Version::Normal(1),
+            qrcode::EcLevel::M,
+            &data,
+        );
+        let dims = (luma.width(), luma.height());
+        let outcome = engine::decode_filtered(&luma, engine::FormatFilter::All);
+        let mut run = fresh_run(&cancel, dims);
+        run.collect_rescue(outcome.rescue, dims, false);
+        run.absorb(outcome.detections, false);
+        assert_eq!(run.observations.len(), 1, "the port's GS1 read");
+        let walked = run.finish(Vec::new(), Instant::now()).unwrap();
+        assert!(walked.merged.is_empty(), "{:?}", walked.merged);
+        // and a cancel raised by then is honoured first
+        let cancelled = CancelToken::new();
+        cancelled.cancel();
+        let err = fresh_run(&cancelled, dims)
+            .finish(Vec::new(), Instant::now())
+            .unwrap_err();
+        assert_eq!(err.code(), "QRS-005");
+    }
+
+    #[test]
+    fn at_most_four_candidates_are_re_derived_per_pass() {
+        // five candidates, only the fifth would locate: nothing is located
+        let luma = eci26_gs1();
+        let outcome = engine::decode_filtered(&luma, engine::FormatFilter::All);
+        let dud = crate::rescue::RescueCandidate {
+            stream: MaskedStream {
+                bits: Vec::new(),
+                bit_len: 0,
+            },
+            corners: [Point { x: 0.0, y: 0.0 }; 4],
+            version: 0,
+            ec: EcLevel::M,
+            mask: 0,
+            inverted: false,
+            transposed: false,
+        };
+        let mut candidates = vec![dud; MAX_RESCUE_CANDIDATES];
+        candidates.push(outcome.rescue[0].clone());
+        let cancel = CancelToken::new();
+        let run = fresh_run(&cancel, (luma.width(), luma.height()));
+        let rederived = run.rederive_candidates(&outcome.detections, &candidates);
+        assert!(rederived.located.is_empty() && rederived.shields.is_empty());
+        // fourth, it does
+        candidates.remove(0);
+        let rederived = run.rederive_candidates(&outcome.detections, &candidates);
+        assert_eq!(rederived.located.len(), 1);
+    }
+
+    #[test]
+    fn a_proof_past_capacity_still_refuses_in_its_attempt() {
+        // once MAX_VETOED proofs are remembered, a new one is not recorded
+        // but still applies to the retain and to its attempt's reads; it
+        // lapses with the attempt (the documented proof capacity)
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, (100, 100));
+        run.veto((0..MAX_VETOED).map(|i| port_veto(&[u8::try_from(i).unwrap()])));
+        let zzz = || hit(b"zzz", EciEvidence::Signalled, EngineKind::Rxing);
+        run.absorb(vec![zzz()], false);
+        run.veto([port_veto(b"zzz")]);
+        assert_eq!(run.refusals.vetoes.len(), MAX_VETOED, "the capacity holds");
+        assert!(run.observations.is_empty(), "the retain applies the proof");
+        assert_eq!(run.absorb(vec![zzz()], false), 1, "a raw hit, counted");
+        assert!(run.observations.is_empty(), "so does its attempt's check");
+        run.refusals.next_attempt();
+        run.absorb(vec![zzz()], false);
+        assert_eq!(run.observations.len(), 1, "then it lapses");
+    }
+
+    #[test]
+    fn a_cancel_is_honoured_before_the_end_of_walk_pass() {
+        // the end-of-walk re-derivation runs after the last attempt's
+        // cancel check: a cancel raised by then is honoured first (every
+        // stage off here, so no attempt checks it at all)
+        let data = vec![255u8; 64 * 64];
+        let planes = normalize(&ImageInput::luma8(&data, 64, 64), &Limits::default()).unwrap();
+        let mut config = ScanConfig::full();
+        (config.pyramid, config.direct, config.enhance, config.deep) = (false, false, false, false);
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let err = run(&planes, &config, &cancel, None).unwrap_err();
+        assert_eq!(err.code(), "QRS-005");
     }
 
     #[test]
@@ -2465,6 +2907,7 @@ mod ladder_mutant_kills {
             ec: EcLevel::Q,
             mask: 2,
             inverted: false,
+            transposed: false,
         };
         run.collect_rescue(vec![twin(), twin()], (100, 100), false);
         assert_eq!(
@@ -2492,6 +2935,7 @@ mod ladder_mutant_kills {
             ec: EcLevel::M,
             mask: 0,
             inverted: false,
+            transposed: false,
         };
         run.collect_rescue(vec![candidate], (50, 50), false);
         assert_eq!(run.rescue_candidates.len(), 1);
@@ -2525,6 +2969,7 @@ mod ladder_mutant_kills {
             ec: EcLevel::M,
             mask: 0,
             inverted: false,
+            transposed: false,
         };
         run.collect_rescue(vec![candidate], (120, 90), false);
         let corner = run.rescue_candidates[0].corners[0];
@@ -2551,6 +2996,7 @@ mod ladder_mutant_kills {
             ec: EcLevel::M,
             mask: 0,
             inverted: false,
+            transposed: false,
         };
         let mut run = Run {
             cancel: &cancel,
@@ -2558,7 +3004,7 @@ mod ladder_mutant_kills {
             orig: (100, 100),
             observations: Vec::new(),
             rescue_candidates: vec![dud(), dud(), dud()],
-            vetoed: Vec::new(),
+            refusals: Refusals::default(),
             panics: 0,
         };
         let mut stages = Vec::new();

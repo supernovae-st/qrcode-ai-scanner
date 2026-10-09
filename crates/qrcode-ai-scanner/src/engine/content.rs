@@ -134,11 +134,27 @@ pub(crate) struct ContentKey {
 }
 
 impl ContentKey {
+    /// The content one engine hit reports.
+    pub(crate) fn of(hit: &RawDetection) -> Self {
+        Self {
+            raw: hit.raw.clone(),
+            eci: hit.eci.clone(),
+            fnc1: hit.fnc1,
+        }
+    }
+
     /// Whether an engine hit reads this same content: identical bytes,
     /// agreeing ECI accounts, no FNC1 position conflict. Symbology is the
     /// caller's filter.
     pub(crate) fn admits(&self, hit: &RawDetection) -> bool {
         self.raw == hit.raw && self.eci.agrees_with(&hit.eci) && self.fnc1.agrees_with(hit.fnc1)
+    }
+
+    /// [`ContentKey::admits`] between two contents: whether they can be one.
+    pub(crate) fn agrees(&self, other: &ContentKey) -> bool {
+        self.raw == other.raw
+            && self.eci.agrees_with(&other.eci)
+            && self.fnc1.agrees_with(other.fnc1)
     }
 
     /// Join an admitted read's account: the most specific one stays
@@ -756,6 +772,23 @@ mod tests {
             !gs1.admits(&hit(b"10AB", EciEvidence::NoEci, Fnc1::Second)),
             "first and second position are different symbols"
         );
+        // between keys: the same test, symmetric, and a hit's own key
+        let (a1, gs1_bytes): (&[u8], &[u8]) = (&[0xA1], b"10AB");
+        for (raw, eci, fnc1) in [
+            (a1, EciEvidence::Signalled, Fnc1::None),
+            (a1, EciEvidence::NoEci, Fnc1::None),
+            (a1, EciEvidence::Unobserved, Fnc1::Unobserved),
+            (gs1_bytes, EciEvidence::NoEci, Fnc1::First),
+            (gs1_bytes, EciEvidence::NoEci, Fnc1::Second),
+        ] {
+            let read = hit(raw, eci, fnc1);
+            let own = ContentKey::of(&read);
+            assert!(own.admits(&read));
+            for other in [&key, &gs1] {
+                assert_eq!(other.agrees(&own), other.admits(&read), "{own:?}");
+                assert_eq!(own.agrees(other), other.agrees(&own), "symmetric");
+            }
+        }
     }
 
     #[test]

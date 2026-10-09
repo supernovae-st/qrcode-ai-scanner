@@ -163,7 +163,12 @@ fn png_row(symbols: &[(Vec<qrcode::Color>, usize)]) -> Vec<u8> {
     let quiet = 4usize;
     let px = MODULE_PX as usize;
     let tallest = symbols.iter().map(|(_, width)| *width).max().unwrap_or(0);
-    let width = (symbols.iter().map(|(_, width)| width + quiet).sum::<usize>() + quiet) * px;
+    let width = (symbols
+        .iter()
+        .map(|(_, width)| width + quiet)
+        .sum::<usize>()
+        + quiet)
+        * px;
     let height = (tallest + 2 * quiet) * px;
     let mut img = image::GrayImage::from_pixel(
         u32::try_from(width).unwrap(),
@@ -1166,7 +1171,10 @@ fn d8_a_refusal_spares_well_formed_fnc1_content_with_equal_bytes() {
     let gs1 = bit_stream_colors(&format!("0101 {BYTE_ABC}"), &[]);
     let hello = bit_stream_colors(BYTE_HELLO, &[]);
     for (name, symbols) in [
-        ("refused + gs1 + hello", vec![refused.clone(), gs1.clone(), hello]),
+        (
+            "refused + gs1 + hello",
+            vec![refused.clone(), gs1.clone(), hello],
+        ),
         ("refused + gs1", vec![refused, gs1]),
     ] {
         let png = png_row(&symbols);
@@ -1373,7 +1381,11 @@ fn e5_artistic_eci26_urls_are_located_by_a_later_stage() {
         let d = one(&report);
         assert_eq!(d.content.raw, URL.as_bytes().to_vec(), "{name}");
         assert_eq!(d.content.text, URL, "{name}: {:?}", report.trace);
-        assert_eq!(d.content.charset, Charset::Utf8, "{name}: ECI 26 reproduces");
+        assert_eq!(
+            d.content.charset,
+            Charset::Utf8,
+            "{name}: ECI 26 reproduces"
+        );
         assert!(
             matches!(&d.payload, Payload::Url { url } if url == URL),
             "{name}: {:?}",

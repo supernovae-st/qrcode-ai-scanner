@@ -32,7 +32,7 @@ use crate::matrix::sampler::GridSampler;
 use crate::matrix::version_db::format_bits_index;
 use crate::matrix::zigzag::{unmask_to_codewords, zigzag_positions};
 use crate::report::{EcLevel, Point};
-use bitstream::Parsed;
+use bitstream::{Parsed, PortRead};
 
 /// A grid the engines detected but could not decode — the rescue input.
 #[derive(Debug, Clone)]
@@ -45,6 +45,10 @@ pub(crate) struct RescueCandidate {
     pub mask: u8,
     /// The geometry came from a photometrically inverting attempt.
     pub inverted: bool,
+    /// The stream was read from the transposed grid (a mirrored symbol);
+    /// the corners stay the detected grid's, so the rescue samples module
+    /// margins transposed too.
+    pub transposed: bool,
 }
 
 /// A successful rescue — feeds the normal merge/report path.
@@ -96,7 +100,10 @@ fn codeword_margins(
         reason = "module coords ≤ 177"
     )]
     for &(y, x) in positions.iter().take(total_codewords * 8) {
-        all.push(sampler.module(x as i32, y as i32)?);
+        // a transposed stream's module (row y, column x) is the detected
+        // grid's (row x, column y)
+        let (column, row) = if candidate.transposed { (y, x) } else { (x, y) };
+        all.push(sampler.module(column as i32, row as i32)?);
     }
     let mut sorted = all.clone();
     sorted.sort_unstable();
@@ -213,29 +220,31 @@ pub(crate) enum Acceptance {
     /// `2t + p ≤ npar` — the guard of [`attempt`].
     Scanner,
     /// An engine already decoded these codewords with plain RS (rqrr): the
-    /// re-derivation corrects within `2t ≤ npar` too. Relaxing `p` is safe:
-    /// a block is within `⌊npar/2⌋` of at most one codeword, and when one
-    /// exists rqrr's decoder (Berlekamp-Massey, then a syndrome re-check)
-    /// takes that same one — a verified re-derivation reproduces exactly the
-    /// codewords the engine accepted, so the misdecode risk Annex B reserves
-    /// against is the engine's acceptance, already made. Only `p` is relaxed
-    /// (v1-L 3, v1-M 2, v1-Q/H 1, v2-L 1, v3-L 1 codewords).
+    /// re-derivation corrects within `2t ≤ npar` too — only `p` is relaxed
+    /// (v1-L 3, v1-M 2, v1-Q/H 1, v2-L 1, v3-L 1 codewords). Sound for the
+    /// orientation the engine decoded, and for no other: a block is within
+    /// `⌊npar/2⌋` of at most one codeword, which rqrr's decoder (Berlekamp-
+    /// Massey, then a syndrome re-check) takes too, so a stream verifying
+    /// in that orientation reproduces the codewords the engine accepted and
+    /// the misdecode risk Annex B reserves against is the engine's, already
+    /// taken. Which orientation that was is checked, never assumed (the rqrr
+    /// adapter's `settle`): a grid verifying both ways stays unverified.
     Engine,
 }
 
 /// What re-deriving a sampled stream found.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Rederived {
     /// The RS-verified data codewords, parsed.
     Parsed(Parsed),
     /// The codewords verify, but the segment stream is not one ISO 18004
     /// defines (a `111xxxxx` designator, an assignment number past
     /// 999999, FNC1 in both positions…) — refuse the symbol, as zbar does.
-    /// `port_payload`: the bytes rxing's port transmits for it when that
-    /// reader tolerates the violation — the read a refusal vetoes.
+    /// `port`: what rxing's port reports for it when that reader tolerates
+    /// the violation — the content a refusal vetoes.
     Malformed {
-        /// See [`bitstream::port_payload`].
-        port_payload: Option<Vec<u8>>,
+        /// See [`bitstream::port_read`].
+        port: Option<PortRead>,
     },
     /// No verified codewords: a stream shorter than its version, a block
     /// beyond RS capacity or past the acceptance's budget — e.g. the
@@ -271,7 +280,7 @@ pub(crate) fn rederive(
     match bitstream::parse(&data, version) {
         Some(parsed) => Rederived::Parsed(parsed),
         None => Rederived::Malformed {
-            port_payload: bitstream::port_payload(&data, version),
+            port: bitstream::port_read(&data, version),
         },
     }
 }
@@ -327,7 +336,7 @@ pub(crate) mod fuzz_api {
         if let Some(parsed) = super::bitstream::parse(data, version) {
             let _ = content::read(&parsed.bytes, &EciEvidence::from_marks(parsed.eci));
         }
-        let _ = super::bitstream::port_payload(data, version);
+        let _ = super::bitstream::port_read(data, version);
         let _ = content::read(data, &EciEvidence::NoEci);
         let _ = content::read(data, &EciEvidence::Signalled);
     }
@@ -389,6 +398,7 @@ mod probe {
                 },
                 mask: u8::try_from(meta.mask).unwrap(),
                 inverted: false,
+                transposed: false,
             };
             println!(
                 "candidate: v{} ec={:?} mask={} bit_len={}",
@@ -488,6 +498,7 @@ mod differential {
                     },
                     mask: u8::try_from(meta.mask).unwrap(),
                     inverted: false,
+                    transposed: false,
                 };
                 let rescued = attempt(luma, &candidate)
                     .unwrap_or_else(|| panic!("rescue pipeline failed on clean {path:?}"));
@@ -707,6 +718,7 @@ mod codewords {
                     },
                     mask: u8::try_from(meta.mask).unwrap(),
                     inverted: false,
+                    transposed: false,
                 };
                 (engine, candidate)
             })
@@ -752,21 +764,26 @@ mod codewords {
         assert_eq!(found.len(), 1);
         let (engine, candidate) = &found[0];
         assert_eq!(engine.as_deref(), Some(&b"abc"[..]), "rqrr guesses");
-        assert!(matches!(
+        assert_eq!(
             rederived(candidate, Acceptance::Engine),
-            Rederived::Malformed { port_payload: None }
-        ));
-        // above the register, the port still reads "abc": that is the veto
+            Rederived::Malformed { port: None }
+        );
+        // above the register, the port still signals a designator and reads
+        // "abc": that content is the veto
         let data =
             stream("0111 11001111 01000010 01000000 0100 00000011 01100001 01100010 01100011 0000");
         let luma = from_codewords(qrcode::Version::Normal(1), qrcode::EcLevel::M, &data);
-        let Rederived::Malformed {
-            port_payload: Some(vetoed),
-        } = rederived(&grids(&luma)[0].1, Acceptance::Engine)
-        else {
-            panic!("an assignment number past 999999 is malformed");
-        };
-        assert_eq!(vetoed, b"abc");
+        assert_eq!(
+            rederived(&grids(&luma)[0].1, Acceptance::Engine),
+            Rederived::Malformed {
+                port: Some(PortRead {
+                    bytes: b"abc".to_vec(),
+                    signalled: true,
+                    fnc1: Fnc1::None,
+                })
+            },
+            "an assignment number past 999999 is malformed"
+        );
         // control: the same stream with a well-formed designator (ECI 4)
         let data = stream("0111 00000100 0100 00000011 01100001 01100010 01100011 0000");
         let luma = from_codewords(qrcode::Version::Normal(1), qrcode::EcLevel::M, &data);
@@ -842,6 +859,103 @@ mod codewords {
             rederived(&candidate, Acceptance::Scanner),
             Rederived::Parsed(_)
         ));
+    }
+
+    /// A grid with x and y swapped — how a mirrored symbol reads right.
+    struct Transposed<'g, G>(&'g G);
+
+    impl<G: rqrr::BitGrid> rqrr::BitGrid for Transposed<'_, G> {
+        fn size(&self) -> usize {
+            self.0.size()
+        }
+
+        fn bit(&self, y: usize, x: usize) -> bool {
+            self.0.bit(x, y)
+        }
+    }
+
+    /// A v2-M symbol whose every module has its own luma (dark 10-69,
+    /// light 190-249, by module index), mirrored or not: margins differ
+    /// from codeword to codeword, and follow the module wherever it lands.
+    fn graded(mirrored: bool) -> LumaImage {
+        const SCALE: usize = 6;
+        const QUIET: usize = 4;
+        let code = qrcode::QrCode::with_version(
+            b"graded margins",
+            qrcode::Version::Normal(2),
+            qrcode::EcLevel::M,
+        )
+        .unwrap();
+        let width = code.width();
+        let colors = code.to_colors();
+        let side = (width + 2 * QUIET) * SCALE;
+        let mut data = vec![255u8; side * side];
+        for (i, color) in colors.iter().enumerate() {
+            let (row, column) = (i / width, i % width);
+            let luma = if *color == qrcode::Color::Dark {
+                10 + (i * 7) % 60
+            } else {
+                190 + (i * 5) % 60
+            };
+            let x = if mirrored { width - 1 - column } else { column };
+            for dy in 0..SCALE {
+                for dx in 0..SCALE {
+                    data[((row + QUIET) * SCALE + dy) * side + (x + QUIET) * SCALE + dx] =
+                        u8::try_from(luma).unwrap();
+                }
+            }
+        }
+        let side = u32::try_from(side).unwrap();
+        LumaImage::new(data, side, side)
+    }
+
+    #[test]
+    fn a_transposed_candidate_samples_its_margins_transposed() {
+        // the mirrored render's transposed stream is the unmirrored symbol's
+        // stream: its S5 margins must be the unmirrored candidate's, value
+        // for value — and reading them untransposed measures other modules
+        let upright = graded(false);
+        let (_, sampled) = grids(&upright).remove(0);
+        let codewords = 44; // v2: 44 codewords
+        let expected = codeword_margins(&upright, &sampled, codewords).unwrap();
+        let mirrored = graded(true);
+        let width = mirrored.width() as usize;
+        let data = mirrored.data();
+        let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(
+            width,
+            mirrored.height() as usize,
+            |x, y| data[y * width + x],
+        );
+        let grid = prepared.detect_grids().remove(0);
+        let (meta, raw_data) = rqrr::Grid::new(Transposed(&grid.grid))
+            .get_raw_data()
+            .unwrap();
+        let mut transposed = RescueCandidate {
+            stream: MaskedStream {
+                bits: raw_data.data[..raw_data.len.div_ceil(8)].to_vec(),
+                bit_len: raw_data.len,
+            },
+            corners: grid.bounds.map(|p| Point {
+                x: p.x as f32,
+                y: p.y as f32,
+            }),
+            version: u8::try_from(meta.version.0).unwrap(),
+            ec: sampled.ec,
+            mask: u8::try_from(meta.mask).unwrap(),
+            inverted: false,
+            transposed: true,
+        };
+        // the same symbol read the same way (rqrr's thresholding of graded
+        // modules may flip a bit or two — the margins read the luma itself)
+        assert_eq!(
+            (transposed.version, transposed.mask),
+            (sampled.version, sampled.mask)
+        );
+        let margins = codeword_margins(&mirrored, &transposed, codewords).unwrap();
+        assert_eq!(margins, expected);
+        transposed.transposed = false;
+        let untransposed = codeword_margins(&mirrored, &transposed, codewords).unwrap();
+        assert_ne!(untransposed, expected);
     }
 
     #[test]
@@ -982,6 +1096,7 @@ mod pins {
             ec: EcLevel::M,
             mask: 0,
             inverted: false,
+            transposed: false,
         };
         (LumaImage::new(data, DIM, DIM), candidate)
     }
