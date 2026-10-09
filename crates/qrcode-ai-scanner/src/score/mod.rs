@@ -2074,4 +2074,73 @@ mod tests {
         assert_eq!(score.value, 62);
         assert!(raised(&hints), "{hints:?}");
     }
+
+    /// Dev diagnostic — `cargo nextest run -p qrcode-ai-scanner --run-ignored
+    /// only --no-capture -E 'test(pdf417_stress_cells_repeatability)'`.
+    /// Re-decodes the SAME pixels of every resolution cell of the PDF417
+    /// fixture in one process, with the scoring filter: a pure function of
+    /// the pixels prints 0 or RUNS everywhere. rxing's PDF417 decoder breaks
+    /// codeword-confidence ties in `HashMap` iteration order (randomized per
+    /// map), so the near-knee 256px cell lands in between; then the same
+    /// pixels are walked as a published input. Prints, never asserts a rate.
+    #[test]
+    #[ignore = "dev diagnostic"]
+    fn pdf417_stress_cells_repeatability() {
+        const RUNS: usize = 100;
+        let path = format!(
+            "{}/../../fixtures/symbology/pdf417.png",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let bytes = std::fs::read(&path).expect("fixture present");
+        let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
+        let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
+        let d = &outcome.merged[0];
+        assert_eq!(d.symbology, crate::report::Symbology::Pdf417);
+        let base = transform::downscale_to(&planes.luma, STRESS_BASE_SIDE);
+        let probe = CellProbe::calibrate(&base, &d.text, d.symbology).expect("base decodes");
+        let survives = |img: &LumaImage| {
+            (0..RUNS)
+                .filter(|_| detections_match(&cell_decode(img, d.symbology).detections, &d.text))
+                .count()
+        };
+        for side in [358u32, 256, 179, 128, 90] {
+            let cell = transform::downscale_to(&base, side);
+            let judged = (0..RUNS)
+                .filter(|_| cell_passes(&cell, &d.text, probe))
+                .count();
+            println!(
+                "{side}px cell ({}x{}): direct {}/{RUNS} · otsu {}/{RUNS} · cell_passes {judged}/{RUNS}",
+                cell.width(),
+                cell.height(),
+                survives(&cell),
+                survives(&transform::otsu_threshold(&cell)),
+            );
+        }
+        // the published side: the ladder's verdict over the full frame, then
+        // over the 256px pixels handed in as an input of their own
+        let walk = |planes: &crate::transform::SourcePlanes| {
+            let mut seen = std::collections::BTreeMap::new();
+            for _ in 0..RUNS {
+                let o =
+                    ladder::run(planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
+                let texts: Vec<_> = o.merged.iter().map(|m| m.text.clone()).collect();
+                let stages: Vec<_> = o
+                    .trace
+                    .stages
+                    .iter()
+                    .map(|s| (s.stage.clone(), s.transforms_tried, s.detections_found))
+                    .collect();
+                *seen.entry(format!("{texts:?} via {stages:?}")).or_insert(0) += 1;
+            }
+            seen
+        };
+        println!("full frame, {RUNS} ladder walks: {:#?}", walk(&planes));
+        let cell = transform::downscale_to(&base, 256);
+        let cell_input = ImageInput::luma8(cell.data(), cell.width(), cell.height());
+        let cell_planes = normalize(&cell_input, &Limits::default()).unwrap();
+        println!(
+            "256px pixels as an input, {RUNS} ladder walks: {:#?}",
+            walk(&cell_planes)
+        );
+    }
 }

@@ -226,3 +226,40 @@ fn budget_cuts_never_ship_a_partial_judgment() {
         budget += step;
     }
 }
+
+/// Dev diagnostic — `cargo nextest run -p qrcode-ai-scanner --run-ignored
+/// only --no-capture -E 'test(pdf417_verdict_repeatability)'`. The same
+/// unbudgeted Full scan of the PDF417 fixture, repeated in ONE process: a
+/// deterministic pipeline prints a single verdict. rxing's PDF417 decoder
+/// breaks codeword-confidence ties in `HashMap` iteration order (randomized
+/// per map), so the near-knee 256px resolution cell — and the value and grade
+/// with it — can differ between two scans of identical bytes. Prints the
+/// verdict histogram; asserts only that every scan decodes.
+#[test]
+#[ignore = "dev diagnostic"]
+fn pdf417_verdict_repeatability() {
+    const SCANS: usize = 60;
+    let bytes = fixture("symbology/pdf417.png");
+    let mut verdicts = std::collections::BTreeMap::new();
+    for _ in 0..SCANS {
+        let report = scan(&bytes, unbudgeted_full());
+        let detections: Vec<_> = report
+            .detections
+            .iter()
+            .map(|d| (d.symbology, d.content.text.clone()))
+            .collect();
+        assert!(!detections.is_empty(), "the fixture decodes every time");
+        let verdict = report.score.as_ref().map(|s| {
+            let resolution = s.axes.iter().find(|a| a.axis == StressAxis::Resolution);
+            (
+                s.value,
+                s.grade,
+                resolution.map(|a| (a.passed, a.failed_at.clone())),
+            )
+        });
+        *verdicts
+            .entry(format!("{verdict:?} · {detections:?}"))
+            .or_insert(0usize) += 1;
+    }
+    println!("{SCANS} unbudgeted Full scans of symbology/pdf417.png: {verdicts:#?}");
+}
