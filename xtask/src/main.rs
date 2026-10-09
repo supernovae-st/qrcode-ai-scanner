@@ -25,6 +25,7 @@
 )] // automation tool: fail loud, bounded pixel math
 
 mod external;
+mod oracle;
 mod rescue_stress;
 mod rotation_sweep;
 mod sync_version;
@@ -106,6 +107,7 @@ fn main() {
         Some("gen-fixtures") => gen_fixtures(),
         Some("gen-symbology-fixtures") => gen_symbology_fixtures(),
         Some("gen-external-manifest") => external::generate(),
+        Some("oracle") => oracle::run(args.collect()),
         Some("rescue-stress") => rescue_stress::run(),
         Some("rotation-sweep") => rotation_sweep::run(),
         Some("sync-version") => {
@@ -141,7 +143,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: xtask <gen-fixtures | gen-external-manifest | corpus-report [--write | --external] | rescue-stress | sync-version [--check] | baseline --bin <p>>"
+                "usage: xtask <gen-fixtures | gen-symbology-fixtures | gen-external-manifest | corpus-report [--write | --external] | oracle [--json <path>] [--corpus-root <abs path>] | rescue-stress | rotation-sweep | sync-version [--check] | baseline --bin <p>>"
             );
             std::process::exit(2);
         }

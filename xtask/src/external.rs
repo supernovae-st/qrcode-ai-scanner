@@ -15,6 +15,16 @@
 //! frontier). A missing `corpus-external/` (CI checkout) skips gracefully
 //! but noisily: it prints exactly how many manifested files went unchecked.
 //!
+//! The pins are a capability tripwire, not a correctness verdict: `match`
+//! is any-based (SOME detection's text equals the truth — extra detections
+//! and the symbology go unchecked) and `decode` proves detection only.
+//! Counts built on them are exploratory; `xtask oracle` (`oracle.rs`)
+//! judges the complete detection list against the expected
+//! (symbology, text) set.
+//!
+//! The corpus root is `<repo>/corpus-external` unless overridden — see
+//! [`corpus_dir`] (a worktree or CI cache rarely holds the corpus itself).
+//!
 //! The files themselves are machine-bound (untracked) and CAN vanish or rot —
 //! 2026-07-08: ten gallery files were found deleted on disk and the gate went
 //! red exactly as designed. Restore procedure, proven that day: every gallery
@@ -34,19 +44,25 @@
 //! score contract is pinned by the vendored corpus and the test suite.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 use qrcode_ai_scanner::{ImageInput, ScanProfile, Scanner, ScoreDepth};
 use rayon::prelude::*;
 use sha2::{Digest as _, Sha256};
 
 /// Committed manifest, at the repo root next to `corpus.toml`.
-const MANIFEST: &str = "corpus-external.tsv";
+pub(crate) const MANIFEST: &str = "corpus-external.tsv";
 /// Gitignored corpus root, at the repo root.
 const CORPUS_DIR: &str = "corpus-external";
+/// Absolute-path override for the corpus root. A variable, not a symlink:
+/// the ignore rule matches the `corpus-external/` directory form only, so a
+/// symlink at the repo root would show up as an untracked file.
+const CORPUS_ENV: &str = "QRSCAN_EXTERNAL_CORPUS";
 
 /// zxing's own `mustPassCount` at rotation 0° (`QRCodeBlackBoxNTestCase`) —
-/// printed as context next to our per-suite match counts.
+/// printed as exploratory context next to our any-based per-suite match
+/// counts.
 const ZXING_REF: [(&str, u32); 6] = [
     ("zxing-blackbox/qrcode-1", 17),
     ("zxing-blackbox/qrcode-2", 31),
@@ -66,12 +82,15 @@ const IMG_EXT: [&str; 6] = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 /// miscorrection class) and "stayed blind" are different truths whose
 /// transitions mean different things.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Status {
-    /// Decoded and the text equals the sibling `.txt` ground truth.
+pub(crate) enum Status {
+    /// Decoded and SOME detection's text equals the sibling `.txt` ground
+    /// truth — any-based: extra detections and the symbology are not
+    /// checked, so this is exploratory, never "exact" (`oracle.rs` owns the
+    /// strict verdict).
     Match,
     /// Decoded; no ground truth exists to compare against (gallery images).
     Decode,
-    /// Decoded but the text differs from the ground truth.
+    /// Decoded but NO detection's text equals the ground truth.
     Wrong,
     /// No decode.
     Blind,
@@ -80,7 +99,7 @@ enum Status {
 }
 
 impl Status {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Match => "match",
             Self::Decode => "decode",
@@ -104,26 +123,78 @@ impl Status {
 
 /// One manifest line.
 #[derive(Debug, Clone)]
-struct Row {
-    status: Status,
-    sha256: String,
+pub(crate) struct Row {
+    pub(crate) status: Status,
+    pub(crate) sha256: String,
     /// Forward-slash path relative to `corpus-external/`.
-    path: String,
+    pub(crate) path: String,
 }
 
 // ------------------------------------------------------------------ shared
 
-fn is_image(rel: &str) -> bool {
+/// The external corpus root, in priority order: `explicit` (`oracle
+/// --corpus-root`), the absolute path in `QRSCAN_EXTERNAL_CORPUS`, then
+/// `<repo>/corpus-external`. The root used is printed — a gate whose input
+/// location is implicit cannot be audited. A relative override exits 2:
+/// resolving it against cargo's cwd would make the measured corpus depend
+/// on the caller's shell.
+pub(crate) fn corpus_dir(explicit: Option<&Path>) -> PathBuf {
+    let env = std::env::var_os(CORPUS_ENV);
+    match resolve_corpus_dir(explicit, env.as_deref(), &crate::repo_root()) {
+        Ok((dir, source)) => {
+            println!("external corpus root: {} ({source})", dir.display());
+            dir
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// [`corpus_dir`]'s pure half: the root plus the name of what chose it.
+fn resolve_corpus_dir(
+    explicit: Option<&Path>,
+    env: Option<&OsStr>,
+    repo: &Path,
+) -> Result<(PathBuf, &'static str), String> {
+    let (dir, source) = match (explicit, env) {
+        (Some(dir), _) => (dir, "--corpus-root"),
+        (None, Some(value)) => (Path::new(value), CORPUS_ENV),
+        (None, None) => return Ok((repo.join(CORPUS_DIR), "default")),
+    };
+    if dir.is_absolute() {
+        Ok((dir.to_path_buf(), source))
+    } else {
+        Err(format!(
+            "{source} must be an absolute path, got \"{}\"",
+            dir.display()
+        ))
+    }
+}
+
+pub(crate) fn is_image(rel: &str) -> bool {
     Path::new(rel)
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| IMG_EXT.contains(&e.to_ascii_lowercase().as_str()))
 }
 
+/// Suite / gallery subdir of a manifest path (`zxing-blackbox/qrcode-2`),
+/// or its first component when there is no subdir.
+pub(crate) fn group_of(path: &str) -> String {
+    let mut parts = path.split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(a), Some(b), Some(_)) => format!("{a}/{b}"),
+        (Some(a), _, _) => a.to_owned(),
+        _ => String::new(),
+    }
+}
+
 /// All files under `dir`, as sorted forward-slash paths relative to `dir`.
 /// Dotfiles (`.DS_Store` and friends) are ignored — they are OS noise, not
 /// corpus content.
-fn walk_sorted(dir: &Path) -> Vec<String> {
+pub(crate) fn walk_sorted(dir: &Path) -> Vec<String> {
     fn recurse(dir: &Path, base: &Path, out: &mut Vec<String>) {
         for entry in std::fs::read_dir(dir).expect("read corpus dir") {
             let entry = entry.expect("dir entry");
@@ -153,7 +224,12 @@ fn walk_sorted(dir: &Path) -> Vec<String> {
 
 fn sha256_hex(path: &Path) -> String {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let digest = Sha256::digest(&bytes);
+    sha256_bytes(&bytes)
+}
+
+/// Lowercase hex sha256 — the manifest's hash format.
+pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
     let mut hex = String::with_capacity(64);
     for b in digest {
         use std::fmt::Write as _;
@@ -164,18 +240,23 @@ fn sha256_hex(path: &Path) -> String {
 
 /// Ground truth for a zxing image: the sibling `.txt`, decoded exactly the
 /// way the blackbox harness reads it (UTF-8, then ISO-8859-1) — no trimming.
-fn ground_truth(img_abs: &Path) -> Option<String> {
+pub(crate) fn ground_truth(img_abs: &Path) -> Option<String> {
     let txt = img_abs.with_extension("txt");
-    let raw = std::fs::read(txt).ok()?;
-    Some(match String::from_utf8(raw) {
+    std::fs::read(txt).ok().map(decode_truth)
+}
+
+/// Truth-file bytes → text: UTF-8, else ISO-8859-1 (the blackbox harness
+/// rule). Never trimmed — trailing newlines are part of the payload.
+pub(crate) fn decode_truth(raw: Vec<u8>) -> String {
+    match String::from_utf8(raw) {
         Ok(s) => s,
         // ISO-8859-1: every byte maps to the same code point.
         Err(e) => e.into_bytes().iter().map(|&b| b as char).collect(),
-    })
+    }
 }
 
 /// The budget-free, score-free scanner every external run uses.
-fn scanner() -> Scanner {
+pub(crate) fn scanner() -> Scanner {
     let mut config = ScanProfile::Full.config();
     config.budget_ms = None;
     config.score_depth = ScoreDepth::Off;
@@ -203,6 +284,7 @@ fn scan_status(scanner: &Scanner, abs: &Path) -> (Status, u8) {
     if texts.is_empty() {
         return (Status::Blind, engine_panics);
     }
+    // any() on purpose: the pin is a tripwire; oracle.rs judges the full set.
     let status = match ground_truth(abs) {
         Some(truth) => {
             if texts.iter().any(|t| *t == truth) {
@@ -216,7 +298,7 @@ fn scan_status(scanner: &Scanner, abs: &Path) -> (Status, u8) {
     (status, engine_panics)
 }
 
-fn parse_manifest(text: &str) -> Result<Vec<Row>, String> {
+pub(crate) fn parse_manifest(text: &str) -> Result<Vec<Row>, String> {
     let mut rows = Vec::new();
     for (idx, line) in text.lines().enumerate() {
         let n = idx + 1;
@@ -257,16 +339,6 @@ fn print_summary(rows: &[Row]) {
         decoded: u32,
         wrong: u32,
         blind: u32,
-    }
-
-    /// Group by suite / gallery subdir when there is one.
-    fn group_of(path: &str) -> String {
-        let mut parts = path.split('/');
-        match (parts.next(), parts.next(), parts.next()) {
-            (Some(a), Some(b), Some(_)) => format!("{a}/{b}"),
-            (Some(a), _, _) => a.to_owned(),
-            _ => String::new(),
-        }
     }
 
     let mut groups: std::collections::BTreeMap<String, Counts> = std::collections::BTreeMap::new();
@@ -316,9 +388,10 @@ fn print_summary(rows: &[Row]) {
     }
     let zx_ref: u32 = ZXING_REF.iter().map(|&(_, n)| n).sum();
     println!(
-        "zxing-blackbox exact-text match @ 0°: {zx_match}/{zx_total} (zxing reference: {zx_ref})"
+        "zxing-blackbox any-text match @ 0° (exploratory — strict verdicts: xtask oracle): \
+         {zx_match}/{zx_total} (zxing reference: {zx_ref})"
     );
-    println!("qrcode-ai gallery decoded: {ga_decode}/{ga_total}");
+    println!("qrcode-ai gallery decoded (detection only — no truth): {ga_decode}/{ga_total}");
 }
 
 // --------------------------------------------------------------- generate
@@ -328,11 +401,12 @@ fn print_summary(rows: &[Row]) {
 /// re-running this and committing the diff.
 pub(crate) fn generate() {
     let root = crate::repo_root();
-    let dir = root.join(CORPUS_DIR);
+    let dir = corpus_dir(None);
     if !dir.is_dir() {
         eprintln!(
-            "{CORPUS_DIR}/ not present at the repo root — nothing to pin.\n\
-             Fetch the corpora first (README « Reproducing the headline numbers »)."
+            "no external corpus at {} — nothing to pin.\n\
+             Fetch the corpora first (README « Reproducing the headline numbers »).",
+            dir.display()
         );
         std::process::exit(2);
     }
@@ -458,7 +532,7 @@ pub(crate) fn verify() {
         std::process::exit(2);
     });
 
-    let dir = root.join(CORPUS_DIR);
+    let dir = corpus_dir(None);
     if !dir.is_dir() {
         // Graceful for CI checkouts (the corpus is not vendored) but LOUD:
         // the exact count of unverified pins is printed, never silently 0.
@@ -609,5 +683,37 @@ mod tests {
             parse_manifest(&format!("maybe\t{}\tx.png", "a".repeat(64))).is_err(),
             "unknown status"
         );
+    }
+
+    /// Explicit root > env > `<repo>/corpus-external`; overrides must be
+    /// absolute. The default arm is the CI path: no override and no corpus
+    /// means `verify` reaches its unchanged loud skip (exit 0).
+    #[test]
+    fn corpus_root_resolution_order() {
+        // repo_root() is absolute on every platform (CARGO_MANIFEST_DIR).
+        let repo = crate::repo_root();
+        let (env_dir, explicit_dir) = (repo.join("env-corpus"), repo.join("explicit-corpus"));
+        assert_eq!(
+            resolve_corpus_dir(None, None, &repo),
+            Ok((repo.join(CORPUS_DIR), "default"))
+        );
+        assert_eq!(
+            resolve_corpus_dir(None, Some(env_dir.as_os_str()), &repo),
+            Ok((env_dir.clone(), CORPUS_ENV))
+        );
+        assert_eq!(
+            resolve_corpus_dir(Some(&explicit_dir), Some(env_dir.as_os_str()), &repo),
+            Ok((explicit_dir, "--corpus-root"))
+        );
+        for relative in ["corpus-external", ""] {
+            assert!(
+                resolve_corpus_dir(None, Some(OsStr::new(relative)), &repo).is_err(),
+                "env {relative:?} must be refused, never resolved against the cwd"
+            );
+            assert!(
+                resolve_corpus_dir(Some(Path::new(relative)), None, &repo).is_err(),
+                "--corpus-root {relative:?} must be refused"
+            );
+        }
     }
 }

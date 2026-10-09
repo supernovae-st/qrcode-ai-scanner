@@ -15,11 +15,20 @@
 //! per-suite `zxing-ref` column is zxing's `mustPassCount` at 0° — their
 //! per-rotation thresholds differ per suite and are not mirrored here; our
 //! own 0° column is the baseline that matters.
+//!
+//! Every angle gets two columns: the historical `any()` match (SOME detection
+//! carries the truth — exploratory) and the strict `exact` of
+//! `oracle::judge` (the complete detection list is exactly the one
+//! (`qr_code`, truth) unit). A gap between the two is unexpected output or
+//! a non-QR symbology carrying the text — never recall.
 
 use std::path::Path;
 
-use qrcode_ai_scanner::{ImageInput, ScanProfile, Scanner, ScoreDepth};
+use qrcode_ai_scanner::{ImageInput, Scanner, Symbology};
 use rayon::prelude::*;
+
+use crate::external::{ground_truth, scanner};
+use crate::oracle::{Outcome, Unit, judge};
 
 /// Exact cardinal rotation of a luma8 buffer — index permutation only.
 fn rot_luma(data: &[u8], w: u32, h: u32, quarter_turns: u8) -> (Vec<u8>, u32, u32) {
@@ -124,20 +133,39 @@ fn bilinear(data: &[u8], w: u32, h: u32, x: f32, y: f32) -> u8 {
     px
 }
 
-/// The budget-free, score-free scanner (same shape as the external gate's).
-fn scanner() -> Scanner {
-    let mut config = ScanProfile::Full.config();
-    config.budget_ms = None;
-    config.score_depth = ScoreDepth::Off;
-    Scanner::builder()
-        .profile(ScanProfile::Custom(config))
-        .build()
+/// One scan against the zxing truth: (`any()` match, strict exact). A scan
+/// `Err` is neither.
+fn verdicts(scanner: &Scanner, luma: &[u8], w: u32, h: u32, truth: &str) -> (bool, bool) {
+    let Ok(report) = scanner.scan(ImageInput::luma8(luma, w, h)) else {
+        return (false, false);
+    };
+    let observed: Vec<(Symbology, &str)> = report
+        .detections
+        .iter()
+        .map(|d| (d.symbology, d.content.text.as_str()))
+        .collect();
+    let any = observed.iter().any(|(_, text)| *text == truth);
+    let expected = [Unit {
+        symbology: Some(Symbology::QrCode),
+        text: truth.to_owned(),
+    }];
+    (any, judge(&expected, &observed) == Outcome::Exact)
 }
 
-fn matches_truth(scanner: &Scanner, luma: &[u8], w: u32, h: u32, truth: &str) -> bool {
-    scanner
-        .scan(ImageInput::luma8(luma, w, h))
-        .is_ok_and(|report| report.detections.iter().any(|d| d.content.text == truth))
+/// Per-image hit row over a table's four angles: the `any()` hits, then the
+/// strict exact hits, in the same angle order.
+fn hit_row(verdicts: [(bool, bool); 4]) -> [u32; 8] {
+    let mut hits = [0u32; 8];
+    for (i, (any, exact)) in verdicts.into_iter().enumerate() {
+        hits[i] = u32::from(any);
+        hits[4 + i] = u32::from(exact);
+    }
+    hits
+}
+
+fn print_row(suite: &str, images: usize, counts: &[u32]) {
+    let cells: Vec<String> = counts.iter().map(u32::to_string).collect();
+    println!("| {suite} | {images} | {} |", cells.join(" | "));
 }
 
 /// Arbitrary-angle probe points — interpolated (trend), unlike the cardinals.
@@ -195,12 +223,12 @@ fn print_total<const N: usize>(grand_images: u32, totals: [u32; N]) {
 }
 
 pub(crate) fn run() {
-    let root = crate::repo_root();
-    let dir = root.join("corpus-external").join("zxing-blackbox");
+    let dir = crate::external::corpus_dir(None).join("zxing-blackbox");
     if !dir.is_dir() {
         eprintln!(
-            "corpus-external/zxing-blackbox/ not present — fetch the corpora first \
-             (README « Reproducing the headline numbers »)."
+            "{} not present — fetch the corpora first \
+             (README « Reproducing the headline numbers »).",
+            dir.display()
         );
         std::process::exit(2);
     }
@@ -216,24 +244,20 @@ pub(crate) fn run() {
         .collect();
     suites.sort();
 
-    println!("| suite | images | 0° | 90° | 180° | 270° |");
-    println!("|---|---|---|---|---|---|");
-    let mut totals = [0u32; 4];
+    println!(
+        "| suite | images | 0° | 90° | 180° | 270° | exact 0° | exact 90° | exact 180° | exact 270° |"
+    );
+    println!("|---|---|---|---|---|---|---|---|---|---|");
+    let mut totals = [0u32; 8];
     let mut grand_images = 0u32;
     for suite in &suites {
         let images = suite_images(&dir.join(suite));
-        let counts = tally::<4>(&images, |base, w, h, truth| {
+        let counts = tally::<8>(&images, |base, w, h, truth| {
             let scanner = scanner();
-            let mut hits = [0u32; 4];
-            for (turn, hit) in hits.iter_mut().enumerate() {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "turn is 0..4 by construction"
-                )]
-                let (buf, rw, rh) = rot_luma(base, w, h, turn as u8);
-                *hit = u32::from(matches_truth(&scanner, &buf, rw, rh, truth));
-            }
-            hits
+            hit_row([0u8, 1, 2, 3].map(|turn| {
+                let (buf, rw, rh) = rot_luma(base, w, h, turn);
+                verdicts(&scanner, &buf, rw, rh, truth)
+            }))
         });
         #[expect(
             clippy::cast_possible_truncation,
@@ -244,10 +268,7 @@ pub(crate) fn run() {
         for (t, c) in totals.iter_mut().zip(counts) {
             *t += c;
         }
-        println!(
-            "| {suite} | {n} | {} | {} | {} | {} |",
-            counts[0], counts[1], counts[2], counts[3]
-        );
+        print_row(suite, images.len(), &counts);
     }
     print_total(grand_images, totals);
     println!(
@@ -256,32 +277,25 @@ pub(crate) fn run() {
     );
 
     // ---- arbitrary angles (interpolated — a TREND, not a verdict) ----------
-    println!("\n| suite | images | 0° | 15° | 30° | 45° |");
-    println!("|---|---|---|---|---|---|");
-    let mut arb_totals = [0u32; 4];
+    println!(
+        "\n| suite | images | 0° | 15° | 30° | 45° | exact 0° | exact 15° | exact 30° | exact 45° |"
+    );
+    println!("|---|---|---|---|---|---|---|---|---|---|");
+    let mut arb_totals = [0u32; 8];
     for suite in &suites {
         let images = suite_images(&dir.join(suite));
-        let counts = tally::<4>(&images, |base, w, h, truth| {
+        let counts = tally::<8>(&images, |base, w, h, truth| {
             let scanner = scanner();
-            let mut hits = [0u32; 4];
-            hits[0] = u32::from(matches_truth(&scanner, base, w, h, truth));
-            for (angle, hit) in ANGLES.iter().zip(hits[1..].iter_mut()) {
-                let (buf, rw, rh) = rot_bilinear(base, w, h, *angle);
-                *hit = u32::from(matches_truth(&scanner, &buf, rw, rh, truth));
-            }
-            hits
+            let [at15, at30, at45] = ANGLES.map(|angle| {
+                let (buf, rw, rh) = rot_bilinear(base, w, h, angle);
+                verdicts(&scanner, &buf, rw, rh, truth)
+            });
+            hit_row([verdicts(&scanner, base, w, h, truth), at15, at30, at45])
         });
         for (t, c) in arb_totals.iter_mut().zip(counts) {
             *t += c;
         }
-        println!(
-            "| {suite} | {} | {} | {} | {} | {} |",
-            images.len(),
-            counts[0],
-            counts[1],
-            counts[2],
-            counts[3]
-        );
+        print_row(suite, images.len(), &counts);
     }
     print_total(grand_images, arb_totals);
     println!(
@@ -289,16 +303,6 @@ pub(crate) fn run() {
          background) — drops mix resampling loss with engine tolerance; read \
          this table as a trend line, never a gate"
     );
-}
-
-/// Sibling `.txt` ground truth, decoded the way the zxing harness reads it.
-fn ground_truth(img_abs: &Path) -> Option<String> {
-    let txt = img_abs.with_extension("txt");
-    let raw = std::fs::read(txt).ok()?;
-    Some(match String::from_utf8(raw) {
-        Ok(s) => s,
-        Err(e) => e.into_bytes().iter().map(|&b| b as char).collect(),
-    })
 }
 
 #[cfg(test)]
