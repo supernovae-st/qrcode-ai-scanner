@@ -41,6 +41,18 @@
 //! tree (git SHA and clean/dirty, read at run time), holds no timing and no
 //! absolute path, and payloads only as text sha256 + byte length +
 //! engines: two runs over the same inputs are byte-identical.
+//!
+//! `--observed <jsonl> --decoder <name>` judges another decoder's recorded
+//! outputs on the same hash-verified images, with the same judge,
+//! dispositions and tallies. The file holds one metadata line
+//! (`{"decoder", "version", "settings"}`) and one record per image
+//! (`{"path", "sha256", "outputs": [{"symbology", "text"}], "error"}`).
+//! Outputs are grouped by (symbology, text) before judging, the 16-group cap
+//! and QR-first order (our wire shape) are recorded as information, and
+//! dispositions apply their outcome rule unchanged — an output that is not
+//! the pinned qrcode-ai-scanner reading marks the entry `differs`
+//! (information) instead of stale. `--emit-observed <jsonl>` writes our own
+//! scans in that shape (decoded text included: keep it local).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -49,7 +61,7 @@ use std::path::{Path, PathBuf};
 use qrcode_ai_scanner::{EngineKind, ImageInput, Scanner, Symbology, Versions};
 use rayon::prelude::*;
 use serde::ser::SerializeMap as _;
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::external::{self, CorpusRoot, Row, Status};
 
@@ -62,7 +74,8 @@ const VENDORED: &str = "corpus.toml";
 const MAX_GROUPS: usize = 16;
 /// z of a two-sided 95% interval.
 const WILSON_Z95: f64 = 1.959_963_984_540_054;
-const USAGE: &str = "usage: xtask oracle [--json <path>] [--corpus-root <absolute path>]";
+const USAGE: &str = "usage: xtask oracle [--json <path>] [--corpus-root <absolute path>] \
+                     [--observed <jsonl> --decoder <name>] [--emit-observed <jsonl>]";
 
 // ------------------------------------------------------------------ judge
 
@@ -200,6 +213,15 @@ pub(crate) fn judge(expected: &[Unit], observed: &[(Symbology, &str)]) -> Outcom
 /// Grouping-contract violations of one report (`spec/01-report.md`).
 /// Messages name detection indices only — payload text never leaves here.
 pub(crate) fn contract_violations(observed: &[(Symbology, &str)]) -> Vec<String> {
+    let mut found = wire_shape_violations(observed);
+    found.extend(duplicate_groups(observed));
+    found
+}
+
+/// The two rules that shape OUR wire report: at most 16 groups, QR family
+/// first. A comparator never promised them, so in observed mode they are
+/// recorded as information instead of judged.
+fn wire_shape_violations(observed: &[(Symbology, &str)]) -> Vec<String> {
     let mut found = Vec::new();
     if observed.len() > MAX_GROUPS {
         found.push(format!(
@@ -217,6 +239,13 @@ pub(crate) fn contract_violations(observed: &[(Symbology, &str)]) -> Vec<String>
             first_other + late
         ));
     }
+    found
+}
+
+/// The grouping rule every decoder is held to: one group per
+/// (symbology, text) content unit.
+fn duplicate_groups(observed: &[(Symbology, &str)]) -> Vec<String> {
+    let mut found = Vec::new();
     for (index, group) in observed.iter().enumerate() {
         if let Some(first) = observed[..index].iter().position(|g| g == group) {
             found.push(format!(
@@ -272,7 +301,7 @@ pub(crate) struct Disposition {
     pub(crate) image_sha256: &'static str,
     pub(crate) truth_sha256: &'static str,
     pub(crate) kind: DispositionKind,
-    /// The judge verdict this entry was written against.
+    /// The qrcode-ai-scanner judge verdict this entry was written against.
     pub(crate) verdict: Outcome,
     /// Why — public corpus facts only.
     pub(crate) note: &'static str,
@@ -313,9 +342,12 @@ pub(crate) const DISPOSITIONS: [Disposition; 2] = [
 enum DispositionState {
     /// Hashes and pin as written — the disposition's outcome applies.
     Holds,
-    /// Hashes as pinned, but the output is not what the pin excuses —
-    /// edit the table deliberately.
+    /// Our own scan: hashes as pinned, but the output is not what the pin
+    /// excuses — edit the table deliberately (blocks).
     Stale,
+    /// Observed decoder: its output is not the pinned qrcode-ai-scanner
+    /// reading. Information only — the outcome rule still applies.
+    Differs,
     /// The row's image or truth sha256 differs from the pinned one.
     Void,
     /// The row was not judged (absent, unreadable, drifted or errored).
@@ -327,6 +359,7 @@ impl DispositionState {
         match self {
             Self::Holds => "holds",
             Self::Stale => "stale",
+            Self::Differs => "differs",
             Self::Void => "void",
             Self::Unevaluated => "unevaluated",
         }
@@ -383,11 +416,15 @@ fn excused_outcome(
 }
 
 /// Final outcome and state of a judged row (raw `verdict`) under its
-/// disposition.
+/// disposition — the same outcome rule for every decoder. `gate` is our
+/// own scan, for which an output the pin does not excuse makes the table
+/// stale; any other decoder's output merely `differs` from the pinned
+/// reading.
 fn settle(
     row: &Judged,
     verdict: Outcome,
     disposition: &Disposition,
+    gate: bool,
 ) -> (Outcome, DispositionState) {
     let truth_sha256 = row.truth_sha256.as_deref().unwrap_or_default();
     if disposition.image_sha256 != row.image_sha256 || disposition.truth_sha256 != truth_sha256 {
@@ -395,27 +432,25 @@ fn settle(
     }
     let observed = units_of(&row.scan);
     let pinned_verdict = verdict == disposition.verdict;
-    match disposition.kind {
-        DispositionKind::KnownWrong { signature } => {
-            let holds = pinned_verdict && observed_signature(&observed) == signature;
-            let state = if holds {
-                DispositionState::Holds
-            } else {
-                DispositionState::Stale
-            };
-            (verdict, state)
-        }
+    let (outcome, holds) = match disposition.kind {
+        DispositionKind::KnownWrong { signature } => (
+            verdict,
+            pinned_verdict && observed_signature(&observed) == signature,
+        ),
         DispositionKind::TruthIncomplete { excused } => {
             let expected = row.expected.as_deref().unwrap_or_default();
             let outcome = excused_outcome(expected, &observed, excused);
-            let state = if pinned_verdict && outcome == Outcome::Ambiguous {
-                DispositionState::Holds
-            } else {
-                DispositionState::Stale
-            };
-            (outcome, state)
+            (outcome, pinned_verdict && outcome == Outcome::Ambiguous)
         }
-    }
+    };
+    let state = if holds {
+        DispositionState::Holds
+    } else if gate {
+        DispositionState::Stale
+    } else {
+        DispositionState::Differs
+    };
+    (outcome, state)
 }
 
 /// sha256 of the table's canonical text, pins included — a receipt names
@@ -438,8 +473,9 @@ fn dispositions_sha256() -> String {
     external::sha256_bytes(canon.as_bytes())
 }
 
-/// Settle every disposition against its judged row (in place).
-fn apply_dispositions(rows: &mut [Judged]) -> Vec<DispositionCheck> {
+/// Settle every disposition against its judged row (in place); `gate` as
+/// in [`settle`].
+fn apply_dispositions(rows: &mut [Judged], gate: bool) -> Vec<DispositionCheck> {
     DISPOSITIONS
         .iter()
         .map(|&disposition| {
@@ -454,7 +490,7 @@ fn apply_dispositions(rows: &mut [Judged]) -> Vec<DispositionCheck> {
             let Some(verdict) = row.verdict else {
                 return unevaluated;
             };
-            let (outcome, state) = settle(row, verdict, &disposition);
+            let (outcome, state) = settle(row, verdict, &disposition, gate);
             row.outcome = outcome;
             row.disposition = Some((disposition.kind, state));
             DispositionCheck {
@@ -488,6 +524,7 @@ impl Set {
 
 /// One detection as observed. The text stays in memory: receipts carry
 /// its sha256 and length only, stdout previews it for public sets only.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Seen {
     symbology: Symbology,
     text: String,
@@ -495,12 +532,14 @@ struct Seen {
 }
 
 /// What one scan produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Scan {
     Report {
         detections: Vec<Seen>,
         engine_panics: u8,
     },
-    /// `code` is the `QRS-xxx` wire code, or `panic`.
+    /// `code` is the `QRS-xxx` wire code, `panic`, or `decoder_error` for
+    /// an observed decoder's reported failure.
     Failed { code: &'static str, detail: String },
 }
 
@@ -554,7 +593,24 @@ struct Judged {
     outcome: Outcome,
     disposition: Option<(DispositionKind, DispositionState)>,
     scan: Scan,
+    /// Blocking grouping-contract violations.
     contract: Vec<String>,
+    /// Wire-shape notes (cap, order) for an observed decoder — information.
+    wire_info: Vec<String>,
+    /// Observed outputs folded into an earlier identical group.
+    merged: usize,
+}
+
+/// The judgment of one scan before dispositions.
+#[derive(Debug, PartialEq, Eq)]
+struct Verdict {
+    /// Raw judge verdict (labelled rows).
+    raw: Option<Outcome>,
+    outcome: Outcome,
+    /// Blocking grouping-contract violations.
+    contract: Vec<String>,
+    /// Wire-shape violations recorded as information only.
+    wire_info: Vec<String>,
 }
 
 /// The (symbology, text) groups of a scan, in report order — none for a
@@ -569,21 +625,204 @@ fn units_of(scan: &Scan) -> Vec<(Symbology, &str)> {
     }
 }
 
-/// Raw verdict (labelled rows), outcome before dispositions, and the
-/// grouping-contract violations of one scan.
-fn verdict_of(expected: Option<&[Unit]>, scan: &Scan) -> (Option<Outcome>, Outcome, Vec<String>) {
+/// Judge one scan. `wire_binds` is our own scanner, which owes the whole
+/// grouping contract; an observed decoder owes the grouping rule but not
+/// our wire shape (cap, order), which then lands in `wire_info`.
+fn verdict_of(expected: Option<&[Unit]>, scan: &Scan, wire_binds: bool) -> Verdict {
     if matches!(scan, Scan::Failed { .. }) {
-        return (None, Outcome::Error, Vec::new());
+        return Verdict {
+            raw: None,
+            outcome: Outcome::Error,
+            contract: Vec::new(),
+            wire_info: Vec::new(),
+        };
     }
     let observed = units_of(scan);
-    let contract = contract_violations(&observed);
-    match expected {
+    let (contract, wire_info) = if wire_binds {
+        (contract_violations(&observed), Vec::new())
+    } else {
+        (
+            duplicate_groups(&observed),
+            wire_shape_violations(&observed),
+        )
+    };
+    let (raw, outcome) = match expected {
         Some(units) => {
             let verdict = judge(units, &observed);
-            (Some(verdict), verdict, contract)
+            (Some(verdict), verdict)
         }
-        None if observed.is_empty() => (None, Outcome::UnlabelledBlind, contract),
-        None => (None, Outcome::UnlabelledDecoded, contract),
+        None if observed.is_empty() => (None, Outcome::UnlabelledBlind),
+        None => (None, Outcome::UnlabelledDecoded),
+    };
+    Verdict {
+        raw,
+        outcome,
+        contract,
+        wire_info,
+    }
+}
+
+// ------------------------------------------------------------- observed
+
+/// Name the emitted and observed files use for our own scanner.
+const OUR_DECODER: &str = "qrcode-ai-scanner";
+
+/// A decoder's metadata line in an `--observed` file.
+#[derive(Debug, Deserialize)]
+struct DecoderMeta {
+    decoder: String,
+    version: String,
+    #[serde(default)]
+    settings: serde_json::Value,
+}
+
+/// One image record of an `--observed` file. Unknown fields are ignored —
+/// `raw_b64` and runner flags ride along for the record; the judge's unit
+/// is (symbology, text).
+#[derive(Debug, Deserialize)]
+struct ObservedLine {
+    path: String,
+    sha256: String,
+    #[serde(default)]
+    outputs: Vec<ObservedOutput>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ObservedOutput {
+    symbology: Symbology,
+    text: String,
+}
+
+/// One observed image, grouped.
+#[derive(Debug)]
+struct ObservedImage {
+    sha256: String,
+    scan: Scan,
+    /// Outputs folded into an earlier identical (symbology, text) group.
+    merged: usize,
+}
+
+/// A decoder's parsed observations.
+#[derive(Debug)]
+struct Observed {
+    meta: DecoderMeta,
+    records: BTreeMap<String, ObservedImage>,
+}
+
+/// Group outputs by (symbology, text), first occurrence first: comparator
+/// outputs are content units, so a payload reported twice is one unit.
+fn group_outputs(outputs: Vec<ObservedOutput>) -> (Vec<Seen>, usize) {
+    let mut groups: Vec<Seen> = Vec::with_capacity(outputs.len());
+    let mut merged = 0;
+    for output in outputs {
+        if groups
+            .iter()
+            .any(|g| g.symbology == output.symbology && g.text == output.text)
+        {
+            merged += 1;
+        } else {
+            groups.push(Seen {
+                symbology: output.symbology,
+                text: output.text,
+                engines: Vec::new(),
+            });
+        }
+    }
+    (groups, merged)
+}
+
+/// Parse an `--observed` JSONL file written by `decoder`: exactly one
+/// metadata line plus one record per image path. Error messages name line
+/// numbers and paths, never payload text.
+fn parse_observed(text: &str, decoder: &str) -> Result<Observed, String> {
+    let mut meta: Option<DecoderMeta> = None;
+    let mut records = BTreeMap::new();
+    for (index, line) in text.lines().enumerate() {
+        let n = index + 1;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(line).map_err(|e| format!("line {n}: {e}"))?;
+        if value.get("path").is_some() {
+            let record: ObservedLine =
+                serde_json::from_value(value).map_err(|e| format!("line {n}: {e}"))?;
+            let (scan, merged) = if let Some(detail) = record.error {
+                let failed = Scan::Failed {
+                    code: "decoder_error",
+                    detail,
+                };
+                (failed, 0)
+            } else {
+                let (detections, merged) = group_outputs(record.outputs);
+                let scan = Scan::Report {
+                    detections,
+                    engine_panics: 0,
+                };
+                (scan, merged)
+            };
+            let image = ObservedImage {
+                sha256: record.sha256,
+                scan,
+                merged,
+            };
+            if records.insert(record.path.clone(), image).is_some() {
+                return Err(format!("line {n}: {} is observed twice", record.path));
+            }
+        } else {
+            let line_meta: DecoderMeta = serde_json::from_value(value).map_err(|e| {
+                format!("line {n}: neither an image record nor decoder metadata: {e}")
+            })?;
+            if meta.replace(line_meta).is_some() {
+                return Err(format!("line {n}: a second decoder metadata line"));
+            }
+        }
+    }
+    let meta = meta.ok_or("no decoder metadata line (decoder, version)")?;
+    if meta.decoder != decoder {
+        return Err(format!(
+            "--decoder {decoder:?} but the file was written by {:?}",
+            meta.decoder
+        ));
+    }
+    Ok(Observed { meta, records })
+}
+
+/// Where image observations come from.
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    /// Our scanner, run on the verified bytes.
+    Scan(&'a Scanner),
+    /// A decoder's recorded outputs.
+    Observed(&'a Observed),
+}
+
+impl Source<'_> {
+    /// Our own scanner owes the whole wire contract and gates the table.
+    fn is_gate(self) -> bool {
+        matches!(self, Self::Scan(_))
+    }
+
+    /// The observation of one verified image (and its merged-output count),
+    /// or why there is none.
+    fn observe(self, path: &str, sha256: &str, bytes: &[u8]) -> Result<(Scan, usize), String> {
+        match self {
+            Self::Scan(scanner) => Ok((scan_bytes(scanner, bytes), 0)),
+            Self::Observed(observed) => {
+                let record = observed
+                    .records
+                    .get(path)
+                    .ok_or_else(|| format!("not observed by the decoder: {path}"))?;
+                if record.sha256 != sha256 {
+                    return Err(format!(
+                        "the observed record hashed other bytes ({}): {path}",
+                        record.sha256
+                    ));
+                }
+                Ok((record.scan.clone(), record.merged))
+            }
+        }
     }
 }
 
@@ -605,11 +844,13 @@ enum Probe {
     Drift,
     /// Hash-verified non-image; a `.txt` file's content decoded as truth.
     Aux(Option<String>),
-    /// Hash-verified image and its scan.
-    Image(Scan),
+    /// Hash-verified image, its observation and merged-output count.
+    Image(Scan, usize),
+    /// Hash-verified image the source has no usable observation for.
+    Unobserved(String),
 }
 
-fn probe(dir: &Path, row: &Row, scanner: &Scanner) -> Probe {
+fn probe(dir: &Path, row: &Row, source: Source<'_>) -> Probe {
     let bytes = match std::fs::read(dir.join(&row.path)) {
         Ok(bytes) => bytes,
         Err(e) => return Probe::Unreadable(e.to_string()),
@@ -618,7 +859,10 @@ fn probe(dir: &Path, row: &Row, scanner: &Scanner) -> Probe {
         return Probe::Drift;
     }
     if external::is_image(&row.path) {
-        return Probe::Image(scan_bytes(scanner, &bytes));
+        return match source.observe(&row.path, &row.sha256, &bytes) {
+            Ok((scan, merged)) => Probe::Image(scan, merged),
+            Err(why) => Probe::Unobserved(why),
+        };
     }
     let is_text = Path::new(&row.path)
         .extension()
@@ -642,12 +886,12 @@ fn suite_symbology(path: &str) -> Option<Symbology> {
         .map(|_| Symbology::QrCode)
 }
 
-/// Re-walk, re-hash and scan the external corpus (`verify`'s integrity
-/// rules), then judge every hash-verified image row.
+/// Re-walk and re-hash the external corpus (`verify`'s integrity rules),
+/// then judge every hash-verified image row from `source`.
 fn evaluate_external(
     dir: &Path,
     pinned: &[Row],
-    scanner: &Scanner,
+    source: Source<'_>,
     integrity: &mut Integrity,
 ) -> Vec<Judged> {
     let on_disk: BTreeSet<String> = match external::walk_sorted(dir) {
@@ -681,12 +925,12 @@ fn evaluate_external(
     let probes: Vec<(&Row, Probe)> = pinned
         .par_iter()
         .filter(|row| on_disk.contains(&row.path))
-        .map(|row| (row, probe(dir, row, scanner)))
+        .map(|row| (row, probe(dir, row, source)))
         .collect();
 
     // path → (pinned sha256, text) of every hash-verified truth file
     let mut truths: BTreeMap<&str, (&str, String)> = BTreeMap::new();
-    let mut scans: Vec<(&Row, Scan)> = Vec::new();
+    let mut scans: Vec<(&Row, Scan, usize)> = Vec::new();
     for (row, probe) in probes {
         match probe {
             Probe::Unreadable(e) => integrity
@@ -702,22 +946,31 @@ fn evaluate_external(
                     truths.insert(row.path.as_str(), (row.sha256.as_str(), text));
                 }
             }
-            Probe::Image(scan) => {
+            Probe::Image(scan, merged) => {
                 integrity.verified += 1;
-                scans.push((row, scan));
+                scans.push((row, scan, merged));
+            }
+            Probe::Unobserved(why) => {
+                integrity.verified += 1;
+                integrity.problems.push(why);
             }
         }
     }
+    let wire_binds = source.is_gate();
     scans
         .into_iter()
-        .filter_map(|(row, scan)| external_row(row, scan, &truths, &mut integrity.problems))
+        .filter_map(|(row, scan, merged)| {
+            let observation = (scan, merged, wire_binds);
+            external_row(row, observation, &truths, &mut integrity.problems)
+        })
         .collect()
 }
 
-/// Expected set + judgment of one hash-verified external image.
+/// Expected set + judgment of one hash-verified external image;
+/// `observation` is (scan, merged outputs, wire contract binds).
 fn external_row(
     row: &Row,
-    scan: Scan,
+    (scan, merged, wire_binds): (Scan, usize, bool),
     truths: &BTreeMap<&str, (&str, String)>,
     problems: &mut Vec<String>,
 ) -> Option<Judged> {
@@ -746,7 +999,7 @@ fn external_row(
         ));
         return None;
     };
-    let (verdict, outcome, contract) = verdict_of(expected.as_deref(), &scan);
+    let verdict = verdict_of(expected.as_deref(), &scan, wire_binds);
     Some(Judged {
         set,
         group: external::group_of(&row.path),
@@ -755,11 +1008,13 @@ fn external_row(
         pin: Some(row.status),
         expected,
         truth_sha256,
-        verdict,
-        outcome,
+        verdict: verdict.raw,
+        outcome: verdict.outcome,
         disposition: None,
         scan,
-        contract,
+        contract: verdict.contract,
+        wire_info: verdict.wire_info,
+        merged,
     })
 }
 
@@ -780,40 +1035,69 @@ pub(crate) fn vendored_expectation(
     }
 }
 
-/// A vendored fixture read once: its sha256 and scan, or the read error.
-type VendoredProbe<'a> = (&'a crate::Entry, Result<(String, Scan), String>);
+/// A vendored fixture read once.
+enum VendoredProbe {
+    Unreadable(String),
+    /// Read, but the source has no usable observation for it.
+    Unobserved(String),
+    Image {
+        sha256: String,
+        scan: Scan,
+        merged: usize,
+    },
+}
 
-/// Scan and judge every `corpus.toml` entry (vendored, always present).
+/// Judge every `corpus.toml` entry (vendored, always present) from `source`.
 fn evaluate_vendored(
     root: &Path,
     corpus: &crate::Corpus,
-    scanner: &Scanner,
+    source: Source<'_>,
     integrity: &mut Integrity,
 ) -> Vec<Judged> {
-    let probes: Vec<VendoredProbe<'_>> = corpus
+    let probes: Vec<(&crate::Entry, VendoredProbe)> = corpus
         .entry
         .par_iter()
         .map(|entry| {
-            let probe = std::fs::read(root.join(&entry.path))
-                .map(|bytes| (external::sha256_bytes(&bytes), scan_bytes(scanner, &bytes)))
-                .map_err(|e| e.to_string());
+            let probe = match std::fs::read(root.join(&entry.path)) {
+                Err(e) => VendoredProbe::Unreadable(e.to_string()),
+                Ok(bytes) => {
+                    let sha256 = external::sha256_bytes(&bytes);
+                    match source.observe(&entry.path, &sha256, &bytes) {
+                        Ok((scan, merged)) => VendoredProbe::Image {
+                            sha256,
+                            scan,
+                            merged,
+                        },
+                        Err(why) => VendoredProbe::Unobserved(why),
+                    }
+                }
+            };
             (entry, probe)
         })
         .collect();
     let mut rows = Vec::with_capacity(probes.len());
     for (entry, probe) in probes {
-        let (image_sha256, scan) = match probe {
-            Ok(measured) => measured,
-            Err(e) => {
+        let (image_sha256, scan, merged) = match probe {
+            VendoredProbe::Image {
+                sha256,
+                scan,
+                merged,
+            } => (sha256, scan, merged),
+            VendoredProbe::Unreadable(e) => {
                 integrity
                     .problems
                     .push(format!("vendored fixture unreadable: {}: {e}", entry.path));
                 continue;
             }
+            VendoredProbe::Unobserved(why) => {
+                integrity.vendored_read += 1;
+                integrity.problems.push(why);
+                continue;
+            }
         };
         integrity.vendored_read += 1;
         let expected = vendored_expectation(entry.expected.as_deref(), entry.expect.as_deref());
-        let (verdict, outcome, contract) = verdict_of(expected.as_deref(), &scan);
+        let verdict = verdict_of(expected.as_deref(), &scan, source.is_gate());
         rows.push(Judged {
             set: Set::Vendored,
             group: format!("vendored/{}", entry.category),
@@ -825,14 +1109,36 @@ fn evaluate_vendored(
                 .expected
                 .as_deref()
                 .map(|text| external::sha256_bytes(text.as_bytes())),
-            verdict,
-            outcome,
+            verdict: verdict.raw,
+            outcome: verdict.outcome,
             disposition: None,
             scan,
-            contract,
+            contract: verdict.contract,
+            wire_info: verdict.wire_info,
+            merged,
         });
     }
     rows
+}
+
+/// Observed records whose path is in neither manifest — integrity problems:
+/// a runner that walked a different corpus must not pass unnoticed.
+fn unknown_observed_paths(
+    observed: &Observed,
+    pinned: &[Row],
+    corpus: &crate::Corpus,
+) -> Vec<String> {
+    let known: BTreeSet<&str> = pinned
+        .iter()
+        .map(|row| row.path.as_str())
+        .chain(corpus.entry.iter().map(|entry| entry.path.as_str()))
+        .collect();
+    observed
+        .records
+        .keys()
+        .filter(|path| !known.contains(path.as_str()))
+        .map(|path| format!("observed record outside both manifests: {path}"))
+        .collect()
 }
 
 /// Every reason this run is not a pass, in a stable order.
@@ -865,7 +1171,7 @@ fn blockers(integrity: &Integrity, rows: &[Judged], checks: &[DispositionCheck])
     for check in checks {
         let d = &check.disposition;
         let why = match (check.state, check.observed) {
-            (DispositionState::Holds, _) => continue,
+            (DispositionState::Holds | DispositionState::Differs, _) => continue,
             (DispositionState::Stale, Some(now)) => format!(
                 "pinned verdict {}, now {} — update DISPOSITIONS deliberately",
                 d.verdict.as_str(),
@@ -1062,6 +1368,22 @@ struct RowReceipt {
     engine_panics: u8,
     error: Option<&'static str>,
     contract: Vec<String>,
+    /// Observed decoder: wire-shape notes (cap, order) — information only.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    wire_info: Vec<String>,
+    /// Observed decoder: outputs folded into an earlier identical group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merged_duplicates: Option<usize>,
+}
+
+/// The observed decoder a receipt judged, as its runner declared it.
+#[derive(Serialize)]
+struct DecoderEcho {
+    name: String,
+    version: String,
+    settings: serde_json::Value,
+    /// Image records in the observed file.
+    records: usize,
 }
 
 /// The scanned tree, read from git at run time — strings, `unknown` when
@@ -1107,9 +1429,16 @@ struct Receipt {
     status: &'static str,
     exit_code: i32,
     reason: Option<&'static str>,
+    /// The judging build (our scanner's versions, in both modes).
     versions: Versions,
+    /// The scanned tree (this checkout), in both modes.
     source: SourceEcho,
-    scan: ScanEcho,
+    /// Our scan configuration; absent when the observations were recorded
+    /// by another decoder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scan: Option<ScanEcho>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decoder: Option<DecoderEcho>,
     inputs: Inputs,
     integrity: Integrity,
     sets: Vec<SetReceipt>,
@@ -1174,16 +1503,82 @@ fn row_receipt(row: &Judged) -> RowReceipt {
         engine_panics,
         error,
         contract: row.contract.clone(),
+        wire_info: row.wire_info.clone(),
+        merged_duplicates: (row.merged > 0).then_some(row.merged),
     }
+}
+
+fn write_text(path: &Path, text: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn write_receipt(path: &Path, receipt: &Receipt) -> Result<(), String> {
     let mut json = serde_json::to_string_pretty(receipt).map_err(|e| e.to_string())?;
     json.push('\n');
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    write_text(path, &json)
+}
+
+#[derive(Serialize)]
+struct EmittedMeta {
+    decoder: &'static str,
+    version: String,
+    settings: ScanEcho,
+}
+
+#[derive(Serialize)]
+struct EmittedOutput<'a> {
+    symbology: Symbology,
+    text: &'a str,
+}
+
+#[derive(Serialize)]
+struct EmittedRecord<'a> {
+    path: &'a str,
+    sha256: &'a str,
+    outputs: Vec<EmittedOutput<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Our own judged scans in the `--observed` JSONL shape, so they can be
+/// re-judged through the comparator path. The file holds decoded TEXT —
+/// private gallery payloads included — and must stay local.
+fn observed_jsonl(rows: &[Judged]) -> Result<String, String> {
+    let versions = Versions::current();
+    let meta = EmittedMeta {
+        decoder: OUR_DECODER,
+        version: format!("{} (pipeline {})", versions.scanner, versions.pipeline),
+        settings: SCAN_ECHO,
+    };
+    let mut out = serde_json::to_string(&meta).map_err(|e| e.to_string())?;
+    out.push('\n');
+    for row in rows {
+        let (outputs, error) = match &row.scan {
+            Scan::Report { detections, .. } => {
+                let outputs = detections
+                    .iter()
+                    .map(|d| EmittedOutput {
+                        symbology: d.symbology,
+                        text: &d.text,
+                    })
+                    .collect();
+                (outputs, None)
+            }
+            Scan::Failed { code, detail } => (Vec::new(), Some(format!("{code}: {detail}"))),
+        };
+        let record = EmittedRecord {
+            path: &row.path,
+            sha256: &row.image_sha256,
+            outputs,
+            error,
+        };
+        out.push_str(&serde_json::to_string(&record).map_err(|e| e.to_string())?);
+        out.push('\n');
     }
-    std::fs::write(path, json).map_err(|e| format!("{}: {e}", path.display()))
+    Ok(out)
 }
 
 // ----------------------------------------------------------------- stdout
@@ -1336,23 +1731,61 @@ fn print_labelled_misses(rows: &[Judged]) {
 struct Args {
     json: Option<PathBuf>,
     corpus_root: Option<PathBuf>,
+    /// Judge a decoder's recorded outputs instead of scanning.
+    observed: Option<PathBuf>,
+    /// The decoder the observed file must declare.
+    decoder: Option<String>,
+    /// Also write our own scans in the observed shape.
+    emit_observed: Option<PathBuf>,
 }
 
+const FLAGS: [&str; 5] = [
+    "--json",
+    "--corpus-root",
+    "--observed",
+    "--decoder",
+    "--emit-observed",
+];
+
 fn parse_args(args: Vec<String>) -> Result<Args, String> {
-    let mut parsed = Args::default();
+    let mut values: BTreeMap<&'static str, String> = BTreeMap::new();
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
-        let slot = match flag.as_str() {
-            "--json" => &mut parsed.json,
-            "--corpus-root" => &mut parsed.corpus_root,
-            _ => return Err(format!("unknown argument {flag:?}")),
+        let Some(key) = FLAGS.iter().copied().find(|known| *known == flag) else {
+            return Err(format!("unknown argument {flag:?}"));
         };
         let value = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
-        if slot.replace(PathBuf::from(value)).is_some() {
+        if values.insert(key, value).is_some() {
             return Err(format!("{flag} given twice"));
         }
     }
+    let mut take = |key: &str| values.remove(key);
+    let parsed = Args {
+        json: take("--json").map(PathBuf::from),
+        corpus_root: take("--corpus-root").map(PathBuf::from),
+        observed: take("--observed").map(PathBuf::from),
+        decoder: take("--decoder"),
+        emit_observed: take("--emit-observed").map(PathBuf::from),
+    };
+    if parsed.observed.is_some() != parsed.decoder.is_some() {
+        return Err("--observed and --decoder go together".to_owned());
+    }
+    if parsed.observed.is_some() && parsed.emit_observed.is_some() {
+        return Err("--emit-observed records our own scan; drop --observed".to_owned());
+    }
     Ok(parsed)
+}
+
+/// The observed file named by `--observed`, or exit 2.
+fn load_observed(path: &Path, decoder: &str) -> Observed {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("oracle: {}: {e}", path.display());
+        std::process::exit(2);
+    });
+    parse_observed(&text, decoder).unwrap_or_else(|e| {
+        eprintln!("oracle: {}: {e}", path.display());
+        std::process::exit(2);
+    })
 }
 
 /// A committed input the oracle cannot run without — exit 2 when absent.
@@ -1387,7 +1820,8 @@ fn new_receipt(
         reason: Some("no external corpus at the default root"),
         versions: Versions::current(),
         source,
-        scan: SCAN_ECHO,
+        scan: Some(SCAN_ECHO),
+        decoder: None,
         inputs: Inputs {
             manifest: FileEcho {
                 path: external::MANIFEST,
@@ -1489,7 +1923,33 @@ fn print_verdict(blockers: &[String]) {
     }
 }
 
-/// `xtask oracle [--json PATH] [--corpus-root ABS]`.
+/// Our scan, or the observed decoder, in one header line — with the tree
+/// that judged it.
+fn print_header(observed: Option<&Observed>, source: &SourceEcho, rows: &[Judged], entries: usize) {
+    let external_images = rows.iter().filter(|r| r.set != Set::Vendored).count();
+    let tree = format!("source {} ({})", source.git_sha, source.tree);
+    match observed {
+        None => {
+            let versions = Versions::current();
+            println!(
+                "oracle {RULES_ID} · scanner {} (pipeline {}) · {tree} · Full, budget-free, \
+                 scoring off · {external_images} external images + {entries} vendored entries",
+                versions.scanner, versions.pipeline
+            );
+        }
+        Some(observed) => println!(
+            "oracle {RULES_ID} · {tree} · observed decoder {} {} · {} records · same judge, \
+             dispositions and tallies (wire cap/order as information) · {external_images} \
+             external images + {entries} vendored entries",
+            observed.meta.decoder,
+            observed.meta.version,
+            observed.records.len()
+        ),
+    }
+}
+
+/// `xtask oracle [--json PATH] [--corpus-root ABS] [--observed JSONL
+/// --decoder NAME] [--emit-observed JSONL]`.
 pub(crate) fn run(args: Vec<String>) {
     let args = parse_args(args).unwrap_or_else(|e| {
         eprintln!("oracle: {e}\n{USAGE}");
@@ -1506,13 +1966,26 @@ pub(crate) fn run(args: Vec<String>) {
         eprintln!("oracle: {VENDORED}: {e}");
         std::process::exit(2);
     });
+    let observed = args
+        .observed
+        .as_deref()
+        .map(|path| load_observed(path, args.decoder.as_deref().unwrap_or_default()));
     let integrity = Integrity {
         manifest_rows: pinned.len(),
         vendored_entries: corpus.entry.len(),
         ..Integrity::default()
     };
-    let source = source_identity(&root);
-    let mut receipt = new_receipt(source, &manifest_text, &vendored_text, integrity);
+    let identity = source_identity(&root);
+    let mut receipt = new_receipt(identity, &manifest_text, &vendored_text, integrity);
+    if let Some(observed) = &observed {
+        receipt.scan = None;
+        receipt.decoder = Some(DecoderEcho {
+            name: observed.meta.decoder.clone(),
+            version: observed.meta.version.clone(),
+            settings: observed.meta.settings.clone(),
+            records: observed.records.len(),
+        });
+    }
 
     let corpus_root = external::corpus_root(args.corpus_root.as_deref());
     let dir = match measurable(corpus_root, &mut receipt) {
@@ -1530,22 +2003,32 @@ pub(crate) fn run(args: Vec<String>) {
     let mut integrity = std::mem::take(&mut receipt.integrity);
 
     let scanner = external::scanner();
-    let mut rows = evaluate_external(&dir, &pinned, &scanner, &mut integrity);
-    let checks = apply_dispositions(&mut rows);
-    rows.extend(evaluate_vendored(&root, &corpus, &scanner, &mut integrity));
+    let source = observed
+        .as_ref()
+        .map_or(Source::Scan(&scanner), Source::Observed);
+    let mut rows = evaluate_external(&dir, &pinned, source, &mut integrity);
+    let checks = apply_dispositions(&mut rows, source.is_gate());
+    rows.extend(evaluate_vendored(&root, &corpus, source, &mut integrity));
+    if let Some(observed) = &observed {
+        let unknown = unknown_observed_paths(observed, &pinned, &corpus);
+        integrity.problems.extend(unknown);
+    }
     let blockers = blockers(&integrity, &rows, &checks);
 
-    let versions = Versions::current();
-    println!(
-        "oracle {RULES_ID} · scanner {} (pipeline {}) · source {} ({}) · Full, budget-free, \
-         scoring off · {} external images + {} vendored entries",
-        versions.scanner,
-        versions.pipeline,
-        receipt.source.git_sha,
-        receipt.source.tree,
-        rows.iter().filter(|r| r.set != Set::Vendored).count(),
-        corpus.entry.len()
+    print_header(
+        observed.as_ref(),
+        &receipt.source,
+        &rows,
+        corpus.entry.len(),
     );
+    if let Some(path) = &args.emit_observed {
+        let written = observed_jsonl(&rows).and_then(|text| write_text(path, &text));
+        if let Err(e) = written {
+            eprintln!("oracle: cannot write the observed file: {e}");
+            std::process::exit(2);
+        }
+        println!("observed (decoded text — keep local): {}", path.display());
+    }
     let (groups, sets) = tallies(&rows);
     print_groups(&groups);
     print_sets(&sets, &integrity);
@@ -1600,11 +2083,12 @@ mod tests {
     const INNER_16: &str = "[\u{5185}\u{5074}QR\u{30b3}\u{30fc}\u{30c9}]\r\n\r\n\
                             *\u{30c0}\u{30d6}\u{30eb}QR*\r\nhttp://d-qr.net/ex/";
 
-    /// A zxing-shaped row for `disposition`'s path and pinned hashes.
+    /// A zxing-shaped row for `disposition`'s path and pinned hashes, judged
+    /// as our own scan.
     fn zxing_row(disposition: &Disposition, truth: &str, observed: &[&str]) -> Judged {
         let expected = vec![qr(truth)];
         let scan = report(observed);
-        let (verdict, outcome, contract) = verdict_of(Some(expected.as_slice()), &scan);
+        let verdict = verdict_of(Some(expected.as_slice()), &scan, true);
         Judged {
             set: Set::Zxing,
             group: external::group_of(disposition.path),
@@ -1613,12 +2097,34 @@ mod tests {
             pin: None,
             expected: Some(expected),
             truth_sha256: Some(disposition.truth_sha256.to_owned()),
-            verdict,
-            outcome,
+            verdict: verdict.raw,
+            outcome: verdict.outcome,
             disposition: None,
             scan,
-            contract,
+            contract: verdict.contract,
+            wire_info: verdict.wire_info,
+            merged: 0,
         }
+    }
+
+    /// One synthetic `--observed` file: metadata plus the given records.
+    fn observed_file(decoder: &str, records: &[String]) -> String {
+        let mut text = format!(
+            "{{\"decoder\": \"{decoder}\", \"version\": \"9.9.9\", \"settings\": {{\"mode\": \"test\"}}}}\n"
+        );
+        for record in records {
+            text.push_str(record);
+            text.push('\n');
+        }
+        text
+    }
+
+    fn record(path: &str, sha256: &str, outputs: &[(&str, &str)]) -> String {
+        let outputs: Vec<serde_json::Value> = outputs
+            .iter()
+            .map(|(symbology, text)| serde_json::json!({"symbology": symbology, "text": text}))
+            .collect();
+        serde_json::json!({"path": path, "sha256": sha256, "outputs": outputs}).to_string()
     }
 
     fn collect_keys(value: &serde_json::Value, keys: &mut Vec<String>) {
@@ -1817,7 +2323,7 @@ mod tests {
     fn dispositions_hold_or_go_stale() {
         let [known_wrong, double_qr] = DISPOSITIONS;
         let settled =
-            |d: &Disposition, row: &Judged| settle(row, row.verdict.expect("labelled"), d);
+            |d: &Disposition, row: &Judged| settle(row, row.verdict.expect("labelled"), d, true);
         assert_eq!(
             settled(
                 &known_wrong,
@@ -1859,7 +2365,7 @@ mod tests {
         let other = "The 2005 USGS aerial photographs of the Washington Monument is censored.";
         let mut rows = vec![zxing_row(&known_wrong, TRUTH_13, &[other])];
         assert_eq!(rows[0].verdict, Some(Outcome::Wrong));
-        let checks = apply_dispositions(&mut rows);
+        let checks = apply_dispositions(&mut rows, true);
         assert_eq!(checks[0].state, DispositionState::Stale);
         assert_eq!(rows[0].outcome, Outcome::Wrong);
         let found = blockers(&Integrity::default(), &rows, &checks);
@@ -1875,6 +2381,60 @@ mod tests {
         );
     }
 
+    /// The same outcome rule for every decoder; only our own scan's
+    /// unexcused output is a stale (blocking) table — another decoder's
+    /// merely `differs` from the pinned qrcode-ai-scanner reading.
+    #[test]
+    fn dispositions_apply_identically_to_every_decoder() {
+        let [known_wrong, double_qr] = DISPOSITIONS;
+        let decoder =
+            |d: &Disposition, row: &Judged| settle(row, row.verdict.expect("labelled"), d, false);
+        assert_eq!(
+            decoder(
+                &known_wrong,
+                &zxing_row(&known_wrong, TRUTH_13, &[MISREAD_13])
+            ),
+            (Outcome::Wrong, DispositionState::Holds),
+            "a decoder sharing the misread is counted wrong"
+        );
+        assert_eq!(
+            decoder(
+                &known_wrong,
+                &zxing_row(&known_wrong, TRUTH_13, &[TRUTH_13])
+            ),
+            (Outcome::Exact, DispositionState::Differs),
+            "a decoder reading the truth exactly is exact"
+        );
+        // the excused symbol is allowed for every decoder, in any order;
+        // anything else is judged
+        for (observed, outcome) in [
+            (&[OUTER_16][..], Outcome::Ambiguous),
+            (&[INNER_16], Outcome::Ambiguous),
+            (&[OUTER_16, INNER_16], Outcome::Ambiguous),
+            (&["garbage", OUTER_16], Outcome::Extra),
+        ] {
+            let row = zxing_row(&double_qr, OUTER_16, observed);
+            assert_eq!(decoder(&double_qr, &row).0, outcome, "{observed:?}");
+        }
+
+        let mut rows = vec![
+            zxing_row(&known_wrong, TRUTH_13, &[TRUTH_13]),
+            zxing_row(&double_qr, OUTER_16, &[INNER_16]),
+        ];
+        let checks = apply_dispositions(&mut rows, false);
+        let states: Vec<DispositionState> = checks.iter().map(|c| c.state).collect();
+        assert_eq!(
+            states,
+            [DispositionState::Differs, DispositionState::Differs]
+        );
+        assert_eq!(
+            (rows[0].outcome, rows[1].outcome),
+            (Outcome::Exact, Outcome::Ambiguous)
+        );
+        let found = blockers(&Integrity::default(), &rows, &checks);
+        assert!(found.is_empty(), "differs is information: {found:?}");
+    }
+
     /// The review finding on 16: a wrong extra output next to the outer
     /// truth must not hide behind `truth_incomplete` — never `ambiguous`.
     #[test]
@@ -1886,7 +2446,7 @@ mod tests {
             &["garbage"],
         ] {
             let mut rows = vec![zxing_row(&double_qr, OUTER_16, observed)];
-            let checks = apply_dispositions(&mut rows);
+            let checks = apply_dispositions(&mut rows, true);
             let outcome = rows[0].outcome;
             assert!(outcome.is_wrong_class(), "{observed:?}: {outcome:?}");
             assert_eq!(checks[1].state, DispositionState::Stale, "{observed:?}");
@@ -1902,7 +2462,7 @@ mod tests {
         // truth is incomplete) but not the pinned reading — stale
         for observed in [&[OUTER_16][..], &[INNER_16]] {
             let mut rows = vec![zxing_row(&double_qr, OUTER_16, observed)];
-            let checks = apply_dispositions(&mut rows);
+            let checks = apply_dispositions(&mut rows, true);
             assert_eq!(
                 (rows[0].outcome, checks[1].state),
                 (Outcome::Ambiguous, DispositionState::Stale),
@@ -1921,7 +2481,7 @@ mod tests {
             zxing_row(&known_wrong, TRUTH_13, &[MISREAD_13]),
             zxing_row(&double_qr, OUTER_16, &[INNER_16, OUTER_16]),
         ];
-        let checks = apply_dispositions(&mut rows);
+        let checks = apply_dispositions(&mut rows, true);
         assert!(checks.iter().all(|c| c.state == DispositionState::Holds));
         assert_eq!(
             (rows[0].verdict, rows[0].outcome),
@@ -1943,7 +2503,7 @@ mod tests {
     fn a_changed_verdict_or_a_missing_row_blocks_as_stale() {
         let [known_wrong, double_qr] = DISPOSITIONS;
         let mut rows = vec![zxing_row(&known_wrong, TRUTH_13, &[TRUTH_13])];
-        let checks = apply_dispositions(&mut rows);
+        let checks = apply_dispositions(&mut rows, true);
         assert_eq!(
             rows[0].outcome,
             Outcome::Exact,
@@ -1968,12 +2528,12 @@ mod tests {
             code: "QRS-001",
             detail: String::from("corrupt"),
         };
-        let (verdict, outcome, contract) = verdict_of(errored.expected.as_deref(), &errored.scan);
+        let verdict = verdict_of(errored.expected.as_deref(), &errored.scan, true);
         assert_eq!(
-            (verdict, outcome, contract.len()),
+            (verdict.raw, verdict.outcome, verdict.contract.len()),
             (None, Outcome::Error, 0)
         );
-        (errored.verdict, errored.outcome) = (verdict, outcome);
+        (errored.verdict, errored.outcome) = (verdict.raw, verdict.outcome);
         // one unit consumes one group: the duplicate is unconsumed output
         // AND a grouping-contract violation
         let duplicated = zxing_row(&known_wrong, "x", &["x", "x"]);
@@ -2114,7 +2674,7 @@ mod tests {
         ];
         let scanner = external::scanner();
         let mut integrity = Integrity::default();
-        let judged = evaluate_external(&corpus.0, &rows, &scanner, &mut integrity);
+        let judged = evaluate_external(&corpus.0, &rows, Source::Scan(&scanner), &mut integrity);
         assert!(integrity.problems.is_empty(), "{:?}", integrity.problems);
         assert_eq!(integrity.verified, rows.len());
         let outcomes: Vec<(&str, Outcome)> = judged
@@ -2137,6 +2697,85 @@ mod tests {
         assert_eq!(judged[1].pin, Some(Status::Match));
     }
 
+    /// A generated corpus judged from a decoder's recorded outputs: the
+    /// same judge applies, and a record that hashed other bytes or is
+    /// missing is an integrity problem, never judged.
+    #[test]
+    fn observed_outputs_are_judged_on_a_synthetic_corpus() {
+        let corpus = TempCorpus::new("observed");
+        let truth = "https://example.invalid/synthetic-truth";
+        let rows = vec![
+            corpus.put(
+                "zxing-blackbox/qrcode-9/1.png",
+                &qr_png(truth),
+                Status::Match,
+            ),
+            corpus.put(
+                "zxing-blackbox/qrcode-9/1.txt",
+                truth.as_bytes(),
+                Status::Aux,
+            ),
+            corpus.put("zxing-blackbox/qrcode-9/2.png", &blank_png(), Status::Blind),
+            corpus.put("zxing-blackbox/qrcode-9/2.txt", b"two", Status::Aux),
+            corpus.put("zxing-blackbox/qrcode-9/3.png", &blank_png(), Status::Blind),
+            corpus.put("zxing-blackbox/qrcode-9/3.txt", b"three", Status::Aux),
+        ];
+        let text = observed_file(
+            "probe",
+            &[
+                record(
+                    &rows[0].path,
+                    &rows[0].sha256,
+                    &[("qr_code", truth), ("micro_qr_code", truth)],
+                ),
+                record(&rows[2].path, &"0".repeat(64), &[]),
+            ],
+        );
+        let observed = parse_observed(&text, "probe").expect("parses");
+        let mut integrity = Integrity::default();
+        let source = Source::Observed(&observed);
+        let judged = evaluate_external(&corpus.0, &rows, source, &mut integrity);
+        assert_eq!(integrity.verified, rows.len(), "the files are intact");
+        let outcomes: Vec<(&str, Outcome)> = judged
+            .iter()
+            .map(|row| (row.path.as_str(), row.outcome))
+            .collect();
+        assert_eq!(
+            outcomes,
+            [("zxing-blackbox/qrcode-9/1.png", Outcome::Extra)],
+            "the truth under a second symbology is extra output"
+        );
+        let problems = integrity.problems.join("\n");
+        for needle in [
+            "the observed record hashed other bytes",
+            "not observed by the decoder: zxing-blackbox/qrcode-9/3.png",
+        ] {
+            assert!(problems.contains(needle), "{problems}");
+        }
+    }
+
+    #[test]
+    fn records_outside_both_manifests_are_problems() {
+        let text = observed_file(
+            "probe",
+            &[
+                record("zxing-blackbox/qrcode-9/1.png", "aa", &[]),
+                record("elsewhere/x.png", "bb", &[]),
+            ],
+        );
+        let observed = parse_observed(&text, "probe").expect("parses");
+        let pinned = vec![Row {
+            status: Status::Blind,
+            sha256: "a".repeat(64),
+            path: String::from("zxing-blackbox/qrcode-9/1.png"),
+        }];
+        let corpus = crate::Corpus { entry: Vec::new() };
+        assert_eq!(
+            unknown_observed_paths(&observed, &pinned, &corpus),
+            ["observed record outside both manifests: elsewhere/x.png"]
+        );
+    }
+
     #[test]
     fn integrity_flags_drift_missing_and_unmanifested_files() {
         let corpus = TempCorpus::new("integrity");
@@ -2152,7 +2791,7 @@ mod tests {
         let rows = vec![good, drifted, missing];
         let scanner = external::scanner();
         let mut integrity = Integrity::default();
-        let judged = evaluate_external(&corpus.0, &rows, &scanner, &mut integrity);
+        let judged = evaluate_external(&corpus.0, &rows, Source::Scan(&scanner), &mut integrity);
         assert_eq!(judged.len(), 1, "only the verified image is judged");
         assert_eq!(integrity.verified, 1);
         let problems = integrity.problems.join("\n");
@@ -2173,7 +2812,7 @@ mod tests {
         let rows = vec![corpus.put("zxing-blackbox/qrcode-9/1.png", &blank_png(), Status::Blind)];
         let scanner = external::scanner();
         let mut integrity = Integrity::default();
-        let judged = evaluate_external(&corpus.0, &rows, &scanner, &mut integrity);
+        let judged = evaluate_external(&corpus.0, &rows, Source::Scan(&scanner), &mut integrity);
         assert!(judged.is_empty());
         assert_eq!(
             integrity.problems,
@@ -2190,7 +2829,7 @@ mod tests {
             std::env::temp_dir().join(format!("qrscan-oracle-gone-{}", std::process::id()));
         let scanner = external::scanner();
         let mut integrity = Integrity::default();
-        let judged = evaluate_external(&absent, &[], &scanner, &mut integrity);
+        let judged = evaluate_external(&absent, &[], Source::Scan(&scanner), &mut integrity);
         assert!(judged.is_empty());
         assert_eq!(integrity.problems.len(), 1);
         assert!(
@@ -2322,6 +2961,15 @@ mod tests {
             Ok(Args {
                 json: Some(PathBuf::from("r.json")),
                 corpus_root: Some(PathBuf::from("/corpus")),
+                ..Args::default()
+            })
+        );
+        assert_eq!(
+            parse(&["--observed", "o.jsonl", "--decoder", "zxing-cpp"]),
+            Ok(Args {
+                observed: Some(PathBuf::from("o.jsonl")),
+                decoder: Some(String::from("zxing-cpp")),
+                ..Args::default()
             })
         );
         assert!(parse(&["--json"]).is_err(), "missing value");
@@ -2330,5 +2978,211 @@ mod tests {
             "repeated flag"
         );
         assert!(parse(&["--external"]).is_err(), "unknown flag");
+        assert!(parse(&["--observed", "o.jsonl"]).is_err(), "no --decoder");
+        assert!(parse(&["--decoder", "zbar"]).is_err(), "no --observed");
+        assert!(
+            parse(&["--observed", "o", "--decoder", "d", "--emit-observed", "e"]).is_err(),
+            "emit is for our own scan"
+        );
+    }
+
+    #[test]
+    fn observed_files_parse_and_group_by_content_unit() {
+        let text = observed_file(
+            "zxing-cpp",
+            &[
+                record("zxing-blackbox/qrcode-1/1.png", "aa", &[("qr_code", "A")]),
+                String::new(),
+                // one payload reported twice is one content unit
+                record(
+                    "qrcode-ai/wild/x.webp",
+                    "bb",
+                    &[("qr_code", "B"), ("micro_qr_code", "B"), ("qr_code", "B")],
+                ),
+                r#"{"path": "fixtures/clean/c.png", "sha256": "cc", "outputs": [], "error": "boom", "flag": 1}"#
+                    .to_owned(),
+            ],
+        );
+        let observed = parse_observed(&text, "zxing-cpp").expect("parses");
+        assert_eq!(
+            (
+                observed.meta.decoder.as_str(),
+                observed.meta.version.as_str()
+            ),
+            ("zxing-cpp", "9.9.9")
+        );
+        assert_eq!(observed.records.len(), 3);
+        let grouped = &observed.records["qrcode-ai/wild/x.webp"];
+        assert_eq!(grouped.merged, 1);
+        let Scan::Report { detections, .. } = &grouped.scan else {
+            panic!("a report");
+        };
+        let units: Vec<(Symbology, &str)> = detections
+            .iter()
+            .map(|d| (d.symbology, d.text.as_str()))
+            .collect();
+        assert_eq!(units, [(QrCode, "B"), (MicroQrCode, "B")]);
+        assert!(matches!(
+            &observed.records["fixtures/clean/c.png"].scan,
+            Scan::Failed { code: "decoder_error", detail } if detail == "boom"
+        ));
+    }
+
+    #[test]
+    fn malformed_observed_files_are_refused() {
+        let ok = record("a.png", "aa", &[]);
+        let bad_symbology = record("a.png", "aa", &[("qr_kode", "A")]);
+        for (text, why) in [
+            (format!("{ok}\n"), "no metadata line"),
+            (
+                observed_file("zbar", std::slice::from_ref(&ok)),
+                "decoder name mismatch",
+            ),
+            (
+                observed_file("zxing-cpp", &[ok.clone(), ok.clone()]),
+                "a path observed twice",
+            ),
+            (
+                observed_file("zxing-cpp", &[bad_symbology]),
+                "unknown symbology",
+            ),
+            (
+                observed_file("zxing-cpp", &[String::from("{oops")]),
+                "not JSON",
+            ),
+            (
+                format!(
+                    "{}{}",
+                    observed_file("zxing-cpp", &[]),
+                    observed_file("zxing-cpp", &[])
+                ),
+                "two metadata lines",
+            ),
+        ] {
+            assert!(parse_observed(&text, "zxing-cpp").is_err(), "{why}");
+        }
+    }
+
+    /// An observation is used only for the bytes the manifest pins.
+    #[test]
+    fn observed_records_must_match_the_verified_bytes() {
+        let text = observed_file(
+            "zbar",
+            &[record(
+                "zxing-blackbox/qrcode-1/1.png",
+                "aa",
+                &[("qr_code", "A")],
+            )],
+        );
+        let observed = parse_observed(&text, "zbar").expect("parses");
+        let source = Source::Observed(&observed);
+        assert!(!source.is_gate());
+        let (scan, merged) = source
+            .observe("zxing-blackbox/qrcode-1/1.png", "aa", b"")
+            .expect("observed");
+        assert_eq!(merged, 0);
+        assert!(matches!(scan, Scan::Report { ref detections, .. } if detections.len() == 1));
+        assert!(
+            source
+                .observe("zxing-blackbox/qrcode-1/1.png", "bb", b"")
+                .is_err(),
+            "hashed other bytes"
+        );
+        assert!(
+            source
+                .observe("zxing-blackbox/qrcode-1/2.png", "aa", b"")
+                .is_err(),
+            "not observed"
+        );
+    }
+
+    /// Cap and order are OUR wire contract: information for an observed
+    /// decoder, blocking for our own scan. Duplicates bind everyone.
+    #[test]
+    fn wire_shape_is_information_for_observed_decoders() {
+        let texts: Vec<String> = (0..17).map(|i| format!("p{i}")).collect();
+        let mut detections: Vec<Seen> = texts
+            .iter()
+            .map(|text| Seen {
+                symbology: QrCode,
+                text: text.clone(),
+                engines: Vec::new(),
+            })
+            .collect();
+        detections.insert(
+            0,
+            Seen {
+                symbology: Ean13,
+                text: String::from("1"),
+                engines: Vec::new(),
+            },
+        );
+        let scan = Scan::Report {
+            detections,
+            engine_panics: 0,
+        };
+        let observed = verdict_of(None, &scan, false);
+        assert!(observed.contract.is_empty(), "{:?}", observed.contract);
+        assert_eq!(observed.wire_info.len(), 2, "{:?}", observed.wire_info);
+        let ours = verdict_of(None, &scan, true);
+        assert!(ours.wire_info.is_empty());
+        let units: Vec<(Symbology, &str)> = std::iter::once((Ean13, "1"))
+            .chain(texts.iter().map(|t| (QrCode, t.as_str())))
+            .collect();
+        assert_eq!(
+            ours.contract,
+            contract_violations(&units),
+            "our scan keeps the full contract, in the usual order"
+        );
+        let duplicated = report(&["x", "x"]);
+        assert_eq!(verdict_of(None, &duplicated, false).contract.len(), 1);
+    }
+
+    /// Our own judged scans, emitted and parsed back, give the same
+    /// content units and verdicts — the self-consistency the comparator
+    /// path rests on. The emitted receipt fields stay hash-only.
+    #[test]
+    fn emitted_observations_rejudge_identically() {
+        let [known_wrong, double_qr] = DISPOSITIONS;
+        let mut errored = zxing_row(&known_wrong, "x", &[]);
+        errored.path = String::from("fixtures/clean/broken.png");
+        errored.scan = Scan::Failed {
+            code: "QRS-001",
+            detail: String::from("corrupt"),
+        };
+        let rows = vec![
+            zxing_row(&known_wrong, "photograph", &["photography"]),
+            zxing_row(&double_qr, "outer", &["inner", "outer"]),
+            errored,
+        ];
+        let text = observed_jsonl(&rows).expect("emits");
+        assert_eq!(text.lines().count(), 1 + rows.len());
+        let observed = parse_observed(&text, OUR_DECODER).expect("parses back");
+        for row in &rows[..2] {
+            let image = &observed.records[&row.path];
+            assert_eq!(image.sha256, row.image_sha256);
+            let again = verdict_of(row.expected.as_deref(), &image.scan, false);
+            assert_eq!(again.raw, row.verdict, "{}", row.path);
+            let (Scan::Report { detections: a, .. }, Scan::Report { detections: b, .. }) =
+                (&image.scan, &row.scan)
+            else {
+                panic!("reports");
+            };
+            let units = |d: &[Seen]| -> Vec<(Symbology, String)> {
+                d.iter().map(|s| (s.symbology, s.text.clone())).collect()
+            };
+            assert_eq!(units(a), units(b));
+        }
+        assert!(matches!(
+            &observed.records["fixtures/clean/broken.png"].scan,
+            Scan::Failed { code: "decoder_error", detail } if detail == "QRS-001: corrupt"
+        ));
+        // merged counts surface in the receipt only when non-zero
+        let mut merged_row = zxing_row(&known_wrong, "a", &["a"]);
+        merged_row.merged = 2;
+        let json = serde_json::to_string(&[row_receipt(&merged_row), row_receipt(&rows[0])])
+            .expect("serialises");
+        assert_eq!(json.matches("merged_duplicates").count(), 1, "{json}");
+        assert!(!json.contains("photography"), "{json}");
     }
 }
