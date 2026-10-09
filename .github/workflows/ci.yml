@@ -116,9 +116,10 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
-      - uses: pnpm/action-setup@v6
+      # pnpm pinned exact (RELEASING.md § Toolchain), by a SHA-pinned action
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
-          version: 10
+          version: 10.34.6
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -147,9 +148,15 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack@0.13.1
-      - name: binaryen version_130 (the wasm-opt npm-publish.yml uses)
+      # the wasm-opt npm-publish.yml uses, checked against the digest of the
+      # .sha256 binaryen publishes with the release
+      - name: binaryen version_130, sha256-verified
         run: |
-          curl -sSfL https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz | tar xz -C "$RUNNER_TEMP"
+          set -euo pipefail
+          archive="$RUNNER_TEMP/binaryen-version_130-x86_64-linux.tar.gz"
+          curl -sSfL -o "$archive" https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz
+          echo "0a18362361ad05465118cd8eeb72edaeec89de6894bc283576ef4e07aa3babcc  $archive" | sha256sum -c -
+          tar xzf "$archive" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/binaryen-version_130/bin" >> "$GITHUB_PATH"
       # build · wasm-opt · patch · type sync · test.mjs, exactly as published
       - run: ./scripts/build-wasm.sh

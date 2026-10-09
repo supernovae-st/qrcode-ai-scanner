@@ -165,6 +165,11 @@ jobs:
     needs: [test, inspect]
     runs-on: ubuntu-24.04
     environment: release
+    # One publish per tag at a time: a dispatch on the tag waits for the
+    # tag-push run instead of racing it.
+    concurrency:
+      group: publish-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write # trusted publishing (OIDC) — no PyPI token needed
