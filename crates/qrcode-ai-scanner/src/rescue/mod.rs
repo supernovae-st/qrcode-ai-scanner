@@ -140,7 +140,7 @@ pub(crate) fn attempt(luma: &LumaImage, candidate: &RescueCandidate) -> Option<R
     let margins = codeword_margins(sample_luma, candidate, codewords.len())?;
 
     let p = protection(candidate.version, candidate.ec);
-    let data = corrected_data(&codewords, candidate.version, candidate.ec, |block| {
+    let data = corrected_data(&codewords, candidate.version, candidate.ec, p, |block| {
         let len = block.bytes.len();
         // rank this block's codewords by confidence, worst first
         let mut ranked: Vec<(usize, f32)> = block
@@ -180,22 +180,23 @@ pub(crate) fn attempt(luma: &LumaImage, candidate: &RescueCandidate) -> Option<R
 
 /// RS-correct every block and concatenate its data codewords — the data
 /// stream of ISO 18004 §8.6. `erasures_for` marks each block's erasure
-/// power positions. `None` when a block is beyond capacity or fails the
-/// Annex B guard (`2t + e + p ≤ npar`).
+/// power positions; `reserved` is the Annex B misdecode-protection count
+/// the acceptance keeps out of the correction budget. `None` when a block
+/// is beyond capacity or past that budget (`2t + e + reserved ≤ npar`).
 fn corrected_data(
     codewords: &[u8],
     version: u8,
     ec: EcLevel,
+    reserved: usize,
     mut erasures_for: impl FnMut(&Block) -> Vec<usize>,
 ) -> Option<Vec<u8>> {
-    let p = protection(version, ec);
     let mut data = Vec::new();
     for block in deinterleave(codewords, usize::from(version), format_bits_index(ec)) {
         let erasures = erasures_for(&block);
         let npar = block.npar;
         let mut bytes = block.bytes;
         let (errors, used) = ee::correct(&mut bytes, npar, &erasures)?;
-        if 2 * errors + used + p > npar {
+        if 2 * errors + used + reserved > npar {
             return None; // Annex B guard
         }
         bytes.truncate(bytes.len().saturating_sub(npar));
@@ -204,26 +205,54 @@ fn corrected_data(
     Some(data)
 }
 
-/// What re-deriving an engine-decoded stream found.
+/// Who accepts a re-derived stream — it sets the RS budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Acceptance {
+    /// The scanner itself (a rescue candidate no engine decoded): the
+    /// ISO/IEC 18004 Annex B misdecode-protection codewords stay reserved,
+    /// `2t + p ≤ npar` — the guard of [`attempt`].
+    Scanner,
+    /// An engine already decoded these codewords with plain RS (rqrr): the
+    /// re-derivation corrects within `2t ≤ npar` too. Relaxing `p` is safe:
+    /// a block is within `⌊npar/2⌋` of at most one codeword, and when one
+    /// exists rqrr's decoder (Berlekamp-Massey, then a syndrome re-check)
+    /// takes that same one — a verified re-derivation reproduces exactly the
+    /// codewords the engine accepted, so the misdecode risk Annex B reserves
+    /// against is the engine's acceptance, already made. Only `p` is relaxed
+    /// (v1-L 3, v1-M 2, v1-Q/H 1, v2-L 1, v3-L 1 codewords).
+    Engine,
+}
+
+/// What re-deriving a sampled stream found.
 #[derive(Debug)]
 pub(crate) enum Rederived {
     /// The RS-verified data codewords, parsed.
     Parsed(Parsed),
     /// The codewords verify, but the segment stream is not one ISO 18004
     /// defines (a `111xxxxx` designator, an assignment number past
-    /// 999999…) — refuse the symbol, as rxing and zbar do.
-    Malformed,
+    /// 999999, FNC1 in both positions…) — refuse the symbol, as zbar does.
+    /// `port_payload`: the bytes rxing's port transmits for it when that
+    /// reader tolerates the violation — the read a refusal vetoes.
+    Malformed {
+        /// See [`bitstream::port_payload`].
+        port_payload: Option<Vec<u8>>,
+    },
     /// No verified codewords: a stream shorter than its version, a block
-    /// beyond RS capacity, the Annex B guard — e.g. the unmirrored read of
-    /// a symbol the engine decoded mirrored.
+    /// beyond RS capacity or past the acceptance's budget — e.g. the
+    /// unmirrored read of a symbol the engine decoded mirrored.
     Unverified,
 }
 
-/// Re-derive the segment structure of a stream an engine DID decode — the
-/// clean path of [`attempt`]: unmask · de-interleave · RS with errors only
-/// (confidence is moot when the engine already corrected the stream) · the
-/// shared parser.
-pub(crate) fn rederive(stream: &MaskedStream, version: u8, ec: EcLevel, mask: u8) -> Rederived {
+/// Re-derive the segment structure of a sampled stream — the clean path of
+/// [`attempt`]: unmask · de-interleave · RS with errors only (no erasure
+/// confidence) under `acceptance`'s budget · the shared parser.
+pub(crate) fn rederive(
+    stream: &MaskedStream,
+    version: u8,
+    ec: EcLevel,
+    mask: u8,
+    acceptance: Acceptance,
+) -> Rederived {
     if !(1..=40).contains(&version) {
         return Rederived::Unverified;
     }
@@ -232,12 +261,18 @@ pub(crate) fn rederive(stream: &MaskedStream, version: u8, ec: EcLevel, mask: u8
     else {
         return Rederived::Unverified;
     };
-    let Some(data) = corrected_data(&codewords, version, ec, |_| Vec::new()) else {
+    let reserved = match acceptance {
+        Acceptance::Scanner => protection(version, ec),
+        Acceptance::Engine => 0,
+    };
+    let Some(data) = corrected_data(&codewords, version, ec, reserved, |_| Vec::new()) else {
         return Rederived::Unverified;
     };
     match bitstream::parse(&data, version) {
         Some(parsed) => Rederived::Parsed(parsed),
-        None => Rederived::Malformed,
+        None => Rederived::Malformed {
+            port_payload: bitstream::port_payload(&data, version),
+        },
     }
 }
 
@@ -292,6 +327,7 @@ pub(crate) mod fuzz_api {
         if let Some(parsed) = super::bitstream::parse(data, version) {
             let _ = content::read(&parsed.bytes, &EciEvidence::from_marks(parsed.eci));
         }
+        let _ = super::bitstream::port_payload(data, version);
         let _ = content::read(data, &EciEvidence::NoEci);
         let _ = content::read(data, &EciEvidence::Signalled);
     }
@@ -465,6 +501,7 @@ mod differential {
                     candidate.version,
                     candidate.ec,
                     candidate.mask,
+                    Acceptance::Engine,
                 ) {
                     Rederived::Parsed(parsed) => assert_eq!(
                         parsed.bytes, engine_raw,
@@ -513,17 +550,42 @@ pub(crate) mod test_symbols {
         LumaImage::new(data, side, side)
     }
 
+    /// Module colors mirrored left-right (module x becomes width-1-x).
+    pub(crate) fn mirror(colors: &[qrcode::Color], width: usize) -> Vec<qrcode::Color> {
+        (0..width * width)
+            .map(|i| colors[(i / width) * width + (width - 1 - i % width)])
+            .collect()
+    }
+
+    fn segments(
+        version: qrcode::Version,
+        ec: qrcode::EcLevel,
+        push: impl FnOnce(&mut qrcode::bits::Bits) -> qrcode::types::QrResult<()>,
+    ) -> qrcode::QrCode {
+        let mut bits = qrcode::bits::Bits::new(version);
+        push(&mut bits).unwrap();
+        bits.push_terminator(ec).unwrap();
+        qrcode::QrCode::with_bits(bits, ec).unwrap()
+    }
+
     /// A symbol from an explicit segment stream (terminator + padding added).
     pub(crate) fn from_segments(
         version: qrcode::Version,
         ec: qrcode::EcLevel,
         push: impl FnOnce(&mut qrcode::bits::Bits) -> qrcode::types::QrResult<()>,
     ) -> LumaImage {
-        let mut bits = qrcode::bits::Bits::new(version);
-        push(&mut bits).unwrap();
-        bits.push_terminator(ec).unwrap();
-        let code = qrcode::QrCode::with_bits(bits, ec).unwrap();
+        let code = segments(version, ec, push);
         render(&code.to_colors(), code.width())
+    }
+
+    /// [`from_segments`], left-right mirrored.
+    pub(crate) fn from_segments_mirrored(
+        version: qrcode::Version,
+        ec: qrcode::EcLevel,
+        push: impl FnOnce(&mut qrcode::bits::Bits) -> qrcode::types::QrResult<()>,
+    ) -> LumaImage {
+        let code = segments(version, ec, push);
+        render(&mirror(&code.to_colors(), code.width()), code.width())
     }
 
     /// A symbol whose data codewords are exactly `data`, padded with the
@@ -533,19 +595,57 @@ pub(crate) mod test_symbols {
         ec: qrcode::EcLevel,
         data: &[u8],
     ) -> LumaImage {
+        from_corrupted_codewords(version, ec, data, &[])
+    }
+
+    /// [`from_codewords`], left-right mirrored.
+    pub(crate) fn from_codewords_mirrored(
+        version: qrcode::Version,
+        ec: qrcode::EcLevel,
+        data: &[u8],
+    ) -> LumaImage {
+        let (colors, width) = codeword_colors(version, ec, data, &[]);
+        render(&mirror(&colors, width), width)
+    }
+
+    /// [`from_codewords`] with the codewords at `corrupt` (indices into the
+    /// encoder's data codewords, then its EC codewords) inverted AFTER the
+    /// RS parity was computed — errors every decoder must correct.
+    pub(crate) fn from_corrupted_codewords(
+        version: qrcode::Version,
+        ec: qrcode::EcLevel,
+        data: &[u8],
+        corrupt: &[usize],
+    ) -> LumaImage {
+        let (colors, width) = codeword_colors(version, ec, data, corrupt);
+        render(&colors, width)
+    }
+
+    fn codeword_colors(
+        version: qrcode::Version,
+        ec: qrcode::EcLevel,
+        data: &[u8],
+        corrupt: &[usize],
+    ) -> (Vec<qrcode::Color>, usize) {
         let capacity = qrcode::bits::Bits::new(version).max_len(ec).unwrap() / 8;
         let mut padded = data.to_vec();
         let mut pads = [0xEC, 0x11].into_iter().cycle();
         while padded.len() < capacity {
             padded.push(pads.next().unwrap());
         }
-        let (data_codewords, ec_codewords) =
+        let (mut data_codewords, mut ec_codewords) =
             qrcode::ec::construct_codewords(&padded, version, ec).unwrap();
+        for &index in corrupt {
+            match index.checked_sub(data_codewords.len()) {
+                None => data_codewords[index] ^= 0xFF,
+                Some(parity) => ec_codewords[parity] ^= 0xFF,
+            }
+        }
         let mut canvas = qrcode::canvas::Canvas::new(version, ec);
         canvas.draw_all_functional_patterns();
         canvas.draw_data(&data_codewords, &ec_codewords);
         let width = usize::try_from(version.width()).unwrap();
-        render(&canvas.apply_best_mask().into_colors(), width)
+        (canvas.apply_best_mask().into_colors(), width)
     }
 
     /// Hand-assembled MSB-first bit string → bytes (zero-padded to a byte).
@@ -570,7 +670,7 @@ mod codewords {
     //! and the data-capacity table rxing's general reader needs.
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_precision_loss)]
 
-    use super::test_symbols::{from_codewords, from_segments, stream};
+    use super::test_symbols::{from_codewords, from_corrupted_codewords, from_segments, stream};
     use super::*;
     use crate::engine::content::EciMark;
 
@@ -613,12 +713,13 @@ mod codewords {
             .collect()
     }
 
-    fn rederived(candidate: &RescueCandidate) -> Rederived {
+    fn rederived(candidate: &RescueCandidate, acceptance: Acceptance) -> Rederived {
         rederive(
             &candidate.stream,
             candidate.version,
             candidate.ec,
             candidate.mask,
+            acceptance,
         )
     }
 
@@ -632,7 +733,7 @@ mod codewords {
         assert_eq!(grids.len(), 1);
         let (engine, candidate) = &grids[0];
         assert_eq!(engine.as_deref(), Some(&[0xA1][..]), "rqrr: bytes only");
-        let Rederived::Parsed(parsed) = rederived(candidate) else {
+        let Rederived::Parsed(parsed) = rederived(candidate, Acceptance::Engine) else {
             panic!("a clean stream re-derives");
         };
         assert_eq!(parsed.bytes, vec![0xA1], "same bytes as rqrr");
@@ -643,19 +744,34 @@ mod codewords {
     fn a_malformed_designator_is_refused_by_the_rederivation_too() {
         // ECI with a 111xxxxx first codeword, then byte "abc": rqrr reads
         // the designator as one byte and decodes "abc"; the shared parser —
-        // here behind real RS-verified codewords — refuses the stream.
+        // here behind real RS-verified codewords — refuses the stream, and
+        // so does rxing's port: no read to veto.
         let data = stream("0111 11100000 0100 00000011 01100001 01100010 01100011 0000");
         let luma = from_codewords(qrcode::Version::Normal(1), qrcode::EcLevel::M, &data);
         let found = grids(&luma);
         assert_eq!(found.len(), 1);
         let (engine, candidate) = &found[0];
         assert_eq!(engine.as_deref(), Some(&b"abc"[..]), "rqrr guesses");
-        assert!(matches!(rederived(candidate), Rederived::Malformed));
+        assert!(matches!(
+            rederived(candidate, Acceptance::Engine),
+            Rederived::Malformed { port_payload: None }
+        ));
+        // above the register, the port still reads "abc": that is the veto
+        let data =
+            stream("0111 11001111 01000010 01000000 0100 00000011 01100001 01100010 01100011 0000");
+        let luma = from_codewords(qrcode::Version::Normal(1), qrcode::EcLevel::M, &data);
+        let Rederived::Malformed {
+            port_payload: Some(vetoed),
+        } = rederived(&grids(&luma)[0].1, Acceptance::Engine)
+        else {
+            panic!("an assignment number past 999999 is malformed");
+        };
+        assert_eq!(vetoed, b"abc");
         // control: the same stream with a well-formed designator (ECI 4)
         let data = stream("0111 00000100 0100 00000011 01100001 01100010 01100011 0000");
         let luma = from_codewords(qrcode::Version::Normal(1), qrcode::EcLevel::M, &data);
         let found = grids(&luma);
-        let Rederived::Parsed(parsed) = rederived(&found[0].1) else {
+        let Rederived::Parsed(parsed) = rederived(&found[0].1, Acceptance::Engine) else {
             panic!("a well-formed designator re-derives");
         };
         assert_eq!(parsed.bytes, b"abc");
@@ -674,10 +790,58 @@ mod codewords {
         for byte in &mut candidate.stream.bits {
             *byte = !*byte;
         }
-        assert!(matches!(rederived(&candidate), Rederived::Unverified));
+        for acceptance in [Acceptance::Scanner, Acceptance::Engine] {
+            assert!(matches!(
+                rederived(&candidate, acceptance),
+                Rederived::Unverified
+            ));
+        }
         // and a version outside the table never reaches the parser
         candidate.version = 41;
-        assert!(matches!(rederived(&candidate), Rederived::Unverified));
+        assert!(matches!(
+            rederived(&candidate, Acceptance::Engine),
+            Rederived::Unverified
+        ));
+    }
+
+    #[test]
+    fn the_annex_b_reserve_binds_the_scanners_acceptance_not_an_engines() {
+        // v1-M (10 parity codewords, p = 2), ECI 4 + byte A1, five codewords
+        // corrupted: plain RS corrects them (rqrr decodes), but 2·5 + 2 > 10
+        let data = stream("0111 00000100 0100 00000001 10100001 0000");
+        let corrupt = [6, 8, 10, 12, 14];
+        let luma = from_corrupted_codewords(
+            qrcode::Version::Normal(1),
+            qrcode::EcLevel::M,
+            &data,
+            &corrupt,
+        );
+        let (engine, candidate) = grids(&luma).remove(0);
+        assert_eq!(engine.as_deref(), Some(&[0xA1][..]), "rqrr corrects five");
+        assert!(
+            matches!(
+                rederived(&candidate, Acceptance::Scanner),
+                Rederived::Unverified
+            ),
+            "the scanner's own acceptance keeps the reserve"
+        );
+        let Rederived::Parsed(parsed) = rederived(&candidate, Acceptance::Engine) else {
+            panic!("rqrr's acceptance: plain RS");
+        };
+        assert_eq!(parsed.bytes, vec![0xA1]);
+        assert_eq!(parsed.eci, vec![EciMark { value: 4, start: 0 }]);
+        // four errors fit the reserve: 2·4 + 2 = 10
+        let luma = from_corrupted_codewords(
+            qrcode::Version::Normal(1),
+            qrcode::EcLevel::M,
+            &data,
+            &corrupt[..4],
+        );
+        let (_, candidate) = grids(&luma).remove(0);
+        assert!(matches!(
+            rederived(&candidate, Acceptance::Scanner),
+            Rederived::Parsed(_)
+        ));
     }
 
     #[test]

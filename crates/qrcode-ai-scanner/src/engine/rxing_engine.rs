@@ -179,7 +179,8 @@ fn observe(result: &rxing::RXingResult) -> Option<RawDetection> {
         version: None,
         ec: ec_level.and_then(parse_ec),
         mask: None,
-        fnc1: Fnc1::None,
+        fnc1: Fnc1::Unobserved,
+        parsed: false,
         engine: EngineKind::Rxing,
     };
     if !symbology.is_qr_family() {
@@ -189,7 +190,8 @@ fn observe(result: &rxing::RXingResult) -> Option<RawDetection> {
             _ => result.getText().as_bytes().to_vec(),
         };
         // GS1 carriers per ISO/IEC 15424 symbology identifiers: DataMatrix
-        // "]d2" (ECC200 FNC1 first) · Code 128 "]C1" (GS1-128)
+        // "]d2" (ECC200 FNC1 first) · Code 128 "]C1" (GS1-128); any other
+        // identifier leaves the position unknown
         if matches!(identifier, "]d2" | "]C1") {
             detection.fnc1 = Fnc1::First;
         }
@@ -199,7 +201,9 @@ fn observe(result: &rxing::RXingResult) -> Option<RawDetection> {
         Reader::Port => {
             detection.raw = result.getRawBytes().to_vec();
             // AIM modifier (ISO 18004 Annex F): 2 · 4 · 6 = ECI in use,
-            // 3/4 = FNC1 first (GS1), 5/6 = FNC1 second (an AIM application)
+            // 3/4 = FNC1 first (GS1), 5/6 = FNC1 second (an AIM application),
+            // 0-2 = no FNC1 — observed; an identifier that does not parse
+            // observes neither
             let modifier = identifier
                 .strip_prefix("]Q")
                 .and_then(|m| m.parse::<u8>().ok());
@@ -211,7 +215,8 @@ fn observe(result: &rxing::RXingResult) -> Option<RawDetection> {
             detection.fnc1 = match modifier {
                 Some(3 | 4) => Fnc1::First,
                 Some(5 | 6) => Fnc1::Second,
-                _ => Fnc1::None,
+                Some(_) => Fnc1::None,
+                None => Fnc1::Unobserved,
             };
         }
         Reader::Codewords(ec) => {
@@ -221,6 +226,7 @@ fn observe(result: &rxing::RXingResult) -> Option<RawDetection> {
             detection.raw = parsed.bytes;
             detection.eci = EciEvidence::from_marks(parsed.eci);
             detection.fnc1 = parsed.fnc1;
+            detection.parsed = true;
             // the EC level this reader states is not published: the
             // detection metadata stays exactly what it was before
             detection.ec = None;
@@ -235,7 +241,7 @@ mod tests {
 
     use super::{MetaKey, MetaValue, Reader, decode, observe, reader};
     use crate::engine::FormatFilter;
-    use crate::engine::content::{EciEvidence, Fnc1};
+    use crate::engine::content::{EciEvidence, EciMark, Fnc1};
     use crate::input::LumaImage;
     use crate::report::{EcLevel, EngineKind, Symbology};
     use crate::rescue::test_symbols;
@@ -280,7 +286,12 @@ mod tests {
         // the rxing 0.9.1 QR path supplies no geometry/stream — rqrr owns that
         assert_eq!(d.version, None);
         assert!(d.corners.is_none() && d.masked_stream.is_none() && d.mask.is_none());
-        assert_eq!(d.fnc1, Fnc1::None, "plain byte-mode QR is not FNC1");
+        assert_eq!(
+            d.fnc1,
+            Fnc1::None,
+            "]Q1 observes: plain byte-mode QR is not FNC1"
+        );
+        assert!(!d.parsed, "the port states its account, never exposes it");
     }
 
     #[test]
@@ -426,6 +437,8 @@ mod tests {
         let d = observe(&general_reader_result(mixed_codewords(), "0")).expect("parses");
         assert_eq!(d.raw, b"12345abc", "never the byte segments alone");
         assert_eq!(d.eci, EciEvidence::NoEci, "observed: no designator");
+        assert_eq!(d.fnc1, Fnc1::None, "observed: no FNC1 indicator");
+        assert!(d.parsed, "the scanner's parser read the codewords");
         assert_eq!(d.ec, None, "the reader's EC digit stays unpublished");
         // a stream that does not parse is no observation — never a stand-in
         assert!(observe(&general_reader_result(vec![0xFF; 16], "0")).is_none());
@@ -433,6 +446,111 @@ mod tests {
         assert!(observe(&general_reader_result(vec![0x40; 17], "0")).is_none());
         // an EC field of neither reader's shape: the bytes' meaning is unknown
         assert!(observe(&general_reader_result(mixed_codewords(), "?")).is_none());
+    }
+
+    /// The data codewords of a symbol built from `push`, padded to the
+    /// capacity of `version` at `ec` — what the general reader returns.
+    fn codewords(
+        version: i16,
+        ec: qrcode::EcLevel,
+        push: impl FnOnce(&mut qrcode::bits::Bits) -> qrcode::types::QrResult<()>,
+    ) -> Vec<u8> {
+        let mut bits = qrcode::bits::Bits::new(qrcode::Version::Normal(version));
+        push(&mut bits).unwrap();
+        bits.push_terminator(ec).unwrap();
+        bits.into_bytes()
+    }
+
+    #[test]
+    fn general_reader_codewords_expose_declarations_and_fnc1_positions() {
+        let m = qrcode::EcLevel::M;
+        // ECI 4 + byte A1: the designator is located where it takes effect
+        let d = observe(&general_reader_result(
+            codewords(1, m, |b| {
+                b.push_eci_designator(4)?;
+                b.push_byte_data(&[0xA1])
+            }),
+            "0",
+        ))
+        .expect("parses");
+        assert_eq!(d.raw, vec![0xA1]);
+        assert_eq!(
+            d.eci,
+            EciEvidence::Located(vec![EciMark { value: 4, start: 0 }])
+        );
+        assert_eq!(d.fnc1, Fnc1::None);
+        // FNC1 first + alphanumeric "10AB%%C": '%%' transmits one '%'
+        let d = observe(&general_reader_result(
+            codewords(1, m, |b| {
+                b.push_fnc1_first_position()?;
+                b.push_alphanumeric_data(b"10AB%%C")
+            }),
+            "0",
+        ))
+        .expect("parses");
+        assert_eq!(d.raw, b"10AB%C");
+        assert_eq!(d.fnc1, Fnc1::First);
+        // FNC1 second (37) + byte "abc": the indicator leads, AIM not GS1
+        let d = observe(&general_reader_result(
+            codewords(1, m, |b| {
+                b.push_fnc1_second_position(37)?;
+                b.push_byte_data(b"abc")
+            }),
+            "0",
+        ))
+        .expect("parses");
+        assert_eq!(d.raw, b"37abc");
+        assert_eq!(d.fnc1, Fnc1::Second);
+        assert!(d.parsed);
+    }
+
+    #[test]
+    fn general_reader_ec_digits_resolve_to_their_level_and_version() {
+        // each stream's length exists at its own level only (v1-L 19, v3-M
+        // 44, v1-H 9, v1-Q 13 data codewords): under any other digit no
+        // version matches and the read is refused, so a remapped digit can
+        // never parse at the wrong version
+        use qrcode::EcLevel as L;
+        let cases = [
+            ("0", L::M, 3),
+            ("1", L::L, 1),
+            ("2", L::H, 1),
+            ("3", L::Q, 1),
+        ];
+        for (digit, level, version) in cases {
+            let stream = codewords(version, level, |b| b.push_byte_data(b"abc"));
+            let d = observe(&general_reader_result(stream.clone(), digit))
+                .unwrap_or_else(|| panic!("digit {digit}: v{version} {level:?} parses"));
+            assert_eq!(d.raw, b"abc", "digit {digit}");
+            for (other, ..) in cases.iter().filter(|(other, ..)| *other != digit) {
+                assert!(
+                    observe(&general_reader_result(stream.clone(), other)).is_none(),
+                    "the v{version} {level:?} stream read under digit {other}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unparsable_identifier_observes_neither_eci_nor_fnc1() {
+        let mut result = rxing::RXingResult::new(
+            "abc",
+            b"abc".to_vec(),
+            Vec::new(),
+            rxing::BarcodeFormat::QR_CODE,
+        );
+        result.putMetadata(
+            MetaKey::ERROR_CORRECTION_LEVEL,
+            MetaValue::ErrorCorrectionLevel("M".to_owned()),
+        );
+        let d = observe(&result).expect("a port read");
+        assert_eq!((d.eci, d.fnc1), (EciEvidence::Unobserved, Fnc1::Unobserved));
+        result.putMetadata(
+            MetaKey::SYMBOLOGY_IDENTIFIER,
+            MetaValue::SymbologyIdentifier("]Q1".to_owned()),
+        );
+        let d = observe(&result).expect("a port read");
+        assert_eq!((d.eci, d.fnc1), (EciEvidence::NoEci, Fnc1::None));
     }
 
     #[test]

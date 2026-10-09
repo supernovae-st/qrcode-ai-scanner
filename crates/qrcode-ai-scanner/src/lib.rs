@@ -256,8 +256,9 @@ impl ScannerBuilder {
 /// Assemble the public report from ladder output. Text comes from the
 /// scanner's one interpretation (`engine::content`): a declared ECI decides
 /// it, the charset heuristic does when none is declared. `raw` is always
-/// the original payload; a declared reading no legacy label reproduces
-/// keeps the heuristic's label for those bytes.
+/// the original payload; a declared reading that no legacy label
+/// reproduces is published with the `utf8` placeholder until the wire
+/// gains `eci`/`unknown`.
 fn build_report(
     outcome: ladder::LadderOutcome,
     scored: Option<(Score, Vec<Hint>)>,

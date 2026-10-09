@@ -2,15 +2,18 @@
 //!
 //! Always through `decode_to` raw bytes: rqrr's `decode()` forces UTF-8.
 //! rqrr parses ECI designators and DISCARDS them (0.10.1 and 0.11.0), so the
-//! adapter re-derives the segment structure from the sampled stream with the
-//! scanner's own codeword path and keeps it only when its payload equals
-//! rqrr's bytes — interpretation is OUR job, once, in `engine::content`.
+//! adapter re-derives the segment structure from the sampled grid with the
+//! scanner's own codeword path — interpretation is OUR job, once, in
+//! `engine::content`. The verified stream decides the payload bytes too:
+//! rqrr's own conversion is not the truth (0.10.1 writes the Kanji values
+//! 5949-5951 as Shift JIS DF FD..DF FF — `value + 0x8140 <= 0x9FFC` —
+//! where ISO 18004 §7.4.6 gives 9F FD..9F FF).
 
 use super::content::{EciEvidence, Fnc1};
 use super::{MaskedStream, RawDetection};
 use crate::input::LumaImage;
 use crate::report::{EcLevel, EngineKind, Point, Symbology};
-use crate::rescue::{Rederived, RescueCandidate};
+use crate::rescue::{Acceptance, Rederived, RescueCandidate};
 
 /// rqrr `ecc_level` is the QR format-info two-bit field: M=0 · L=1 · H=2 · Q=3.
 /// Pinned empirically by the engine tests (generated at known EC levels).
@@ -24,11 +27,21 @@ fn map_ec(level: u16) -> Option<EcLevel> {
     }
 }
 
+/// One rqrr pass over an image.
+pub(super) struct Pass {
+    /// Decodes the scanner publishes.
+    pub(super) found: Vec<RawDetection>,
+    /// Grids detected but not decoded — the S5 rescue inputs.
+    pub(super) rescue: Vec<RescueCandidate>,
+    /// Payloads of decodes the scanner refused — the ladder's veto keys.
+    pub(super) refused: Vec<Vec<u8>>,
+}
+
 #[expect(
     clippy::cast_precision_loss,
     reason = "corner coordinates are bounded by Limits::max_dimension (10k) — exact in f32 (2^24)"
 )]
-pub(super) fn decode(luma: &LumaImage) -> (Vec<RawDetection>, Vec<RescueCandidate>) {
+pub(super) fn decode(luma: &LumaImage) -> Pass {
     let width = luma.width() as usize;
     let data = luma.data();
     let mut prepared =
@@ -36,11 +49,14 @@ pub(super) fn decode(luma: &LumaImage) -> (Vec<RawDetection>, Vec<RescueCandidat
             data[y * width + x]
         });
 
-    let mut found = Vec::new();
-    let mut rescue = Vec::new();
+    let mut pass = Pass {
+        found: Vec::new(),
+        rescue: Vec::new(),
+        refused: Vec::new(),
+    };
     for grid in prepared.detect_grids() {
-        let mut raw = Vec::new();
-        let Ok(meta) = grid.decode_to(&mut raw) else {
+        let mut decoded = Vec::new();
+        let Ok(meta) = grid.decode_to(&mut decoded) else {
             // RS gave up — but the grid + format info may still read: that
             // stream is the S5 erasure-rescue input
             if let Ok((meta, raw_data)) = grid.get_raw_data()
@@ -48,11 +64,8 @@ pub(super) fn decode(luma: &LumaImage) -> (Vec<RawDetection>, Vec<RescueCandidat
                 && let Some(ec) = map_ec(meta.ecc_level)
                 && let Ok(mask) = u8::try_from(meta.mask)
             {
-                rescue.push(RescueCandidate {
-                    stream: MaskedStream {
-                        bits: raw_data.data[..raw_data.len.div_ceil(8)].to_vec(),
-                        bit_len: raw_data.len,
-                    },
+                pass.rescue.push(RescueCandidate {
+                    stream: masked(&raw_data),
                     corners: grid.bounds.map(|p| Point {
                         x: p.x as f32,
                         y: p.y as f32,
@@ -65,63 +78,140 @@ pub(super) fn decode(luma: &LumaImage) -> (Vec<RawDetection>, Vec<RescueCandidat
             }
             continue;
         };
-        // raw sampled bitstream (still masked) — the synthetic-UEC input
-        let masked_stream = grid.get_raw_data().ok().map(|(_, raw_data)| MaskedStream {
-            bits: raw_data.data[..raw_data.len.div_ceil(8)].to_vec(),
-            bit_len: raw_data.len,
-        });
-        let version = u8::try_from(meta.version.0).ok();
-        let ec = map_ec(meta.ecc_level);
-        let mask = u8::try_from(meta.mask).ok();
-        let Some(eci) = segment_evidence(&raw, masked_stream.as_ref(), version, ec, mask) else {
-            // the RS-verified stream is not one ISO 18004 defines (rqrr reads
-            // a 111xxxxx designator as one byte): refused, as rxing and zbar
-            // refuse it — never a guessed payload
-            continue;
-        };
+        // the grid as sampled, still masked — the synthetic-UEC input
+        let sampled = grid.get_raw_data().ok();
+        let (raw, eci, fnc1, parsed) =
+            match account(decoded, rederive_decoded(&grid, sampled.as_ref())) {
+                Account::Read {
+                    raw,
+                    eci,
+                    fnc1,
+                    parsed,
+                } => (raw, eci, fnc1, parsed),
+                Account::Refused(payloads) => {
+                    pass.refused.extend(payloads);
+                    continue;
+                }
+            };
         let corners = grid.bounds.map(|p| Point {
             x: p.x as f32,
             y: p.y as f32,
         });
-        found.push(RawDetection {
+        pass.found.push(RawDetection {
             symbology: Symbology::QrCode,
             raw,
             eci,
-            masked_stream,
+            masked_stream: sampled.map(|(_, raw_data)| masked(&raw_data)),
             corners: Some(corners),
-            version,
-            ec,
-            mask,
-            // rqrr cannot decode FNC1 symbols (mode dispatch rejects 0x5/0x9)
-            fnc1: Fnc1::None,
+            version: u8::try_from(meta.version.0).ok(),
+            ec: map_ec(meta.ecc_level),
+            mask: u8::try_from(meta.mask).ok(),
+            fnc1,
+            parsed,
             engine: EngineKind::Rqrr,
         });
     }
-    (found, rescue)
+    pass
 }
 
-/// ECI evidence for one rqrr decode: the segment structure re-derived from
-/// the sampled stream, kept only when its payload equals rqrr's bytes.
-/// `None` = the stream verifies but violates ISO 18004 — refuse the decode.
-fn segment_evidence(
-    raw: &[u8],
-    stream: Option<&MaskedStream>,
-    version: Option<u8>,
-    ec: Option<EcLevel>,
-    mask: Option<u8>,
-) -> Option<EciEvidence> {
-    let (Some(stream), Some(version), Some(ec), Some(mask)) = (stream, version, ec, mask) else {
-        return Some(EciEvidence::Unobserved);
-    };
-    match crate::rescue::rederive(stream, version, ec, mask) {
-        Rederived::Parsed(parsed) if parsed.bytes == raw => {
-            Some(EciEvidence::from_marks(parsed.eci))
+/// What the scanner makes of one rqrr decode.
+#[derive(Debug, PartialEq, Eq)]
+enum Account {
+    /// Published: the payload and what was observed of its declarations.
+    Read {
+        raw: Vec<u8>,
+        eci: EciEvidence,
+        fnc1: Fnc1,
+        parsed: bool,
+    },
+    /// Refused: the stream rqrr decoded is not one ISO 18004 defines (rqrr
+    /// reads a `111xxxxx` designator as one byte, an assignment number past
+    /// 999999 like any other). Carries the payloads the refusal vetoes:
+    /// rqrr's bytes and what rxing's port transmits for the stream.
+    Refused(Vec<Vec<u8>>),
+}
+
+/// rqrr decoded `decoded`; the re-derivation of its grid decides.
+fn account(decoded: Vec<u8>, derived: Rederived) -> Account {
+    match derived {
+        // the RS-verified grid is the truth, bytes included: they can only
+        // differ from rqrr's through rqrr's own conversion of the very same
+        // codewords (rqrr keeps the first orientation its RS accepts, and
+        // the re-derivation reproduces that acceptance)
+        Rederived::Parsed(parsed) => Account::Read {
+            raw: parsed.bytes,
+            eci: EciEvidence::from_marks(parsed.eci),
+            fnc1: parsed.fnc1,
+            parsed: true,
+        },
+        // no orientation verifies: nothing observable of the declarations;
+        // rqrr decoded the symbol, so its stream held no FNC1 indicator
+        Rederived::Unverified => Account::Read {
+            raw: decoded,
+            eci: EciEvidence::Unobserved,
+            fnc1: Fnc1::None,
+            parsed: false,
+        },
+        Rederived::Malformed { port_payload } => {
+            Account::Refused(std::iter::once(decoded).chain(port_payload).collect())
         }
-        // rqrr may have decoded the MIRRORED grid while `get_raw_data` reads
-        // it unmirrored: a stream that tells another story than the decoded
-        // bytes declares nothing — never fabricate a declaration from it
-        Rederived::Parsed(_) | Rederived::Unverified => Some(EciEvidence::Unobserved),
-        Rederived::Malformed => None,
+    }
+}
+
+/// Re-derive what rqrr decoded: the grid as sampled, then — when that does
+/// not verify — its transpose, the orientation rqrr's mirrored retry
+/// decodes (`MirroredGrid` swaps x and y). rqrr keeps the sampled grid
+/// whenever its RS accepts it, so only one orientation verifies: the one
+/// rqrr read. Each is unmasked with the format information read from it.
+fn rederive_decoded<G: rqrr::BitGrid>(
+    grid: &rqrr::Grid<G>,
+    sampled: Option<&(rqrr::MetaData, rqrr::RawData)>,
+) -> Rederived {
+    let derived = sampled.map_or(Rederived::Unverified, |(meta, raw_data)| {
+        rederive_sampled(meta, raw_data)
+    });
+    if !matches!(derived, Rederived::Unverified) {
+        return derived;
+    }
+    rqrr::Grid::new(Transposed(&grid.grid))
+        .get_raw_data()
+        .map_or(Rederived::Unverified, |(meta, raw_data)| {
+            rederive_sampled(&meta, &raw_data)
+        })
+}
+
+/// One orientation through the scanner's codeword path, under rqrr's own
+/// acceptance (plain RS — see [`Acceptance::Engine`]).
+fn rederive_sampled(meta: &rqrr::MetaData, raw_data: &rqrr::RawData) -> Rederived {
+    let (Ok(version), Some(ec), Ok(mask)) = (
+        u8::try_from(meta.version.0),
+        map_ec(meta.ecc_level),
+        u8::try_from(meta.mask),
+    ) else {
+        return Rederived::Unverified;
+    };
+    crate::rescue::rederive(&masked(raw_data), version, ec, mask, Acceptance::Engine)
+}
+
+/// rqrr's sampled stream, still masked.
+fn masked(raw_data: &rqrr::RawData) -> MaskedStream {
+    MaskedStream {
+        bits: raw_data.data[..raw_data.len.div_ceil(8)].to_vec(),
+        bit_len: raw_data.len,
+    }
+}
+
+/// A grid with x and y swapped — what rqrr's mirrored retry reads (a
+/// left-right mirrored symbol samples as a transposed one).
+struct Transposed<'g, G>(&'g G);
+
+impl<G: rqrr::BitGrid> rqrr::BitGrid for Transposed<'_, G> {
+    fn size(&self) -> usize {
+        self.0.size()
+    }
+
+    fn bit(&self, y: usize, x: usize) -> bool {
+        self.0.bit(x, y)
     }
 }
 
@@ -129,11 +219,12 @@ fn segment_evidence(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_precision_loss)]
 
-    use super::{decode, segment_evidence};
+    use super::{Account, account, decode};
     use crate::engine::content::{EciEvidence, EciMark, Fnc1};
     use crate::input::LumaImage;
     use crate::report::{EcLevel, EngineKind, Symbology};
-    use crate::rescue::test_symbols;
+    use crate::rescue::bitstream::Parsed;
+    use crate::rescue::{Rederived, test_symbols};
 
     /// Render a QR to a luma plane (default 4-module quiet zone, 6px modules)
     /// and report the symbol version the encoder chose.
@@ -158,8 +249,8 @@ mod tests {
         // measured here (the rxing QR path leaves them None).
         let (luma, version) = render(b"https://qrc-ai.com/v2", qrcode::EcLevel::M);
         assert!(version >= 2, "want a v2+ symbol, got v{version}");
-        let (found, _rescue) = decode(&luma);
-        let d = found.first().expect("rqrr decodes a clean QR");
+        let pass = decode(&luma);
+        let d = pass.found.first().expect("rqrr decodes a clean QR");
         assert_eq!(d.raw, b"https://qrc-ai.com/v2");
         assert_eq!(d.symbology, Symbology::QrCode);
         assert_eq!(d.engine, EngineKind::Rqrr);
@@ -177,6 +268,7 @@ mod tests {
         );
         assert_eq!(d.fnc1, Fnc1::None, "a plain byte-mode QR is not FNC1");
         assert_eq!(d.eci, EciEvidence::NoEci, "observed: no designator");
+        assert!(d.parsed, "the scanner's parser read the stream");
     }
 
     #[test]
@@ -196,8 +288,12 @@ mod tests {
             .build();
         let (w, h) = (img.width(), img.height());
         let luma = LumaImage::new(img.into_raw(), w, h);
-        let (found, _rescue) = decode(&luma);
-        assert!(found.is_empty(), "rqrr must not decode FNC1: {found:?}");
+        let pass = decode(&luma);
+        assert!(
+            pass.found.is_empty(),
+            "rqrr must not decode FNC1: {:?}",
+            pass.found
+        );
     }
 
     #[test]
@@ -206,8 +302,8 @@ mod tests {
         // boundary itself lives in engine::run_isolated, exercised in mod.rs;
         // the adapter's own job is to return empty on a QR-less image.)
         let blank = LumaImage::new(vec![255u8; 48 * 48], 48, 48);
-        let (found, rescue) = decode(&blank);
-        assert!(found.is_empty() && rescue.is_empty());
+        let pass = decode(&blank);
+        assert!(pass.found.is_empty() && pass.rescue.is_empty() && pass.refused.is_empty());
     }
 
     #[test]
@@ -220,8 +316,8 @@ mod tests {
                 b.push_eci_designator(4)?;
                 b.push_byte_data(&[0xA1])
             });
-        let (found, _) = decode(&luma);
-        let d = found.first().expect("rqrr decodes the clean render");
+        let pass = decode(&luma);
+        let d = pass.found.first().expect("rqrr decodes the clean render");
         assert_eq!(d.raw, b"12345\xA1");
         assert_eq!(
             d.eci,
@@ -230,52 +326,144 @@ mod tests {
     }
 
     #[test]
-    fn a_stream_that_tells_another_story_declares_nothing() {
+    fn the_verified_stream_decides_the_payload_and_its_account() {
+        let parsed = |bytes: &[u8], eci: Vec<EciMark>| {
+            Rederived::Parsed(Parsed {
+                bytes: bytes.to_vec(),
+                eci,
+                fnc1: Fnc1::None,
+                structured_append: false,
+                hanzi: false,
+            })
+        };
+        let read = |raw: &[u8], eci: EciEvidence, parsed: bool| Account::Read {
+            raw: raw.to_vec(),
+            eci,
+            fnc1: Fnc1::None,
+            parsed,
+        };
+        let eci4 = vec![EciMark { value: 4, start: 0 }];
+        // equal bytes: the located declaration
+        assert_eq!(
+            account(vec![0xA1], parsed(&[0xA1], eci4.clone())),
+            read(&[0xA1], EciEvidence::Located(eci4), true)
+        );
+        // rqrr's own conversion differs (its Kanji inversion): the verified
+        // bytes are the payload, never rqrr's
+        assert_eq!(
+            account(vec![0xDF, 0xFD], parsed(&[0x9F, 0xFD], Vec::new())),
+            read(&[0x9F, 0xFD], EciEvidence::NoEci, true)
+        );
+        // no orientation verifies: rqrr's bytes, nothing observable of the
+        // declarations, and no FNC1 (rqrr decodes neither mode)
+        assert_eq!(
+            account(b"abc".to_vec(), Rederived::Unverified),
+            read(b"abc", EciEvidence::Unobserved, false)
+        );
+        // malformed: refused, with the payloads the refusal vetoes
+        assert_eq!(
+            account(
+                b"abc".to_vec(),
+                Rederived::Malformed {
+                    port_payload: Some(b"xyz".to_vec())
+                }
+            ),
+            Account::Refused(vec![b"abc".to_vec(), b"xyz".to_vec()])
+        );
+        assert_eq!(
+            account(b"abc".to_vec(), Rederived::Malformed { port_payload: None }),
+            Account::Refused(vec![b"abc".to_vec()])
+        );
+    }
+
+    /// rqrr's own bytes for every grid of `luma` it decodes.
+    fn rqrr_bytes(luma: &LumaImage) -> Vec<Vec<u8>> {
+        let width = luma.width() as usize;
+        let data = luma.data();
+        let mut prepared =
+            rqrr::PreparedImage::prepare_from_greyscale(width, luma.height() as usize, |x, y| {
+                data[y * width + x]
+            });
+        prepared
+            .detect_grids()
+            .into_iter()
+            .filter_map(|grid| {
+                let mut raw = Vec::new();
+                grid.decode_to(&mut raw).ok().map(|_| raw)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rqrrs_kanji_inversion_yields_to_the_verified_stream() {
+        // Shift JIS 9F FD is the 13-bit Kanji value 5949 (ISO 18004 §7.4.6);
+        // rqrr 0.10.1 writes it DF FD, the re-derivation 9F FD
         let luma =
             test_symbols::from_segments(qrcode::Version::Normal(3), qrcode::EcLevel::M, |b| {
+                b.push_kanji_data(&[0x9F, 0xFD])
+            });
+        assert_eq!(rqrr_bytes(&luma), vec![vec![0xDF, 0xFD]], "rqrr's bytes");
+        let pass = decode(&luma);
+        let d = pass.found.first().expect("rqrr decodes the clean render");
+        assert_eq!(d.raw, vec![0x9F, 0xFD]);
+        assert_eq!(d.eci, EciEvidence::NoEci);
+        assert!(d.parsed);
+    }
+
+    #[test]
+    fn a_mirrored_decode_is_rederived_on_the_transposed_grid() {
+        // rqrr decodes a mirrored symbol through its mirrored retry; the
+        // sampled grid does not verify, its transpose does
+        let luma = test_symbols::from_segments_mirrored(
+            qrcode::Version::Normal(3),
+            qrcode::EcLevel::M,
+            |b| {
                 b.push_eci_designator(4)?;
                 b.push_byte_data(&[0xA1])
-            });
-        let (found, _) = decode(&luma);
-        let d = found.first().expect("rqrr decodes the clean render");
-        let stream = d.masked_stream.as_ref().expect("rqrr exposes the stream");
-        // bytes that differ from the re-derived payload (what a mirrored
-        // decode looks like): unobserved, never a borrowed declaration
-        assert_eq!(
-            segment_evidence(b"other", Some(stream), d.version, d.ec, d.mask),
-            Some(EciEvidence::Unobserved)
+            },
         );
-        // a tampered stream that no longer verifies
-        let mut tampered = stream.clone();
-        for byte in &mut tampered.bits {
-            *byte = !*byte;
-        }
+        let pass = decode(&luma);
+        let d = pass
+            .found
+            .first()
+            .expect("rqrr decodes the mirrored render");
+        assert_eq!(d.raw, vec![0xA1]);
         assert_eq!(
-            segment_evidence(&d.raw, Some(&tampered), d.version, d.ec, d.mask),
-            Some(EciEvidence::Unobserved)
+            d.eci,
+            EciEvidence::Located(vec![EciMark { value: 4, start: 0 }])
         );
-        // no stream or no format metadata: nothing observable
-        assert_eq!(
-            segment_evidence(&d.raw, None, d.version, d.ec, d.mask),
-            Some(EciEvidence::Unobserved)
-        );
-        assert_eq!(
-            segment_evidence(&d.raw, Some(stream), None, d.ec, d.mask),
-            Some(EciEvidence::Unobserved)
-        );
+        assert!(d.parsed);
     }
 
     #[test]
     fn a_malformed_designator_decode_is_refused() {
         // rqrr reads a 111xxxxx designator as one byte and returns "abc";
-        // the verified stream violates ISO 18004 Table 4: no detection (and
-        // no rescue input — rqrr did decode it)
+        // the verified stream violates ISO 18004 Table 4: no detection, no
+        // rescue input (rqrr did decode it), its bytes are the veto key —
+        // mirrored or not (the transposed grid is re-derived too)
         let data =
             test_symbols::stream("0111 11100000 0100 00000011 01100001 01100010 01100011 0000");
+        for luma in [
+            test_symbols::from_codewords(qrcode::Version::Normal(1), qrcode::EcLevel::M, &data),
+            test_symbols::from_codewords_mirrored(
+                qrcode::Version::Normal(1),
+                qrcode::EcLevel::M,
+                &data,
+            ),
+        ] {
+            let pass = decode(&luma);
+            assert!(pass.found.is_empty(), "{:?}", pass.found);
+            assert!(pass.rescue.is_empty());
+            assert_eq!(pass.refused, vec![b"abc".to_vec()]);
+        }
+        // above the register: rxing's port transmits "abc" too
+        let data = test_symbols::stream(
+            "0111 11001111 01000010 01000000 0100 00000011 01100001 01100010 01100011 0000",
+        );
         let luma =
             test_symbols::from_codewords(qrcode::Version::Normal(1), qrcode::EcLevel::M, &data);
-        let (found, rescue) = decode(&luma);
-        assert!(found.is_empty(), "{found:?}");
-        assert!(rescue.is_empty());
+        let pass = decode(&luma);
+        assert!(pass.found.is_empty());
+        assert_eq!(pass.refused, vec![b"abc".to_vec(), b"abc".to_vec()]);
     }
 }

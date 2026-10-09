@@ -32,25 +32,28 @@ pub(crate) struct EciMark {
     pub(crate) start: usize,
 }
 
-/// The FNC1 mode a read declared (ISO 18004 §7.4.8).
+/// The FNC1 mode a read observed (ISO 18004 §7.4.8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fnc1 {
-    /// No FNC1 mode indicator.
+    /// No FNC1 mode indicator — observed: rxing's AIM modifier `]Q0`-`]Q2`,
+    /// a parsed stream, or an rqrr decode (rqrr decodes neither FNC1 mode).
     None,
     /// FNC1 in first position — GS1 data (`]Q3`/`]Q4`).
     First,
     /// FNC1 in second position — an AIM application, never GS1
     /// (`]Q5`/`]Q6`); its application indicator leads the payload bytes.
     Second,
+    /// The position is unknown: a symbology outside the QR family, or an
+    /// rxing result whose symbology identifier does not parse.
+    Unobserved,
 }
 
 impl Fnc1 {
-    /// First and second position describe different symbols.
+    /// Observed positions agree only with themselves — a plain symbol, a
+    /// GS1 one and an AIM one are three contents even over equal bytes;
+    /// an unknown position agrees with any.
     fn agrees_with(self, other: Self) -> bool {
-        !matches!(
-            (self, other),
-            (Self::First, Self::Second) | (Self::Second, Self::First)
-        )
+        self == other || self == Self::Unobserved || other == Self::Unobserved
     }
 }
 
@@ -87,6 +90,16 @@ impl EciEvidence {
     /// signalled ~ signalled | located · located(a) ~ located(a) | signalled.
     /// Everything else is a different content (an unmarked `A1` and an
     /// ECI-4 `A1` stay two).
+    ///
+    /// Two reads whose observed accounts disagree never merge. The converse
+    /// is weaker, and that is the lattice's residual ambiguity: a read
+    /// without located evidence (unobserved, signalled) agrees with several
+    /// contents of equal bytes. The ladder lets geometry decide where the
+    /// read has corners (it joins the admitting detection they overlap),
+    /// else the first in attempt order; two signalled-only reads of equal
+    /// bytes under different, never exposed designators (two rxing-only
+    /// symbols, ECI 4 and ECI 7, no geometry) still reconcile into one, and
+    /// a single located read then decides the text of both.
     pub(crate) fn agrees_with(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Unobserved, _)
@@ -116,7 +129,7 @@ pub(crate) struct ContentKey {
     pub(crate) raw: Vec<u8>,
     /// The most specific ECI account any admitted read gave.
     pub(crate) eci: EciEvidence,
-    /// The FNC1 position any admitted read stated.
+    /// The FNC1 position the admitted reads observed.
     pub(crate) fnc1: Fnc1,
 }
 
@@ -129,12 +142,13 @@ impl ContentKey {
     }
 
     /// Join an admitted read's account: the most specific one stays
-    /// (located over signalled, no-ECI over unobserved; the first on a tie).
+    /// (located over signalled, no-ECI over unobserved, an observed FNC1
+    /// position over an unknown one; the first on a tie).
     pub(crate) fn join(&mut self, eci: EciEvidence, fnc1: Fnc1) {
         if eci.specificity() > self.eci.specificity() {
             self.eci = eci;
         }
-        if self.fnc1 == Fnc1::None {
+        if self.fnc1 == Fnc1::Unobserved {
             self.fnc1 = fnc1;
         }
     }
@@ -674,10 +688,33 @@ mod tests {
         let mut key = ContentKey {
             raw: vec![0xA1],
             eci: EciEvidence::Unobserved,
-            fnc1: Fnc1::None,
+            fnc1: Fnc1::Unobserved,
         };
         key.join(EciEvidence::NoEci, Fnc1::First);
-        assert_eq!((key.eci, key.fnc1), (EciEvidence::NoEci, Fnc1::First));
+        assert_eq!((&key.eci, key.fnc1), (&EciEvidence::NoEci, Fnc1::First));
+        // an observed position is kept
+        key.join(EciEvidence::NoEci, Fnc1::Unobserved);
+        assert_eq!(key.fnc1, Fnc1::First);
+    }
+
+    #[test]
+    fn observed_fnc1_positions_agree_only_with_themselves() {
+        use Fnc1 as F;
+        for (a, b, agree) in [
+            (F::None, F::None, true),
+            (F::First, F::First, true),
+            (F::Second, F::Second, true),
+            (F::None, F::First, false),
+            (F::None, F::Second, false),
+            (F::First, F::Second, false),
+            (F::Unobserved, F::None, true),
+            (F::Unobserved, F::First, true),
+            (F::Unobserved, F::Second, true),
+            (F::Unobserved, F::Unobserved, true),
+        ] {
+            assert_eq!(a.agrees_with(b), agree, "{a:?} vs {b:?}");
+            assert_eq!(b.agrees_with(a), agree, "symmetric: {b:?} vs {a:?}");
+        }
     }
 
     #[test]
@@ -692,6 +729,7 @@ mod tests {
             ec: None,
             mask: None,
             fnc1,
+            parsed: false,
             engine: EngineKind::Rxing,
         };
         let key = ContentKey {
@@ -709,7 +747,11 @@ mod tests {
             fnc1: Fnc1::First,
         };
         assert!(gs1.admits(&hit(b"10AB", EciEvidence::NoEci, Fnc1::First)));
-        assert!(gs1.admits(&hit(b"10AB", EciEvidence::NoEci, Fnc1::None)));
+        assert!(gs1.admits(&hit(b"10AB", EciEvidence::NoEci, Fnc1::Unobserved)));
+        assert!(
+            !gs1.admits(&hit(b"10AB", EciEvidence::NoEci, Fnc1::None)),
+            "an observed plain symbol is another content"
+        );
         assert!(
             !gs1.admits(&hit(b"10AB", EciEvidence::NoEci, Fnc1::Second)),
             "first and second position are different symbols"

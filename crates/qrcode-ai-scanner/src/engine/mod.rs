@@ -49,12 +49,18 @@ pub(crate) struct RawDetection {
     pub ec: Option<EcLevel>,
     /// Mask pattern 0-7 when measured.
     pub mask: Option<u8>,
-    /// The FNC1 position the read stated. First = GS1 formatted data (QR
+    /// The FNC1 position the read observed. First = GS1 formatted data (QR
     /// `]Q3`/`]Q4` · `DataMatrix` `]d2` · GS1-128 `]C1`); second = an AIM
     /// application, never GS1. rqrr cannot decode FNC1 symbols at all (its
     /// mode dispatch rejects indicators 0x5/0x9); rxing and the rescue
     /// parser can.
     pub fnc1: Fnc1,
+    /// The scanner's own segment parser read this stream (an rqrr decode's
+    /// re-derivation, rxing's codeword output, the rescue): its ECI and
+    /// FNC1 account is exposed, not stated by an engine. A stream proven
+    /// malformed vetoes only reads that are not parsed — equal bytes from
+    /// a parsed stream belong to another, well-formed symbol.
+    pub parsed: bool,
     /// Producing engine.
     pub engine: EngineKind,
 }
@@ -67,6 +73,10 @@ pub(crate) struct EngineOutcome {
     /// Grids detected but NOT decoded (rqrr `get_raw_data` ok, RS failed) —
     /// the S5 rescue inputs. Corners are in ATTEMPT space here.
     pub rescue: Vec<crate::rescue::RescueCandidate>,
+    /// QR payloads proven malformed in this pass: what rqrr decoded from a
+    /// stream the scanner's parser refuses, and what rxing's port transmits
+    /// for that stream. The ladder vetoes unparsed reads of these bytes.
+    pub refused: Vec<Vec<u8>>,
     /// Engine panics caught and isolated during this pass. NOTE: isolation
     /// stops the unwind, but the process-global panic HOOK still runs first
     /// — server embedders see a backtrace on stderr per caught panic
@@ -129,11 +139,11 @@ pub(crate) fn decode_filtered(luma: &LumaImage, filter: FormatFilter) -> EngineO
     if matches!(
         filter,
         FormatFilter::All | FormatFilter::QrFamily | FormatFilter::Only(Symbology::QrCode)
-    ) && let Some((found, rescue)) =
-        run_engine(&mut outcome.panics, || rqrr_engine::decode(luma))
+    ) && let Some(pass) = run_engine(&mut outcome.panics, || rqrr_engine::decode(luma))
     {
-        outcome.detections.extend(found);
-        outcome.rescue.extend(rescue);
+        outcome.detections.extend(pass.found);
+        outcome.rescue.extend(pass.rescue);
+        outcome.refused.extend(pass.refused);
     }
 
     outcome

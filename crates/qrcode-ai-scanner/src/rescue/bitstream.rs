@@ -11,8 +11,23 @@
 //! designator, an assignment number above 999999, an unknown mode, an
 //! out-of-range numeric/alphanumeric value, an invalid AIM application
 //! indicator, a truncated count) returns `None` — never a best guess.
+//! [`port_payload`] names what a more tolerant reader transmits for such a
+//! stream: the bytes a refusal must veto in that reader's output.
 
 use crate::engine::content::{EciMark, Fnc1};
+
+/// The rules a parse applies to designators and FNC1 indicators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rules {
+    /// ISO/IEC 18004 exactly — the scanner's own reading.
+    Iso,
+    /// What rxing's zxing-cpp port also accepts (0.9.1): an assignment
+    /// number above 999999 (read as "unknown") and FNC1 in both positions
+    /// — second after first while no data precedes it, first after second
+    /// (the last one wins). Never a reading: only the bytes such a stream
+    /// transmits through that reader.
+    Port,
+}
 
 /// MSB-first bit reader over the data codewords.
 struct Bits<'a> {
@@ -87,6 +102,18 @@ pub(crate) struct Parsed {
 /// not define (a rescue that corrected to garbage must not surface, and a
 /// re-derivation must not invent a declaration).
 pub(crate) fn parse(data: &[u8], version: u8) -> Option<Parsed> {
+    parse_with(data, version, Rules::Iso)
+}
+
+/// The payload rxing's zxing-cpp port transmits for a stream [`parse`]
+/// refuses — an assignment number above 999999, FNC1 indicators in both
+/// positions. `None` when that reader refuses the stream too. A refusal
+/// vetoes the port's read of exactly these bytes.
+pub(crate) fn port_payload(data: &[u8], version: u8) -> Option<Vec<u8>> {
+    parse_with(data, version, Rules::Port).map(|parsed| parsed.bytes)
+}
+
+fn parse_with(data: &[u8], version: u8, rules: Rules) -> Option<Parsed> {
     let mut bits = Bits {
         bytes: data,
         cursor: 0,
@@ -110,21 +137,21 @@ pub(crate) fn parse(data: &[u8], version: u8) -> Option<Parsed> {
             0b0101 => {
                 // FNC1 first position (§7.4.8.2) — after a second-position
                 // declaration it describes no symbol ISO defines
-                if fnc1 == Fnc1::Second {
+                if fnc1 == Fnc1::Second && rules == Rules::Iso {
                     return None;
                 }
                 fnc1 = Fnc1::First;
             }
             0b1001 => {
                 // FNC1 second position (§7.4.8.3): once, before all data
-                if fnc1 != Fnc1::None || !out.is_empty() {
+                if !out.is_empty() || (fnc1 != Fnc1::None && rules == Rules::Iso) {
                     return None;
                 }
                 application_indicator(&mut bits, &mut out)?;
                 fnc1 = Fnc1::Second;
             }
             0b0111 => {
-                let value = eci_designator(&mut bits)?;
+                let value = eci_designator(&mut bits, rules)?;
                 eci.push(EciMark {
                     value,
                     start: out.len(),
@@ -264,8 +291,9 @@ fn double_byte(bits: &mut Bits<'_>, mode: u32, version: u8, out: &mut Vec<u8>) -
 /// ECI assignment number per ISO 18004 Table 4: the leading 1-bits of the
 /// first codeword count the extra codewords (`0bbbbbbb` · `10b{14}` ·
 /// `110b{21}`); the prefix bits are NOT part of the value. `111xxxxx` has
-/// no meaning and the register stops at 999999 — both refuse.
-fn eci_designator(bits: &mut Bits<'_>) -> Option<u32> {
+/// no meaning and the register stops at 999999 — both refuse (the port
+/// reads the latter as "unknown").
+fn eci_designator(bits: &mut Bits<'_>, rules: Rules) -> Option<u32> {
     let first = bits.take(8)?;
     let value = if first & 0x80 == 0 {
         first
@@ -276,7 +304,7 @@ fn eci_designator(bits: &mut Bits<'_>) -> Option<u32> {
     } else {
         return None;
     };
-    (value <= 999_999).then_some(value)
+    (value <= 999_999 || rules == Rules::Port).then_some(value)
 }
 
 /// FNC1-mode alphanumeric data (ISO 18004 §7.4.8.2 · §7.4.8.3): a lone `%`
@@ -475,6 +503,41 @@ mod tests {
     }
 
     #[test]
+    fn port_payload_names_what_the_port_transmits_for_a_refused_stream() {
+        let abc = "0100 00000011 01100001 01100010 01100011 0000";
+        // above the register (1000000): refused, the port reads "abc"
+        let above = stream(&format!("0111 11001111 01000010 01000000 {abc}"));
+        assert!(parse(&above, 1).is_none());
+        assert_eq!(port_payload(&above, 1).as_deref(), Some(&b"abc"[..]));
+        // FNC1 in both positions, either order: the indicator leads
+        for order in ["1001 00100101 0101", "0101 1001 00100101"] {
+            let both = stream(&format!("{order} {abc}"));
+            assert!(parse(&both, 1).is_none(), "{order}");
+            assert_eq!(
+                port_payload(&both, 1).as_deref(),
+                Some(&b"37abc"[..]),
+                "{order}"
+            );
+        }
+        // what the port refuses too stays refused: a 111xxxxx designator,
+        // a late, repeated or invalid application indicator
+        for refused in [
+            format!("0111 11100000 {abc}"),
+            format!("0100 00000001 01100001 1001 00100101 {abc}"),
+            format!("1001 00100101 1001 00100101 {abc}"),
+            "1001 01100100 0000".to_owned(),
+        ] {
+            assert!(port_payload(&stream(&refused), 1).is_none(), "{refused}");
+        }
+        // a well-formed stream transmits its own payload
+        let declared = stream("0111 00000100 0100 00000001 10100001 0000");
+        assert_eq!(
+            port_payload(&declared, 1),
+            parse(&declared, 1).map(|p| p.bytes)
+        );
+    }
+
+    #[test]
     fn eci_one_byte_designator_records_value_and_offset() {
         // 1-byte ECI (first = 5, high bit CLEAR) → NO extra byte, then 'U'.
         // An `&`→`^`/`|` or `==`→`!=` swap would enter a multi-byte branch,
@@ -568,13 +631,17 @@ mod tests {
     proptest::proptest! {
         /// Total over attacker-shaped codewords: refuse or parse, never
         /// panic; every recorded offset lies inside the returned payload,
-        /// in stream order; and the interpretation of what parsed is total.
+        /// in stream order; the interpretation of what parsed is total; and
+        /// the port's tolerance only ever adds payloads (a well-formed
+        /// stream transmits the same bytes through it).
         #[test]
         fn parse_is_total_and_its_offsets_stay_in_bounds(
             data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..48),
             version in 0u8..42,
         ) {
+            let tolerant = port_payload(&data, version);
             if let Some(parsed) = parse(&data, version) {
+                proptest::prop_assert_eq!(tolerant.as_deref(), Some(parsed.bytes.as_slice()));
                 let mut previous = 0;
                 for mark in &parsed.eci {
                     proptest::prop_assert!(mark.value <= 999_999);
