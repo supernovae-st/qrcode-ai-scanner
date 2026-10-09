@@ -1,4 +1,5 @@
-//! Deterministic decode ladder — S1 pyramid → S2 direct → S3 enhance → S4 deep.
+//! Deterministic decode ladder — S1 pyramid → S2 direct → S3 enhance → S4
+//! deep → S5 rescue.
 //!
 //! Replaces the v0.2 RNG brute force: the attempt sequence is a fixed,
 //! declared order, so the same input under the same config always walks the
@@ -6,25 +7,35 @@
 //! interruptible) and cooperative cancellation are checked between attempts.
 //! Early exit happens at stage boundaries: a stage that finds something
 //! still completes, so consensus data within that stage is preserved — and
-//! a stage that found only QR reads whose ECI declarations are signalled,
-//! never located, does not end the walk (a later stage may locate them).
+//! a stage that found only QR Code reads whose ECI declarations are
+//! signalled, never located, does not end the walk (a later stage may
+//! locate them).
 //!
-//! The walk ends with one pass over the rescue candidates collected in
-//! every attempt — at most `MAX_RESCUE_CANDIDATES` clean RS re-derivations,
-//! no sampling — so a grid detected in another attempt than the read it
-//! locates or refuses still counts. That pass runs after the deadline too
-//! (a refusal stays a refusal); cancellation is checked before it.
+//! Every attempt runs the engines, re-derives the grids rqrr detected but
+//! could not decode (at most `MAX_RESCUE_CANDIDATES`, while a QR Code read
+//! the scanner has not parsed is in play — rqrr's adapter already decided
+//! the first four grids' orientation: per grid at most one extra raw read
+//! of its own grid and two plain RS passes, no image sampling), re-reads
+//! the reads no parse of the attempt carries (`engine::locate`, at most
+//! `MAX_REREADS` per scan), records the refusals and collects the reads
+//! (`engine::reconcile`). Nothing is decided per attempt: the walk ends
+//! with one more pass over the rescue candidates collected in every
+//! attempt — clean RS, no sampling, past the deadline too (a refusal stays a
+//! refusal; cancellation is checked before it) — and the reconciliation of
+//! the whole read set.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use web_time::Instant;
 
-use crate::engine::content::{self, ContentKey, EciEvidence, Fnc1, Reading};
-use crate::engine::{self, MaskedStream, RawDetection, Veto};
+use crate::engine::content::{self, ContentKey, EciEvidence, Fnc1, Reading, Segments};
+use crate::engine::locate::{LocateHint, Located};
+use crate::engine::reconcile::{Geometry, Rank, Read, ReadStore, Reconciled, Seed, source};
+use crate::engine::{self, RawDetection, Refusal};
 use crate::error::{Result, ScanError};
 use crate::input::LumaImage;
-use crate::report::{EcLevel, EngineKind, PipelineTrace, Point, StageTrace, Symbology};
+use crate::report::{EngineKind, PipelineTrace, Point, StageTrace, Symbology};
 use crate::rescue::{Acceptance, Rederived, RescueCandidate};
 use crate::transform::{self, Channel, SourcePlanes};
 
@@ -380,25 +391,14 @@ impl ScanProfile {
     }
 }
 
-/// Hard cap on distinct merged detections — a tile of thousands of
-/// micro-QRs is a CPU/report amplifier, not a use case.
-const MAX_DETECTIONS: usize = 16;
-
 /// Rescue candidates kept per walk (S5 cost is per candidate) and
 /// re-derived per attempt.
 const MAX_RESCUE_CANDIDATES: usize = crate::rescue::MAX_CANDIDATES;
 
-/// The walk's proof capacity: refusals of proven-malformed streams it
-/// remembers (every hit is checked against them). A proof past capacity
-/// still refuses in the attempt that found it — the detections it covers
-/// and that attempt's reads — then lapses: its symbol's reads in later
-/// attempts stay refused only where a stream proves it again.
-const MAX_VETOED: usize = 16;
-
-/// Contents of well-formed streams (re-derived rescue candidates) a walk
-/// remembers as shields: no refusal covers a read they admit. Past
-/// capacity a shield is dropped — the walk refuses rather than publishes.
-const MAX_SHIELDS: usize = 16;
+/// Re-reads per scan (both walks of an alpha fallback together): each
+/// spends at most `engine::locate::MAX_PROBES` format probes and as many
+/// error-correction attempts.
+const MAX_REREADS: usize = 16;
 
 /// One S4 deep-recovery transform recipe. The SAME enumeration drives the
 /// ladder and the score probe ([`crate::score`]'s `CellProbe`) — a symbol
@@ -569,7 +569,8 @@ pub(crate) const DEEP_RUNGS: [Rung; 15] = [
     },
 ];
 
-/// One payload after cross-engine, cross-attempt merging.
+/// One published content: the reconciled reads and the scanner's one
+/// reading of them (its field set is what the score evaluates).
 #[derive(Debug, Clone)]
 pub(crate) struct MergedDetection {
     pub symbology: crate::report::Symbology,
@@ -579,15 +580,15 @@ pub(crate) struct MergedDetection {
     /// Identity is the content, not this text: two contents that read the
     /// same stay two detections.
     pub text: String,
-    /// The published label (`engine::content::Reading::published`).
+    /// How `text` relates to `raw` (spec/01 § Content).
     pub charset: crate::report::Charset,
-    pub masked_stream: Option<MaskedStream>,
+    pub masked_stream: Option<engine::MaskedStream>,
     pub corners: Option<[Point; 4]>,
     pub version: Option<u8>,
-    pub ec: Option<EcLevel>,
+    pub ec: Option<crate::report::EcLevel>,
     pub mask: Option<u8>,
-    /// FNC1-in-first-position (GS1) — stated by any admitted read (rxing,
-    /// rescue; rqrr rejects FNC1 symbols). Second position is never GS1.
+    /// FNC1 in first position (GS1). Second position is never GS1: the
+    /// position itself travels in [`LadderOutcome::contents`].
     pub fnc1: bool,
     /// The GEOMETRY SOURCE's attempt photometrically inverted the symbol
     /// (light-on-dark original). Meaningful only when `corners` is `Some`;
@@ -596,31 +597,39 @@ pub(crate) struct MergedDetection {
     pub engines: Vec<EngineKind>,
 }
 
-/// Ladder result: merged detections + the execution trace.
+/// Ladder result: the published detections, what they are, the walk's
+/// reads and refusals, and the execution trace.
 #[derive(Debug)]
 pub(crate) struct LadderOutcome {
     pub merged: Vec<MergedDetection>,
-    /// What each merged detection is made of, aligned with `merged` — what
-    /// another walk's refusals look at ([`LadderOutcome::fold_fallback`]).
-    footings: Vec<Footing>,
-    /// The walk's proofs of malformed streams and its shields.
-    refusals: Refusals,
-    /// Each merged detection's content key and single reading, aligned with
-    /// `merged` — what the score/alpha matchers compare engine hits against
-    /// (`ContentKey::admits`) and what the content wire contract will
-    /// publish; carried for tests until those consumers are wired.
-    #[cfg(test)]
+    /// Each detection's content and its one reading, aligned with `merged`:
+    /// what the wire publishes (`eci`, `fnc1`) and what probes match reads
+    /// against (`ContentKey::admits`).
     pub contents: Vec<(ContentKey, Reading)>,
+    /// What reconciliation established, aligned with `merged` — what
+    /// another walk's refusals look at ([`LadderOutcome::fold_fallback`]).
+    reconciled: Vec<Reconciled>,
+    /// The walk's reads and refusals.
+    store: ReadStore,
+    /// Re-reads the scan spent.
+    rereads: usize,
     pub trace: PipelineTrace,
 }
 
 impl LadderOutcome {
+    /// What the opposite-background walk starts from: this walk's
+    /// refusals (those past capacity included), the contents its parses
+    /// read, and the re-reads already spent.
+    pub(crate) fn seed(&self) -> Seed {
+        self.store.seed(self.rereads)
+    }
+
     /// Fold a second walk (the alpha fallback) in: both walks stay in the
-    /// trace, its detections replace these only when it found some. This
-    /// walk's proofs still refuse there — the fallback flattened the same
-    /// symbols over another background without them, so a detection they
-    /// cover is dropped (unless either walk shields its content). Returns
-    /// whether the fallback found any detection that stands.
+    /// trace, its detections replace these only when it found some. It
+    /// started from this walk's refusals ([`run_seeded`]); as a second
+    /// guard, a detection they still cover is dropped unless a parse of
+    /// either walk protects its content. Returns whether the fallback found
+    /// a detection that stands.
     pub(crate) fn fold_fallback(&mut self, fallback: LadderOutcome) -> bool {
         self.trace.stages.extend(fallback.trace.stages);
         self.trace.engine_panics = self
@@ -628,300 +637,89 @@ impl LadderOutcome {
             .engine_panics
             .saturating_add(fallback.trace.engine_panics);
         self.trace.total_ms += fallback.trace.total_ms;
-        let shields: Vec<&ContentKey> = fallback
-            .refusals
-            .shields
-            .iter()
-            .chain(
-                fallback
-                    .footings
-                    .iter()
-                    .filter(|footing| footing.parsed)
-                    .map(|footing| &footing.key),
-            )
-            .collect();
+        let protection = fallback.store.seed(0).protection;
         let stands: Vec<bool> = fallback
-            .footings
+            .reconciled
             .iter()
-            .map(|footing| {
-                !self.refusals.refuses_detection(footing)
-                    || shields.iter().any(|key| key.agrees(&footing.key))
-            })
+            .map(|detection| !self.store.withholds(detection, &protection))
             .collect();
-        let kept = |index: usize| stands.get(index).copied().unwrap_or(false);
-        let merged: Vec<MergedDetection> = fallback
-            .merged
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, detection)| kept(index).then_some(detection))
-            .collect();
-        let found = !merged.is_empty();
+        let found = stands.contains(&true);
         if found {
-            self.merged = merged;
-            self.footings = fallback
-                .footings
-                .into_iter()
-                .enumerate()
-                .filter_map(|(index, footing)| kept(index).then_some(footing))
-                .collect();
-            #[cfg(test)]
-            {
-                self.contents = fallback
-                    .contents
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(|(index, content)| kept(index).then_some(content))
-                    .collect();
-            }
+            self.merged = kept(fallback.merged, &stands);
+            self.contents = kept(fallback.contents, &stands);
+            self.reconciled = kept(fallback.reconciled, &stands);
         }
         found
     }
 }
 
-/// What a refusal looks at in a detection: its content, and whether the
-/// scanner's own parser read it or only engines did (and which).
-#[derive(Debug, Clone)]
-struct Footing {
-    symbology: Symbology,
-    key: ContentKey,
-    /// Some admitted read came from the scanner's own segment parser.
-    parsed: bool,
-    engines: Vec<EngineKind>,
-}
-
-/// A walk's account of malformed and well-formed streams.
-#[derive(Debug, Clone, Default)]
-struct Refusals {
-    /// Proofs of malformed streams the walk remembers (`MAX_VETOED`).
-    vetoes: Vec<Veto>,
-    /// The current attempt's proofs past that capacity: they refuse in
-    /// their attempt, then lapse ([`Refusals::next_attempt`]).
-    overflow: Vec<Veto>,
-    /// Contents of well-formed streams — re-derived rescue candidates that
-    /// parse — no veto covers a read they admit (`MAX_SHIELDS`).
-    shields: Vec<ContentKey>,
-}
-
-impl Refusals {
-    /// Record a proof; past capacity it still applies to this attempt.
-    fn record(&mut self, veto: Veto) {
-        if self.vetoes.contains(&veto) || self.overflow.contains(&veto) {
-            return;
-        }
-        if self.vetoes.len() < MAX_VETOED {
-            self.vetoes.push(veto);
-        } else {
-            self.overflow.push(veto);
-        }
-    }
-
-    /// Remember a well-formed stream's content.
-    fn shield(&mut self, key: ContentKey) {
-        if self.shields.len() < MAX_SHIELDS && !self.shields.contains(&key) {
-            self.shields.push(key);
-        }
-    }
-
-    /// A new attempt: the last one's proofs past capacity lapse.
-    fn next_attempt(&mut self) {
-        self.overflow.clear();
-    }
-
-    fn proofs(&self) -> impl Iterator<Item = &Veto> {
-        self.vetoes.iter().chain(&self.overflow)
-    }
-
-    /// Whether a proof covers this engine hit and no shield admits it.
-    fn refuses(&self, hit: &RawDetection) -> bool {
-        self.proofs().any(|veto| veto.refuses(hit))
-            && !self.shields.iter().any(|key| key.admits(hit))
-    }
-
-    /// The same for a detection: a QR Code made only of unparsed reads
-    /// whose content a proof covers and no shield agrees with.
-    fn refuses_detection(&self, footing: &Footing) -> bool {
-        footing.symbology == Symbology::QrCode
-            && !footing.parsed
-            && self
-                .proofs()
-                .any(|veto| veto.refuses_content(&footing.key, &footing.engines))
-            && !self.shields.iter().any(|key| key.agrees(&footing.key))
-    }
-}
-
-/// One detection as the ladder sees it: every engine hit of the same
-/// symbology whose content its key admits (an rxing and an rqrr read of one
-/// symbol, the same symbol across attempts), folded together. Engines all
-/// report the original bytes, so identity is the content — and an unmarked
-/// `A1` never folds into an ECI-4 `A1`.
-#[derive(Debug, Clone)]
-struct Observation {
-    symbology: Symbology,
-    key: ContentKey,
-    masked_stream: Option<MaskedStream>,
-    corners: Option<[Point; 4]>,
-    version: Option<u8>,
-    ec: Option<EcLevel>,
-    mask: Option<u8>,
-    /// The GEOMETRY SOURCE's attempt photometrically inverted the symbol;
-    /// adopted together with the corners.
-    photometric_inverted: bool,
-    /// Some admitted read came from the scanner's own segment parser — a
-    /// well-formed stream carries these bytes, so no veto removes it.
-    parsed: bool,
-    engines: Vec<EngineKind>,
-}
-
-impl Observation {
-    fn new(detection: RawDetection, attempt_inverts: bool) -> Self {
-        Self {
-            symbology: detection.symbology,
-            key: ContentKey {
-                raw: detection.raw,
-                eci: detection.eci,
-                fnc1: detection.fnc1,
-            },
-            masked_stream: detection.masked_stream,
-            photometric_inverted: attempt_inverts && detection.corners.is_some(),
-            corners: detection.corners,
-            version: detection.version,
-            ec: detection.ec,
-            mask: detection.mask,
-            parsed: detection.parsed,
-            engines: vec![detection.engine],
-        }
-    }
-
-    /// Its declarations are signalled, never located.
-    fn signalled_only(&self) -> bool {
-        self.key.eci == EciEvidence::Signalled
-    }
-
-    /// What a refusal looks at.
-    fn footing(&self) -> Footing {
-        Footing {
-            symbology: self.symbology,
-            key: self.key.clone(),
-            parsed: self.parsed,
-            engines: self.engines.clone(),
-        }
-    }
-
-    /// A rescue candidate's well-formed stream that locates this detection:
-    /// its account and the grid it measured (the stream with the format
-    /// read from it, the corners with their photometry) — never an engine:
-    /// no engine read it, and `rescue` names the S5 stage alone.
-    fn adopt_location(&mut self, location: Location) {
-        self.key.join(location.key.eci, location.key.fnc1);
-        self.parsed = true;
-        if self.masked_stream.is_none() {
-            self.masked_stream = Some(location.stream);
-            self.version = Some(location.version);
-            self.ec = Some(location.ec);
-            self.mask = Some(location.mask);
-        }
-        if self.corners.is_none() {
-            self.corners = Some(location.corners);
-            self.photometric_inverted = location.inverts;
-        }
-    }
-
-    /// Fold an admitted hit in: the most specific content account, and the
-    /// metadata rules the merge always had.
-    fn fold(&mut self, detection: RawDetection, attempt_inverts: bool) {
-        self.key.join(detection.eci, detection.fnc1);
-        self.parsed |= detection.parsed;
-        if self.masked_stream.is_none()
-            && let Some(stream) = detection.masked_stream
-        {
-            // bitstream source (rqrr/rescue): its format metadata measured
-            // the same grid as the stream — adopt them together (a mixed
-            // ec/stream pair would compute UEC against the wrong RS
-            // parameters)
-            self.masked_stream = Some(stream);
-            self.version = detection.version.or(self.version);
-            self.ec = detection.ec.or(self.ec);
-            self.mask = detection.mask.or(self.mask);
-        } else {
-            self.version = self.version.or(detection.version);
-            self.ec = self.ec.or(detection.ec);
-            self.mask = self.mask.or(detection.mask);
-        }
-        // the photometry flag describes the GEOMETRY source — it travels
-        // with newly-adopted corners only
-        if self.corners.is_none() && detection.corners.is_some() {
-            self.photometric_inverted = attempt_inverts;
-        }
-        self.corners = self.corners.or(detection.corners);
-        if !self.engines.contains(&detection.engine) {
-            self.engines.push(detection.engine);
-        }
-    }
-
-    /// The public shape: the content interpreted once.
-    fn into_detection(self) -> (MergedDetection, ContentKey, Reading) {
-        let reading = content::read(&self.key.raw, &self.key.eci);
-        let merged = MergedDetection {
-            symbology: self.symbology,
-            raw: self.key.raw.clone(),
-            text: reading.text.clone(),
-            charset: reading.published(),
-            masked_stream: self.masked_stream,
-            corners: self.corners,
-            version: self.version,
-            ec: self.ec,
-            mask: self.mask,
-            fnc1: self.key.fnc1 == Fnc1::First,
-            photometric_inverted: self.photometric_inverted,
-            engines: self.engines,
-        };
-        (merged, self.key, reading)
-    }
+/// The items `stands` keeps, aligned.
+fn kept<T>(items: Vec<T>, stands: &[bool]) -> Vec<T> {
+    items
+        .into_iter()
+        .zip(stands)
+        .filter_map(|(item, &stands)| stands.then_some(item))
+        .collect()
 }
 
 struct Run<'a> {
     cancel: &'a CancelToken,
     deadline: Option<Instant>,
-    /// Original input dimensions — every attempt's detections are rescaled
+    /// Original input dimensions — every attempt's geometry is rescaled
     /// back into this coordinate space (decodes happen on downscales).
     orig: (u32, u32),
-    /// The detections so far, first-seen order (deterministic).
-    observations: Vec<Observation>,
-    /// Grids detected but not decoded (rqrr stream readable) — S5 inputs.
-    /// Corners already rescaled to original space; capped to bound cost.
+    /// The walk's reads and refusals.
+    store: ReadStore,
+    /// Grids detected but not decoded (rqrr stream readable) — S5 inputs
+    /// and the end-of-walk pass's grids. Corners already rescaled to
+    /// original space; capped to bound cost.
     rescue_candidates: Vec<RescueCandidate>,
-    /// Streams a designator-exposing parser proved malformed in some
-    /// attempt, as the contents they refuse for the rest of the walk
-    /// (whichever engine reads the symbol where rqrr does not), and the
-    /// well-formed contents that shield equal reads.
-    refusals: Refusals,
+    /// Attempts made so far: the next attempt's rank.
+    attempts: u32,
+    /// Re-reads the scan spent.
+    rereads: usize,
     panics: u8,
 }
 
-/// A rescue candidate's well-formed stream with a located declaration: the
-/// content and grid it brings to the signalled-only detection it locates.
-#[derive(Debug, Clone)]
-struct Location {
-    key: ContentKey,
-    stream: MaskedStream,
-    /// ORIGINAL image space.
-    corners: [Point; 4],
-    version: u8,
-    ec: EcLevel,
-    mask: u8,
-    /// The candidate's attempt photometrically inverted the symbol.
-    inverts: bool,
+/// The candidate geometry: its grid's corners with the photometry of its
+/// attempt, and the stream with the format read from it.
+fn candidate_geometry(candidate: &RescueCandidate) -> Geometry {
+    Geometry {
+        corners: Some((candidate.corners, candidate.inverted)),
+        stream: Some((
+            candidate.stream.clone(),
+            candidate.version,
+            candidate.ec,
+            candidate.mask,
+        )),
+        ec: None,
+    }
 }
 
-/// What re-deriving rescue candidates (clean RS) established.
-#[derive(Debug, Default)]
-struct Rederivations {
-    /// Well-formed streams with a located declaration.
-    located: Vec<Location>,
-    /// The contents of every well-formed stream: shields.
-    shields: Vec<ContentKey>,
-    /// What the port reports for each stream proven malformed.
-    vetoes: Vec<Veto>,
+/// An engine read the scanner has not parsed, of a QR Code symbol.
+fn unparsed_qr(read: &Read) -> bool {
+    !read.engines.is_empty() && read.symbology == Symbology::QrCode && !read.parsed
+}
+
+impl<'a> Run<'a> {
+    fn new(
+        cancel: &'a CancelToken,
+        deadline: Option<Instant>,
+        orig: (u32, u32),
+        seed: Seed,
+    ) -> Self {
+        let rereads = seed.rereads;
+        Self {
+            cancel,
+            deadline,
+            orig,
+            store: ReadStore::seeded(seed),
+            rescue_candidates: Vec::new(),
+            attempts: 0,
+            rereads,
+            panics: 0,
+        }
+    }
 }
 
 impl Run<'_> {
@@ -937,115 +735,60 @@ impl Run<'_> {
             .is_some_and(|deadline| Instant::now() >= deadline)
     }
 
-    /// Reconcile one engine pass into the detections (linear scan: N is
-    /// tiny, order deterministic). A hit joins a detection of its symbology
-    /// whose content key admits it (same bytes, agreeing ECI accounts and
-    /// FNC1 positions) — an EAN-13 and a QR carrying the same digits stay
-    /// two, and so do two contents that read the same text. Reads a proof
-    /// refuses are dropped. Returns the raw hit count, pre-merge and
-    /// pre-veto: the trace's `detections_found`.
-    fn absorb(&mut self, found: Vec<RawDetection>, attempt_inverts: bool) -> u32 {
-        let count = u32::try_from(found.len()).unwrap_or(u32::MAX);
-        // the pass's own parsed reads shield what they admit before they
-        // are absorbed
-        let parsed: Vec<ContentKey> = found
-            .iter()
-            .filter(|hit| hit.parsed)
-            .map(ContentKey::of)
-            .collect();
-        for detection in found {
-            if self.is_vetoed(&detection, &parsed) {
-                continue;
-            }
-            match self.slot_for(&detection) {
-                Some(index) => self.observations[index].fold(detection, attempt_inverts),
-                None if self.observations.len() >= MAX_DETECTIONS => {}
-                None => self
-                    .observations
-                    .push(Observation::new(detection, attempt_inverts)),
-            }
-        }
-        count
+    /// The next attempt's rank.
+    fn next_attempt(&mut self) -> u32 {
+        let attempt = self.attempts;
+        self.attempts = self.attempts.saturating_add(1);
+        attempt
     }
 
-    /// The detection a hit joins. Several can admit a read without located
-    /// evidence (`EciEvidence::agrees_with`): a hit that carries corners
-    /// joins the first admitting detection its corners overlap; otherwise,
-    /// and when none overlaps, the FIRST admitting one in attempt order.
-    fn slot_for(&self, detection: &RawDetection) -> Option<usize> {
-        let admits = |seen: &Observation| {
-            seen.symbology == detection.symbology && seen.key.admits(detection)
-        };
-        detection
-            .corners
-            .and_then(|corners| {
-                self.observations.iter().position(|seen| {
-                    admits(seen) && seen.corners.is_some_and(|own| same_place(&own, &corners))
-                })
-            })
-            .or_else(|| self.observations.iter().position(admits))
-    }
-
-    /// A hit some proof refuses and nothing shields: no re-derived
-    /// candidate's content, no parsed read of this pass (`pass`) or of a
-    /// detection admits it — a well-formed stream carries those bytes.
-    fn is_vetoed(&self, hit: &RawDetection, pass: &[ContentKey]) -> bool {
-        self.refusals.refuses(hit)
-            && !pass.iter().any(|key| key.admits(hit))
-            && !self
-                .observations
-                .iter()
-                .any(|seen| seen.parsed && seen.symbology == hit.symbology && seen.key.admits(hit))
-    }
-
-    /// Record proofs of malformed streams (ISO 18004 defines no symbol for
-    /// them) and drop the detections only refused reads made — whichever
-    /// attempt made them — unless a parsed detection's content agrees.
-    fn veto(&mut self, vetoes: impl IntoIterator<Item = Veto>) {
-        for veto in vetoes {
-            self.refusals.record(veto);
-        }
-        let parsed: Vec<ContentKey> = self
-            .observations
-            .iter()
-            .filter(|seen| seen.parsed)
-            .map(|seen| seen.key.clone())
-            .collect();
-        let refusals = &self.refusals;
-        self.observations.retain(|seen| {
-            !refusals.refuses_detection(&seen.footing())
-                || parsed.iter().any(|key| key.agrees(&seen.key))
-        });
-    }
-
-    /// Re-derive rescue candidates (plain RS, no luma sampling — or the
-    /// re-derivation the engine pass already chose their orientation with)
-    /// while an unparsed QR read is in play — in `found` or already
-    /// absorbed. Every stream that parses shields its content; one with a
-    /// located declaration may also locate a signalled-only read; one proven
-    /// malformed refuses what rxing's port reports for it. At most
-    /// `MAX_RESCUE_CANDIDATES` candidates, in the order given (original-space
-    /// corners, photometry stamped).
-    fn rederive_candidates(
+    /// An engine hit as a read of this walk: original-space place and
+    /// geometry, the photometry of its attempt travelling with its
+    /// corners; and what its re-read needs (attempt space).
+    fn read_of(
         &self,
-        found: &[RawDetection],
-        candidates: &[RescueCandidate],
-    ) -> Rederivations {
-        let unparsed_qr =
-            |symbology: Symbology, parsed: bool| symbology == Symbology::QrCode && !parsed;
-        let in_play = found
-            .iter()
-            .any(|detection| unparsed_qr(detection.symbology, detection.parsed))
-            || self
-                .observations
-                .iter()
-                .any(|seen| unparsed_qr(seen.symbology, seen.parsed));
-        let mut out = Rederivations::default();
-        if !in_play {
-            return out;
-        }
-        for candidate in candidates.iter().take(MAX_RESCUE_CANDIDATES) {
-            // the engine pass may have decided it already (its orientation)
+        hit: RawDetection,
+        rank: Rank,
+        dims: (u32, u32),
+        inverts: bool,
+    ) -> (Read, Option<LocateHint>) {
+        let place = |corners: [Point; 4]| rescaled(corners, dims, self.orig);
+        let stream = match (hit.masked_stream, hit.version, hit.ec, hit.mask) {
+            (Some(stream), Some(version), Some(ec), Some(mask)) => {
+                Some((stream, version, ec, mask))
+            }
+            _ => None,
+        };
+        let geometry = Geometry {
+            corners: hit.corners.map(|corners| (place(corners), inverts)),
+            ec: if stream.is_none() { hit.ec } else { None },
+            stream,
+        };
+        let key = ContentKey {
+            raw: hit.raw,
+            eci: hit.eci,
+            fnc1: hit.fnc1,
+        };
+        let mut read =
+            Read::new(hit.symbology, key, Some(hit.engine), rank).at(hit.location.map(place));
+        read.segments = hit.segments;
+        read.engine_reading = hit.engine_reading;
+        read.parsed = hit.parsed;
+        read.geometry = geometry;
+        (read, hit.locate)
+    }
+
+    /// Re-derive grids rqrr detected but did not decode (plain RS, no luma
+    /// sampling — or the re-derivation the engine pass already chose their
+    /// orientation with): a stream that parses is a candidate parse — its
+    /// declarations, FNC1 position, segments and geometry, no engine; one
+    /// proven malformed is a refusal at the grid's place. At most
+    /// `MAX_RESCUE_CANDIDATES`, in the order given (original-space corners,
+    /// photometry stamped).
+    fn rederive(candidates: &[RescueCandidate], attempt: u32) -> (Vec<Read>, Vec<Refusal>) {
+        let mut reads = Vec::new();
+        let mut refusals = Vec::new();
+        for (index, candidate) in candidates.iter().take(MAX_RESCUE_CANDIDATES).enumerate() {
             let derived = candidate.rederived.clone().unwrap_or_else(|| {
                 crate::rescue::rederive(
                     &candidate.stream,
@@ -1062,90 +805,92 @@ impl Run<'_> {
                         eci: EciEvidence::from_marks(parsed.eci),
                         fnc1: parsed.fnc1,
                     };
-                    if matches!(key.eci, EciEvidence::Located(_)) {
-                        out.located.push(Location {
-                            key: key.clone(),
-                            stream: candidate.stream.clone(),
-                            corners: candidate.corners,
-                            version: candidate.version,
-                            ec: candidate.ec,
-                            mask: candidate.mask,
-                            inverts: candidate.inverted,
-                        });
-                    }
-                    out.shields.push(key);
+                    let rank = Rank {
+                        attempt,
+                        source: source::CANDIDATE,
+                        index: u32::try_from(index).unwrap_or(u32::MAX),
+                    };
+                    let mut read =
+                        Read::new(Symbology::QrCode, key, None, rank).at(Some(candidate.corners));
+                    read.segments = Segments::Observed(parsed.segments);
+                    read.parsed = true;
+                    read.geometry = candidate_geometry(candidate);
+                    reads.push(read);
                 }
-                Rederived::Malformed { port } => out.vetoes.extend(port.map(Veto::port)),
+                Rederived::Malformed { port } => {
+                    refusals.extend(Refusal::new(port, None, Some(candidate.corners)));
+                }
                 Rederived::Unverified => {}
             }
         }
-        out
+        (reads, refusals)
     }
 
-    /// Fold each location into the first signalled-only QR detection whose
-    /// content it agrees with (equal bytes, agreeing accounts); the others
-    /// are left to S5.
-    fn locate(&mut self, locations: Vec<Location>) {
-        for location in locations {
-            if let Some(seen) = self.observations.iter_mut().find(|seen| {
-                seen.signalled_only()
-                    && seen.symbology == Symbology::QrCode
-                    && seen.key.agrees(&location.key)
-            }) {
-                seen.adopt_location(location);
+    /// The re-read (07-pipeline property 6): each read with a hint that no
+    /// parsed read or candidate parse of the attempt carries is sampled at
+    /// its engine's corners in the attempt image, while the scan has
+    /// re-reads left. A located parse upgrades it (declarations, segments —
+    /// never its bytes, engines or geometry); a refused one removes it and
+    /// records the refusal at its place.
+    fn reread(
+        &mut self,
+        img: &LumaImage,
+        reads: &mut Vec<(Read, Option<LocateHint>)>,
+        refusals: &mut Vec<Refusal>,
+    ) {
+        let mut i = 0;
+        while let Some((read, hint)) = reads.get(i) {
+            let carried = reads.iter().any(|(other, _)| {
+                other.parsed && other.symbology == read.symbology && other.key.agrees(&read.key)
+            });
+            let Some(hint) = hint
+                .clone()
+                .filter(|_| !carried && self.rereads < MAX_REREADS)
+            else {
+                i += 1;
+                continue;
+            };
+            self.rereads += 1;
+            match engine::reread(img, &hint, &read.key.raw) {
+                Located::Parsed {
+                    eci,
+                    fnc1,
+                    segments,
+                    ..
+                } => {
+                    if let Some((read, _)) = reads.get_mut(i) {
+                        read.key.eci = EciEvidence::from_marks(eci);
+                        read.key.fnc1 = fnc1;
+                        read.segments = Segments::Observed(segments);
+                        read.parsed = true;
+                    }
+                    i += 1;
+                }
+                Located::Refused { port } => {
+                    let (read, _) = reads.remove(i);
+                    refusals.push(Refusal {
+                        port: Some(engine::port_key(port)),
+                        rqrr: None,
+                        place: read.location,
+                    });
+                }
+                Located::Unverified => i += 1,
             }
         }
     }
 
-    /// One pass's evidence, before its reads are absorbed: a new attempt
-    /// (the last one's proofs past capacity lapse), its shields, then its
-    /// proofs — the engines' refusals and the candidates'. Returns the
-    /// locations, folded in once the pass's reads are absorbed.
-    fn prove(&mut self, rederived: Rederivations, refused: Vec<Veto>) -> Vec<Location> {
-        self.refusals.next_attempt();
-        for key in rederived.shields {
-            self.refusals.shield(key);
-        }
-        self.veto(refused.into_iter().chain(rederived.vetoes));
-        rederived.located
-    }
-
-    /// Whether the walk may stop after a stage: something was found, and
-    /// not only signalled-only reads with a QR Code among them — a later
-    /// stage may read that symbol through a stream that locates its
-    /// declarations (rqrr, a rescue candidate; nothing reads Micro QR or
-    /// rMQR streams).
-    fn settled(&self) -> bool {
-        let awaits_location = self.observations.iter().all(Observation::signalled_only)
-            && self
-                .observations
-                .iter()
-                .any(|seen| seen.symbology == Symbology::QrCode);
-        !self.observations.is_empty() && !awaits_location
-    }
-
-    /// Before the walk ends: the collected candidates of every attempt get
-    /// the same re-derivation — rqrr may have detected the grid in another
-    /// attempt than the one an engine read the symbol in.
-    fn rederive_collected(&mut self) {
-        let rederived = self.rederive_candidates(&[], &self.rescue_candidates);
-        let located = self.prove(rederived, Vec::new());
-        self.locate(located);
-    }
-
-    /// S5 — try the collected rescue candidates; first success absorbs.
+    /// S5 — try the collected rescue candidates when the walk published
+    /// nothing (refused and withheld reads do not count); the first success
+    /// is collected.
     fn rescue_stage(&mut self, luma: &LumaImage, stages: &mut Vec<StageTrace>) -> Result<()> {
-        if !self.observations.is_empty()
-            || self.rescue_candidates.is_empty()
-            || self.out_of_budget()
-        {
+        if self.rescue_candidates.is_empty() || self.out_of_budget() || self.store.found() {
             return Ok(());
         }
         let started = Instant::now();
-        let candidates = std::mem::take(&mut self.rescue_candidates);
+        let attempt = self.next_attempt();
         let mut tried = 0u32;
         let mut found = 0u32;
-        for candidate in &candidates {
+        for candidate in self.rescue_candidates.clone() {
             self.check_cancel()?;
             if self.out_of_budget() {
                 break;
@@ -1170,22 +915,22 @@ impl Run<'_> {
             }
             if let Some(rescued) = crate::rescue::attempt(luma, &sampling) {
                 found += 1;
-                self.absorb(
-                    vec![RawDetection {
-                        symbology: crate::report::Symbology::QrCode,
-                        raw: rescued.raw,
-                        eci: EciEvidence::from_marks(rescued.eci),
-                        masked_stream: Some(candidate.stream.clone()),
-                        corners: Some(candidate.corners),
-                        version: Some(candidate.version),
-                        ec: Some(candidate.ec),
-                        mask: Some(candidate.mask),
-                        fnc1: rescued.fnc1,
-                        parsed: true,
-                        engine: EngineKind::Rescue,
-                    }],
-                    candidate.inverted,
-                );
+                let key = ContentKey {
+                    raw: rescued.raw,
+                    eci: EciEvidence::from_marks(rescued.eci),
+                    fnc1: rescued.fnc1,
+                };
+                let rank = Rank {
+                    attempt,
+                    source: source::RESCUE,
+                    index: 0,
+                };
+                let mut read = Read::new(Symbology::QrCode, key, Some(EngineKind::Rescue), rank)
+                    .at(Some(candidate.corners));
+                read.segments = Segments::Observed(rescued.segments);
+                read.parsed = true;
+                read.geometry = candidate_geometry(&candidate);
+                self.store.collect(read);
                 break; // first rescue wins — candidates are dedupes of one symbol
             }
         }
@@ -1231,8 +976,10 @@ impl Run<'_> {
         }
     }
 
-    /// Run one stage as a fixed sequence of lazily-built attempts.
-    /// Returns `Ok(true)` when the ladder should stop (budget mid-stage).
+    /// Run one stage as a fixed sequence of lazily-built attempts: each
+    /// attempt's engines, candidates, re-reads and refusals, then its reads
+    /// are collected. Returns `Ok(true)` when the ladder should stop
+    /// (budget mid-stage).
     fn stage(
         &mut self,
         name: &str,
@@ -1253,23 +1000,59 @@ impl Run<'_> {
             let img = (attempt.build)();
             let outcome = engine::decode_filtered(&img, filter);
             self.panics = self.panics.saturating_add(outcome.panics);
+            // the trace counts the reads the adapters delivered
+            found_total = found_total
+                .saturating_add(u32::try_from(outcome.detections.len()).unwrap_or(u32::MAX));
             let dims = (img.width(), img.height());
-            // the attempt's grids in original space; its proofs come first,
-            // so they veto its reads
-            let candidates: Vec<RescueCandidate> = outcome
-                .rescue
-                .iter()
-                .map(|candidate| RescueCandidate {
-                    corners: rescaled(candidate.corners, dims, self.orig),
-                    inverted: attempt.inverts,
-                    ..candidate.clone()
+            let index = self.next_attempt();
+            let mut reads: Vec<(Read, Option<LocateHint>)> = outcome
+                .detections
+                .into_iter()
+                .enumerate()
+                .map(|(i, hit)| {
+                    let rank = Rank {
+                        attempt: index,
+                        source: match hit.engine {
+                            EngineKind::Rxing => source::RXING,
+                            EngineKind::Rqrr => source::RQRR,
+                            EngineKind::Rescue => source::RESCUE,
+                        },
+                        index: u32::try_from(i).unwrap_or(u32::MAX),
+                    };
+                    self.read_of(hit, rank, dims, attempt.inverts)
                 })
                 .collect();
-            let rederived = self.rederive_candidates(&outcome.detections, &candidates);
-            let located = self.prove(rederived, outcome.refused);
-            let hits = rescale_corners(outcome.detections, dims, self.orig);
-            found_total += self.absorb(hits, attempt.inverts);
-            self.locate(located);
+            let mut refusals: Vec<Refusal> = outcome
+                .refused
+                .into_iter()
+                .map(|refusal| Refusal {
+                    place: refusal.place.map(|place| rescaled(place, dims, self.orig)),
+                    ..refusal
+                })
+                .collect();
+            // the attempt's grids in original space, photometry stamped,
+            // re-derived while an unparsed QR read is in play
+            if reads.iter().any(|(read, _)| unparsed_qr(read)) || self.store.unparsed_qr() {
+                let candidates: Vec<RescueCandidate> = outcome
+                    .rescue
+                    .iter()
+                    .map(|candidate| RescueCandidate {
+                        corners: rescaled(candidate.corners, dims, self.orig),
+                        inverted: attempt.inverts,
+                        ..candidate.clone()
+                    })
+                    .collect();
+                let (parses, refused) = Self::rederive(&candidates, index);
+                reads.extend(parses.into_iter().map(|read| (read, None)));
+                refusals.extend(refused);
+            }
+            self.reread(&img, &mut reads, &mut refusals);
+            for refusal in refusals {
+                self.store.refuse(refusal, index);
+            }
+            for (read, _) in reads {
+                self.store.collect(read);
+            }
             self.collect_rescue(outcome.rescue, dims, attempt.inverts);
             tried += 1;
         }
@@ -1358,47 +1141,6 @@ fn deep_attempts(luma: &LumaImage, longest: u32) -> Vec<Attempt<'_>> {
     attempts
 }
 
-/// Whether a read's corners describe the place a detection's do: the read's
-/// centre lies inside the detection's corner bounding box (the same symbol
-/// across attempts and engines; two symbols side by side never do).
-fn same_place(own: &[Point; 4], read: &[Point; 4]) -> bool {
-    let (x, y) = read
-        .iter()
-        .fold((0.0, 0.0), |(x, y), p| (x + p.x / 4.0, y + p.y / 4.0));
-    let (mut min_x, mut max_x, mut min_y, mut max_y) = (
-        f32::INFINITY,
-        f32::NEG_INFINITY,
-        f32::INFINITY,
-        f32::NEG_INFINITY,
-    );
-    for p in own {
-        min_x = min_x.min(p.x);
-        max_x = max_x.max(p.x);
-        min_y = min_y.min(p.y);
-        max_y = max_y.max(p.y);
-    }
-    (min_x..=max_x).contains(&x) && (min_y..=max_y).contains(&y)
-}
-
-/// Map detection corners from the attempt image's coordinate space back to
-/// the original input's (decodes run on downscales; consumers — overlays,
-/// structural sampling — need original-space geometry).
-fn rescale_corners(
-    mut found: Vec<RawDetection>,
-    attempt_dims: (u32, u32),
-    orig_dims: (u32, u32),
-) -> Vec<RawDetection> {
-    if attempt_dims == orig_dims {
-        return found;
-    }
-    for detection in &mut found {
-        if let Some(corners) = &mut detection.corners {
-            *corners = rescaled(*corners, attempt_dims, orig_dims);
-        }
-    }
-    found
-}
-
 /// Four corners from one image's coordinate space to another's.
 #[expect(
     clippy::cast_precision_loss,
@@ -1424,19 +1166,29 @@ pub(crate) fn run(
     cancel: &CancelToken,
     deadline: Option<Instant>,
 ) -> Result<LadderOutcome> {
+    run_seeded(planes, config, cancel, deadline, Seed::default())
+}
+
+/// [`run`], starting from another walk's refusals, the contents its parses
+/// read and the re-reads it spent — the opposite-background walk of an
+/// alpha fallback.
+pub(crate) fn run_seeded(
+    planes: &SourcePlanes,
+    config: &ScanConfig,
+    cancel: &CancelToken,
+    deadline: Option<Instant>,
+    seed: Seed,
+) -> Result<LadderOutcome> {
     let started = Instant::now();
     // Engines never see anything bigger than max_engine_side: one rxing
     // TryHarder pass on a huge image is an unbounded, uninterruptible burn.
     let work = transform::downscale_to(&planes.luma, config.max_engine_side);
-    let mut run = Run {
+    let mut run = Run::new(
         cancel,
         deadline,
-        orig: (planes.luma.width(), planes.luma.height()),
-        observations: Vec::new(),
-        rescue_candidates: Vec::new(),
-        refusals: Refusals::default(),
-        panics: 0,
-    };
+        (planes.luma.width(), planes.luma.height()),
+        seed,
+    );
     let mut stages = Vec::new();
     let luma = &work;
     let longest = luma.width().max(luma.height());
@@ -1452,7 +1204,7 @@ pub(crate) fn run(
                 engine::FormatFilter::All,
                 &mut stages,
             )?;
-            if stop || run.settled() {
+            if stop || run.store.settled() {
                 break 'ladder;
             }
         }
@@ -1465,7 +1217,7 @@ pub(crate) fn run(
                 engine::FormatFilter::All,
                 &mut stages,
             )?;
-            if stop || run.settled() {
+            if stop || run.store.settled() {
                 break 'ladder;
             }
         }
@@ -1490,7 +1242,7 @@ pub(crate) fn run(
                 }
             }
             let stop = run.stage("enhance", attempts, engine::FormatFilter::All, &mut stages)?;
-            if stop || run.settled() {
+            if stop || run.store.settled() {
                 break 'ladder;
             }
         }
@@ -1510,7 +1262,7 @@ pub(crate) fn run(
 
         // S5 — rescue: erasure-aware RS over grids the engines detected
         // but could not decode (the logo-occlusion class). Only when the
-        // ladder came up empty — a decoded symbol never needs rescuing.
+        // ladder published nothing — a decoded symbol never needs rescuing.
         run.rescue_stage(luma, &mut stages)?;
     }
     run.finish(stages, started)
@@ -1520,51 +1272,80 @@ impl Run<'_> {
     /// End of the walk, every early exit included: the candidates collected
     /// in other attempts than the reads they locate or refuse (at most
     /// `MAX_RESCUE_CANDIDATES` clean re-derivations, no sampling — past the
-    /// deadline too, after a last cancellation check), then the content of
-    /// each detection, interpreted ONCE.
+    /// deadline too, after a last cancellation check), then the
+    /// reconciliation of the whole read set and each content interpreted
+    /// ONCE.
     fn finish(mut self, stages: Vec<StageTrace>, started: Instant) -> Result<LadderOutcome> {
         self.check_cancel()?;
-        self.rederive_collected();
-        // the end pass's proofs past capacity lapse with it: another walk
-        // sees the recorded ones
-        self.refusals.next_attempt();
-
-        // PRIMARY-detection contract: detections order is QR-family first
-        // (stable). On a flyer carrying a QR + a retail barcode, the product
-        // cares about the QR — and the scored "primary" (detections[0])
-        // must not depend on detector-internal iteration order.
-        let mut detected: Vec<_> = self
-            .observations
-            .into_iter()
-            .map(|seen| {
-                let footing = seen.footing();
-                let (merged, key, reading) = seen.into_detection();
-                (merged, key, reading, footing)
+        let attempt = self.next_attempt();
+        let (parses, refusals) = Self::rederive(&self.rescue_candidates, attempt);
+        for refusal in refusals {
+            self.store.refuse(refusal, attempt);
+        }
+        for read in parses {
+            self.store.collect(read);
+        }
+        // PRIMARY-detection contract: QR family first, then by earliest
+        // read — on a flyer carrying a QR + a retail barcode, the scored
+        // "primary" (detections[0]) never depends on detector order
+        let reconciled = self.store.reconcile();
+        let contents: Vec<(ContentKey, Reading)> = reconciled
+            .iter()
+            .map(|detection| {
+                let reading = content::read(
+                    &detection.key.raw,
+                    &detection.key.eci,
+                    &detection.segments,
+                    detection.engine_reading,
+                    detection.symbology.is_qr_family(),
+                );
+                (detection.key.clone(), reading)
             })
             .collect();
-        detected.sort_by_key(|(merged, ..)| !merged.symbology.is_qr_family());
-        #[cfg(test)]
-        let contents = detected
+        let merged = reconciled
             .iter()
-            .map(|(_, key, reading, _)| (key.clone(), reading.clone()))
+            .zip(&contents)
+            .map(|(detection, (_, reading))| merged_detection(detection, reading))
             .collect();
-        let (merged, footings) = detected
-            .into_iter()
-            .map(|(merged, _, _, footing)| (merged, footing))
-            .unzip();
-
         Ok(LadderOutcome {
             merged,
-            footings,
-            refusals: self.refusals,
-            #[cfg(test)]
             contents,
+            reconciled,
+            store: self.store,
+            rereads: self.rereads,
             trace: PipelineTrace {
                 stages,
                 engine_panics: self.panics,
                 total_ms: started.elapsed().as_secs_f64() * 1_000.0,
             },
         })
+    }
+}
+
+/// A reconciled content as the score and the report see it.
+fn merged_detection(detection: &Reconciled, reading: &Reading) -> MergedDetection {
+    let (masked_stream, version, ec, mask) = match &detection.geometry.stream {
+        Some((stream, version, ec, mask)) => {
+            (Some(stream.clone()), Some(*version), Some(*ec), Some(*mask))
+        }
+        None => (None, None, detection.geometry.ec, None),
+    };
+    MergedDetection {
+        symbology: detection.symbology,
+        raw: detection.key.raw.clone(),
+        text: reading.text.clone(),
+        charset: reading.charset,
+        masked_stream,
+        corners: detection.geometry.corners.map(|(corners, _)| corners),
+        version,
+        ec,
+        mask,
+        fnc1: detection.key.fnc1 == Fnc1::First,
+        photometric_inverted: detection
+            .geometry
+            .corners
+            .is_some_and(|(_, inverted)| inverted),
+        engines: detection.engines.clone(),
     }
 }
 
@@ -1941,12 +1722,11 @@ mod kanji_merge_tests {
 #[cfg(test)]
 mod content_readings {
     //! The ladder's account of each detection's content, on symbols encoded
-    //! from explicit segment streams: the label decision the published
-    //! three-label `charset` cannot carry yet.
+    //! from explicit segment streams: one reading per detection, its label
+    //! on the wire.
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use crate::engine::content::Label;
     use crate::input::{ImageInput, Limits};
     use crate::report::Charset;
     use crate::transform::normalize;
@@ -1973,17 +1753,18 @@ mod content_readings {
         run(&planes, &config, &CancelToken::new(), None).unwrap()
     }
 
-    /// The one detection of a single-symbol walk, with its content key and
-    /// label decision.
-    fn single(outcome: &LadderOutcome) -> (&MergedDetection, &ContentKey, Label) {
+    /// The one detection of a single-symbol walk, with its content key.
+    fn single(outcome: &LadderOutcome) -> (&MergedDetection, &ContentKey) {
         assert_eq!(outcome.merged.len(), 1, "{:?}", outcome.merged);
         assert_eq!(outcome.contents.len(), 1);
         let (key, reading) = &outcome.contents[0];
         let d = &outcome.merged[0];
-        // the published pair is the one reading of the reconciled content
-        assert_eq!((&key.raw, &reading.text), (&d.raw, &d.text));
-        assert_eq!(reading, &content::read(&key.raw, &key.eci));
-        (d, key, reading.label)
+        // the published triple is the one reading of the reconciled content
+        assert_eq!(
+            (&key.raw, &reading.text, reading.charset),
+            (&d.raw, &d.text, d.charset)
+        );
+        (d, key)
     }
 
     fn located(marks: &[(u32, usize)]) -> EciEvidence {
@@ -2001,7 +1782,7 @@ mod content_readings {
             b.push_eci_designator(4)?;
             b.push_byte_data(&[0xA1])
         });
-        let (d, key, label) = single(&outcome);
+        let (d, key) = single(&outcome);
         assert_eq!(
             (d.raw.as_slice(), d.text.as_str()),
             (&[0xA1][..], "\u{104}")
@@ -2011,10 +1792,7 @@ mod content_readings {
             located(&[(4, 0)]),
             "rqrr's re-derivation located it"
         );
-        assert_eq!(label, Label::Eci);
-        // the three-label contract cannot name ISO/IEC 8859-2: the utf8
-        // placeholder until `eci` exists on the wire
-        assert_eq!(d.charset, Charset::Utf8);
+        assert_eq!(d.charset, Charset::Eci, "no decoder label reads ISO 8859-2");
     }
 
     #[test]
@@ -2023,9 +1801,9 @@ mod content_readings {
             b.push_eci_designator(3)?;
             b.push_byte_data(&[0x35, 0x80])
         });
-        let (d, _, label) = single(&outcome);
+        let (d, _) = single(&outcome);
         assert_eq!(d.text, "5\u{80}");
-        assert_eq!(label, Label::Eci, "latin1 would decode 0x80 as '€'");
+        assert_eq!(d.charset, Charset::Eci, "latin1 would decode 0x80 as '€'");
     }
 
     #[test]
@@ -2045,11 +1823,10 @@ mod content_readings {
                 b.push_eci_designator(value)?;
                 b.push_byte_data(bytes)
             });
-            let (d, _, label) = single(&outcome);
-            assert_eq!(label, Label::Unknown, "{name}");
+            let (d, _) = single(&outcome);
             assert_eq!(d.raw, bytes, "{name}");
             assert_eq!(d.text, text, "{name}: marked, never transcribed");
-            assert_eq!(d.charset, Charset::Utf8, "{name}: placeholder");
+            assert_eq!(d.charset, Charset::Unknown, "{name}");
         }
     }
 
@@ -2060,12 +1837,12 @@ mod content_readings {
             b.push_byte_data("é".as_bytes())?;
             b.push_kanji_data(&[0x82, 0xB1, 0x82, 0xF1])
         });
-        let (d, _, label) = single(&outcome);
+        let (d, _) = single(&outcome);
         assert_eq!(d.raw, vec![0xC3, 0xA9, 0x82, 0xB1, 0x82, 0xF1]);
         // WHATWG UTF-8: one U+FFFD per maximal ill-formed subpart
         assert_eq!(d.text, String::from_utf8_lossy(&d.raw));
         assert!(d.text.starts_with('é') && d.text.contains('\u{FFFD}'));
-        assert_eq!(label, Label::Unknown);
+        assert_eq!(d.charset, Charset::Unknown);
     }
 
     #[test]
@@ -2077,22 +1854,33 @@ mod content_readings {
             b.push_eci_designator(26)?;
             b.push_byte_data(b"a")
         });
-        let (d, key, label) = single(&outcome);
+        let (d, key) = single(&outcome);
         assert_eq!(d.raw, vec![0x82, 0xB1, b'a']);
         assert_eq!(key.eci, located(&[(26, 2)]));
         assert_eq!(d.text, "\u{82}\u{B1}a");
-        assert_eq!(label, Label::Eci, "utf8 cannot reproduce it");
+        assert_eq!(d.charset, Charset::Eci, "utf8 cannot reproduce it");
     }
 
     #[test]
     fn unmarked_payloads_keep_the_legacy_resolver() {
         let outcome = walk(|b| b.push_byte_data(&[0x35, 0x80]));
-        let (d, key, label) = single(&outcome);
+        let (d, key) = single(&outcome);
         assert_eq!(d.text, "5€");
         assert_eq!(key.eci, EciEvidence::NoEci, "both engines observed none");
-        assert_eq!(label, Label::Legacy(Charset::Latin1));
         assert_eq!(d.charset, Charset::Latin1);
         assert_eq!(d.engines, vec![EngineKind::Rxing, EngineKind::Rqrr]);
+    }
+
+    #[test]
+    fn kanji_segments_choose_shift_jis() {
+        // the parse observes the Kanji segment: Shift_JIS over all of raw
+        let outcome = walk(|b| {
+            b.push_byte_data(b"QR:")?;
+            b.push_kanji_data(&[0x93, 0xFA, 0x96, 0x7B])
+        });
+        let (d, key) = single(&outcome);
+        assert_eq!(key.eci, EciEvidence::NoEci);
+        assert_eq!((d.text.as_str(), d.charset), ("QR:日本", Charset::ShiftJis));
     }
 }
 
@@ -2100,7 +1888,7 @@ mod content_readings {
 mod ladder_mutant_kills {
     //! Surgical traps for the weekly mutation survivors on the decode ladder
     //! (the product's critical path). Each test names the mutant(s) it kills
-    //! by `line:col`. The `absorb`/`collect_rescue`/`rescue_stage` merge and
+    //! by `line:col` where one exists. The candidate, re-read, rescue and
     //! book-keeping logic is exercised directly (private methods, reachable
     //! from this in-crate child module); the stage-gating booleans in `run`
     //! are driven through synthetic in-memory planes with `budget_ms: None`
@@ -2108,40 +1896,13 @@ mod ladder_mutant_kills {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
 
     use super::*;
+    use crate::engine::content::EciMark;
     use crate::input::{ImageInput, Limits};
+    use crate::report::EcLevel;
     use crate::transform::normalize;
 
     fn fresh_run(cancel: &CancelToken, orig: (u32, u32)) -> Run<'_> {
-        Run {
-            cancel,
-            deadline: None,
-            orig,
-            observations: Vec::new(),
-            rescue_candidates: Vec::new(),
-            refusals: Refusals::default(),
-            panics: 0,
-        }
-    }
-
-    fn qr_detection(
-        raw: &[u8],
-        corners: Option<[Point; 4]>,
-        engine: EngineKind,
-        fnc1: bool,
-    ) -> RawDetection {
-        RawDetection {
-            symbology: Symbology::QrCode,
-            raw: raw.to_vec(),
-            eci: EciEvidence::Unobserved,
-            masked_stream: None,
-            corners,
-            version: None,
-            ec: None,
-            mask: None,
-            fnc1: if fnc1 { Fnc1::First } else { Fnc1::None },
-            parsed: false,
-            engine,
-        }
+        Run::new(cancel, None, orig, Seed::default())
     }
 
     fn qr_png(content: &str, module: u32) -> Vec<u8> {
@@ -2167,509 +1928,69 @@ mod ladder_mutant_kills {
             .collect()
     }
 
-    /// The public detections of a run so far, with their readings.
-    fn detected(run: &Run<'_>) -> Vec<(MergedDetection, ContentKey, Reading)> {
-        run.observations
-            .iter()
-            .cloned()
-            .map(Observation::into_detection)
+    fn eci_mark(value: u32, start: usize) -> EciEvidence {
+        EciEvidence::Located(vec![EciMark { value, start }])
+    }
+
+    /// The engine reads of one decode pass as reads of `run`'s attempt
+    /// `attempt` (full-resolution, upright).
+    fn reads_of(
+        run: &Run<'_>,
+        detections: Vec<RawDetection>,
+        attempt: u32,
+        dims: (u32, u32),
+    ) -> Vec<(Read, Option<LocateHint>)> {
+        detections
+            .into_iter()
+            .enumerate()
+            .map(|(i, hit)| {
+                let rank = Rank {
+                    attempt,
+                    source: 0,
+                    index: u32::try_from(i).unwrap(),
+                };
+                run.read_of(hit, rank, dims, false)
+            })
             .collect()
     }
 
-    fn merged(run: &Run<'_>) -> Vec<MergedDetection> {
-        detected(run).into_iter().map(|(m, _, _)| m).collect()
-    }
-
-    fn eci_mark(value: u32, start: usize) -> EciEvidence {
-        EciEvidence::Located(vec![content::EciMark { value, start }])
-    }
-
-    // ---- Run::absorb · Observation::fold ----
+    // ---- Run::read_of ----
 
     #[test]
-    fn absorb_photometry_travels_with_the_first_corners_only() {
-        // `&&` -> `||` in the fold's corner adoption. The photometry flag is
-        // adopted only when the EXISTING observation has no corners yet AND
-        // the incoming one does. A second corner-carrying attempt (this one
-        // INVERTING) must NOT overwrite the first geometry source's polarity.
+    fn photometry_travels_with_the_corners_only() {
+        // `&&` -> `||` on the photometry: an upright attempt with corners is
+        // not inverted; an inverting one is; a read without corners carries
+        // no photometry at all
         let cancel = CancelToken::new();
-        let mut run = fresh_run(&cancel, (100, 100));
-        let corners_a = Some([Point { x: 1.0, y: 1.0 }; 4]);
-        let corners_b = Some([Point { x: 9.0, y: 9.0 }; 4]);
-        run.absorb(
-            vec![qr_detection(
-                b"same-symbol",
-                corners_a,
-                EngineKind::Rqrr,
-                false,
-            )],
-            false,
-        );
-        run.absorb(
-            vec![qr_detection(
-                b"same-symbol",
-                corners_b,
-                EngineKind::Rqrr,
-                false,
-            )],
-            true,
-        );
-        let merged = merged(&run);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].corners, corners_a, "first corners are kept");
-        assert!(
-            !merged[0].photometric_inverted,
-            "`||` would adopt the second (inverting) attempt's flag"
-        );
+        let run = fresh_run(&cancel, (100, 100));
+        let mut hit = RawDetection::qr(b"x", EciEvidence::NoEci, Fnc1::None, EngineKind::Rqrr);
+        hit.corners = Some([Point { x: 2.0, y: 3.0 }; 4]);
+        let rank = Rank::default();
+        let (upright, _) = run.read_of(hit.clone(), rank, (100, 100), false);
+        let (inverted, _) = run.read_of(hit.clone(), rank, (100, 100), true);
+        assert_eq!(upright.geometry.corners.map(|(_, i)| i), Some(false));
+        assert_eq!(inverted.geometry.corners.map(|(_, i)| i), Some(true));
+        hit.corners = None;
+        let (bare, _) = run.read_of(hit, rank, (100, 100), true);
+        assert!(bare.geometry.corners.is_none());
     }
 
     #[test]
-    fn absorb_keeps_the_observed_fnc1_position() {
-        // A later read whose position is unknown joins and must not clear
-        // the stated FNC1 first; an OBSERVED plain read of the same bytes
-        // is another symbol.
+    fn a_read_is_placed_in_original_space() {
+        // orig 200x100 over an attempt of 50x50: fx = 4, fy = 2
         let cancel = CancelToken::new();
-        let mut run = fresh_run(&cancel, (100, 100));
-        run.absorb(
-            vec![qr_detection(b"gs1-data", None, EngineKind::Rxing, true)],
-            false,
-        );
-        let mut unknown = qr_detection(b"gs1-data", None, EngineKind::Rescue, false);
-        unknown.fnc1 = Fnc1::Unobserved;
-        run.absorb(vec![unknown], false);
-        let found = merged(&run);
-        assert_eq!(found.len(), 1);
-        assert!(found[0].fnc1, "an unknown position never clears fnc1");
-        run.absorb(
-            vec![qr_detection(b"gs1-data", None, EngineKind::Rqrr, false)],
-            false,
-        );
-        let found = merged(&run);
-        assert_eq!(found.len(), 2, "observed none vs first: two symbols");
-        assert!(found[0].fnc1 && !found[1].fnc1);
+        let run = fresh_run(&cancel, (200, 100));
+        let mut hit = RawDetection::qr(b"x", EciEvidence::NoEci, Fnc1::None, EngineKind::Rxing);
+        hit.location = Some([Point { x: 10.0, y: 10.0 }; 4]);
+        hit.ec = Some(EcLevel::Q);
+        let (read, _) = run.read_of(hit, Rank::default(), (50, 50), false);
+        let corner = read.location.unwrap()[0];
+        assert!((corner.x - 40.0).abs() < 1e-3 && (corner.y - 20.0).abs() < 1e-3);
+        assert_eq!(read.places.len(), 1);
+        assert_eq!(read.geometry.ec, Some(EcLevel::Q), "the port's EC level");
     }
 
-    #[test]
-    fn absorb_unions_distinct_engines() {
-        // delete `!`. A fold appends an engine only when it is NOT already
-        // present; dropping the `!` inverts that and refuses the second one.
-        let cancel = CancelToken::new();
-        let mut run = fresh_run(&cancel, (100, 100));
-        run.absorb(
-            vec![qr_detection(b"payload", None, EngineKind::Rxing, false)],
-            false,
-        );
-        run.absorb(
-            vec![qr_detection(b"payload", None, EngineKind::Rqrr, false)],
-            false,
-        );
-        let merged = merged(&run);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(
-            merged[0].engines,
-            vec![EngineKind::Rxing, EngineKind::Rqrr],
-            "dropping `!` refuses to append the second engine"
-        );
-    }
-
-    #[test]
-    fn absorb_caps_distinct_detections_at_max() {
-        // The walk-time guard `>= MAX_DETECTIONS` drops NEW contents once the
-        // cap is reached (`>` would keep a 17th); a known content still
-        // folds in after it.
-        let cancel = CancelToken::new();
-        let mut run = fresh_run(&cancel, (100, 100));
-        for i in 0..(MAX_DETECTIONS + 4) {
-            let raw = format!("symbol-{i}");
-            run.absorb(
-                vec![qr_detection(raw.as_bytes(), None, EngineKind::Rxing, false)],
-                false,
-            );
-        }
-        assert_eq!(run.observations.len(), MAX_DETECTIONS);
-        // first-seen order survives the cap
-        assert_eq!(merged(&run)[0].text, "symbol-0");
-        run.absorb(
-            vec![qr_detection(b"symbol-0", None, EngineKind::Rqrr, false)],
-            false,
-        );
-        assert_eq!(
-            merged(&run)[0].engines,
-            vec![EngineKind::Rxing, EngineKind::Rqrr]
-        );
-    }
-
-    #[test]
-    fn absorb_new_upright_detection_is_not_marked_inverted() {
-        // `&&` -> `||`. A NEW observation's photometry is
-        // `attempt_inverts && corners.is_some()`. An upright (inverts=false)
-        // attempt with corners must land false, not true.
-        let cancel = CancelToken::new();
-        let mut run = fresh_run(&cancel, (100, 100));
-        run.absorb(
-            vec![qr_detection(
-                b"upright",
-                Some([Point { x: 2.0, y: 3.0 }; 4]),
-                EngineKind::Rqrr,
-                false,
-            )],
-            false,
-        );
-        let merged = merged(&run);
-        assert_eq!(merged.len(), 1);
-        assert!(
-            !merged[0].photometric_inverted,
-            "`||` reads true from corners alone on an upright attempt"
-        );
-    }
-
-    /// A QR hit of `raw` with the given ECI account.
-    fn hit(raw: &[u8], eci: EciEvidence, engine: EngineKind) -> RawDetection {
-        let mut detection = qr_detection(raw, None, engine, false);
-        detection.eci = eci;
-        detection
-    }
-
-    #[test]
-    fn engines_reconcile_on_bytes_with_agreeing_eci_evidence() {
-        // rxing's port: [A1], a designator signalled but not located; rqrr:
-        // [A1] with the re-derived ECI 4 at offset 0. Same bytes, agreeing
-        // accounts → ONE detection carrying the located one, read once.
-        let cancel = CancelToken::new();
-        let mut run = fresh_run(&cancel, (100, 100));
-        let rxing = hit(&[0xA1], EciEvidence::Signalled, EngineKind::Rxing);
-        let mut rqrr = hit(&[0xA1], eci_mark(4, 0), EngineKind::Rqrr);
-        rqrr.corners = Some([Point { x: 4.0, y: 4.0 }; 4]);
-        run.absorb(vec![rxing, rqrr], false);
-        let found = detected(&run);
-        assert_eq!(found.len(), 1);
-        let (merged, key, reading) = &found[0];
-        assert_eq!(key.eci, eci_mark(4, 0), "located beats signalled");
-        assert_eq!(merged.text, "\u{104}");
-        assert_eq!(merged.raw, vec![0xA1]);
-        assert_eq!(merged.engines, vec![EngineKind::Rxing, EngineKind::Rqrr]);
-        assert!(merged.corners.is_some(), "rqrr's geometry rides along");
-        assert_eq!(reading.label, content::Label::Eci);
-    }
-
-    #[test]
-    fn reconciliation_follows_the_evidence_lattice() {
-        // (first account, second account, detections, account kept)
-        let located = || eci_mark(4, 0);
-        let cases = [
-            (
-                EciEvidence::Unobserved,
-                EciEvidence::NoEci,
-                1,
-                EciEvidence::NoEci,
-            ),
-            (
-                EciEvidence::NoEci,
-                EciEvidence::Unobserved,
-                1,
-                EciEvidence::NoEci,
-            ),
-            (EciEvidence::Unobserved, located(), 1, located()),
-            (
-                EciEvidence::Signalled,
-                EciEvidence::Signalled,
-                1,
-                EciEvidence::Signalled,
-            ),
-            (EciEvidence::Signalled, located(), 1, located()),
-            (located(), EciEvidence::Signalled, 1, located()),
-            (located(), located(), 1, located()),
-            (
-                EciEvidence::NoEci,
-                EciEvidence::Signalled,
-                2,
-                EciEvidence::NoEci,
-            ),
-            (EciEvidence::NoEci, located(), 2, EciEvidence::NoEci),
-            (located(), eci_mark(4, 1), 2, located()),
-            (located(), eci_mark(3, 0), 2, located()),
-        ];
-        for (first, second, count, kept) in cases {
-            let cancel = CancelToken::new();
-            let mut run = fresh_run(&cancel, (100, 100));
-            run.absorb(
-                vec![
-                    hit(&[0xA1], first.clone(), EngineKind::Rxing),
-                    hit(&[0xA1], second.clone(), EngineKind::Rqrr),
-                ],
-                false,
-            );
-            let found = detected(&run);
-            assert_eq!(found.len(), count, "{first:?} then {second:?}");
-            assert_eq!(found[0].1.eci, kept, "{first:?} then {second:?}");
-        }
-    }
-
-    #[test]
-    fn a_read_joins_the_first_compatible_detection_in_attempt_order() {
-        // two detections of [A1] — unmarked, then ECI 4 — and two later
-        // reads: an unobserved one agrees with both and joins the FIRST;
-        // a signalled one can only join the declared one
-        let cancel = CancelToken::new();
-        let mut run = fresh_run(&cancel, (100, 100));
-        run.absorb(
-            vec![
-                hit(&[0xA1], EciEvidence::NoEci, EngineKind::Rqrr),
-                hit(&[0xA1], eci_mark(4, 0), EngineKind::Rescue),
-            ],
-            false,
-        );
-        run.absorb(
-            vec![hit(&[0xA1], EciEvidence::Unobserved, EngineKind::Rxing)],
-            false,
-        );
-        run.absorb(
-            vec![hit(&[0xA1], EciEvidence::Signalled, EngineKind::Rxing)],
-            false,
-        );
-        let found = detected(&run);
-        assert_eq!(found.len(), 2);
-        assert_eq!(
-            found[0].0.engines,
-            vec![EngineKind::Rqrr, EngineKind::Rxing]
-        );
-        assert_eq!(found[0].1.eci, EciEvidence::NoEci);
-        assert_eq!(
-            found[1].0.engines,
-            vec![EngineKind::Rescue, EngineKind::Rxing]
-        );
-        assert_eq!(found[1].1.eci, eci_mark(4, 0));
-        // the order decides: once an unobserved read has become "no ECI",
-        // a signalled read of the same bytes is another content
-        let mut run = fresh_run(&cancel, (100, 100));
-        run.absorb(
-            vec![
-                hit(&[0xA1], EciEvidence::Unobserved, EngineKind::Rxing),
-                hit(&[0xA1], EciEvidence::NoEci, EngineKind::Rqrr),
-                hit(&[0xA1], EciEvidence::Signalled, EngineKind::Rxing),
-            ],
-            false,
-        );
-        assert_eq!(detected(&run).len(), 2);
-    }
-
-    /// A 100 px square at `x`.
-    fn square_at(x: f32) -> [Point; 4] {
-        [
-            Point { x, y: 10.0 },
-            Point {
-                x: x + 100.0,
-                y: 10.0,
-            },
-            Point {
-                x: x + 100.0,
-                y: 110.0,
-            },
-            Point { x, y: 110.0 },
-        ]
-    }
-
-    #[test]
-    fn a_read_with_corners_joins_the_admitting_detection_it_overlaps() {
-        // two symbols of [A1] side by side — unmarked on the left, ECI 4 on
-        // the right — and a read both admit (its ECI unobserved): where its
-        // corners lie decides, not the attempt order alone
-        let cancel = CancelToken::new();
-        let mut run = fresh_run(&cancel, (400, 200));
-        let mut unmarked = hit(&[0xA1], EciEvidence::NoEci, EngineKind::Rqrr);
-        unmarked.corners = Some(square_at(10.0));
-        let mut declared = hit(&[0xA1], eci_mark(4, 0), EngineKind::Rqrr);
-        declared.corners = Some(square_at(210.0));
-        run.absorb(vec![unmarked, declared], false);
-        let mut placed = hit(&[0xA1], EciEvidence::Unobserved, EngineKind::Rescue);
-        placed.corners = Some(square_at(212.0));
-        run.absorb(vec![placed], false);
-        let found = detected(&run);
-        assert_eq!(found.len(), 2);
-        assert_eq!(
-            found[0].0.engines,
-            vec![EngineKind::Rqrr],
-            "the left symbol keeps its own reads"
-        );
-        assert_eq!(
-            found[1].0.engines,
-            vec![EngineKind::Rqrr, EngineKind::Rescue]
-        );
-        // a read without corners still joins the first compatible one
-        run.absorb(
-            vec![hit(&[0xA1], EciEvidence::Unobserved, EngineKind::Rxing)],
-            false,
-        );
-        let found = detected(&run);
-        assert_eq!(
-            found[0].0.engines,
-            vec![EngineKind::Rqrr, EngineKind::Rxing]
-        );
-    }
-
-    /// The refusal of what the port reports for a stream that signals a
-    /// designator (ECI 1000000 + `raw`).
-    fn port_veto(raw: &[u8]) -> Veto {
-        Veto::Port(ContentKey {
-            raw: raw.to_vec(),
-            eci: EciEvidence::Signalled,
-            fnc1: Fnc1::None,
-        })
-    }
-
-    #[test]
-    fn a_proof_refuses_the_reads_its_content_admits_and_nothing_else() {
-        let cancel = CancelToken::new();
-        let mut run = fresh_run(&cancel, (100, 100));
-        // a port read absorbed before the proof is removed by it…
-        run.absorb(
-            vec![hit(b"abc", EciEvidence::Signalled, EngineKind::Rxing)],
-            false,
-        );
-        run.veto([port_veto(b"abc")]);
-        assert!(run.observations.is_empty());
-        // …later reads it covers are dropped — and still counted: the
-        // trace counts raw engine hits
-        assert_eq!(
-            run.absorb(
-                vec![
-                    hit(b"abc", EciEvidence::Signalled, EngineKind::Rxing),
-                    hit(b"abc", EciEvidence::Unobserved, EngineKind::Rqrr),
-                ],
-                false,
-            ),
-            2
-        );
-        assert!(run.observations.is_empty());
-        // equal bytes under another account are another symbol: a plain
-        // port read, a GS1 one; so is any read outside the QR Code
-        let mut gs1 = hit(b"abc", EciEvidence::NoEci, EngineKind::Rxing);
-        gs1.fnc1 = Fnc1::First;
-        let mut micro = hit(b"abc", EciEvidence::Signalled, EngineKind::Rxing);
-        micro.symbology = Symbology::MicroQrCode;
-        run.absorb(
-            vec![
-                hit(b"abc", EciEvidence::NoEci, EngineKind::Rxing),
-                gs1,
-                micro,
-            ],
-            false,
-        );
-        assert_eq!(run.observations.len(), 3);
-        // rqrr's own bytes refuse rqrr's unparsed reads only
-        run.veto([Veto::Rqrr(b"xyz".to_vec())]);
-        run.absorb(
-            vec![
-                hit(b"xyz", EciEvidence::Unobserved, EngineKind::Rqrr),
-                hit(b"xyz", EciEvidence::NoEci, EngineKind::Rxing),
-            ],
-            false,
-        );
-        let xyz: Vec<MergedDetection> = merged(&run)
-            .into_iter()
-            .filter(|m| m.raw == b"xyz")
-            .collect();
-        assert_eq!(xyz.len(), 1);
-        assert_eq!(xyz[0].engines, vec![EngineKind::Rxing]);
-    }
-
-    #[test]
-    fn well_formed_streams_shield_the_reads_they_admit() {
-        let cancel = CancelToken::new();
-        // a parsed read shields its content in its own pass…
-        let mut run = fresh_run(&cancel, (100, 100));
-        run.veto([port_veto(b"abc")]);
-        let mut parsed = hit(b"abc", eci_mark(4, 0), EngineKind::Rqrr);
-        parsed.parsed = true;
-        run.absorb(
-            vec![
-                hit(b"abc", EciEvidence::Signalled, EngineKind::Rxing),
-                parsed,
-            ],
-            false,
-        );
-        let found = merged(&run);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].engines, vec![EngineKind::Rxing, EngineKind::Rqrr]);
-        // …and a detection holding one survives a later proof
-        run.veto([port_veto(b"abc")]);
-        assert_eq!(run.observations.len(), 1);
-        // a re-derived candidate's content shields too: FNC1 second then
-        // first + "37abc" reads like a well-formed FNC1-first "37abc"
-        let gs1 = ContentKey {
-            raw: b"37abc".to_vec(),
-            eci: EciEvidence::NoEci,
-            fnc1: Fnc1::First,
-        };
-        let mut read = hit(b"37abc", EciEvidence::NoEci, EngineKind::Rxing);
-        read.fnc1 = Fnc1::First;
-        let mut run = fresh_run(&cancel, (100, 100));
-        run.veto([Veto::Port(gs1.clone())]);
-        run.absorb(vec![read.clone()], false);
-        assert!(run.observations.is_empty(), "nothing well-formed in sight");
-        run.refusals.shield(gs1);
-        run.absorb(vec![read], false);
-        assert_eq!(run.observations.len(), 1, "a well-formed stream carries it");
-        // the shields are bounded
-        for i in 0..2 * MAX_SHIELDS {
-            run.refusals.shield(ContentKey {
-                raw: vec![u8::try_from(i).unwrap()],
-                eci: EciEvidence::NoEci,
-                fnc1: Fnc1::None,
-            });
-        }
-        assert_eq!(run.refusals.shields.len(), MAX_SHIELDS);
-    }
-
-    #[test]
-    fn a_rederived_candidate_locates_a_signalled_read_and_nothing_else() {
-        // ECI 26 + FNC1 first: rqrr cannot decode FNC1 (its grid is a
-        // rescue candidate), rxing's port signals the ECI
-        let luma = crate::rescue::test_symbols::from_segments(
-            qrcode::Version::Normal(3),
-            qrcode::EcLevel::M,
-            |b| {
-                b.push_eci_designator(26)?;
-                b.push_fnc1_first_position()?;
-                b.push_numeric_data(b"0109506000134352")
-            },
-        );
-        let outcome = engine::decode_filtered(&luma, engine::FormatFilter::All);
-        assert_eq!(outcome.rescue.len(), 1, "rqrr's grid");
-        let cancel = CancelToken::new();
-        let mut run = fresh_run(&cancel, (luma.width(), luma.height()));
-        // no unparsed QR read in play: nothing is re-derived
-        let idle = run.rederive_candidates(&[], &outcome.rescue);
-        assert!(idle.located.is_empty() && idle.shields.is_empty());
-        let rederived = run.rederive_candidates(&outcome.detections, &outcome.rescue);
-        assert!(rederived.vetoes.is_empty());
-        assert_eq!(rederived.located.len(), 1);
-        let location = &rederived.located[0];
-        assert_eq!(location.key.eci, eci_mark(26, 0));
-        assert_eq!(location.key.fnc1, Fnc1::First);
-        assert_eq!(rederived.shields, vec![location.key.clone()]);
-        // before the port's read exists, it locates nothing
-        run.locate(rederived.located.clone());
-        assert!(run.observations.is_empty());
-        run.absorb(outcome.detections.clone(), false);
-        assert!(run.observations[0].signalled_only());
-        run.locate(rederived.located);
-        let found = detected(&run);
-        assert_eq!(found.len(), 1);
-        let (merged, key, _) = &found[0];
-        assert_eq!(key.eci, eci_mark(26, 0), "located over signalled");
-        assert_eq!(merged.text, "0109506000134352");
-        assert_eq!(
-            merged.engines,
-            vec![EngineKind::Rxing],
-            "a location is no engine read"
-        );
-        assert!(merged.fnc1 && merged.corners.is_some() && merged.masked_stream.is_some());
-        assert!(
-            run.observations[0].parsed,
-            "a well-formed stream carries it"
-        );
-    }
+    // ---- Run::rederive (candidates) ----
 
     /// The ECI 26 + FNC1-first GTIN symbol (rqrr's grid is a candidate).
     fn eci26_gs1() -> LumaImage {
@@ -2685,58 +2006,46 @@ mod ladder_mutant_kills {
     }
 
     #[test]
-    fn the_end_of_walk_pass_locates_and_refuses_across_attempts() {
-        // rqrr's grid collected in one attempt, rxing's read absorbed in
-        // another: only the end-of-walk pass brings them together
-        let cancel = CancelToken::new();
+    fn a_rederived_candidate_locates_a_signalled_read_and_nothing_else() {
+        // ECI 26 + FNC1 first: rqrr cannot decode FNC1 (its grid is a
+        // candidate), rxing's port signals the ECI
         let luma = eci26_gs1();
         let dims = (luma.width(), luma.height());
         let outcome = engine::decode_filtered(&luma, engine::FormatFilter::All);
-        let mut run = fresh_run(&cancel, dims);
-        run.collect_rescue(outcome.rescue, dims, false);
-        run.absorb(outcome.detections, false);
-        assert!(run.observations[0].signalled_only());
-        let walked = run.finish(Vec::new(), Instant::now()).unwrap();
-        assert_eq!(walked.merged.len(), 1);
-        let d = &walked.merged[0];
-        assert_eq!(d.text, "0109506000134352");
-        assert_eq!(d.engines, vec![EngineKind::Rxing]);
-        assert!(d.fnc1 && d.corners.is_some());
-        assert_eq!(walked.contents[0].0.eci, eci_mark(26, 0));
-        // FNC1 second then first: the collected grid proves the stream
-        // malformed and refuses the port's GS1 read
-        let data = crate::rescue::test_symbols::stream(
-            "1001 00100101 0101 0100 00000011 01100001 01100010 01100011 0000",
+        assert_eq!(outcome.rescue.len(), 1, "rqrr's grid");
+        let (parses, refusals) = Run::rederive(&outcome.rescue, 0);
+        assert!(refusals.is_empty());
+        let [parse] = &parses[..] else {
+            panic!("one candidate parse: {parses:?}");
+        };
+        assert_eq!(parse.key.eci, eci_mark(26, 0));
+        assert_eq!(parse.key.fnc1, Fnc1::First);
+        assert!(
+            parse.parsed && parse.engines.is_empty(),
+            "a parse, no engine"
         );
-        let luma = crate::rescue::test_symbols::from_codewords(
-            qrcode::Version::Normal(1),
-            qrcode::EcLevel::M,
-            &data,
-        );
-        let dims = (luma.width(), luma.height());
-        let outcome = engine::decode_filtered(&luma, engine::FormatFilter::All);
+        // alone it publishes nothing; with the port's read it locates it
+        let cancel = CancelToken::new();
         let mut run = fresh_run(&cancel, dims);
-        run.collect_rescue(outcome.rescue, dims, false);
-        run.absorb(outcome.detections, false);
-        assert_eq!(run.observations.len(), 1, "the port's GS1 read");
-        let walked = run.finish(Vec::new(), Instant::now()).unwrap();
-        assert!(walked.merged.is_empty(), "{:?}", walked.merged);
-        // and a cancel raised by then is honoured first
-        let cancelled = CancelToken::new();
-        cancelled.cancel();
-        let err = fresh_run(&cancelled, dims)
-            .finish(Vec::new(), Instant::now())
-            .unwrap_err();
-        assert_eq!(err.code(), "QRS-005");
+        run.store.collect(parse.clone());
+        assert!(run.store.reconcile().is_empty());
+        for (read, _) in reads_of(&run, outcome.detections, 0, dims) {
+            run.store.collect(read);
+        }
+        let found = run.store.reconcile();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key.eci, eci_mark(26, 0), "located over signalled");
+        assert_eq!(found[0].engines, vec![EngineKind::Rxing]);
+        assert!(found[0].geometry.corners.is_some() && found[0].geometry.stream.is_some());
     }
 
     #[test]
     fn at_most_four_candidates_are_re_derived_per_pass() {
-        // five candidates, only the fifth would locate: nothing is located
+        // five candidates, only the fifth would parse: nothing is parsed
         let luma = eci26_gs1();
         let outcome = engine::decode_filtered(&luma, engine::FormatFilter::All);
         let dud = crate::rescue::RescueCandidate {
-            stream: MaskedStream {
+            stream: engine::MaskedStream {
                 bits: Vec::new(),
                 bit_len: 0,
             },
@@ -2750,34 +2059,60 @@ mod ladder_mutant_kills {
         };
         let mut candidates = vec![dud; MAX_RESCUE_CANDIDATES];
         candidates.push(outcome.rescue[0].clone());
-        let cancel = CancelToken::new();
-        let run = fresh_run(&cancel, (luma.width(), luma.height()));
-        let rederived = run.rederive_candidates(&outcome.detections, &candidates);
-        assert!(rederived.located.is_empty() && rederived.shields.is_empty());
+        let (parses, refusals) = Run::rederive(&candidates, 0);
+        assert!(parses.is_empty() && refusals.is_empty());
         // fourth, it does
         candidates.remove(0);
-        let rederived = run.rederive_candidates(&outcome.detections, &candidates);
-        assert_eq!(rederived.located.len(), 1);
+        assert_eq!(Run::rederive(&candidates, 0).0.len(), 1);
     }
 
     #[test]
-    fn a_proof_past_capacity_still_refuses_in_its_attempt() {
-        // once MAX_VETOED proofs are remembered, a new one is not recorded
-        // but still applies to the retain and to its attempt's reads; it
-        // lapses with the attempt (the documented proof capacity)
+    fn the_end_of_walk_pass_locates_and_refuses_across_attempts() {
+        // rqrr's grid collected in one attempt, rxing's read in another:
+        // only the end-of-walk pass brings them together
         let cancel = CancelToken::new();
-        let mut run = fresh_run(&cancel, (100, 100));
-        run.veto((0..MAX_VETOED).map(|i| port_veto(&[u8::try_from(i).unwrap()])));
-        let zzz = || hit(b"zzz", EciEvidence::Signalled, EngineKind::Rxing);
-        run.absorb(vec![zzz()], false);
-        run.veto([port_veto(b"zzz")]);
-        assert_eq!(run.refusals.vetoes.len(), MAX_VETOED, "the capacity holds");
-        assert!(run.observations.is_empty(), "the retain applies the proof");
-        assert_eq!(run.absorb(vec![zzz()], false), 1, "a raw hit, counted");
-        assert!(run.observations.is_empty(), "so does its attempt's check");
-        run.refusals.next_attempt();
-        run.absorb(vec![zzz()], false);
-        assert_eq!(run.observations.len(), 1, "then it lapses");
+        let luma = eci26_gs1();
+        let dims = (luma.width(), luma.height());
+        let outcome = engine::decode_filtered(&luma, engine::FormatFilter::All);
+        let mut run = fresh_run(&cancel, dims);
+        run.collect_rescue(outcome.rescue, dims, false);
+        for (read, _) in reads_of(&run, outcome.detections, 1, dims) {
+            run.store.collect(read);
+        }
+        let walked = run.finish(Vec::new(), Instant::now()).unwrap();
+        assert_eq!(walked.merged.len(), 1);
+        let d = &walked.merged[0];
+        assert_eq!(d.text, "0109506000134352");
+        assert_eq!(d.engines, vec![EngineKind::Rxing]);
+        assert!(d.fnc1 && d.corners.is_some());
+        assert_eq!(walked.contents[0].0.eci, eci_mark(26, 0));
+        // FNC1 second then first: the collected grid proves the stream
+        // malformed and withholds the port's GS1 read where the grid is
+        let data = crate::rescue::test_symbols::stream(
+            "1001 00100101 0101 0100 00000011 01100001 01100010 01100011 0000",
+        );
+        let luma = crate::rescue::test_symbols::from_codewords(
+            qrcode::Version::Normal(1),
+            qrcode::EcLevel::M,
+            &data,
+        );
+        let dims = (luma.width(), luma.height());
+        let outcome = engine::decode_filtered(&luma, engine::FormatFilter::All);
+        let mut run = fresh_run(&cancel, dims);
+        run.collect_rescue(outcome.rescue, dims, false);
+        for (read, _) in reads_of(&run, outcome.detections, 1, dims) {
+            run.store.collect(read);
+        }
+        assert_eq!(run.store.reconcile().len(), 1, "the port's GS1 read");
+        let walked = run.finish(Vec::new(), Instant::now()).unwrap();
+        assert!(walked.merged.is_empty(), "{:?}", walked.merged);
+        // and a cancel raised by then is honoured first
+        let cancelled = CancelToken::new();
+        cancelled.cancel();
+        let err = fresh_run(&cancelled, dims)
+            .finish(Vec::new(), Instant::now())
+            .unwrap_err();
+        assert_eq!(err.code(), "QRS-005");
     }
 
     #[test]
@@ -2795,116 +2130,67 @@ mod ladder_mutant_kills {
         assert_eq!(err.code(), "QRS-005");
     }
 
+    // ---- Run::reread ----
+
     #[test]
-    fn the_walk_goes_on_while_only_signalled_qr_reads_were_found() {
+    fn the_re_read_locates_a_port_read_no_parse_of_the_attempt_carries() {
+        // ECI 4 [A1]: rxing's port read signals a designator; the re-read at
+        // its corners locates it — unless rqrr's parsed read of the same
+        // attempt carries the content already
+        let luma = crate::rescue::test_symbols::from_segments(
+            qrcode::Version::Normal(3),
+            qrcode::EcLevel::M,
+            |b| {
+                b.push_eci_designator(4)?;
+                b.push_byte_data(&[0xA1])
+            },
+        );
+        let dims = (luma.width(), luma.height());
+        let outcome = engine::decode_filtered(&luma, engine::FormatFilter::All);
         let cancel = CancelToken::new();
-        let settled = |reads: Vec<RawDetection>| {
-            let mut run = fresh_run(&cancel, (100, 100));
-            run.absorb(reads, false);
-            run.settled()
-        };
-        assert!(!settled(Vec::new()), "nothing found");
-        assert!(!settled(vec![hit(
-            b"abc",
-            EciEvidence::Signalled,
-            EngineKind::Rxing
-        )]));
-        let mut micro = hit(b"abc", EciEvidence::Signalled, EngineKind::Rxing);
-        micro.symbology = Symbology::MicroQrCode;
+        let port: Vec<RawDetection> = outcome
+            .detections
+            .iter()
+            .filter(|d| d.engine == EngineKind::Rxing)
+            .cloned()
+            .collect();
+        let mut run = fresh_run(&cancel, dims);
+        let mut reads = reads_of(&run, port.clone(), 0, dims);
+        let mut refusals = Vec::new();
+        run.reread(&luma, &mut reads, &mut refusals);
+        assert_eq!(run.rereads, 1);
+        assert!(refusals.is_empty());
+        let (read, _) = &reads[0];
+        assert_eq!(read.key.eci, eci_mark(4, 0));
+        assert!(read.parsed && read.engines == vec![(EngineKind::Rxing, read.rank)]);
         assert!(
-            settled(vec![micro.clone()]),
-            "no later stage locates a Micro QR stream"
+            read.geometry.corners.is_none(),
+            "its geometry stays internal"
         );
-        assert!(!settled(vec![
-            micro,
-            hit(b"xyz", EciEvidence::Signalled, EngineKind::Rxing)
-        ]));
-        for account in [EciEvidence::NoEci, EciEvidence::Unobserved, eci_mark(26, 0)] {
-            assert!(
-                settled(vec![
-                    hit(b"abc", EciEvidence::Signalled, EngineKind::Rxing),
-                    hit(b"xyz", account.clone(), EngineKind::Rxing),
-                ]),
-                "{account:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn an_unmarked_byte_never_folds_into_a_declared_one() {
-        // [A1] without ECI ('¡') and [A1] under ECI 4 ('Ą') are different
-        // contents: disagreeing evidence keeps them two detections.
-        let cancel = CancelToken::new();
-        let mut run = fresh_run(&cancel, (100, 100));
-        run.absorb(
-            vec![
-                hit(&[0xA1], EciEvidence::NoEci, EngineKind::Rqrr),
-                hit(&[0xA1], eci_mark(4, 0), EngineKind::Rqrr),
-            ],
-            false,
-        );
-        let texts: Vec<String> = merged(&run).into_iter().map(|m| m.text).collect();
-        assert_eq!(texts, vec!["¡".to_owned(), "\u{104}".to_owned()]);
-    }
-
-    #[test]
-    fn same_text_from_different_bytes_stays_two_detections() {
-        // 'é' as UTF-8 and 'é' as an unmarked Windows-1252 byte read the
-        // same text but are two contents: identity is never the text
-        let cancel = CancelToken::new();
-        let mut run = fresh_run(&cancel, (100, 100));
-        let utf8 = hit("é".as_bytes(), EciEvidence::Unobserved, EngineKind::Rxing);
-        let mut latin1 = hit(&[0xE9], EciEvidence::NoEci, EngineKind::Rqrr);
-        latin1.masked_stream = Some(MaskedStream {
-            bits: vec![0; 4],
-            bit_len: 32,
-        });
-        run.absorb(vec![utf8, latin1], false);
-        let found = merged(&run);
-        assert_eq!(found.len(), 2);
-        assert!(found.iter().all(|m| m.text == "é"));
-        assert_eq!(found[0].raw, "é".as_bytes());
-        assert_eq!(found[0].charset, crate::report::Charset::Utf8);
-        assert_eq!(found[1].raw, vec![0xE9]);
-        assert_eq!(found[1].charset, crate::report::Charset::Latin1);
-        assert!(found[1].masked_stream.is_some() && found[0].masked_stream.is_none());
-    }
-
-    #[test]
-    fn fnc1_first_and_second_never_reconcile() {
-        // the same bytes under GS1 (first) and under an AIM application
-        // (second) are two contents; an unknown position agrees with both
-        // (the first in order takes it), an observed none with neither
-        let cancel = CancelToken::new();
-        let mut run = fresh_run(&cancel, (100, 100));
-        let mut first = hit(b"37abc", EciEvidence::NoEci, EngineKind::Rxing);
-        first.fnc1 = Fnc1::First;
-        let mut second = hit(b"37abc", EciEvidence::NoEci, EngineKind::Rescue);
-        second.fnc1 = Fnc1::Second;
-        let mut unknown = hit(b"37abc", EciEvidence::NoEci, EngineKind::Rqrr);
-        unknown.fnc1 = Fnc1::Unobserved;
-        let plain = hit(b"37abc", EciEvidence::NoEci, EngineKind::Rqrr);
-        run.absorb(vec![unknown, first, second, plain], false);
-        let found = detected(&run);
-        assert_eq!(found.len(), 3);
-        assert_eq!(found[0].1.fnc1, Fnc1::First, "the stated position is kept");
-        assert!(found[0].0.fnc1, "FNC1 first is the GS1 flag");
-        assert_eq!(found[1].1.fnc1, Fnc1::Second);
-        assert!(!found[1].0.fnc1, "FNC1 second is never GS1");
-        assert_eq!(found[2].1.fnc1, Fnc1::None, "a plain read is a third");
+        // carried by rqrr's parse of the same attempt: no re-read spent
+        let mut run = fresh_run(&cancel, dims);
+        let mut reads = reads_of(&run, outcome.detections, 0, dims);
+        run.reread(&luma, &mut reads, &mut refusals);
+        assert_eq!(run.rereads, 0);
+        // the scan's re-reads are bounded
+        let mut run = fresh_run(&cancel, dims);
+        run.rereads = MAX_REREADS;
+        let mut reads = reads_of(&run, port, 0, dims);
+        run.reread(&luma, &mut reads, &mut refusals);
+        assert_eq!(reads[0].0.key.eci, EciEvidence::Signalled, "none left");
+        assert_eq!(run.rereads, MAX_REREADS);
     }
 
     // ---- Run::collect_rescue ----
 
     #[test]
     fn collect_rescue_dedupes_by_symbol_identity() {
-        // 533:29 `==` -> `!=` (dedup identity). Two candidates with identical
-        // (version, ec, mask, inverts) collapse to one; `!=` keeps the twin
-        // (its `any(|c| c != candidate)` is false, so nothing dedupes).
+        // `==` -> `!=` (dedup identity). Two candidates with identical
+        // (version, ec, mask, inverts) collapse to one.
         let cancel = CancelToken::new();
         let mut run = fresh_run(&cancel, (100, 100));
         let twin = || crate::rescue::RescueCandidate {
-            stream: MaskedStream {
+            stream: engine::MaskedStream {
                 bits: vec![0u8; 8],
                 bit_len: 64,
             },
@@ -2917,23 +2203,17 @@ mod ladder_mutant_kills {
             rederived: None,
         };
         run.collect_rescue(vec![twin(), twin()], (100, 100), false);
-        assert_eq!(
-            run.rescue_candidates.len(),
-            1,
-            "533: `!=` keeps the duplicate candidate"
-        );
+        assert_eq!(run.rescue_candidates.len(), 1, "`!=` keeps the duplicate");
     }
 
     #[test]
     fn collect_rescue_rescales_corners_into_original_space() {
-        // 537:29 `!=` -> `==` gate + 543/544 factor `/` -> `*`/`%` + 547/548
-        // `*=` -> `/=`/`+=`. orig 200x100 over an attempt of 50x50 gives
-        // fx=4, fy=2 (deliberately distinct); a (10,10) corner must land at
-        // (40,20).
+        // orig 200x100 over an attempt of 50x50 gives fx=4, fy=2
+        // (deliberately distinct); a (10,10) corner must land at (40,20).
         let cancel = CancelToken::new();
         let mut run = fresh_run(&cancel, (200, 100));
         let candidate = crate::rescue::RescueCandidate {
-            stream: MaskedStream {
+            stream: engine::MaskedStream {
                 bits: vec![0u8; 8],
                 bit_len: 64,
             },
@@ -2948,27 +2228,16 @@ mod ladder_mutant_kills {
         run.collect_rescue(vec![candidate], (50, 50), false);
         assert_eq!(run.rescue_candidates.len(), 1);
         let corner = run.rescue_candidates[0].corners[0];
-        assert!(
-            (corner.x - 40.0).abs() < 1e-3,
-            "537/543/547: x scales by orig.0/attempt.0 = 4 -> 40, got {}",
-            corner.x
-        );
-        assert!(
-            (corner.y - 20.0).abs() < 1e-3,
-            "537/544/548: y scales by orig.1/attempt.1 = 2 -> 20, got {}",
-            corner.y
-        );
+        assert!((corner.x - 40.0).abs() < 1e-3, "{}", corner.x);
+        assert!((corner.y - 20.0).abs() < 1e-3, "{}", corner.y);
     }
 
     #[test]
     fn collect_rescue_leaves_full_res_corners_untouched() {
-        // 537:29 `!=` -> `==` companion: when the attempt ran at ORIGINAL
-        // resolution there is nothing to rescale, and `==` would wrongly
-        // scale by a bogus factor. Corners must pass through unchanged.
         let cancel = CancelToken::new();
         let mut run = fresh_run(&cancel, (120, 90));
         let candidate = crate::rescue::RescueCandidate {
-            stream: MaskedStream {
+            stream: engine::MaskedStream {
                 bits: vec![0u8; 8],
                 bit_len: 64,
             },
@@ -2989,14 +2258,13 @@ mod ladder_mutant_kills {
 
     #[test]
     fn rescue_stage_counts_and_times_every_candidate() {
-        // 488:19 `tried += 1` -> `*=` (freezes at 0) + 511:49 `ms * 1000`
-        // -> `+ 1000` (reads ~1000ms). Three version-0 candidates fail
-        // `rescue::attempt` at its 1..=40 range check (no parsing, no panic),
-        // so each is TRIED and none is FOUND.
+        // `tried += 1` -> `*=` (freezes at 0) + `ms * 1000` -> `+ 1000`.
+        // Three version-0 candidates fail `rescue::attempt` at its 1..=40
+        // range check (no parsing, no panic): each TRIED, none FOUND.
         let cancel = CancelToken::new();
         let luma = LumaImage::new(vec![255u8; 100 * 100], 100, 100);
         let dud = || crate::rescue::RescueCandidate {
-            stream: MaskedStream {
+            stream: engine::MaskedStream {
                 bits: Vec::new(),
                 bit_len: 0,
             },
@@ -3008,36 +2276,40 @@ mod ladder_mutant_kills {
             transposed: false,
             rederived: None,
         };
-        let mut run = Run {
-            cancel: &cancel,
-            deadline: None,
-            orig: (100, 100),
-            observations: Vec::new(),
-            rescue_candidates: vec![dud(), dud(), dud()],
-            refusals: Refusals::default(),
-            panics: 0,
-        };
+        let mut run = fresh_run(&cancel, (100, 100));
+        run.rescue_candidates = vec![dud(), dud(), dud()];
         let mut stages = Vec::new();
         run.rescue_stage(&luma, &mut stages).unwrap();
         let rescue = stages
             .iter()
             .find(|s| s.stage == "rescue")
             .expect("rescue stage pushed");
-        assert_eq!(
-            rescue.transforms_tried, 3,
-            "488: `*=` freezes tried at 0 instead of counting all three"
-        );
+        assert_eq!(rescue.transforms_tried, 3, "`*=` freezes tried at 0");
         assert_eq!(rescue.detections_found, 0);
-        assert!(
-            rescue.ms < 100.0,
-            "511: `+ 1000` reads ~1000ms; three no-op candidates take microseconds ({})",
-            rescue.ms
-        );
+        assert!(rescue.ms < 100.0, "`+ 1000` reads ~1000ms ({})", rescue.ms);
+        // a walk that published something never runs it
+        let mut run = fresh_run(&cancel, (100, 100));
+        run.rescue_candidates = vec![dud()];
+        let rank = Rank::default();
+        let key = ContentKey {
+            raw: b"x".to_vec(),
+            eci: EciEvidence::NoEci,
+            fnc1: Fnc1::None,
+        };
+        run.store.collect(Read::new(
+            Symbology::QrCode,
+            key,
+            Some(EngineKind::Rxing),
+            rank,
+        ));
+        let mut stages = Vec::new();
+        run.rescue_stage(&luma, &mut stages).unwrap();
+        assert!(stages.is_empty());
     }
 
     #[test]
     fn rescue_stage_reports_a_real_recovery() {
-        // 490:23 `found += 1` -> `*=` (freezes at 0). The occluded fixture is
+        // `found += 1` -> `*=` (freezes at 0). The occluded fixture is
         // recovered ONLY by S5 rescue; with budget_ms None the walk is fully
         // deterministic (no wall-clock cut).
         let bytes = std::fs::read(format!(
@@ -3050,19 +2322,17 @@ mod ladder_mutant_kills {
         config.budget_ms = None;
         let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
         assert_eq!(outcome.merged.len(), 1, "S5 recovers the occluded symbol");
+        assert_eq!(outcome.merged[0].engines, vec![EngineKind::Rescue]);
         let rescue = outcome
             .trace
             .stages
             .iter()
             .find(|s| s.stage == "rescue")
             .expect("rescue stage ran");
-        assert_eq!(
-            rescue.detections_found, 1,
-            "490: `*=` freezes found at 0 on the successful rescue"
-        );
+        assert_eq!(rescue.detections_found, 1, "`*=` freezes found at 0");
         assert!(
             rescue.transforms_tried >= 1,
-            "488: the winning candidate was tried"
+            "the winning candidate was tried"
         );
     }
 
@@ -3070,8 +2340,8 @@ mod ladder_mutant_kills {
 
     #[test]
     fn stage_accumulates_raw_detections_found() {
-        // 580:25 `found_total += absorb(..)` -> `*=` (freezes at 0). A clean
-        // QR decodes, so the deciding stage reports at least one raw hit.
+        // `found_total += ..` -> `*=` (freezes at 0). A clean QR decodes,
+        // so the deciding stage reports at least one raw hit.
         let bytes = qr_png("https://qrcode-ai.com/found-count-pin", 6);
         let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
         let mut config = ScanConfig::full();
@@ -3086,30 +2356,26 @@ mod ladder_mutant_kills {
             .sum();
         assert!(
             found >= 1,
-            "580: `*=` freezes every stage's detections_found at 0"
+            "`*=` freezes every stage's detections_found at 0"
         );
     }
 
     #[test]
     fn stage_ms_stays_within_total_ms() {
-        // 587:49 stage `ms * 1000` -> `+ 1000` (a sub-interval reads ~1000ms)
-        // + 806:55 total `ms * 1000` -> `+ 1000` (reads ~1000ms) / `-> / 1000`
-        // (drops total below a real stage's ms). Structural invariant: every
-        // stage is a sub-interval of the whole run.
+        // stage `ms * 1000` -> `+ 1000` and total `ms * 1000` -> `+ 1000` /
+        // `/ 1000`. Structural invariant: every stage is a sub-interval of
+        // the whole run.
         let data = vec![255u8; 96 * 96];
         let planes = normalize(&ImageInput::luma8(&data, 96, 96), &Limits::default()).unwrap();
         let mut config = ScanConfig::full();
         config.budget_ms = None;
         let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
         let total = outcome.trace.total_ms;
-        assert!(
-            (0.0..1_000.0).contains(&total),
-            "806: `+ 1000` reads ~1000ms; a 96px blank scan is microseconds ({total})"
-        );
+        assert!((0.0..1_000.0).contains(&total), "{total}");
         for s in &outcome.trace.stages {
             assert!(
                 s.ms >= 0.0 && s.ms <= total,
-                "587/806: stage {} ms {} must sit within total {}",
+                "stage {} ms {} must sit within total {}",
                 s.stage,
                 s.ms,
                 total
@@ -3117,15 +2383,122 @@ mod ladder_mutant_kills {
         }
     }
 
+    // ---- LadderOutcome::fold_fallback ----
+
+    #[test]
+    fn the_fallback_walk_starts_from_the_first_walks_refusals() {
+        // walk 1 refused "abc" (its port content); walk 2 reads only a port
+        // read of it there, and a plain detection — the refused one is not
+        // published, the plain one replaces the empty walk 1
+        let cancel = CancelToken::new();
+        let place = [
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 100.0, y: 0.0 },
+            Point { x: 100.0, y: 100.0 },
+            Point { x: 0.0, y: 100.0 },
+        ];
+        let mut walk1 = fresh_run(&cancel, (100, 100));
+        walk1.store.refuse(
+            engine::Refusal {
+                port: Some(ContentKey {
+                    raw: b"abc".to_vec(),
+                    eci: EciEvidence::Signalled,
+                    fnc1: Fnc1::None,
+                }),
+                rqrr: None,
+                place: Some(place),
+            },
+            0,
+        );
+        let mut first = walk1.finish(Vec::new(), Instant::now()).unwrap();
+        let mut walk2 = Run::new(&cancel, None, (100, 100), first.seed());
+        let signalled = ContentKey {
+            raw: b"abc".to_vec(),
+            eci: EciEvidence::Signalled,
+            fnc1: Fnc1::None,
+        };
+        let plain = ContentKey {
+            raw: b"hello".to_vec(),
+            eci: EciEvidence::NoEci,
+            fnc1: Fnc1::None,
+        };
+        let rank = |index| Rank {
+            attempt: 0,
+            source: 0,
+            index,
+        };
+        let at = Some([Point { x: 50.0, y: 50.0 }; 4]);
+        walk2.store.collect(
+            Read::new(
+                Symbology::QrCode,
+                signalled.clone(),
+                Some(EngineKind::Rxing),
+                rank(0),
+            )
+            .at(at),
+        );
+        walk2.store.collect(Read::new(
+            Symbology::QrCode,
+            plain,
+            Some(EngineKind::Rxing),
+            rank(1),
+        ));
+        let second = walk2.finish(Vec::new(), Instant::now()).unwrap();
+        assert_eq!(
+            second.merged.len(),
+            1,
+            "the seed withholds the refused read"
+        );
+        assert!(first.fold_fallback(second));
+        assert_eq!(first.merged.len(), 1);
+        assert_eq!(first.merged[0].raw, b"hello");
+        assert_eq!(first.contents[0].0.raw, b"hello", "aligned");
+        // a walk-2 parse protecting that content keeps it: second guard too
+        let mut walk1 = fresh_run(&cancel, (100, 100));
+        walk1.store.refuse(
+            engine::Refusal {
+                port: Some(signalled.clone()),
+                rqrr: None,
+                place: None,
+            },
+            0,
+        );
+        let mut first = walk1.finish(Vec::new(), Instant::now()).unwrap();
+        let mut walk2 = Run::new(&cancel, None, (100, 100), first.seed());
+        walk2.store.collect(Read::new(
+            Symbology::QrCode,
+            signalled,
+            Some(EngineKind::Rxing),
+            rank(0),
+        ));
+        let mut located = Read::new(
+            Symbology::QrCode,
+            ContentKey {
+                raw: b"abc".to_vec(),
+                eci: eci_mark(26, 0),
+                fnc1: Fnc1::None,
+            },
+            Some(EngineKind::Rqrr),
+            rank(1),
+        );
+        located.parsed = true;
+        walk2.store.collect(located);
+        let second = walk2.finish(Vec::new(), Instant::now()).unwrap();
+        assert!(first.fold_fallback(second));
+        assert_eq!(
+            first.merged[0].engines,
+            vec![EngineKind::Rxing, EngineKind::Rqrr]
+        );
+    }
+
     // ---- deep_attempts ----
 
     #[test]
     fn deep_attempts_full_res_grid_uses_the_stretch_variant() {
-        // 640:34 delete `!`. The (size=None, stretch=false) grid combo is
-        // SKIPPED (it duplicates the S3 otsu/invert at full res); only
-        // (None, stretch=true) survives. The lone inverting full-res grid
-        // attempt must therefore build invert(contrast_stretch(luma)).
-        // Dropping the `!` keeps (None, stretch=false) instead -> invert(luma).
+        // delete `!`. The (size=None, stretch=false) grid combo is SKIPPED
+        // (it duplicates the S3 otsu/invert at full res); only (None,
+        // stretch=true) survives. The lone inverting full-res grid attempt
+        // must therefore build invert(contrast_stretch(luma)).
         let side = 64u32;
         let mut data = vec![0u8; (side * side) as usize];
         for (i, px) in data.iter_mut().enumerate() {
@@ -3141,20 +2514,15 @@ mod ladder_mutant_kills {
         );
         let got = (inverting[0].build)();
         let expected = transform::invert(&transform::contrast_stretch(&luma));
-        assert_eq!(
-            got.data(),
-            expected.data(),
-            "640: dropping `!` builds invert(luma) instead of invert(stretch(luma))"
-        );
+        assert_eq!(got.data(), expected.data());
     }
 
     // ---- run: stage gating + early exit ----
 
     #[test]
     fn pyramid_skipped_when_image_not_larger_than_pyramid_side() {
-        // 724:38 `>` -> `==`/`>=`. longest == pyramid_side means downscaling
-        // to pyramid_side is a no-op, so the strict `>` skips the redundant
-        // pyramid rung. Both `==` and `>=` would run it.
+        // `>` -> `==`/`>=`. longest == pyramid_side means downscaling to
+        // pyramid_side is a no-op, so the strict `>` skips the pyramid.
         let data = vec![255u8; 128 * 128];
         let planes = normalize(&ImageInput::luma8(&data, 128, 128), &Limits::default()).unwrap();
         let mut config = ScanConfig::full();
@@ -3163,33 +2531,27 @@ mod ladder_mutant_kills {
         let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
         assert!(
             !stage_names(&outcome).contains(&"pyramid"),
-            "724: `==`/`>=` run a redundant pyramid when longest == pyramid_side: {:?}",
+            "{:?}",
             stage_names(&outcome)
         );
     }
 
     #[test]
     fn pyramid_runs_when_image_exceeds_pyramid_side() {
-        // 724:63 delete `!` before `out_of_budget()`. With an available
-        // budget the pyramid MUST run on an oversized image; gating it on
-        // being OUT of budget makes it never run.
+        // delete `!` before `out_of_budget()`: with an available budget the
+        // pyramid MUST run on an oversized image.
         let data = vec![255u8; 700 * 700];
         let planes = normalize(&ImageInput::luma8(&data, 700, 700), &Limits::default()).unwrap();
         let mut config = ScanConfig::full(); // pyramid_side = 512
         config.budget_ms = None;
         let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
-        assert_eq!(
-            stage_names(&outcome).first().copied(),
-            Some("pyramid"),
-            "724: deleting `!` skips the pyramid stage entirely: {:?}",
-            stage_names(&outcome)
-        );
+        assert_eq!(stage_names(&outcome).first().copied(), Some("pyramid"));
     }
 
     #[test]
     fn ladder_stops_after_pyramid_finds_a_symbol() {
-        // 732:21 `stop || !merged.is_empty()` -> `&&`. A symbol decoded at
-        // the pyramid downscale must break the ladder before direct.
+        // `stop || settled()` -> `&&`. A symbol decoded at the pyramid
+        // downscale must break the ladder before direct.
         let bytes = qr_png("https://qrcode-ai.com/pyr", 24); // > 512px longest
         let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
         let mut config = ScanConfig::full();
@@ -3198,15 +2560,13 @@ mod ladder_mutant_kills {
         assert_eq!(outcome.merged.len(), 1, "pyramid decodes the symbol");
         assert!(
             !stage_names(&outcome).contains(&"direct"),
-            "732: `&&` keeps walking direct/enhance/deep after a pyramid hit: {:?}",
+            "{:?}",
             stage_names(&outcome)
         );
     }
 
     #[test]
     fn ladder_stops_after_direct_finds_a_symbol() {
-        // 745:21 `stop || !merged.is_empty()` -> `&&`. A small QR (pyramid
-        // skipped) decoded by direct must break before enhance.
         let bytes = qr_png("https://qrcode-ai.com/direct-stop-pin", 6); // < 512px
         let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
         let mut config = ScanConfig::full();
@@ -3215,21 +2575,18 @@ mod ladder_mutant_kills {
         assert_eq!(outcome.merged.len(), 1);
         assert!(
             !stage_names(&outcome).contains(&"pyramid"),
-            "small QR: pyramid must be skipped: {:?}",
+            "{:?}",
             stage_names(&outcome)
         );
         assert!(
             !stage_names(&outcome).contains(&"enhance"),
-            "745: `&&` keeps walking enhance/deep after a direct hit: {:?}",
+            "{:?}",
             stage_names(&outcome)
         );
     }
 
     #[test]
     fn enhance_stage_is_gated_by_its_config_flag() {
-        // 751:27 `config.enhance && !out_of_budget()` -> `||`. With enhance
-        // disabled but budget available, the stage must stay off; `||` opens
-        // it on the budget alone. A blank image reaches every gate.
         let data = vec![255u8; 64 * 64];
         let planes = normalize(&ImageInput::luma8(&data, 64, 64), &Limits::default()).unwrap();
         let mut config = ScanConfig::full();
@@ -3238,16 +2595,13 @@ mod ladder_mutant_kills {
         let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
         assert!(
             !stage_names(&outcome).contains(&"enhance"),
-            "751: `||` runs enhance despite config.enhance = false: {:?}",
+            "{:?}",
             stage_names(&outcome)
         );
     }
 
     #[test]
     fn ladder_stops_after_enhance_finds_a_symbol() {
-        // 770:21 `stop || !merged.is_empty()` -> `&&`. Force the decode into
-        // enhance (pyramid + direct disabled); the ladder must break before
-        // deep.
         let bytes = qr_png("https://qrcode-ai.com/enhance-stop-pin", 6);
         let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
         let mut config = ScanConfig::full();
@@ -3258,15 +2612,13 @@ mod ladder_mutant_kills {
         assert_eq!(outcome.merged.len(), 1, "enhance decodes the symbol");
         assert!(
             !stage_names(&outcome).contains(&"deep"),
-            "770: `&&` keeps walking deep after an enhance hit: {:?}",
+            "{:?}",
             stage_names(&outcome)
         );
     }
 
     #[test]
     fn deep_stage_is_gated_by_its_config_flag() {
-        // 777:24 `config.deep && !out_of_budget()` -> `||`. With deep disabled
-        // but budget available, the stage must stay off.
         let data = vec![255u8; 64 * 64];
         let planes = normalize(&ImageInput::luma8(&data, 64, 64), &Limits::default()).unwrap();
         let mut config = ScanConfig::full();
@@ -3275,7 +2627,7 @@ mod ladder_mutant_kills {
         let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
         assert!(
             !stage_names(&outcome).contains(&"deep"),
-            "777: `||` runs deep despite config.deep = false: {:?}",
+            "{:?}",
             stage_names(&outcome)
         );
     }

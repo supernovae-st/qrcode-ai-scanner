@@ -51,16 +51,22 @@ fn windows_1252(raw: &[u8]) -> String {
         .into_owned()
 }
 
-/// Decode `raw` the way a legacy wire label promises — `None` when the
-/// label's decoder rejects a byte. `Latin1` means what the heuristic
-/// decodes under it: the Windows-1252 superset, total.
+/// Decode `raw` the way a decoder label promises — `None` when the label's
+/// decoder rejects a byte, or the label names no decoder (`eci`, `unknown`,
+/// a newer scanner's label). `Latin1` means what the heuristic decodes
+/// under it: the Windows-1252 superset, total.
 pub(crate) fn decode_legacy(raw: &[u8], label: Charset) -> Option<String> {
+    let strict = |encoding: &'static encoding_rs::Encoding| {
+        encoding
+            .decode_without_bom_handling_and_without_replacement(raw)
+            .map(std::borrow::Cow::into_owned)
+    };
     match label {
         Charset::Utf8 => std::str::from_utf8(raw).ok().map(str::to_owned),
-        Charset::ShiftJis => encoding_rs::SHIFT_JIS
-            .decode_without_bom_handling_and_without_replacement(raw)
-            .map(std::borrow::Cow::into_owned),
+        Charset::ShiftJis => strict(encoding_rs::SHIFT_JIS),
         Charset::Latin1 => Some(windows_1252(raw)),
+        Charset::Gb18030 => strict(encoding_rs::GB18030),
+        Charset::Eci | Charset::Unknown | Charset::Unrecognized => None,
     }
 }
 
@@ -148,6 +154,18 @@ mod tests {
             Some("こ")
         );
         assert_eq!(decode_legacy(&[0xFF], Charset::ShiftJis), None);
+        assert_eq!(
+            decode_legacy(&[0xD6, 0xD0, 0xCE, 0xC4], Charset::Gb18030).as_deref(),
+            Some("中文")
+        );
+        assert_eq!(decode_legacy(&[0xB0, 0xFF], Charset::Gb18030), None);
+        for label in [Charset::Eci, Charset::Unknown, Charset::Unrecognized] {
+            assert_eq!(
+                decode_legacy(b"ok", label),
+                None,
+                "{label:?} has no decoder"
+            );
+        }
         // ISO/IEC 8859-1 proper keeps C1 controls — and is injective
         assert_eq!(iso_8859_1(&[0x35, 0x80, 0xFF]), "5\u{80}ÿ");
     }

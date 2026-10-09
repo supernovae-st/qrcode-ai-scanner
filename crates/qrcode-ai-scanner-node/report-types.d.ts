@@ -22,7 +22,16 @@ export type Symbology =
  */
 export type EngineKind = "rxing" | "rqrr" | "rescue";
 export type EcLevel = "l" | "m" | "q" | "h";
-export type Charset = "utf8" | "shift_jis" | "latin1";
+/**
+ * How content.text relates to content.raw (spec/01 § Content). utf8 · shift_jis · latin1 · gb18030 (latin1 = WHATWG
+ * windows-1252, gb18030 = WHATWG gb18030): text is EXACTLY raw decoded with that decoder. eci: raw decoded under
+ * content.eci. unknown: NOT a complete decoding (each U+FFFD = one unread byte or maximal ill-formed sequence; use raw).
+ * "unknown" is the ONLY lossy value, now and later: any other value, even one newer than these types, is a complete
+ * decoding the scanner checked (the declared interpretation only when content.eci lists it). Test === "unknown".
+ */
+export type Charset = "utf8" | "shift_jis" | "latin1" | "gb18030" | "eci" | "unknown";
+/** FNC1 position: first = GS1 mode; second = AIM application mode (raw starts with the application indicator). */
+export type Fnc1Position = "first" | "second";
 export type Grade = "excellent" | "good" | "acceptable" | "fair" | "poor";
 export type UecGrade = "a" | "b" | "c" | "d" | "f";
 export type StressAxis = "resolution" | "blur" | "contrast" | "perspective" | "rotation" | "lighting";
@@ -54,11 +63,25 @@ export type Payload =
   | { kind: "v_event"; raw: string }
   | { kind: "text" };
 
+/** One ECI designator observed in the symbol data (ISO/IEC 18004 §7.4.2). */
+export interface EciSegment {
+  /** ECI assignment number as encoded, 0–999999. */
+  designator: number;
+  /** Byte offset into raw where it takes effect (until the next entry's start, or the end). */
+  start: number;
+}
+
+/** One exact reading of a symbol's data. Compare by identity (symbology, raw, fnc1, compatible eci), never text. */
 export interface DecodedContent {
+  /** raw decoded as charset states; empty if and only if raw is empty. */
   text: string;
-  /** Original payload bytes, base64. */
+  /** Payload bytes, base64. QR family: the original bytes; other symbologies: the bytes of the engine's reading. */
   raw: string;
   charset: Charset;
+  /** ECI designators in symbol order. ABSENT: none observed; []: ECI use signalled but not located. */
+  eci?: EciSegment[];
+  /** FNC1 position; absent when none was observed or the symbology does not report it. */
+  fnc1?: Fnc1Position;
 }
 
 export interface QrMeta {
@@ -76,6 +99,7 @@ export interface QrMeta {
 export interface Detection {
   /** The symbology this detection was read as. */
   symbology: Symbology;
+  /** One reading of the symbol's data; detections are the distinct contents the scanner can tell apart. */
   content: DecodedContent;
   payload: Payload;
   corners: [Point, Point, Point, Point] | null;
@@ -183,7 +207,7 @@ export type AlphaPlacement = "any" | "light_only" | "dark_only" | "mixed" | "non
 export interface AlphaProbe {
   /** Neutral background luma composited under the content (0-255). */
   background_luma: number;
-  /** The composite still decoded to the primary symbol's text. */
+  /** One of the composite's reads denotes the same content as the primary. */
   decoded: boolean;
 }
 
@@ -193,6 +217,7 @@ export interface AlphaPaletteProbe {
   background: string;
   /** Its BT.601 luma (the sweep is luma-space by construction). */
   background_luma: number;
+  /** One of the composite's reads denotes the same content as the primary. */
   decoded: boolean;
 }
 

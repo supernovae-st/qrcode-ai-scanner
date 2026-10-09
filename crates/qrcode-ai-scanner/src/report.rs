@@ -133,32 +133,118 @@ pub enum EcLevel {
     H,
 }
 
-/// Character set resolved for the decoded bytes.
+/// How [`DecodedContent::text`] relates to [`DecodedContent::raw`] (spec/01
+/// § Content). Every value except [`Charset::Unknown`] states that `text` is
+/// a complete decoding of `raw` that the scanner checked byte for byte; it
+/// states the encoder's declared interpretation only when
+/// [`DecodedContent::eci`] lists it. `Unknown` is the only lossy value, now
+/// and in every later version: test with [`Charset::is_lossy`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[non_exhaustive]
 pub enum Charset {
-    /// Valid UTF-8 (or ASCII).
+    /// Exactly the strict UTF-8 decoding of `raw` (ASCII included).
     Utf8,
-    /// Shift-JIS (kanji-mode or sniffed byte-mode).
+    /// Exactly the WHATWG `Shift_JIS` decoding of `raw`.
     ShiftJis,
-    /// Windows-1252 / Latin-1 fallback.
+    /// Exactly the WHATWG windows-1252 decoding of `raw` (historical name;
+    /// not strict ISO/IEC 8859-1).
     Latin1,
+    /// Exactly the WHATWG gb18030 decoding of `raw` (GB 2312 and GBK read
+    /// unchanged): Hanzi-mode data without a designator, or designators 29,
+    /// 31, 32.
+    Gb18030,
+    /// `raw` decoded under [`DecodedContent::eci`] (bytes before the first
+    /// designator as ISO/IEC 8859-1), when no label above states the same
+    /// reading.
+    Eci,
+    /// Not a complete decoding: each U+FFFD stands for one byte or one
+    /// maximal ill-formed sequence the scanner could not read; positions
+    /// cannot be recovered from `text` — use `raw` (and `eci`).
+    Unknown,
+    /// Reader side only: a label written by a newer scanner, still a
+    /// complete, checked decoding (show `text`, never re-decode `raw` from
+    /// it). Never produced by this crate; serializing it is an error
+    /// (forward the original JSON). Must stay the last variant.
+    #[cfg_attr(feature = "serde", serde(other, skip_serializing))]
+    Unrecognized,
 }
 
-/// Decoded content — both the resolved text and the raw bytes truth.
+impl Charset {
+    /// `true` only for [`Charset::Unknown`], forever.
+    #[must_use]
+    pub const fn is_lossy(self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+}
+
+/// One ECI designator observed in the symbol's data (ISO/IEC 18004 §7.4.2).
+/// It governs `raw[start..]` up to the next entry's `start`, or the end; an
+/// empty span governs no byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
+pub struct EciSegment {
+    /// ECI assignment number as encoded, 0-999999.
+    pub designator: u32,
+    /// Byte offset into [`DecodedContent::raw`]; non-decreasing along the
+    /// list, at most `raw.len()`.
+    pub start: u32,
+}
+
+/// FNC1 position (ISO/IEC 18004 §7.4.8; AIM `]Q3`–`]Q6`,
+/// `]d2`/`]d3`/`]d5`/`]d6`, `]C1`/`]C2`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
+pub enum Fnc1Position {
+    /// GS1 mode: `raw` holds GS1 element-string data (QR and Data Matrix
+    /// transmit 0x1D between fields; GS1-128 read by the current engine
+    /// does not).
+    First,
+    /// AIM application mode: `raw` starts with the application indicator.
+    Second,
+    /// Reader side only, as [`Charset::Unrecognized`].
+    #[cfg_attr(feature = "serde", serde(other, skip_serializing))]
+    Unrecognized,
+}
+
+/// The exact bytes, the declarations observed and the scanner's ONE reading
+/// of them (spec/01 § Content). Compare contents by identity (spec/01
+/// § Comparing contents), never by `text`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct DecodedContent {
-    /// Text under the resolved charset.
+    /// `raw` decoded as `charset` states; empty if and only if `raw` is
+    /// empty.
     pub text: String,
-    /// Raw decoded bytes (charset-independent truth). Base64 on the wire.
+    /// Payload bytes, base64 on the wire. QR family: the ORIGINAL bytes on
+    /// every decode path (designators excluded), never an engine's text.
+    /// Other symbologies: the ISO/IEC 8859-1 encoding of the engine's text
+    /// when every character is ≤ U+00FF (exact on its non-ECI paths), else
+    /// its UTF-8 (spec/01 § raw).
     #[cfg_attr(feature = "serde", serde(with = "raw_b64"))]
     pub raw: Vec<u8>,
-    /// Charset used to produce `text`.
+    /// How `text` relates to `raw`.
     pub charset: Charset,
+    /// `None` (key absent): no designator observed. `Some(vec![])`: ECI use
+    /// signalled (`]Q2`/`]Q4`/`]Q6`) but the designators could not be
+    /// located.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub eci: Option<Vec<EciSegment>>,
+    /// `None` (key absent): no FNC1 observed, or not observable for this
+    /// symbology.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub fnc1: Option<Fnc1Position>,
 }
 
 /// QR symbol metadata.
@@ -181,26 +267,30 @@ pub struct QrMeta {
     pub inverted: Option<bool>,
 }
 
-/// One decoded QR symbol.
+/// One decoded symbol content.
 ///
-/// Detections merge across engines and attempts BY DECODED TEXT: two
-/// physical symbols carrying the identical payload in one image collapse
-/// into one detection (corners from the first geometry source). Distinct
-/// payloads always stay distinct.
+/// Detections are the distinct contents the scanner can tell apart
+/// (spec/01 § Detection): every read of every attempt is reconciled before
+/// publication, and reads with the same symbology, `raw` and FNC1 position
+/// and compatible ECI evidence become one detection. Identical copies of a
+/// symbol are one detection; a different `raw`, FNC1 position or
+/// contradicting declarations always stay separate, even with equal text.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct Detection {
     /// The barcode symbology this detection was read as.
     pub symbology: Symbology,
-    /// Decoded content (text + raw bytes + charset).
+    /// The content: raw bytes, declarations and the one reading of them.
     pub content: DecodedContent,
     /// Typed payload classification of the text.
     pub payload: Payload,
-    /// Symbol corners in image coordinates, clockwise from top-left,
-    /// when the engine provides them.
+    /// Symbol corners in image coordinates, clockwise from top-left: from
+    /// rqrr (its decode, or a grid it detected that the scanner
+    /// error-corrected itself — `engines` may then list rxing alone) or the
+    /// S5 rescue candidate.
     pub corners: Option<[Point; 4]>,
-    /// Symbol metadata.
+    /// Symbol metadata, from the same source as `corners`.
     pub meta: QrMeta,
     /// Engines that confirmed this payload (consensus surface for scoring).
     pub engines: Vec<EngineKind>,
@@ -504,7 +594,8 @@ pub enum AlphaPlacement {
 pub struct AlphaProbe {
     /// Neutral background luma composited under the content.
     pub background_luma: u8,
-    /// The composite still decoded to the primary symbol's text.
+    /// One of the composite's reads denotes the same content as the
+    /// primary detection (spec/07 property 7).
     pub decoded: bool,
 }
 
@@ -518,7 +609,8 @@ pub struct AlphaPaletteProbe {
     pub background: String,
     /// Its BT.601 luma (the sweep is luma-space by construction).
     pub background_luma: u8,
-    /// The composite still decoded to the primary symbol's text.
+    /// One of the composite's reads denotes the same content as the
+    /// primary detection (spec/07 property 7).
     pub decoded: bool,
 }
 
@@ -647,9 +739,12 @@ pub struct StageTrace {
     pub transforms_tried: u32,
     /// Wall-clock milliseconds spent in this stage.
     pub ms: f64,
-    /// RAW engine hits in this stage, PRE-merge — both engines decoding
-    /// the same symbol counts twice here (the merged symbol count is
-    /// `detections.len()` on the report).
+    /// Reads this stage's engine adapters delivered — raw hits before
+    /// folding, the re-read, vetoes and reconciliation (an rxing + rqrr
+    /// double read counts 2); a decode the rqrr adapter refuses because its
+    /// own grid parses malformed is not delivered; candidate re-derivations
+    /// and re-reads never count. It includes hits the scanner refuses or
+    /// holds for confirmation: read `detections`, not this counter.
     pub detections_found: u32,
 }
 
@@ -853,6 +948,8 @@ mod tests {
                     text: "https://qrcode-ai.com".into(),
                     raw: b"https://qrcode-ai.com".to_vec(),
                     charset: Charset::Utf8,
+                    eci: None,
+                    fnc1: None,
                 },
                 payload: Payload::Text,
                 corners: Some([
@@ -933,6 +1030,81 @@ mod tests {
                 serde_json::Value::String(wire.to_owned())
             );
         }
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn content_wire_names_pinned() {
+        for (charset, wire) in [
+            (Charset::Utf8, "utf8"),
+            (Charset::ShiftJis, "shift_jis"),
+            (Charset::Latin1, "latin1"),
+            (Charset::Gb18030, "gb18030"),
+            (Charset::Eci, "eci"),
+            (Charset::Unknown, "unknown"),
+        ] {
+            assert_eq!(serde_json::to_value(charset).unwrap(), wire);
+            let back: Charset = serde_json::from_value(wire.into()).unwrap();
+            assert_eq!(back, charset);
+            assert_eq!(charset.is_lossy(), charset == Charset::Unknown, "{wire}");
+        }
+        // a newer scanner's label reads as a complete decoding, and is never
+        // written back
+        let future: Charset = serde_json::from_str("\"future_x\"").unwrap();
+        assert_eq!(future, Charset::Unrecognized);
+        assert!(!future.is_lossy());
+        assert!(serde_json::to_string(&Charset::Unrecognized).is_err());
+        for (position, wire) in [
+            (Fnc1Position::First, "first"),
+            (Fnc1Position::Second, "second"),
+        ] {
+            assert_eq!(serde_json::to_value(position).unwrap(), wire);
+        }
+        let fifth: Fnc1Position = serde_json::from_str("\"fifth\"").unwrap();
+        assert_eq!(fifth, Fnc1Position::Unrecognized);
+        assert!(serde_json::to_string(&Fnc1Position::Unrecognized).is_err());
+        assert_eq!(
+            serde_json::to_value(EciSegment {
+                designator: 4,
+                start: 0
+            })
+            .unwrap(),
+            serde_json::json!({"designator": 4, "start": 0})
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn content_optional_keys_are_absent_or_present() {
+        let content = |eci, fnc1| DecodedContent {
+            text: "hi".into(),
+            raw: b"hi".to_vec(),
+            charset: Charset::Utf8,
+            eci,
+            fnc1,
+        };
+        assert_eq!(
+            serde_json::to_value(content(None, None)).unwrap(),
+            serde_json::json!({"text": "hi", "raw": "aGk=", "charset": "utf8"})
+        );
+        assert_eq!(
+            serde_json::to_value(content(Some(Vec::new()), Some(Fnc1Position::First))).unwrap(),
+            serde_json::json!({
+                "text": "hi", "raw": "aGk=", "charset": "utf8", "eci": [], "fnc1": "first"
+            })
+        );
+        // reports without the keys read with both absent
+        let old: DecodedContent =
+            serde_json::from_str(r#"{"text":"hi","raw":"aGk=","charset":"utf8"}"#).unwrap();
+        assert_eq!(old, content(None, None));
+        let unknown: DecodedContent =
+            serde_json::from_str(r#"{"text":"日本中文","raw":"k/qWe9bQzsQ=","charset":"unknown"}"#)
+                .unwrap();
+        assert_eq!((unknown.charset, unknown.eci), (Charset::Unknown, None));
+        assert_eq!(
+            unknown.raw,
+            [0x93, 0xFA, 0x96, 0x7B, 0xD6, 0xD0, 0xCE, 0xC4]
+        );
     }
 
     #[test]

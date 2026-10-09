@@ -1,0 +1,1653 @@
+//! Collect, then reconcile (07-pipeline property 6 § Reconciliation).
+//!
+//! A walk collects reads: every engine hit of every attempt, upgraded by the
+//! scanner's own parses (the re-read), the candidate parses of grids rqrr
+//! detected but did not decode (no engine), and the S5 rescue. Identical
+//! reads fold into one. Refusals are records of refused streams; what they
+//! withhold, and what protects a read from them, is evaluated over the
+//! whole walk — so retroactively — whenever the walk asks what stands.
+//! [`ReadStore::reconcile`] turns what stands into the distinct contents
+//! the scanner can tell apart — a function of the read set, never of the
+//! order the reads arrived in:
+//!
+//! 1. a candidate parse joins only when it contains an engine read of its
+//!    bytes with an agreeing account;
+//! 2. per (symbology, raw): located and no-ECI reads with an observed FNC1
+//!    position form one detection per (evidence, position); a signalled
+//!    read joins the one located detection of its position that contains
+//!    it, or the group's signalled detection when there is no located one;
+//!    reads with unobserved evidence, then reads with an unobserved
+//!    position, join the one agreeing detection that contains them, else
+//!    form one detection per published identity;
+//! 3. a detection no engine read belongs to is not published; at most
+//!    [`MAX_DETECTIONS`], QR family first, then by earliest read.
+
+use super::content::{ContentKey, DoubleByteSpan, EciEvidence, EngineReading, Fnc1, Segments};
+use super::{MaskedStream, Refusal};
+use crate::report::{EcLevel, EngineKind, Point, Symbology};
+
+/// Distinct reads a walk reconciles; later distinct reads are counted.
+pub(crate) const MAX_DISTINCT_READS: usize = 64;
+
+/// Detections a report publishes — a tile of thousands of micro-QRs is a
+/// CPU/report amplifier, not a use case.
+pub(crate) const MAX_DETECTIONS: usize = 16;
+
+/// Refused streams a walk remembers (one record per stream, both its
+/// names). A refusal past capacity still withholds what was collected up to
+/// its attempt, then lapses; the opposite-background walk receives it.
+pub(crate) const MAX_REFUSALS: usize = 16;
+
+/// Distinct places a folded read remembers: a refusal withholds a read only
+/// when every place it was read at lies inside the refused symbol.
+const MAX_PLACES: usize = 8;
+
+/// Where a read sits in the walk: its attempt, its source within the
+/// attempt ([`source`]) and its index in that source's output.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct Rank {
+    /// Attempt index in walk order.
+    pub(crate) attempt: u32,
+    /// The source within the attempt.
+    pub(crate) source: u8,
+    /// Index within the source's output.
+    pub(crate) index: u32,
+}
+
+/// The sources a [`Rank`] orders, within an attempt.
+pub(crate) mod source {
+    /// rxing's reads.
+    pub(crate) const RXING: u8 = 0;
+    /// rqrr's reads.
+    pub(crate) const RQRR: u8 = 1;
+    /// Candidate parses (grids rqrr detected, re-derived by the scanner).
+    pub(crate) const CANDIDATE: u8 = 2;
+    /// The S5 rescue.
+    pub(crate) const RESCUE: u8 = 3;
+}
+
+/// What a read measured of its symbol (original image space).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Geometry {
+    /// Symbol corners (rqrr, candidates, the rescue) and whether the
+    /// attempt that measured them inverted the symbol photometrically.
+    pub(crate) corners: Option<([Point; 4], bool)>,
+    /// The verified stream with the version, EC level and mask read from
+    /// it — the synthetic-UEC input, adopted as a whole.
+    pub(crate) stream: Option<(MaskedStream, u8, EcLevel, u8)>,
+    /// An EC level stated without a stream (rxing's port).
+    pub(crate) ec: Option<EcLevel>,
+}
+
+/// One read of the walk.
+#[derive(Debug, Clone)]
+pub(crate) struct Read {
+    /// The symbology it was read as.
+    pub(crate) symbology: Symbology,
+    /// Its bytes, ECI evidence and FNC1 position.
+    pub(crate) key: ContentKey,
+    /// The Kanji/Hanzi segments a parse of it observed.
+    pub(crate) segments: Segments,
+    /// The decoding engine's mode-aware reading (rule 1e).
+    pub(crate) engine_reading: EngineReading,
+    /// Engines that delivered it, each with its earliest rank; empty: a
+    /// candidate parse.
+    pub(crate) engines: Vec<(EngineKind, Rank)>,
+    /// Its earliest rank.
+    pub(crate) rank: Rank,
+    /// The last attempt it was read in.
+    pub(crate) last_attempt: u32,
+    /// The corner points of the symbol it was first read at (internal).
+    pub(crate) location: Option<[Point; 4]>,
+    /// Every distinct place it was read at (at most [`MAX_PLACES`]).
+    pub(crate) places: Vec<[Point; 4]>,
+    /// What it measured.
+    pub(crate) geometry: Geometry,
+    /// The ranks of the reads its location and geometry parts come from.
+    sources: Sources,
+    /// The scanner's own parser read its stream.
+    pub(crate) parsed: bool,
+}
+
+/// Which read of a fold supplied each part: every part comes from the
+/// earliest read that carries it.
+#[derive(Debug, Clone, Copy)]
+struct Sources {
+    location: Rank,
+    corners: Rank,
+    stream: Rank,
+    ec: Rank,
+}
+
+impl Read {
+    /// A read by `engine` (`None`: a candidate parse) at `rank`.
+    pub(crate) fn new(
+        symbology: Symbology,
+        key: ContentKey,
+        engine: Option<EngineKind>,
+        rank: Rank,
+    ) -> Self {
+        Self {
+            symbology,
+            key,
+            segments: Segments::NotObserved,
+            engine_reading: EngineReading::None,
+            engines: engine.map(|engine| (engine, rank)).into_iter().collect(),
+            rank,
+            last_attempt: rank.attempt,
+            location: None,
+            places: Vec::new(),
+            geometry: Geometry::default(),
+            sources: Sources {
+                location: rank,
+                corners: rank,
+                stream: rank,
+                ec: rank,
+            },
+            parsed: false,
+        }
+    }
+
+    /// The read, made at `location`.
+    pub(crate) fn at(mut self, location: Option<[Point; 4]>) -> Self {
+        self.location = location;
+        self.places = location.into_iter().collect();
+        self
+    }
+
+    /// Same fold identity: identical in symbology, raw, FNC1, evidence,
+    /// segments and engine reading.
+    fn identical(&self, other: &Self) -> bool {
+        self.symbology == other.symbology
+            && self.key == other.key
+            && self.segments == other.segments
+            && self.engine_reading == other.engine_reading
+    }
+
+    /// Fold an identical read in: engines united (earliest rank each), the
+    /// earliest rank, every place; the location and each geometry part
+    /// from the earliest read that carries it.
+    fn fold(&mut self, other: Self) {
+        for (engine, rank) in other.engines {
+            match self.engines.iter_mut().find(|(own, _)| *own == engine) {
+                Some((_, own)) => *own = (*own).min(rank),
+                None => self.engines.push((engine, rank)),
+            }
+        }
+        self.rank = self.rank.min(other.rank);
+        self.last_attempt = self.last_attempt.max(other.last_attempt);
+        for place in other.places {
+            if self.places.len() < MAX_PLACES && !self.places.contains(&place) {
+                self.places.push(place);
+            }
+        }
+        let take = |own: bool, own_rank: Rank, theirs: bool, their_rank: Rank| {
+            theirs && (!own || their_rank < own_rank)
+        };
+        let (own, theirs) = (self.sources, other.sources);
+        if take(
+            self.location.is_some(),
+            own.location,
+            other.location.is_some(),
+            theirs.location,
+        ) {
+            self.location = other.location;
+            self.sources.location = theirs.location;
+        }
+        if take(
+            self.geometry.corners.is_some(),
+            own.corners,
+            other.geometry.corners.is_some(),
+            theirs.corners,
+        ) {
+            self.geometry.corners = other.geometry.corners;
+            self.sources.corners = theirs.corners;
+        }
+        if take(
+            self.geometry.stream.is_some(),
+            own.stream,
+            other.geometry.stream.is_some(),
+            theirs.stream,
+        ) {
+            self.geometry.stream = other.geometry.stream;
+            self.sources.stream = theirs.stream;
+        }
+        if take(
+            self.geometry.ec.is_some(),
+            own.ec,
+            other.geometry.ec.is_some(),
+            theirs.ec,
+        ) {
+            self.geometry.ec = other.geometry.ec;
+            self.sources.ec = theirs.ec;
+        }
+        self.parsed |= other.parsed;
+    }
+
+    /// An engine delivered it (it is no candidate parse).
+    fn by_engine(&self) -> bool {
+        !self.engines.is_empty()
+    }
+}
+
+/// What a refusal does to one read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cover {
+    /// Nothing.
+    Nothing,
+    /// Withholds rqrr's part of it.
+    Rqrr,
+    /// Withholds all of it.
+    Whole,
+}
+
+/// What a refusal's names withhold of a read: an unparsed QR Code read
+/// lying inside the refused symbol — every place it was read at — whose
+/// account the port name matches (all of it), or of rqrr's bytes (rqrr's
+/// part). A read or a refusal without a place never fails the place test.
+fn cover(refusal: &Refusal, read: &Read) -> Cover {
+    if read.symbology != Symbology::QrCode || read.parsed {
+        return Cover::Nothing;
+    }
+    let there = read
+        .places
+        .iter()
+        .all(|&place| inside(Some(place), refusal.place));
+    if !there {
+        return Cover::Nothing;
+    }
+    if refusal
+        .port
+        .as_ref()
+        .is_some_and(|port| port.agrees(&read.key))
+    {
+        Cover::Whole
+    } else if refusal
+        .rqrr
+        .as_ref()
+        .is_some_and(|bytes| *bytes == read.key.raw)
+        && read.engines.iter().any(|(e, _)| *e == EngineKind::Rqrr)
+    {
+        Cover::Rqrr
+    } else {
+        Cover::Nothing
+    }
+}
+
+/// What a walk hands the opposite-background walk: every refusal it
+/// recorded (those past capacity included), the parsed contents that
+/// protect reads, and the re-reads the scan already spent.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Seed {
+    /// Every refusal of the walk.
+    pub(crate) refusals: Vec<Refusal>,
+    /// Contents a parse of the walk read: no refusal withholds a read they
+    /// agree with.
+    pub(crate) protection: Vec<(Symbology, ContentKey)>,
+    /// Re-reads already spent by the scan.
+    pub(crate) rereads: usize,
+}
+
+/// The reads of one walk.
+#[derive(Debug, Default)]
+pub(crate) struct ReadStore {
+    reads: Vec<Read>,
+    /// Distinct reads past [`MAX_DISTINCT_READS`]: counted, not reconciled.
+    pub(crate) dropped: u32,
+    /// Refusals within capacity: they withhold across the whole walk.
+    refusals: Vec<Refusal>,
+    /// Refusals past capacity, with the attempt that found each: they
+    /// withhold what was read up to that attempt.
+    overflow: Vec<(Refusal, u32)>,
+    /// Another walk's parsed contents.
+    protection: Vec<(Symbology, ContentKey)>,
+}
+
+impl ReadStore {
+    /// A store that starts from another walk's refusals and protection.
+    pub(crate) fn seeded(seed: Seed) -> Self {
+        let mut store = Self {
+            protection: seed.protection,
+            ..Self::default()
+        };
+        for refusal in seed.refusals {
+            if !store.refusals.contains(&refusal) {
+                store.refusals.push(refusal);
+            }
+        }
+        store
+    }
+
+    /// Collect one read: folded into an identical read, or kept while
+    /// capacity lasts (later distinct reads are counted).
+    pub(crate) fn collect(&mut self, read: Read) {
+        if let Some(own) = self.reads.iter_mut().find(|own| own.identical(&read)) {
+            own.fold(read);
+        } else if self.reads.len() < MAX_DISTINCT_READS {
+            self.reads.push(read);
+        } else {
+            self.dropped = self.dropped.saturating_add(1);
+        }
+    }
+
+    /// Record a refused stream found in `attempt` (once per record).
+    pub(crate) fn refuse(&mut self, refusal: Refusal, attempt: u32) {
+        if self.refusals.contains(&refusal) || self.overflow.iter().any(|(r, _)| *r == refusal) {
+            return;
+        }
+        if self.refusals.len() < MAX_REFUSALS {
+            self.refusals.push(refusal);
+        } else {
+            self.overflow.push((refusal, attempt));
+        }
+    }
+
+    /// Whether a parsed read, a candidate parse or a seeded content of the
+    /// same symbology agrees with the read: then no refusal withholds it.
+    fn protected(&self, read: &Read) -> bool {
+        self.reads
+            .iter()
+            .any(|p| p.parsed && p.symbology == read.symbology && p.key.agrees(&read.key))
+            || self
+                .protection
+                .iter()
+                .any(|(symbology, key)| *symbology == read.symbology && key.agrees(&read.key))
+    }
+
+    /// The read as it stands: `None` when withheld; rqrr's part removed when
+    /// only that is withheld.
+    fn standing(&self, read: &Read) -> Option<Read> {
+        if self.protected(read) {
+            return Some(read.clone());
+        }
+        let refusals =
+            self.refusals
+                .iter()
+                .chain(self.overflow.iter().filter_map(|(refusal, attempt)| {
+                    (read.last_attempt <= *attempt).then_some(refusal)
+                }));
+        let mut rqrr_withheld = false;
+        for refusal in refusals {
+            match cover(refusal, read) {
+                Cover::Whole => return None,
+                Cover::Rqrr => rqrr_withheld = true,
+                Cover::Nothing => {}
+            }
+        }
+        if !rqrr_withheld {
+            return Some(read.clone());
+        }
+        let mut read = read.clone();
+        read.engines
+            .retain(|(engine, _)| *engine != EngineKind::Rqrr);
+        read.rank = read.engines.iter().map(|(_, rank)| *rank).min()?;
+        Some(read)
+    }
+
+    /// The reads that stand.
+    fn live(&self) -> Vec<Read> {
+        self.reads
+            .iter()
+            .filter_map(|read| self.standing(read))
+            .collect()
+    }
+
+    /// Whether the walk publishes something — what the S5 trigger asks.
+    pub(crate) fn found(&self) -> bool {
+        !self.reconcile().is_empty()
+    }
+
+    /// Whether a QR Code read the scanner has not parsed stands — what
+    /// re-deriving candidates waits for.
+    pub(crate) fn unparsed_qr(&self) -> bool {
+        self.live()
+            .iter()
+            .any(|read| read.by_engine() && read.symbology == Symbology::QrCode && !read.parsed)
+    }
+
+    /// Whether the walk may stop after a stage (07-pipeline property 2): an
+    /// engine read stands, and not every QR Code read only signals an ECI
+    /// it could not locate. A signalled read a candidate parse contains
+    /// with an agreeing account counts as located; other symbologies
+    /// neither stop nor prolong the walk.
+    pub(crate) fn settled(&self) -> bool {
+        let live = self.live();
+        let engine_reads: Vec<&Read> = live.iter().filter(|read| read.by_engine()).collect();
+        if engine_reads.is_empty() {
+            return false;
+        }
+        let qr: Vec<&&Read> = engine_reads
+            .iter()
+            .filter(|read| read.symbology == Symbology::QrCode)
+            .collect();
+        qr.is_empty() || !qr.iter().all(|read| awaits_location(&live, read))
+    }
+
+    /// What the opposite-background walk starts with.
+    pub(crate) fn seed(&self, rereads: usize) -> Seed {
+        Seed {
+            refusals: self
+                .refusals
+                .iter()
+                .cloned()
+                .chain(self.overflow.iter().map(|(refusal, _)| refusal.clone()))
+                .collect(),
+            protection: self
+                .reads
+                .iter()
+                .filter(|read| read.parsed)
+                .map(|read| (read.symbology, read.key.clone()))
+                .chain(self.protection.iter().cloned())
+                .collect(),
+            rereads,
+        }
+    }
+
+    /// Whether this walk's refusals withhold a detection of the
+    /// opposite-background walk — the second guard over it: a QR Code
+    /// detection only unparsed reads made, at a place a refused symbol
+    /// covers, unless `protection` agrees with it.
+    pub(crate) fn withholds(
+        &self,
+        detection: &Reconciled,
+        protection: &[(Symbology, ContentKey)],
+    ) -> bool {
+        let read = Read {
+            engines: detection
+                .engines
+                .iter()
+                .map(|&engine| (engine, detection.rank))
+                .collect(),
+            parsed: detection.parsed,
+            ..Read::new(
+                detection.symbology,
+                detection.key.clone(),
+                None,
+                detection.rank,
+            )
+            .at(detection.location)
+        };
+        let protected = protection
+            .iter()
+            .any(|(symbology, key)| *symbology == read.symbology && key.agrees(&read.key));
+        !protected
+            && self
+                .refusals
+                .iter()
+                .chain(self.overflow.iter().map(|(refusal, _)| refusal))
+                .any(|refusal| match cover(refusal, &read) {
+                    Cover::Whole => true,
+                    Cover::Rqrr => read.engines.iter().all(|(e, _)| *e == EngineKind::Rqrr),
+                    Cover::Nothing => false,
+                })
+    }
+
+    /// The distinct contents of the walk (module doc).
+    pub(crate) fn reconcile(&self) -> Vec<Reconciled> {
+        reconcile(self.live())
+    }
+}
+
+/// A signalled QR Code read no agreeing candidate parse contains.
+fn awaits_location(live: &[Read], read: &Read) -> bool {
+    read.key.eci == EciEvidence::Signalled
+        && !live.iter().any(|candidate| {
+            !candidate.by_engine()
+                && candidate.symbology == read.symbology
+                && candidate.key.agrees(&read.key)
+                && inside(read.location, candidate.location)
+        })
+}
+
+/// One published content and what its reads measured.
+#[derive(Debug, Clone)]
+pub(crate) struct Reconciled {
+    /// The symbology.
+    pub(crate) symbology: Symbology,
+    /// Its identity: bytes, the detection's evidence, FNC1 position.
+    pub(crate) key: ContentKey,
+    /// The one distinct non-empty segment observation of its parsed reads.
+    pub(crate) segments: Segments,
+    /// Its reads' one engine reading.
+    pub(crate) engine_reading: EngineReading,
+    /// Engines, in the order of their earliest reads.
+    pub(crate) engines: Vec<EngineKind>,
+    /// Geometry from its earliest reads that carry it.
+    pub(crate) geometry: Geometry,
+    /// The corner points of the read that formed it (internal).
+    pub(crate) location: Option<[Point; 4]>,
+    /// A parse of the scanner read it.
+    pub(crate) parsed: bool,
+    /// Its earliest read.
+    pub(crate) rank: Rank,
+}
+
+/// Whether the centre of a read's corner points lies inside the box of a
+/// detection's; reads or detections without corners never fail it.
+pub(crate) fn inside(read: Option<[Point; 4]>, detection: Option<[Point; 4]>) -> bool {
+    let (Some(read), Some(own)) = (read, detection) else {
+        return true;
+    };
+    let (x, y) = read
+        .iter()
+        .fold((0.0, 0.0), |(x, y), p| (x + p.x / 4.0, y + p.y / 4.0));
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+    );
+    for p in own {
+        min_x = min_x.min(p.x);
+        max_x = max_x.max(p.x);
+        min_y = min_y.min(p.y);
+        max_y = max_y.max(p.y);
+    }
+    (min_x..=max_x).contains(&x) && (min_y..=max_y).contains(&y)
+}
+
+/// A detection being formed: its account and the reads that joined it.
+struct Forming {
+    eci: EciEvidence,
+    fnc1: Fnc1,
+    /// The corner points of the earliest read that formed it.
+    place: Option<[Point; 4]>,
+    members: Vec<Read>,
+}
+
+impl Forming {
+    fn new(read: Read) -> Self {
+        Self {
+            eci: read.key.eci.clone(),
+            fnc1: read.key.fnc1,
+            place: read.location,
+            members: vec![read],
+        }
+    }
+
+    fn identity(&self) -> Identity {
+        identity(&self.eci, self.fnc1)
+    }
+
+    fn contains(&self, read: &Read) -> bool {
+        inside(read.location, self.place)
+    }
+
+    fn agrees(&self, read: &Read) -> bool {
+        self.eci.agrees_with(&read.key.eci) && self.fnc1.agrees_with(read.key.fnc1)
+    }
+}
+
+/// What a detection publishes of its account: the `eci` key (absent, `[]`
+/// or the list) and the `fnc1` key.
+type Identity = (Option<EciEvidence>, Option<Fnc1>);
+
+fn identity(eci: &EciEvidence, fnc1: Fnc1) -> Identity {
+    let eci = matches!(eci, EciEvidence::Located(_) | EciEvidence::Signalled).then(|| eci.clone());
+    let fnc1 = matches!(fnc1, Fnc1::First | Fnc1::Second).then_some(fnc1);
+    (eci, fnc1)
+}
+
+/// Reconcile a read set (the module doc; spec/07 property 6).
+pub(crate) fn reconcile(mut reads: Vec<Read>) -> Vec<Reconciled> {
+    // a total order: ranks are distinct within a walk; constructed sets
+    // that share one fall back to the content
+    reads.sort_by(|a, b| {
+        a.rank
+            .cmp(&b.rank)
+            .then_with(|| format!("{:?}", a.key).cmp(&format!("{:?}", b.key)))
+    });
+    let admitted: Vec<Read> = reads
+        .iter()
+        .filter(|read| {
+            read.by_engine()
+                || reads.iter().any(|engine| {
+                    engine.by_engine()
+                        && engine.symbology == read.symbology
+                        && engine.key.agrees(&read.key)
+                        && inside(engine.location, read.location)
+                })
+        })
+        .cloned()
+        .collect();
+    let mut groups: Vec<Vec<Read>> = Vec::new();
+    for read in admitted {
+        let group = groups.iter_mut().find(|group| {
+            group.first().is_some_and(|first| {
+                first.symbology == read.symbology && first.key.raw == read.key.raw
+            })
+        });
+        match group {
+            Some(group) => group.push(read),
+            None => groups.push(vec![read]),
+        }
+    }
+    let mut detections: Vec<Reconciled> = groups
+        .into_iter()
+        .flat_map(reconcile_group)
+        .filter(|detection| !detection.engines.is_empty())
+        .collect();
+    detections.sort_by_key(|detection| (!detection.symbology.is_qr_family(), detection.rank));
+    detections.truncate(MAX_DETECTIONS);
+    detections
+}
+
+/// Steps 1-3 within one (symbology, raw) group, its reads in order.
+fn reconcile_group(reads: Vec<Read>) -> Vec<Reconciled> {
+    let observed = |fnc1: Fnc1| fnc1 != Fnc1::Unobserved;
+    let mut formed: Vec<Forming> = Vec::new();
+    // step 1: located and no-ECI reads with an observed FNC1 position
+    let (first, rest): (Vec<Read>, Vec<Read>) = reads.into_iter().partition(|read| {
+        matches!(read.key.eci, EciEvidence::Located(_) | EciEvidence::NoEci)
+            && observed(read.key.fnc1)
+    });
+    for read in first {
+        match formed
+            .iter_mut()
+            .find(|f| f.eci == read.key.eci && f.fnc1 == read.key.fnc1)
+        {
+            Some(f) => f.members.push(read),
+            None => formed.push(Forming::new(read)),
+        }
+    }
+    // step 2: signalled reads with an observed FNC1 position
+    let (signalled, rest): (Vec<Read>, Vec<Read>) = rest
+        .into_iter()
+        .partition(|read| read.key.eci == EciEvidence::Signalled && observed(read.key.fnc1));
+    let step_one = formed.len();
+    for read in signalled {
+        join_signalled(&mut formed, step_one, read);
+    }
+    // step 3: unobserved evidence with an observed position, then an
+    // unobserved position
+    let (unobserved, unknown_position): (Vec<Read>, Vec<Read>) =
+        rest.into_iter().partition(|read| observed(read.key.fnc1));
+    join_or_form(&mut formed, unobserved);
+    join_or_form(&mut formed, unknown_position);
+    formed.into_iter().map(published).collect()
+}
+
+/// Step 2: a signalled read joins the one located step-1 detection of its
+/// FNC1 position that contains it; several or none: nothing. Without any
+/// such detection, the group's signalled detection for its position, which
+/// the first such read opens.
+fn join_signalled(formed: &mut Vec<Forming>, step_one: usize, read: Read) {
+    let located: Vec<usize> = (0..step_one)
+        .filter(|&i| {
+            matches!(formed[i].eci, EciEvidence::Located(_)) && formed[i].fnc1 == read.key.fnc1
+        })
+        .collect();
+    if located.is_empty() {
+        match formed[step_one..]
+            .iter_mut()
+            .find(|f| f.fnc1 == read.key.fnc1)
+        {
+            Some(f) => f.members.push(read),
+            None => formed.push(Forming::new(read)),
+        }
+        return;
+    }
+    let containing: Vec<usize> = located
+        .into_iter()
+        .filter(|&i| formed[i].contains(&read))
+        .collect();
+    if let [only] = containing[..] {
+        formed[only].members.push(read);
+    }
+}
+
+/// Step 3, one kind of read against the detections formed before: a read
+/// joins the one agreeing detection that contains it; with several it
+/// joins nothing; with none, the reads of that kind form one detection per
+/// published identity, unless a detection with that identity already
+/// exists — then they join nothing.
+fn join_or_form(formed: &mut Vec<Forming>, reads: Vec<Read>) {
+    let before = formed.len();
+    let mut left: Vec<Read> = Vec::new();
+    for read in reads {
+        let containing: Vec<usize> = (0..before)
+            .filter(|&i| formed[i].agrees(&read) && formed[i].contains(&read))
+            .collect();
+        match containing[..] {
+            [only] => formed[only].members.push(read),
+            [] => left.push(read),
+            _ => {}
+        }
+    }
+    for read in left {
+        let identity = identity(&read.key.eci, read.key.fnc1);
+        if formed[..before].iter().any(|f| f.identity() == identity) {
+            continue;
+        }
+        match formed[before..]
+            .iter_mut()
+            .find(|f| f.identity() == identity)
+        {
+            Some(f) => f.members.push(read),
+            None => formed.push(Forming::new(read)),
+        }
+    }
+}
+
+/// A formed detection as published: its account, the joined segments and
+/// engine reading, engines by earliest read, the earliest geometry.
+fn published(forming: Forming) -> Reconciled {
+    let Forming {
+        eci,
+        fnc1,
+        place,
+        members,
+    } = forming;
+    let mut engines: Vec<(EngineKind, Rank)> = Vec::new();
+    for &(engine, rank) in members.iter().flat_map(|m| m.engines.iter()) {
+        match engines.iter_mut().find(|(own, _)| *own == engine) {
+            Some((_, own)) => *own = (*own).min(rank),
+            None => engines.push((engine, rank)),
+        }
+    }
+    engines.sort_by_key(|&(_, rank)| rank);
+    // members are in rank order: the first that carries a part gives it
+    let geometry = Geometry {
+        corners: members.iter().find_map(|m| m.geometry.corners),
+        stream: members.iter().find_map(|m| m.geometry.stream.clone()),
+        ec: members.iter().find_map(|m| m.geometry.ec),
+    };
+    let rank = members.iter().map(|m| m.rank).min().unwrap_or_default();
+    let (symbology, raw) = members
+        .first()
+        .map_or((Symbology::QrCode, Vec::new()), |m| {
+            (m.symbology, m.key.raw.clone())
+        });
+    Reconciled {
+        symbology,
+        key: ContentKey { raw, eci, fnc1 },
+        segments: joined_segments(&members),
+        engine_reading: joined_engine_reading(&members),
+        engines: engines.into_iter().map(|(engine, _)| engine).collect(),
+        geometry,
+        location: place,
+        parsed: members.iter().any(|m| m.parsed),
+        rank,
+    }
+}
+
+/// The one distinct non-empty segment observation of the parsed reads;
+/// several conflict; parsed reads with none: no segment; no parsed read:
+/// not observed.
+fn joined_segments(members: &[Read]) -> Segments {
+    let mut parsed = false;
+    let mut seen: Vec<&Vec<DoubleByteSpan>> = Vec::new();
+    for member in members.iter().filter(|m| m.parsed) {
+        parsed = true;
+        if let Segments::Observed(spans) = &member.segments
+            && !spans.is_empty()
+            && !seen.contains(&spans)
+        {
+            seen.push(spans);
+        }
+    }
+    match seen[..] {
+        [] if parsed => Segments::Observed(Vec::new()),
+        [] => Segments::NotObserved,
+        [only] => Segments::Observed(only.clone()),
+        _ => Segments::Conflicting,
+    }
+}
+
+/// The one distinct engine reading of the reads; several distinct ones:
+/// none (rule 1e does not apply).
+fn joined_engine_reading(members: &[Read]) -> EngineReading {
+    let mut seen = EngineReading::None;
+    for member in members {
+        match (seen, member.engine_reading) {
+            (_, EngineReading::None) => {}
+            (EngineReading::None, reading) => seen = reading,
+            (own, reading) if own == reading => {}
+            _ => return EngineReading::None,
+        }
+    }
+    seen
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::engine::content::{self, DoubleByteMode, EciMark};
+    use crate::report::Charset;
+
+    use DoubleByteMode::{Hanzi, Kanji};
+    use EciEvidence::{NoEci, Signalled, Unobserved};
+    use EngineKind::{Rqrr, Rxing};
+
+    const X: Option<EngineKind> = Some(Rxing);
+    const Q: Option<EngineKind> = Some(Rqrr);
+    /// A candidate parse: no engine.
+    const C: Option<EngineKind> = None;
+    /// Two places side by side, and none.
+    const L: Option<f32> = Some(10.0);
+    const R: Option<f32> = Some(210.0);
+    const NOWHERE: Option<f32> = None;
+
+    const A1: &[u8] = &[0xA1];
+    const E_ACUTE: &[u8] = &[0xC3, 0xA9];
+    const YAMADA: &[u8] = &[0x8E, 0x52, 0x93, 0x63];
+    const CHUWEN: &[u8] = &[0xD6, 0xD0, 0xCE, 0xC4];
+
+    /// A 100 px square at `x`.
+    fn square_at(x: f32) -> [Point; 4] {
+        [
+            Point { x, y: 10.0 },
+            Point {
+                x: x + 100.0,
+                y: 10.0,
+            },
+            Point {
+                x: x + 100.0,
+                y: 110.0,
+            },
+            Point { x, y: 110.0 },
+        ]
+    }
+
+    fn located(marks: &[(u32, usize)]) -> EciEvidence {
+        EciEvidence::Located(
+            marks
+                .iter()
+                .map(|&(value, start)| EciMark { value, start })
+                .collect(),
+        )
+    }
+
+    fn eci4() -> EciEvidence {
+        located(&[(4, 0)])
+    }
+
+    fn key(raw: &[u8], eci: EciEvidence, fnc1: Fnc1) -> ContentKey {
+        ContentKey {
+            raw: raw.to_vec(),
+            eci,
+            fnc1,
+        }
+    }
+
+    /// The `n`-th read of a set, FNC1 none, made at `at` (a square there);
+    /// rqrr reads and candidate parses measure its corners. A candidate
+    /// parse is a parse.
+    fn read(
+        n: u32,
+        raw: &[u8],
+        eci: EciEvidence,
+        engine: Option<EngineKind>,
+        at: Option<f32>,
+    ) -> Read {
+        let rank = Rank {
+            attempt: n,
+            source: 0,
+            index: 0,
+        };
+        let mut read = Read::new(Symbology::QrCode, key(raw, eci, Fnc1::None), engine, rank)
+            .at(at.map(square_at));
+        if engine != X {
+            read.geometry.corners = at.map(|x| (square_at(x), false));
+        }
+        if engine.is_none() {
+            read.parsed = true;
+            read.segments = Segments::Observed(Vec::new());
+        }
+        read
+    }
+
+    /// The read, parsed by the scanner.
+    fn parsed(mut read: Read) -> Read {
+        read.parsed = true;
+        if read.segments == Segments::NotObserved {
+            read.segments = Segments::Observed(Vec::new());
+        }
+        read
+    }
+
+    fn fnc1(mut read: Read, fnc1: Fnc1) -> Read {
+        read.key.fnc1 = fnc1;
+        read
+    }
+
+    fn spans(mut read: Read, spans: &[(DoubleByteMode, usize, usize)]) -> Read {
+        read.segments = Segments::Observed(
+            spans
+                .iter()
+                .map(|&(mode, start, end)| DoubleByteSpan { mode, start, end })
+                .collect(),
+        );
+        read
+    }
+
+    fn engine_reading(mut read: Read, reading: EngineReading) -> Read {
+        read.engine_reading = reading;
+        read
+    }
+
+    /// A detection's reading, as the ladder interprets it.
+    fn reading(detection: &Reconciled) -> (String, Charset) {
+        let reading = content::read(
+            &detection.key.raw,
+            &detection.key.eci,
+            &detection.segments,
+            detection.engine_reading,
+            detection.symbology.is_qr_family(),
+        );
+        (reading.text, reading.charset)
+    }
+
+    /// What a publication is, compared across orders.
+    fn summary(detections: &[Reconciled]) -> Vec<String> {
+        detections
+            .iter()
+            .map(|d| {
+                format!(
+                    "{:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+                    d.key,
+                    d.engines,
+                    d.rank,
+                    d.geometry.corners.map(|(corners, _)| corners[0].x),
+                    d.location.map(|corners| corners[0].x),
+                    d.segments,
+                    reading(d),
+                )
+            })
+            .collect()
+    }
+
+    fn store(reads: impl IntoIterator<Item = Read>, refusals: &[Refusal]) -> ReadStore {
+        let mut store = ReadStore::default();
+        for refusal in refusals {
+            store.refuse(refusal.clone(), 0);
+        }
+        for read in reads {
+            store.collect(read);
+        }
+        store
+    }
+
+    /// Every permutation of `0..n` (Heap's algorithm).
+    fn permutations(n: usize) -> Vec<Vec<usize>> {
+        fn heap(k: usize, items: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+            if k <= 1 {
+                out.push(items.clone());
+                return;
+            }
+            heap(k - 1, items, out);
+            for i in 0..k - 1 {
+                if k.is_multiple_of(2) {
+                    items.swap(i, k - 1);
+                } else {
+                    items.swap(0, k - 1);
+                }
+                heap(k - 1, items, out);
+            }
+        }
+        let mut out = Vec::new();
+        heap(n, &mut (0..n).collect(), &mut out);
+        out
+    }
+
+    /// Reconcile `reads` collected in every order; the publication must be
+    /// one.
+    fn every_order(reads: &[Read], refusals: &[Refusal]) -> Vec<Reconciled> {
+        let found = store(reads.iter().cloned(), refusals).reconcile();
+        let expected = summary(&found);
+        for order in permutations(reads.len()) {
+            let shuffled = order.iter().map(|&i| reads[i].clone());
+            assert_eq!(
+                summary(&store(shuffled, refusals).reconcile()),
+                expected,
+                "order {order:?}"
+            );
+        }
+        found
+    }
+
+    fn engines(found: &[Reconciled]) -> Vec<Vec<EngineKind>> {
+        found.iter().map(|d| d.engines.clone()).collect()
+    }
+
+    #[test]
+    fn reconcile_is_order_independent() {
+        // rxing and rqrr both located
+        let found = every_order(
+            &[
+                parsed(read(0, A1, eci4(), X, NOWHERE)),
+                parsed(read(1, A1, eci4(), Q, L)),
+            ],
+            &[],
+        );
+        assert_eq!(engines(&found), [vec![Rxing, Rqrr]]);
+        assert_eq!(reading(&found[0]), ("\u{104}".into(), Charset::Eci));
+        // a signalled port read joins the located one
+        let found = every_order(
+            &[
+                read(0, A1, Signalled, X, NOWHERE),
+                parsed(read(1, A1, eci4(), Q, L)),
+            ],
+            &[],
+        );
+        assert_eq!(engines(&found), [vec![Rxing, Rqrr]]);
+        assert_eq!(found[0].key.eci, eci4());
+        // twins ECI 26 / ECI 4 over the same bytes; a signalled read without
+        // a place joins neither, one at the right joins ECI 4
+        let twins = [
+            parsed(read(0, E_ACUTE, located(&[(26, 0)]), Q, L)),
+            parsed(read(1, E_ACUTE, eci4(), Q, R)),
+        ];
+        for (at, expected) in [
+            (NOWHERE, [vec![Rqrr], vec![Rqrr]]),
+            (R, [vec![Rqrr], vec![Rqrr, Rxing]]),
+        ] {
+            let mut reads = twins.to_vec();
+            reads.push(read(2, E_ACUTE, Signalled, X, at));
+            let found = every_order(&reads, &[]);
+            assert_eq!(engines(&found), expected, "{at:?}");
+            assert_eq!(reading(&found[0]), ("é".into(), Charset::Utf8));
+            assert_eq!(reading(&found[1]), ("ĂŠ".into(), Charset::Eci));
+        }
+        // FNC1 first and second are two contents
+        let found = every_order(
+            &[
+                fnc1(read(0, b"37abc", NoEci, X, NOWHERE), Fnc1::First),
+                fnc1(read(1, b"37abc", NoEci, X, NOWHERE), Fnc1::Second),
+            ],
+            &[],
+        );
+        assert_eq!(found.len(), 2);
+        // an unobserved read joins the one it lies in, none without a place
+        let pair = [
+            parsed(read(0, A1, NoEci, Q, L)),
+            parsed(read(1, A1, eci4(), Q, R)),
+        ];
+        for (at, expected) in [
+            (R, [vec![Rqrr], vec![Rqrr, Rxing]]),
+            (NOWHERE, [vec![Rqrr], vec![Rqrr]]),
+        ] {
+            let mut reads = pair.to_vec();
+            reads.push(read(2, A1, Unobserved, X, at));
+            assert_eq!(engines(&every_order(&reads, &[])), expected, "{at:?}");
+        }
+        // FNC1 first + ECI 26, the port read located by the re-read
+        let gs1: &[u8] = b"0109506000134352";
+        let eci26 = located(&[(26, 0)]);
+        let found = every_order(
+            &[
+                fnc1(parsed(read(0, gs1, eci26.clone(), X, L)), Fnc1::First),
+                fnc1(read(1, gs1, eci26, C, L), Fnc1::First),
+            ],
+            &[],
+        );
+        assert_eq!(engines(&found), [vec![Rxing]]);
+        assert_eq!(found[0].key.fnc1, Fnc1::First);
+        assert!(found[0].geometry.corners.is_some(), "the candidate's grid");
+        // signalled beside no-ECI over the same bytes
+        let found = every_order(
+            &[
+                read(0, E_ACUTE, Signalled, X, NOWHERE),
+                read(1, E_ACUTE, NoEci, X, NOWHERE),
+            ],
+            &[],
+        );
+        assert_eq!(
+            found.iter().map(reading).collect::<Vec<_>>(),
+            [
+                ("\u{FFFD}\u{FFFD}".to_owned(), Charset::Unknown),
+                ("é".to_owned(), Charset::Utf8)
+            ]
+        );
+    }
+
+    #[test]
+    fn double_byte_contents_reconcile_in_every_order() {
+        // Kanji 山田, rxing (its own reading) + rqrr (segments)
+        let found = every_order(
+            &[
+                engine_reading(read(0, YAMADA, NoEci, X, NOWHERE), EngineReading::ShiftJis),
+                spans(parsed(read(1, YAMADA, NoEci, Q, L)), &[(Kanji, 0, 4)]),
+            ],
+            &[],
+        );
+        assert_eq!(engines(&found), [vec![Rxing, Rqrr]]);
+        assert_eq!(reading(&found[0]), ("山田".into(), Charset::ShiftJis));
+        // Hanzi 中文, rxing + a candidate parse (no engine)
+        let found = every_order(
+            &[
+                read(0, CHUWEN, NoEci, X, L),
+                spans(read(1, CHUWEN, NoEci, C, L), &[(Hanzi, 0, 4)]),
+            ],
+            &[],
+        );
+        assert_eq!(engines(&found), [vec![Rxing]]);
+        assert_eq!(reading(&found[0]), ("中文".into(), Charset::Gb18030));
+        // Hanzi twice, one unobserved
+        let found = every_order(
+            &[
+                engine_reading(read(0, CHUWEN, NoEci, X, NOWHERE), EngineReading::Gb18030),
+                read(1, CHUWEN, Unobserved, Q, NOWHERE),
+            ],
+            &[],
+        );
+        assert_eq!(engines(&found), [vec![Rxing, Rqrr]]);
+        assert_eq!(reading(&found[0]), ("中文".into(), Charset::Gb18030));
+        // Kanji-mode and byte-mode twins
+        let found = every_order(
+            &[
+                spans(parsed(read(0, YAMADA, NoEci, Q, L)), &[(Kanji, 0, 4)]),
+                parsed(read(1, YAMADA, NoEci, Q, R)),
+            ],
+            &[],
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(reading(&found[0]), ("山田".into(), Charset::ShiftJis));
+        // Kanji against Hanzi over one stream: conflicting segments
+        let both: &[u8] = &[0xB0, 0xA1, 0xB0, 0xA1];
+        let found = every_order(
+            &[
+                spans(parsed(read(0, both, NoEci, Q, L)), &[(Kanji, 0, 4)]),
+                spans(parsed(read(1, both, NoEci, X, R)), &[(Hanzi, 0, 4)]),
+            ],
+            &[],
+        );
+        assert_eq!(found[0].segments, Segments::Conflicting);
+        assert_eq!(reading(&found[0]), ("\u{FFFD}".repeat(4), Charset::Unknown));
+    }
+
+    #[test]
+    fn reads_beside_candidates_and_refusals_reconcile_in_every_order() {
+        // an unobserved read without a place between two candidates
+        let found = every_order(
+            &[
+                read(0, A1, Unobserved, X, NOWHERE),
+                read(1, A1, NoEci, C, L),
+                read(2, A1, eci4(), C, R),
+            ],
+            &[],
+        );
+        assert!(found.is_empty(), "{:?}", summary(&found));
+        // rxing-only signalled twins are one content
+        let found = every_order(
+            &[
+                read(0, E_ACUTE, Signalled, X, L),
+                read(1, E_ACUTE, Signalled, X, R),
+            ],
+            &[],
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            reading(&found[0]),
+            ("\u{FFFD}\u{FFFD}".into(), Charset::Unknown)
+        );
+        // with a refusal (the place rules have their own tests below)
+        let refusal = Refusal {
+            port: Some(key(b"abc", Signalled, Fnc1::None)),
+            rqrr: None,
+            place: None,
+        };
+        let found = every_order(
+            &[
+                parsed(read(0, b"abc", located(&[(3, 0)]), Q, L)),
+                read(1, b"abc", Signalled, X, L),
+                read(2, b"abc", Signalled, X, R),
+            ],
+            &[refusal],
+        );
+        assert_eq!(engines(&found), [vec![Rqrr, Rxing]], "protected, joined");
+    }
+
+    #[test]
+    fn a_read_outside_its_only_candidate_never_lends_geometry() {
+        // a located anchor on the left and an unobserved read of another
+        // symbol on the right: two contents, each its own geometry
+        let found = every_order(
+            &[
+                parsed(read(0, A1, eci4(), Q, L)),
+                read(1, A1, Unobserved, Q, R),
+            ],
+            &[],
+        );
+        assert_eq!(found.len(), 2);
+        let corners: Vec<Option<f32>> = found
+            .iter()
+            .map(|d| d.geometry.corners.map(|(c, _)| c[0].x))
+            .collect();
+        assert_eq!(corners, [L, R]);
+        assert_eq!(reading(&found[1]), ("\u{FFFD}".into(), Charset::Unknown));
+        // a signalled read beside a single located anchor joins none
+        let found = every_order(
+            &[
+                parsed(read(0, A1, eci4(), Q, L)),
+                read(1, A1, Signalled, X, R),
+            ],
+            &[],
+        );
+        assert_eq!(engines(&found), [vec![Rqrr]]);
+    }
+
+    #[test]
+    fn reads_without_place_join_none_and_order_never_matters() {
+        // U (no place), N and S of [A1]: two detections; U agrees with both
+        // and lies in both — it joins neither (their earliest reads stay N's
+        // and S's)
+        let found = every_order(
+            &[
+                read(0, A1, Unobserved, Q, NOWHERE),
+                read(1, A1, NoEci, Q, L),
+                read(2, A1, Signalled, X, R),
+            ],
+            &[],
+        );
+        let ranks: Vec<u32> = found.iter().map(|d| d.rank.attempt).collect();
+        assert_eq!(ranks, [1, 2]);
+        assert_eq!(found[0].key.eci, NoEci);
+        assert_eq!(found[1].key.eci, Signalled);
+    }
+
+    #[test]
+    fn a_candidate_joins_only_where_it_contains_an_engine_read() {
+        // the only matching port read lies elsewhere: the candidate is not
+        // admitted, the port read stands alone without geometry
+        let found = every_order(
+            &[
+                fnc1(read(0, b"10ABC", NoEci, C, L), Fnc1::First),
+                fnc1(read(1, b"10ABC", NoEci, X, R), Fnc1::First),
+            ],
+            &[],
+        );
+        assert_eq!(engines(&found), [vec![Rxing]]);
+        assert!(found[0].geometry.corners.is_none());
+    }
+
+    #[test]
+    fn a_read_two_candidates_contain_joins_neither() {
+        // both candidates admitted, the read joins neither, neither is
+        // published
+        let found = every_order(
+            &[
+                read(0, A1, eci4(), C, L),
+                read(1, A1, located(&[(7, 0)]), C, L),
+                read(2, A1, Signalled, X, L),
+            ],
+            &[],
+        );
+        assert!(found.is_empty(), "{:?}", summary(&found));
+    }
+
+    #[test]
+    fn reconciliation_follows_the_evidence_lattice() {
+        // (first account, second account, detections, account kept first)
+        let cases = [
+            (Unobserved, NoEci, 1, NoEci),
+            (NoEci, Unobserved, 1, NoEci),
+            (Unobserved, eci4(), 1, eci4()),
+            (Signalled, Signalled, 1, Signalled),
+            (Signalled, eci4(), 1, eci4()),
+            (eci4(), Signalled, 1, eci4()),
+            (eci4(), eci4(), 1, eci4()),
+            (NoEci, Signalled, 2, NoEci),
+            (NoEci, eci4(), 2, NoEci),
+            (eci4(), located(&[(4, 1)]), 2, eci4()),
+            (eci4(), located(&[(3, 0)]), 2, eci4()),
+        ];
+        for (first, second, count, kept) in cases {
+            let found = every_order(
+                &[
+                    read(0, A1, first.clone(), X, NOWHERE),
+                    read(1, A1, second.clone(), Q, NOWHERE),
+                ],
+                &[],
+            );
+            assert_eq!(found.len(), count, "{first:?} then {second:?}");
+            assert_eq!(found[0].key.eci, kept, "{first:?} then {second:?}");
+        }
+    }
+
+    #[test]
+    fn fnc1_first_and_second_never_reconcile() {
+        // the same bytes under GS1 (first) and under an AIM application
+        // (second) are two contents, a plain read a third; an unknown
+        // position agrees with all three and joins none
+        let found = every_order(
+            &[
+                fnc1(read(0, b"37abc", NoEci, Q, NOWHERE), Fnc1::Unobserved),
+                fnc1(read(1, b"37abc", NoEci, X, NOWHERE), Fnc1::First),
+                fnc1(
+                    read(2, b"37abc", NoEci, Some(EngineKind::Rescue), NOWHERE),
+                    Fnc1::Second,
+                ),
+                read(3, b"37abc", NoEci, Q, NOWHERE),
+            ],
+            &[],
+        );
+        let positions: Vec<Fnc1> = found.iter().map(|d| d.key.fnc1).collect();
+        assert_eq!(positions, [Fnc1::First, Fnc1::Second, Fnc1::None]);
+        assert!(found.iter().all(|d| d.engines.len() == 1));
+    }
+
+    #[test]
+    fn a_read_with_corners_joins_the_admitting_detection_it_overlaps() {
+        // two symbols of [A1] side by side — unmarked on the left, ECI 4 on
+        // the right — and a read both admit: where it lies decides; a read
+        // WITHOUT a place both admit joins none
+        let base = [
+            parsed(read(0, A1, NoEci, Q, L)),
+            parsed(read(1, A1, eci4(), Q, R)),
+            read(2, A1, Unobserved, Some(EngineKind::Rescue), Some(212.0)),
+        ];
+        let found = every_order(&base, &[]);
+        assert_eq!(
+            engines(&found),
+            [vec![Rqrr], vec![Rqrr, EngineKind::Rescue]]
+        );
+        // (its FNC1 position unobserved too, so it never folds into the
+        // rescue read)
+        let mut reads = base.to_vec();
+        reads.push(fnc1(read(3, A1, Unobserved, X, NOWHERE), Fnc1::Unobserved));
+        assert_eq!(
+            engines(&every_order(&reads, &[])),
+            [vec![Rqrr], vec![Rqrr, EngineKind::Rescue]]
+        );
+    }
+
+    #[test]
+    fn identical_reads_fold_with_the_first_geometry() {
+        // engines united; the first corners keep their photometry, whatever
+        // the order the reads arrive in
+        let mut later = read(1, b"same", NoEci, Q, R);
+        later.geometry.corners = Some((square_at(210.0), true));
+        let found = every_order(
+            &[
+                read(0, b"same", NoEci, X, NOWHERE),
+                read(2, b"same", NoEci, Q, L),
+                later,
+            ],
+            &[],
+        );
+        assert_eq!(engines(&found), [vec![Rxing, Rqrr]]);
+        assert_eq!(
+            found[0]
+                .geometry
+                .corners
+                .map(|(c, inverted)| (c[0].x, inverted)),
+            Some((210.0, true)),
+            "the earliest read that carries corners"
+        );
+    }
+
+    #[test]
+    fn reconcile_bounds() {
+        // 65 distinct reads — 64 reconciled (the 65th counted), at most 16
+        // published, the QR family first
+        let mut store = ReadStore::default();
+        for i in 0..65u32 {
+            let mut read = read(i, format!("symbol-{i}").as_bytes(), NoEci, X, NOWHERE);
+            if i % 2 == 0 {
+                read.symbology = Symbology::DataMatrix;
+                read.key.eci = Unobserved;
+                read.key.fnc1 = Fnc1::Unobserved;
+            }
+            store.collect(read);
+        }
+        assert_eq!((store.reads.len(), store.dropped), (MAX_DISTINCT_READS, 1));
+        let found = store.reconcile();
+        assert_eq!(found.len(), MAX_DETECTIONS);
+        assert!(found.iter().all(|d| d.symbology == Symbology::QrCode));
+        assert_eq!(found[0].key.raw, b"symbol-1");
+        // a known content still folds in past the bound
+        store.collect(read(70, b"symbol-1", NoEci, Q, NOWHERE));
+        assert_eq!(store.reconcile()[0].engines, [Rxing, Rqrr]);
+    }
+
+    fn port(raw: &[u8], place: Option<f32>) -> Refusal {
+        Refusal {
+            port: Some(key(raw, Signalled, Fnc1::None)),
+            rqrr: None,
+            place: place.map(square_at),
+        }
+    }
+
+    fn published(store: &ReadStore) -> Vec<(Vec<u8>, Vec<EngineKind>)> {
+        store
+            .reconcile()
+            .into_iter()
+            .map(|d| (d.key.raw, d.engines))
+            .collect()
+    }
+
+    #[test]
+    fn a_refusal_withholds_the_reads_its_names_cover_and_nothing_else() {
+        // the port key (abc, signalled, none) withholds unparsed QR Code
+        // reads (abc, signalled) and (abc, unobserved) — retroactively
+        let mut store = store(
+            [
+                read(0, b"abc", Signalled, X, NOWHERE),
+                read(1, b"abc", Unobserved, Q, NOWHERE),
+            ],
+            &[],
+        );
+        assert_eq!(published(&store).len(), 1);
+        store.refuse(port(b"abc", None), 2);
+        assert!(
+            published(&store).is_empty(),
+            "a later proof marks earlier reads"
+        );
+        // never a no-ECI read, a GS1 one, a parsed read or another symbology
+        let mut micro = read(4, b"abc", Signalled, X, NOWHERE);
+        micro.symbology = Symbology::MicroQrCode;
+        for other in [
+            read(3, b"abc", NoEci, X, NOWHERE),
+            fnc1(read(3, b"abc", Signalled, X, NOWHERE), Fnc1::First),
+            parsed(read(3, b"abc", eci4(), X, NOWHERE)),
+            micro,
+        ] {
+            let store = store_with(other.clone(), port(b"abc", None));
+            assert_eq!(published(&store).len(), 1, "{other:?}");
+        }
+        // rqrr's bytes withhold rqrr's part of an unparsed read only
+        let refusal = Refusal {
+            port: None,
+            rqrr: Some(b"xyz".to_vec()),
+            place: None,
+        };
+        let store = store_with(read(0, b"xyz", Unobserved, Q, NOWHERE), refusal.clone());
+        assert!(published(&store).is_empty());
+        let mut both = read(0, b"xyz", Unobserved, Q, NOWHERE);
+        both.engines.push((
+            Rxing,
+            Rank {
+                attempt: 1,
+                ..Rank::default()
+            },
+        ));
+        assert_eq!(
+            published(&store_with(both, refusal)),
+            [(b"xyz".to_vec(), vec![Rxing])]
+        );
+    }
+
+    fn store_with(read: Read, refusal: Refusal) -> ReadStore {
+        let mut store = ReadStore::default();
+        store.collect(read);
+        store.refuse(refusal, 0);
+        store
+    }
+
+    #[test]
+    fn a_refusal_withholds_only_where_the_refused_symbol_is() {
+        // a well-formed symbol beside a refused one, their port reads alike —
+        // the refusal withholds the read that lies inside the refused grid,
+        // never the other
+        let store = store_with(read(0, b"abc", Signalled, X, L), port(b"abc", R));
+        assert_eq!(published(&store).len(), 1, "elsewhere: it stands");
+        let store = store_with(read(0, b"abc", Signalled, X, R), port(b"abc", R));
+        assert!(published(&store).is_empty(), "inside: withheld");
+        // a read made at both places is evidence of a symbol elsewhere
+        let mut twice = read(0, b"abc", Signalled, X, R);
+        twice.fold(read(1, b"abc", Signalled, X, L));
+        assert_eq!(published(&store_with(twice, port(b"abc", R))).len(), 1);
+        // a read without a place never fails the place test
+        let store = store_with(read(0, b"abc", Signalled, X, NOWHERE), port(b"abc", R));
+        assert!(published(&store).is_empty());
+    }
+
+    #[test]
+    fn a_parsed_read_of_the_same_attempt_protects_an_earlier_read() {
+        // a proof and a parsed read admitting an earlier observation in one
+        // attempt — the observation is kept, with its engines and first-seen
+        // order
+        let mut store = ReadStore::default();
+        store.collect(read(0, b"abc", Signalled, X, NOWHERE));
+        store.collect(read(1, b"zzz", NoEci, X, NOWHERE));
+        store.refuse(port(b"abc", None), 2);
+        store.collect(parsed(read(2, b"abc", eci4(), Q, L)));
+        assert_eq!(
+            published(&store),
+            [
+                (b"abc".to_vec(), vec![Rxing, Rqrr]),
+                (b"zzz".to_vec(), vec![Rxing])
+            ]
+        );
+        // so does the other walk's parsed content (the alpha seed)
+        let mut seeded = ReadStore::seeded(Seed {
+            refusals: vec![port(b"abc", None)],
+            protection: vec![(Symbology::QrCode, key(b"abc", eci4(), Fnc1::None))],
+            rereads: 0,
+        });
+        seeded.collect(read(0, b"abc", Signalled, X, NOWHERE));
+        assert_eq!(published(&seeded).len(), 1);
+    }
+
+    #[test]
+    fn a_refusal_past_capacity_withholds_up_to_its_attempt() {
+        // 16 recorded refusals; a 17th, found in attempt 3, withholds what
+        // was read up to attempt 3 — a later attempt's read stands
+        let mut store = ReadStore::default();
+        for i in 0..MAX_REFUSALS {
+            store.refuse(port(&[u8::try_from(i).unwrap()], None), 0);
+        }
+        store.collect(read(3, b"zzz", Signalled, X, NOWHERE));
+        store.refuse(port(b"zzz", None), 3);
+        assert_eq!(store.refusals.len(), MAX_REFUSALS, "the capacity holds");
+        assert!(published(&store).is_empty());
+        store.collect(read(3, b"zzz", Signalled, X, NOWHERE));
+        assert!(published(&store).is_empty(), "the same attempt's read too");
+        store.collect(read(4, b"zzz", Signalled, X, NOWHERE));
+        assert_eq!(published(&store).len(), 1, "then it lapses");
+        // the opposite-background walk receives it
+        assert_eq!(store.seed(0).refusals.len(), MAX_REFUSALS + 1);
+        let mut walk2 = ReadStore::seeded(store.seed(0));
+        walk2.collect(read(9, b"zzz", Signalled, X, NOWHERE));
+        assert!(published(&walk2).is_empty());
+    }
+
+    #[test]
+    fn the_walk_goes_on_while_only_signalled_qr_reads_were_found() {
+        // continuation over the reads that stand
+        let settled = |reads: Vec<Read>, refusals: &[Refusal]| store(reads, refusals).settled();
+        assert!(!settled(Vec::new(), &[]), "nothing found");
+        assert!(!settled(vec![read(0, b"abc", Signalled, X, NOWHERE)], &[]));
+        let mut ean = read(1, b"4006381333931", Unobserved, X, NOWHERE);
+        ean.symbology = Symbology::Ean13;
+        assert!(
+            !settled(
+                vec![read(0, b"abc", Signalled, X, NOWHERE), ean.clone()],
+                &[]
+            ),
+            "other symbologies neither stop nor prolong it"
+        );
+        assert!(settled(vec![ean], &[]));
+        for account in [NoEci, Unobserved, located(&[(26, 0)])] {
+            assert!(
+                settled(
+                    vec![
+                        read(0, b"abc", Signalled, X, NOWHERE),
+                        read(1, b"xyz", account.clone(), X, NOWHERE),
+                    ],
+                    &[]
+                ),
+                "{account:?}"
+            );
+        }
+        for symbology in [Symbology::MicroQrCode, Symbology::RectangularMicroQrCode] {
+            let mut other = read(0, b"abc", Signalled, X, NOWHERE);
+            other.symbology = symbology;
+            assert!(settled(vec![other], &[]), "{symbology:?}");
+        }
+        // withheld reads do not count
+        assert!(!settled(
+            vec![
+                read(0, b"abc", Signalled, X, NOWHERE),
+                read(1, b"zzz", Signalled, X, NOWHERE),
+                read(2, b"zzz", Unobserved, Q, NOWHERE),
+            ],
+            &[port(b"zzz", None)]
+        ));
+        // a signalled read a candidate parse contains with an agreeing
+        // account counts as located
+        assert!(settled(
+            vec![
+                read(0, b"abc", Signalled, X, L),
+                read(1, b"abc", located(&[(26, 0)]), C, L),
+            ],
+            &[]
+        ));
+        assert!(!settled(
+            vec![
+                read(0, b"abc", Signalled, X, L),
+                read(1, b"abc", located(&[(26, 0)]), C, R),
+            ],
+            &[]
+        ));
+    }
+
+    fn arbitrary_read() -> impl Strategy<Value = (u8, u8, u8, u8, u8)> {
+        (0u8..2, 0u8..5, 0u8..3, 0u8..3, 0u8..3)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        /// Order independence over arbitrary sets of up to 64 reads.
+        #[test]
+        fn reconcile_is_order_independent_over_arbitrary_sets(
+            shapes in proptest::collection::vec(arbitrary_read(), 1..64)
+                .prop_flat_map(|shapes| {
+                    let n = shapes.len();
+                    (Just(shapes), Just((0..n).collect::<Vec<usize>>()).prop_shuffle())
+                }),
+        ) {
+            let (shapes, order) = shapes;
+            let reads: Vec<Read> = shapes
+                .iter()
+                .enumerate()
+                .map(|(n, &(raw, eci, fnc1_code, engine, at))| {
+                    let raw: &[u8] = if raw == 0 { A1 } else { b"abc" };
+                    let eci = match eci {
+                        0 => Unobserved,
+                        1 => NoEci,
+                        2 => Signalled,
+                        3 => eci4(),
+                        _ => located(&[(7, 0)]),
+                    };
+                    let engine = [X, Q, C][usize::from(engine)];
+                    let at = [NOWHERE, L, R][usize::from(at)];
+                    let position = [Fnc1::None, Fnc1::First, Fnc1::Unobserved][usize::from(fnc1_code)];
+                    let mut read = fnc1(read(u32::try_from(n).unwrap(), raw, eci, engine, at), position);
+                    if engine == Q && matches!(read.key.eci, EciEvidence::Located(_) | NoEci) {
+                        read = parsed(read);
+                    }
+                    read
+                })
+                .collect();
+            let expected = summary(&store(reads.iter().cloned(), &[]).reconcile());
+            let shuffled = order.iter().map(|&i| reads[i].clone());
+            prop_assert_eq!(summary(&store(shuffled, &[]).reconcile()), expected);
+        }
+    }
+}

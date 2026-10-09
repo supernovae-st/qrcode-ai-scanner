@@ -21,10 +21,15 @@ Wire-name policy the gate relies on:
     snake_case, so the serde/wire name == the Rust field name (per-field
     `#[serde(rename)]`/`skip` IS honoured if it ever appears).
   * The Dart mirror lenient-degrades UNKNOWN variants at runtime (every enum
-    has an `unknown` fallback; Payload/Hint have catch-all variants). The gate
-    checks only that its KNOWN set matches Rust EXACTLY. Dart field NAMES are
-    read from the `j['wire_key']` accessors in each `fromJson` (the camelCase
-    Dart identifiers are local and never touch the wire).
+    has a fallback — `unknown`, or `unrecognized` for Charset and Fnc1Position,
+    where `unknown` is a real wire value; Payload/Hint have catch-all
+    variants). The gate checks only that its KNOWN set matches Rust EXACTLY.
+    Dart field NAMES are read from the `j['wire_key']` accessors in each
+    `fromJson` (the camelCase Dart identifiers are local and never touch the
+    wire).
+  * A Rust variant carrying `serde(... skip_serializing ...)` (the reader-side
+    `serde(other)` fallback, `Unrecognized`) is never written on the wire: it
+    is no wire value and the gate ignores it.
 
 Schema leniency is deliberate (additive evolution): the tag property stays
 `type: string`, but every FIELDED variant must have a conditional and the
@@ -50,6 +55,7 @@ DART_PATH = "bindings/flutter/lib/report.dart"
 CONTRACT_STRUCTS = [
     (REPORT_RS, "Point"),
     (GS1_RS, "Gs1Element"),
+    (REPORT_RS, "EciSegment"),
     (REPORT_RS, "DecodedContent"),
     (REPORT_RS, "QrMeta"),
     (REPORT_RS, "Detection"),
@@ -76,6 +82,7 @@ OPTIONAL_FIELDS: dict[str, set[str]] = {
     "ScanReport": {"alpha"},
     "Score": {"weights_run"},
     "AxisScore": {"refined_failed_at"},
+    "DecodedContent": {"eci", "fnc1"},
 }
 
 # Flat enums with a same-named schema $def (rust ↔ ts ↔ schema).
@@ -84,6 +91,7 @@ FLAT_ENUMS = [
     "EngineKind",
     "EcLevel",
     "Charset",
+    "Fnc1Position",
     "Grade",
     "IsoGrade",
     "StressAxis",
@@ -98,6 +106,7 @@ DART_ENUMS = [
     "EngineKind",
     "EcLevel",
     "Charset",
+    "Fnc1Position",
     "Grade",
     "StressAxis",
     "AlphaMode",
@@ -151,9 +160,21 @@ def rust_variants(path: str, enum_name: str) -> set[str]:
     start = src.index(f"pub enum {enum_name}")
     body_start = src.index("{", start)
     body = _balanced(src, body_start)
-    # variant = identifier at indent-4 followed by `,` or `{` (skip nested fields)
-    names = re.findall(r"^\s{4}([A-Z]\w*)\s*[,{]", body, re.M)
-    return {snake(n) for n in names}
+    # variant = identifier at indent-4 followed by `,` or `{` (skip nested
+    # fields); a variant whose attributes say `skip_serializing` is reader-side
+    # only (never written) and is no wire value
+    names: set[str] = set()
+    skipped = False
+    for line in body.splitlines():
+        if re.match(r"^\s{4}#\[", line):
+            skipped = skipped or "skip_serializing" in line
+            continue
+        m = re.match(r"^\s{4}([A-Z]\w*)\s*[,{]", line)
+        if m:
+            if not skipped:
+                names.add(snake(m.group(1)))
+            skipped = False
+    return names
 
 
 def rust_struct_fields(path: str, struct_name: str) -> set[str]:

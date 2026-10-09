@@ -45,9 +45,10 @@ pub use ladder::{
 pub use payload::Payload;
 pub use report::{
     AlphaEnvelope, AlphaMode, AlphaPaletteProbe, AlphaPlacement, AlphaProbe, AlphaReport,
-    AxisScore, Charset, DecodedContent, Detection, EcLevel, EngineKind, Grade, Hint,
-    Iso15415Report, IsoGrade, IsoParameter, PipelineTrace, PlateColor, Point, QrMeta, ScanReport,
-    Score, StageTrace, StressAxis, StructuralReport, Symbology, UecGrade, UecReport, Versions,
+    AxisScore, Charset, DecodedContent, Detection, EcLevel, EciSegment, EngineKind, Fnc1Position,
+    Grade, Hint, Iso15415Report, IsoGrade, IsoParameter, PipelineTrace, PlateColor, Point, QrMeta,
+    ScanReport, Score, StageTrace, StressAxis, StructuralReport, Symbology, UecGrade, UecReport,
+    Versions,
 };
 
 /// Fuzz-only entry points — cargo-fuzz builds the whole graph with
@@ -55,11 +56,12 @@ pub use report::{
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub mod fuzzing {
-    /// Drive both text classifiers (plain + FNC1) — they parse
-    /// attacker-controlled decoded QR content and must never panic.
+    /// Drive every text classifier (plain, FNC1 first, FNC1 second) —
+    /// they parse attacker-controlled decoded content and must never panic.
     pub fn classify_text(text: &str) {
         let _ = crate::payload::classify(text);
         let _ = crate::payload::classify_fnc1(text);
+        let _ = crate::classify_aim_application(text);
     }
 
     /// Drive the shared segment parser over attacker-controlled data
@@ -128,14 +130,16 @@ impl Scanner {
         // same budget) — a mis-called content mean must never turn a
         // decodable design into a false "no detection". Both walks stay in
         // the trace; `fallback_used` marks a RESCUE, not an attempt. A
-        // stream the first walk proved malformed stays refused in the second
-        // (`fold_fallback` applies the first walk's proofs).
+        // stream the first walk refused stays refused in the second: it
+        // starts from the first walk's refusals and parsed contents
+        // (`fold_fallback` checks them once more).
         let mut fallback_used = false;
         if outcome.merged.is_empty()
             && let Some(context) = &mut alpha_context
             && let Some((alt_planes, alt_background)) = context.opposite_planes()
         {
-            let alt_outcome = ladder::run(&alt_planes, &self.config, cancel, deadline)?;
+            let alt_outcome =
+                ladder::run_seeded(&alt_planes, &self.config, cancel, deadline, outcome.seed())?;
             if outcome.fold_fallback(alt_outcome) {
                 planes = alt_planes;
                 context.adopt_background(alt_background);
@@ -255,12 +259,64 @@ impl ScannerBuilder {
     }
 }
 
-/// Assemble the public report from ladder output. Text comes from the
-/// scanner's one interpretation (`engine::content`): a declared ECI decides
-/// it, the charset heuristic does when none is declared. `raw` is always
-/// the original payload; a declared reading that no legacy label
-/// reproduces is published with the `utf8` placeholder until the wire
-/// gains `eci`/`unknown`.
+/// The text classifier for FNC1-in-second-position data (spec/05): an
+/// AIM-assigned application's data, never GS1 — the plain classifier
+/// without its no-FNC1 GS1 sniff (the only route to `Gs1` it has).
+fn classify_aim_application(text: &str) -> Payload {
+    match payload::classify(text) {
+        Payload::Gs1 { .. } => Payload::Text,
+        payload => payload,
+    }
+}
+
+/// FNC1-in-first-position data without a verified text reading: the
+/// element string is not parsed (spec/05).
+fn gs1_not_parsed() -> Payload {
+    Payload::Gs1 {
+        elements: Vec::new(),
+        gtin: None,
+        conformant: false,
+        issues: vec![
+            "content has no verified text reading (charset unknown): element string not parsed"
+                .to_owned(),
+        ],
+    }
+}
+
+/// What a content publishes of its account: the located designators,
+/// `[]` for a declaration that was signalled but not located, no key
+/// otherwise; and the FNC1 position when one was observed.
+fn wire_account(
+    key: &engine::content::ContentKey,
+) -> (Option<Vec<EciSegment>>, Option<Fnc1Position>) {
+    use engine::content::{EciEvidence, Fnc1};
+    let eci = match &key.eci {
+        EciEvidence::Located(marks) => Some(
+            marks
+                .iter()
+                .map(|mark| EciSegment {
+                    designator: mark.value,
+                    start: u32::try_from(mark.start).unwrap_or(u32::MAX),
+                })
+                .collect(),
+        ),
+        EciEvidence::Signalled => Some(Vec::new()),
+        EciEvidence::NoEci | EciEvidence::Unobserved => None,
+    };
+    let fnc1 = match key.fnc1 {
+        Fnc1::First => Some(Fnc1Position::First),
+        Fnc1::Second => Some(Fnc1Position::Second),
+        Fnc1::None | Fnc1::Unobserved => None,
+    };
+    (eci, fnc1)
+}
+
+/// Assemble the public report from ladder output. Each detection's content
+/// is the scanner's one reading of the reconciled content
+/// (`engine::content::read`): `raw` the original payload, `eci` and `fnc1`
+/// its observed account, `text` and `charset` per spec/01 rules 1-3. The
+/// payload is routed by FNC1 position, symbology and charset (spec/05): no
+/// structured reading is ever built from text the scanner could not read.
 fn build_report(
     outcome: ladder::LadderOutcome,
     scored: Option<(Score, Vec<Hint>)>,
@@ -293,15 +349,24 @@ fn build_report(
     let detections = outcome
         .merged
         .into_iter()
-        .map(|m| {
-            // payload routing is symbology-aware: FNC1-led carriers (QR
-            // ]Q3/]Q4 · DataMatrix ]d2 · GS1-128 ]C1) are element strings;
-            // retail 1D symbols ARE a GTIN (AI 01 semantics); everything
-            // else goes through the text classifier
-            let payload = if m.fnc1 {
+        .zip(outcome.contents)
+        .map(|(m, (key, _))| {
+            let (eci, fnc1) = wire_account(&key);
+            // payload routing (spec/05): FNC1-first carriers are element
+            // strings; retail 1D symbols ARE a GTIN (AI 01 semantics); text
+            // the scanner could not read is text; FNC1-second data belongs
+            // to an AIM application; everything else goes through the text
+            // classifier
+            let payload = if m.fnc1 && m.charset.is_lossy() {
+                gs1_not_parsed()
+            } else if m.fnc1 {
                 payload::classify_fnc1(&m.text)
             } else if m.symbology.is_retail_gtin() {
                 payload::classify_retail_gtin(&m.text, m.symbology)
+            } else if m.charset.is_lossy() {
+                Payload::Text
+            } else if fnc1 == Some(Fnc1Position::Second) {
+                classify_aim_application(&m.text)
             } else {
                 payload::classify(&m.text)
             };
@@ -311,6 +376,8 @@ fn build_report(
                     text: m.text,
                     raw: m.raw,
                     charset: m.charset,
+                    eci,
+                    fnc1,
                 },
                 payload,
                 corners: m.corners,

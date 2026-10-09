@@ -11,19 +11,26 @@
 //!   exposed (only their presence, through the AIM modifier `]Q2`/`]Q4`/
 //!   `]Q6`);
 //! - its `ZXing`-lineage reader (when the port fails): the RS-corrected
-//!   data codewords — parsed here with the scanner's segment parser.
+//!   data codewords — parsed here with the scanner's segment parser, and
+//!   kept only when the parse's byte-mode segments are the reader's own.
 //!
 //! The decoded text is neither the payload nor the reading: content is
-//! interpreted once, in `engine::content`. Version/corners are NOT provided
-//! by the QR paths: rqrr supplies geometry.
+//! interpreted once, in `engine::content` (a port read's text only says
+//! which complete double-byte decoding the engine chose, rule 1e). Version
+//! and corners are NOT published from the QR paths — rqrr supplies
+//! geometry; the result points stay internal (they tell symbols apart and
+//! frame the re-read). Other symbologies carry the ISO/IEC 8859-1 bytes of
+//! the engine's text when it fits, else its UTF-8 (spec/01 § raw), and the
+//! FNC1 position their symbology identifier states.
 
 use rxing::RXingResultMetadataType as MetaKey;
 use rxing::RXingResultMetadataValue as MetaValue;
 
 use super::RawDetection;
-use super::content::{EciEvidence, Fnc1};
+use super::content::{EciEvidence, EngineReading, Fnc1, Segments};
+use super::locate::{Frame, LocateHint};
 use crate::input::LumaImage;
-use crate::report::{EcLevel, EngineKind, Symbology};
+use crate::report::{EcLevel, EngineKind, Point, Symbology};
 use crate::rescue::bitstream;
 
 /// rxing format → our wire symbology. `None` = formats we refuse to
@@ -182,21 +189,19 @@ fn observe(result: &rxing::RXingResult) -> Option<RawDetection> {
         fnc1: Fnc1::Unobserved,
         parsed: false,
         engine: EngineKind::Rxing,
+        segments: Segments::NotObserved,
+        engine_reading: EngineReading::None,
+        location: None,
+        locate: None,
     };
     if !symbology.is_qr_family() {
-        // outside the QR content contract: byte segments, else the text
-        detection.raw = match metadata.get(&MetaKey::BYTE_SEGMENTS) {
-            Some(MetaValue::ByteSegments(segments)) => segments.concat(),
-            _ => result.getText().as_bytes().to_vec(),
-        };
-        // GS1 carriers per ISO/IEC 15424 symbology identifiers: DataMatrix
-        // "]d2" (ECC200 FNC1 first) · Code 128 "]C1" (GS1-128); any other
-        // identifier leaves the position unknown
-        if matches!(identifier, "]d2" | "]C1") {
-            detection.fnc1 = Fnc1::First;
-        }
+        // outside the QR content contract: the engine's reading, never its
+        // byte segments (they omit every non-byte encodation)
+        detection.raw = non_qr_raw(result.getText());
+        detection.fnc1 = identifier_fnc1(identifier);
         return Some(detection);
     }
+    detection.location = location(result.getPoints());
     match reader(symbology, ec_level)? {
         Reader::Port => {
             detection.raw = result.getRawBytes().to_vec();
@@ -218,14 +223,31 @@ fn observe(result: &rxing::RXingResult) -> Option<RawDetection> {
                 Some(_) => Fnc1::None,
                 None => Fnc1::Unobserved,
             };
+            detection.engine_reading = EngineReading::of(&detection.raw, result.getText());
+            detection.locate = locate_hint(&detection, result, modifier);
         }
         Reader::Codewords(ec) => {
             let codewords = result.getRawBytes();
             let parsed = crate::rescue::version_of_data(codewords.len(), ec)
                 .and_then(|version| bitstream::parse(codewords, version))?;
+            // the parse must be the reader's own: its byte-mode segments,
+            // in order (none with none)
+            let segments: Vec<&[u8]> = parsed
+                .byte_segments
+                .iter()
+                .filter_map(|range| parsed.bytes.get(range.clone()))
+                .collect();
+            let reader_segments: Vec<&[u8]> = match metadata.get(&MetaKey::BYTE_SEGMENTS) {
+                Some(MetaValue::ByteSegments(own)) => own.iter().map(Vec::as_slice).collect(),
+                _ => Vec::new(),
+            };
+            if segments != reader_segments {
+                return None;
+            }
             detection.raw = parsed.bytes;
             detection.eci = EciEvidence::from_marks(parsed.eci);
             detection.fnc1 = parsed.fnc1;
+            detection.segments = Segments::Observed(parsed.segments);
             detection.parsed = true;
             // the EC level this reader states is not published: the
             // detection metadata stays exactly what it was before
@@ -235,13 +257,91 @@ fn observe(result: &rxing::RXingResult) -> Option<RawDetection> {
     Some(detection)
 }
 
+/// A non-QR read's bytes (spec/01 § raw): the ISO/IEC 8859-1 encoding of
+/// the engine's text when every character is at most U+00FF — exactly the
+/// symbol's bytes on the engine's paths without ECI — else its UTF-8.
+fn non_qr_raw(text: &str) -> Vec<u8> {
+    text.chars()
+        .map(|c| u8::try_from(u32::from(c)).ok())
+        .collect::<Option<Vec<u8>>>()
+        .unwrap_or_else(|| text.as_bytes().to_vec())
+}
+
+/// The FNC1 position an ISO/IEC 15424 symbology identifier states: Data
+/// Matrix `]d2`/`]d5` and GS1-128 `]C1` first, `]d3`/`]d6`/`]C2` second,
+/// `]d1`/`]d4`/`]C0`/`]C4` none; any other identifier says nothing of it.
+fn identifier_fnc1(identifier: &str) -> Fnc1 {
+    match identifier {
+        "]d2" | "]d5" | "]C1" => Fnc1::First,
+        "]d3" | "]d6" | "]C2" => Fnc1::Second,
+        "]d1" | "]d4" | "]C0" | "]C4" => Fnc1::None,
+        _ => Fnc1::Unobserved,
+    }
+}
+
+/// A QR-family result's points as four corners: the port's four outer
+/// corners, or the general reader's finder centres completed to a
+/// parallelogram (its fourth point, when present, is an alignment pattern
+/// near the missing corner).
+fn location(points: &[rxing::Point]) -> Option<[Point; 4]> {
+    let at = |i: usize| points.get(i).map(|p| Point { x: p.x, y: p.y });
+    match points.len() {
+        3 => {
+            let (a, b, c) = (at(0)?, at(1)?, at(2)?);
+            Some([
+                a,
+                b,
+                c,
+                Point {
+                    x: a.x + c.x - b.x,
+                    y: a.y + c.y - b.y,
+                },
+            ])
+        }
+        n if n >= 4 => Some([at(0)?, at(1)?, at(2)?, at(3)?]),
+        _ => None,
+    }
+}
+
+/// What the re-read needs for a port read of a QR Code symbol whose
+/// modifier leaves its declarations or segments unverified: an ECI or FNC1
+/// indicator (`]Q2`-`]Q6`), or no indicator over a payload that is not
+/// UTF-8 (Kanji segments to find). Micro QR and rMQR are never re-read.
+fn locate_hint(
+    detection: &RawDetection,
+    result: &rxing::RXingResult,
+    modifier: Option<u8>,
+) -> Option<LocateHint> {
+    let modifier = modifier?;
+    let unverified = match modifier {
+        2..=6 => true,
+        0 | 1 => std::str::from_utf8(&detection.raw).is_err(),
+        _ => false,
+    };
+    if detection.symbology != Symbology::QrCode || !unverified || result.getPoints().len() != 4 {
+        return None;
+    }
+    let inverted = matches!(
+        result.getRXingResultMetadata().get(&MetaKey::IS_INVERTED),
+        Some(MetaValue::IsInverted(true))
+    );
+    Some(LocateHint {
+        points: detection.location?,
+        frame: Frame::OuterCorners,
+        inverted,
+        ec: detection.ec?,
+        version: None,
+        modifier: Some(modifier),
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_precision_loss)]
 
     use super::{MetaKey, MetaValue, Reader, decode, observe, reader};
     use crate::engine::FormatFilter;
-    use crate::engine::content::{EciEvidence, EciMark, Fnc1};
+    use crate::engine::content::{EciEvidence, EciMark, Fnc1, Segments};
     use crate::input::LumaImage;
     use crate::report::{EcLevel, EngineKind, Symbology};
     use crate::rescue::test_symbols;
@@ -407,18 +507,25 @@ mod tests {
         bits.into_bytes()
     }
 
-    /// A result shaped like rxing's `ZXing`-lineage reader output.
-    fn general_reader_result(codewords: Vec<u8>, ec_digit: &str) -> rxing::RXingResult {
+    /// A result shaped like rxing's `ZXing`-lineage reader output, with the
+    /// byte segments it lists (none: no metadata, as rxing omits it).
+    fn general_reader_result(
+        codewords: Vec<u8>,
+        ec_digit: &str,
+        byte_segments: &[&[u8]],
+    ) -> rxing::RXingResult {
         let mut result = rxing::RXingResult::new(
             "12345abc",
             codewords,
             Vec::new(),
             rxing::BarcodeFormat::QR_CODE,
         );
-        result.putMetadata(
-            MetaKey::BYTE_SEGMENTS,
-            MetaValue::ByteSegments(vec![b"abc".to_vec()]),
-        );
+        if !byte_segments.is_empty() {
+            result.putMetadata(
+                MetaKey::BYTE_SEGMENTS,
+                MetaValue::ByteSegments(byte_segments.iter().map(|s| s.to_vec()).collect()),
+            );
+        }
         result.putMetadata(
             MetaKey::ERROR_CORRECTION_LEVEL,
             MetaValue::ErrorCorrectionLevel(ec_digit.to_owned()),
@@ -434,18 +541,145 @@ mod tests {
     fn general_reader_codewords_reparse_to_the_whole_payload() {
         // the general reader's byte segments hold 'abc' only; its raw bytes
         // are the data codewords — re-parsed, the payload is all of it
-        let d = observe(&general_reader_result(mixed_codewords(), "0")).expect("parses");
+        let abc: &[&[u8]] = &[b"abc"];
+        let d = observe(&general_reader_result(mixed_codewords(), "0", abc)).expect("parses");
         assert_eq!(d.raw, b"12345abc", "never the byte segments alone");
         assert_eq!(d.eci, EciEvidence::NoEci, "observed: no designator");
         assert_eq!(d.fnc1, Fnc1::None, "observed: no FNC1 indicator");
+        assert_eq!(d.segments, Segments::Observed(Vec::new()));
         assert!(d.parsed, "the scanner's parser read the codewords");
         assert_eq!(d.ec, None, "the reader's EC digit stays unpublished");
+        assert!(d.locate.is_none(), "a parsed read needs no re-read");
         // a stream that does not parse is no observation — never a stand-in
-        assert!(observe(&general_reader_result(vec![0xFF; 16], "0")).is_none());
+        assert!(observe(&general_reader_result(vec![0xFF; 16], "0", abc)).is_none());
         // a length no version has at that EC level: unknown structure
-        assert!(observe(&general_reader_result(vec![0x40; 17], "0")).is_none());
+        assert!(observe(&general_reader_result(vec![0x40; 17], "0", abc)).is_none());
         // an EC field of neither reader's shape: the bytes' meaning is unknown
-        assert!(observe(&general_reader_result(mixed_codewords(), "?")).is_none());
+        assert!(observe(&general_reader_result(mixed_codewords(), "?", abc)).is_none());
+    }
+
+    #[test]
+    fn general_reader_codewords_must_be_the_readers_own() {
+        // the parse's byte-mode segments equal the reader's own, in order,
+        // or the codewords are not what it decoded — no observation
+        for segments in [
+            &[][..],
+            &[&b"ab"[..]][..],
+            &[&b"abc"[..], &b""[..]][..],
+            &[&b"12345"[..], &b"abc"[..]][..],
+        ] {
+            assert!(
+                observe(&general_reader_result(mixed_codewords(), "0", segments)).is_none(),
+                "{segments:?}"
+            );
+        }
+        // numeric data alone: none with none
+        let digits = codewords(1, qrcode::EcLevel::M, |b| b.push_numeric_data(b"12345"));
+        let d = observe(&general_reader_result(digits.clone(), "0", &[])).expect("parses");
+        assert_eq!(d.raw, b"12345");
+        assert!(observe(&general_reader_result(digits, "0", &[b"12345"])).is_none());
+    }
+
+    #[test]
+    fn identifiers_state_the_fnc1_position_of_other_symbologies() {
+        // ISO/IEC 15424 symbology identifiers
+        for (identifier, fnc1) in [
+            ("]d2", Fnc1::First),
+            ("]d5", Fnc1::First),
+            ("]C1", Fnc1::First),
+            ("]d3", Fnc1::Second),
+            ("]d6", Fnc1::Second),
+            ("]C2", Fnc1::Second),
+            ("]d1", Fnc1::None),
+            ("]d4", Fnc1::None),
+            ("]C0", Fnc1::None),
+            ("]C4", Fnc1::None),
+            ("]e0", Fnc1::Unobserved),
+            ("]z0", Fnc1::Unobserved),
+            ("]L2", Fnc1::Unobserved),
+            ("", Fnc1::Unobserved),
+        ] {
+            assert_eq!(super::identifier_fnc1(identifier), fnc1, "{identifier:?}");
+        }
+    }
+
+    #[test]
+    fn other_symbologies_carry_the_engines_reading() {
+        // the ISO/IEC 8859-1 bytes of the text when they fit, else its
+        // UTF-8 — never the byte segments
+        assert_eq!(super::non_qr_raw("日本"), "日本".as_bytes());
+        assert_eq!(super::non_qr_raw("Ã©"), vec![0xC3, 0xA9]);
+        assert_eq!(super::non_qr_raw("Café"), vec![b'C', b'a', b'f', 0xE9]);
+        let mut result = rxing::RXingResult::new(
+            "Ã©",
+            vec![0xFF],
+            Vec::new(),
+            rxing::BarcodeFormat::DATA_MATRIX,
+        );
+        result.putMetadata(
+            MetaKey::BYTE_SEGMENTS,
+            MetaValue::ByteSegments(vec![vec![0xFF]]),
+        );
+        result.putMetadata(
+            MetaKey::SYMBOLOGY_IDENTIFIER,
+            MetaValue::SymbologyIdentifier("]d2".to_owned()),
+        );
+        let d = observe(&result).expect("a Data Matrix read");
+        assert_eq!(d.raw, vec![0xC3, 0xA9]);
+        assert_eq!((d.eci, d.fnc1), (EciEvidence::Unobserved, Fnc1::First));
+        assert!(d.location.is_none() && d.locate.is_none());
+    }
+
+    #[test]
+    fn rxing_points_are_outer_corners_plus_half() {
+        // the locked rxing release, 6 px modules, 4-module quiet zone: the
+        // port's result points sit half a pixel inside the outer corners
+        let luma = render(b"https://qrc-ai.com/points", qrcode::EcLevel::M);
+        let found = decode(&luma, FormatFilter::All);
+        let d = qr(&found);
+        let modules = ((luma.width() / 6) - 8) as f32;
+        let (lo, hi) = (24.5, 24.5 + 6.0 * modules);
+        let expected = [(lo, lo), (hi, lo), (hi, hi), (lo, hi)];
+        let points = d.location.expect("the port's corner points");
+        for (point, (x, y)) in points.iter().zip(expected) {
+            assert!(
+                (point.x - x).abs() < 0.01 && (point.y - y).abs() < 0.01,
+                "{points:?} vs {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_unverified_port_reads_get_a_re_read() {
+        // ]Q1 ASCII and ]Q1 UTF-8 need none; ]Q2 does (at the port's
+        // corners, in the polarity it read); Micro QR never
+        let plain = decode(&render(b"plain", qrcode::EcLevel::M), FormatFilter::All);
+        assert!(qr(&plain).locate.is_none());
+        let utf8 = decode(
+            &render("café".as_bytes(), qrcode::EcLevel::M),
+            FormatFilter::All,
+        );
+        assert!(qr(&utf8).locate.is_none());
+        let luma =
+            test_symbols::from_segments(qrcode::Version::Normal(3), qrcode::EcLevel::M, |b| {
+                b.push_eci_designator(4)?;
+                b.push_byte_data(&[0xA1])
+            });
+        let found = decode(&luma, FormatFilter::All);
+        let hint = qr(&found)
+            .locate
+            .clone()
+            .expect("]Q2: declarations to locate");
+        assert_eq!(hint.modifier, Some(2));
+        assert_eq!(hint.ec, EcLevel::M);
+        assert!(!hint.inverted);
+        assert_eq!(Some(hint.points), qr(&found).location);
+        let micro =
+            test_symbols::from_segments(qrcode::Version::Micro(3), qrcode::EcLevel::M, |b| {
+                b.push_byte_data(&[0xE9])
+            });
+        let found = decode(&micro, FormatFilter::All);
+        assert!(qr(&found).locate.is_none());
     }
 
     /// The data codewords of a symbol built from `push`, padded to the
@@ -471,6 +705,7 @@ mod tests {
                 b.push_byte_data(&[0xA1])
             }),
             "0",
+            &[&[0xA1]],
         ))
         .expect("parses");
         assert_eq!(d.raw, vec![0xA1]);
@@ -486,6 +721,7 @@ mod tests {
                 b.push_alphanumeric_data(b"10AB%%C")
             }),
             "0",
+            &[],
         ))
         .expect("parses");
         assert_eq!(d.raw, b"10AB%C");
@@ -497,6 +733,7 @@ mod tests {
                 b.push_byte_data(b"abc")
             }),
             "0",
+            &[b"abc"],
         ))
         .expect("parses");
         assert_eq!(d.raw, b"37abc");
@@ -519,12 +756,12 @@ mod tests {
         ];
         for (digit, level, version) in cases {
             let stream = codewords(version, level, |b| b.push_byte_data(b"abc"));
-            let d = observe(&general_reader_result(stream.clone(), digit))
+            let d = observe(&general_reader_result(stream.clone(), digit, &[b"abc"]))
                 .unwrap_or_else(|| panic!("digit {digit}: v{version} {level:?} parses"));
             assert_eq!(d.raw, b"abc", "digit {digit}");
             for (other, ..) in cases.iter().filter(|(other, ..)| *other != digit) {
                 assert!(
-                    observe(&general_reader_result(stream.clone(), other)).is_none(),
+                    observe(&general_reader_result(stream.clone(), other, &[b"abc"])).is_none(),
                     "the v{version} {level:?} stream read under digit {other}"
                 );
             }

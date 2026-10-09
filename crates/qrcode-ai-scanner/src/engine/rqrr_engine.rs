@@ -14,10 +14,12 @@
 //! verify ([`rescue_input`]: a mirrored FNC1 symbol), decided once for at
 //! most [`MAX_CANDIDATES`] grids per pass.
 
-use super::content::{EciEvidence, Fnc1};
-use super::{MaskedStream, RawDetection, Veto};
+use super::content::{EciEvidence, EngineReading, Fnc1, Segments};
+use super::locate::{Frame, LocateHint};
+use super::{MaskedStream, RawDetection, Refusal};
 use crate::input::LumaImage;
 use crate::report::{EcLevel, EngineKind, Point, Symbology};
+use crate::rescue::bitstream::PortRead;
 use crate::rescue::{Acceptance, MAX_CANDIDATES, Rederived, RescueCandidate};
 
 /// rqrr `ecc_level` is the QR format-info two-bit field: M=0 · L=1 · H=2 · Q=3.
@@ -38,8 +40,8 @@ pub(super) struct Pass {
     pub(super) found: Vec<RawDetection>,
     /// Grids detected but not decoded — the S5 rescue inputs.
     pub(super) rescue: Vec<RescueCandidate>,
-    /// What the decodes the scanner refused veto in the ladder.
-    pub(super) refused: Vec<Veto>,
+    /// The decodes the scanner refused: what they withhold in the ladder.
+    pub(super) refused: Vec<Refusal>,
 }
 
 /// One rqrr pass. `orient_candidates`: the caller consumes the rescue
@@ -63,7 +65,7 @@ pub(super) fn decode(luma: &LumaImage, orient_candidates: bool) -> Pass {
     let mut oriented = 0;
     for grid in prepared.detect_grids() {
         let mut decoded = Vec::new();
-        if grid.decode_to(&mut decoded).is_err() {
+        let Ok(meta) = grid.decode_to(&mut decoded) else {
             // RS or the parser gave up — but the grid + format info may
             // still read: that stream is the S5 erasure-rescue input
             let input = if orient_candidates && oriented < MAX_CANDIDATES {
@@ -74,32 +76,52 @@ pub(super) fn decode(luma: &LumaImage, orient_candidates: bool) -> Pass {
             };
             pass.rescue.extend(input);
             continue;
-        }
+        };
+        let bounds = corners(&grid);
         let (derived, orientation) = rederive_decoded(&grid, &decoded);
-        let (raw, eci, fnc1, parsed) = match account(decoded, derived) {
+        let (raw, eci, fnc1, segments, parsed) = match account(decoded, derived) {
             Account::Read {
                 raw,
                 eci,
                 fnc1,
+                segments,
                 parsed,
-            } => (raw, eci, fnc1, parsed),
-            Account::Refused(vetoes) => {
-                pass.refused.extend(vetoes);
+            } => (raw, eci, fnc1, segments, parsed),
+            Account::Refused { rqrr, port } => {
+                pass.refused
+                    .extend(Refusal::new(port, Some(rqrr), Some(bounds)));
                 continue;
             }
+        };
+        // a grid that decided nothing: the re-read may still locate the
+        // declarations, at rqrr's bounds and measured version
+        let locate = match (&eci, map_ec(meta.ecc_level)) {
+            (EciEvidence::Unobserved, Some(ec)) => Some(LocateHint {
+                points: bounds,
+                frame: Frame::GridBounds,
+                inverted: false,
+                ec,
+                version: u8::try_from(meta.version.0).ok(),
+                modifier: None,
+            }),
+            _ => None,
         };
         let mut read = RawDetection {
             symbology: Symbology::QrCode,
             raw,
             eci,
             masked_stream: None,
-            corners: Some(corners(&grid)),
+            corners: Some(bounds),
             version: None,
             ec: None,
             mask: None,
             fnc1,
             parsed,
             engine: EngineKind::Rqrr,
+            segments,
+            engine_reading: EngineReading::None,
+            location: Some(bounds),
+            locate,
         };
         publish_orientation(&mut read, orientation);
         pass.found.push(read);
@@ -226,18 +248,23 @@ fn rescue_input<G: rqrr::BitGrid>(grid: &rqrr::Grid<G>) -> Option<RescueCandidat
 /// What the scanner makes of one rqrr decode.
 #[derive(Debug, PartialEq, Eq)]
 enum Account {
-    /// Published: the payload and what was observed of its declarations.
+    /// Published: the payload and what was observed of its declarations and
+    /// double-byte segments.
     Read {
         raw: Vec<u8>,
         eci: EciEvidence,
         fnc1: Fnc1,
+        segments: Segments,
         parsed: bool,
     },
     /// Refused: the stream rqrr decoded is not one ISO 18004 defines (rqrr
     /// reads a `111xxxxx` designator as one byte, an assignment number past
-    /// 999999 like any other). Carries what the refusal vetoes: rqrr's own
-    /// bytes, for rqrr's reads, and the content rxing's port reports.
-    Refused(Vec<Veto>),
+    /// 999999 like any other). Carries what the refusal withholds by: rqrr's
+    /// own bytes, for rqrr's reads, and what rxing's port reports.
+    Refused {
+        rqrr: Vec<u8>,
+        port: Option<PortRead>,
+    },
 }
 
 /// rqrr decoded `decoded`; the re-derivation of its grid decides.
@@ -249,6 +276,7 @@ fn account(decoded: Vec<u8>, derived: Rederived) -> Account {
             raw: parsed.bytes,
             eci: EciEvidence::from_marks(parsed.eci),
             fnc1: parsed.fnc1,
+            segments: Segments::Observed(parsed.segments),
             parsed: true,
         },
         // no orientation verifies (or both do): nothing observable of the
@@ -258,13 +286,13 @@ fn account(decoded: Vec<u8>, derived: Rederived) -> Account {
             raw: decoded,
             eci: EciEvidence::Unobserved,
             fnc1: Fnc1::None,
+            segments: Segments::NotObserved,
             parsed: false,
         },
-        Rederived::Malformed { port } => Account::Refused(
-            std::iter::once(Veto::Rqrr(decoded))
-                .chain(port.map(Veto::port))
-                .collect(),
-        ),
+        Rederived::Malformed { port } => Account::Refused {
+            rqrr: decoded,
+            port,
+        },
     }
 }
 
@@ -405,8 +433,7 @@ mod tests {
     use super::{
         Account, Decision, Transposed, account, decode, rederive_sampled, rescue_input, settle,
     };
-    use crate::engine::Veto;
-    use crate::engine::content::{ContentKey, EciEvidence, EciMark, Fnc1};
+    use crate::engine::content::{ContentKey, EciEvidence, EciMark, Fnc1, Segments};
     use crate::input::LumaImage;
     use crate::report::{EcLevel, EngineKind, Symbology};
     use crate::rescue::bitstream::{Parsed, PortRead};
@@ -418,7 +445,8 @@ mod tests {
             eci: Vec::new(),
             fnc1: Fnc1::None,
             structured_append: false,
-            hanzi: false,
+            segments: Vec::new(),
+            byte_segments: Vec::new(),
         })
     }
 
@@ -650,7 +678,22 @@ mod tests {
                 eci: vec![EciMark { value: 4, start: 0 }],
                 fnc1: Fnc1::None,
                 structured_append: false,
-                hanzi: false,
+                segments: Vec::new(),
+                byte_segments: std::iter::once(0..bytes.len()).collect(),
+            })
+        };
+        let kanji_pair = || {
+            Rederived::Parsed(Parsed {
+                bytes: vec![0x9F, 0xFD],
+                eci: Vec::new(),
+                fnc1: Fnc1::None,
+                structured_append: false,
+                segments: vec![crate::engine::content::DoubleByteSpan {
+                    mode: crate::engine::content::DoubleByteMode::Kanji,
+                    start: 0,
+                    end: 2,
+                }],
+                byte_segments: Vec::new(),
             })
         };
         let cases: [(&str, LumaImage, bool, Rederived, Vec<u8>); 4] = [
@@ -672,14 +715,14 @@ mod tests {
                 "Kanji 9F FD",
                 test_symbols::from_segments(v3, m, kanji),
                 false,
-                parsed_bytes(&[0x9F, 0xFD]),
+                kanji_pair(),
                 vec![0xDF, 0xFD],
             ),
             (
                 "mirrored Kanji 9F FD",
                 test_symbols::from_segments_mirrored(v3, m, kanji),
                 true,
-                parsed_bytes(&[0x9F, 0xFD]),
+                kanji_pair(),
                 vec![0xDF, 0xFD],
             ),
         ];
@@ -816,13 +859,19 @@ mod tests {
                 eci,
                 fnc1: Fnc1::None,
                 structured_append: false,
-                hanzi: false,
+                segments: Vec::new(),
+                byte_segments: Vec::new(),
             })
         };
         let read = |raw: &[u8], eci: EciEvidence, parsed: bool| Account::Read {
             raw: raw.to_vec(),
             eci,
             fnc1: Fnc1::None,
+            segments: if parsed {
+                Segments::Observed(Vec::new())
+            } else {
+                Segments::NotObserved
+            },
             parsed,
         };
         let eci4 = vec![EciMark { value: 4, start: 0 }];
@@ -843,31 +892,31 @@ mod tests {
             account(b"abc".to_vec(), Rederived::Unverified),
             read(b"abc", EciEvidence::Unobserved, false)
         );
-        // malformed: refused, with what the refusal vetoes — rqrr's own
-        // bytes for rqrr's reads, and the content the port reports
+        // malformed: refused, with what the refusal withholds by — rqrr's
+        // own bytes for rqrr's reads, and what the port reports
+        let port = PortRead {
+            bytes: b"xyz".to_vec(),
+            signalled: true,
+            fnc1: Fnc1::None,
+        };
         assert_eq!(
             account(
                 b"abc".to_vec(),
                 Rederived::Malformed {
-                    port: Some(PortRead {
-                        bytes: b"xyz".to_vec(),
-                        signalled: true,
-                        fnc1: Fnc1::None,
-                    })
+                    port: Some(port.clone())
                 }
             ),
-            Account::Refused(vec![
-                Veto::Rqrr(b"abc".to_vec()),
-                Veto::Port(ContentKey {
-                    raw: b"xyz".to_vec(),
-                    eci: EciEvidence::Signalled,
-                    fnc1: Fnc1::None,
-                }),
-            ])
+            Account::Refused {
+                rqrr: b"abc".to_vec(),
+                port: Some(port),
+            }
         );
         assert_eq!(
             account(b"abc".to_vec(), malformed()),
-            Account::Refused(vec![Veto::Rqrr(b"abc".to_vec())])
+            Account::Refused {
+                rqrr: b"abc".to_vec(),
+                port: None,
+            }
         );
     }
 
@@ -1009,19 +1058,12 @@ mod tests {
 
     #[test]
     fn a_read_nothing_decided_publishes_no_stream_or_format() {
-        let mut read = crate::engine::RawDetection {
-            symbology: Symbology::QrCode,
-            raw: b"abc".to_vec(),
-            eci: EciEvidence::Unobserved,
-            masked_stream: None,
-            corners: None,
-            version: None,
-            ec: None,
-            mask: None,
-            fnc1: Fnc1::None,
-            parsed: false,
-            engine: EngineKind::Rqrr,
-        };
+        let mut read = crate::engine::RawDetection::qr(
+            b"abc",
+            EciEvidence::Unobserved,
+            Fnc1::None,
+            EngineKind::Rqrr,
+        );
         super::publish_orientation(&mut read, None);
         assert!(read.masked_stream.is_none());
         assert_eq!((read.version, read.ec, read.mask), (None, None, None));
@@ -1067,8 +1109,9 @@ mod tests {
     fn a_malformed_designator_decode_is_refused() {
         // rqrr reads a 111xxxxx designator as one byte and returns "abc";
         // the verified stream violates ISO 18004 Table 4: no detection, no
-        // rescue input (rqrr did decode it), its bytes veto rqrr's reads —
-        // mirrored or not (the transposed grid is re-derived too)
+        // rescue input (rqrr did decode it), one refusal whose bytes withhold
+        // rqrr's reads where the grid is — mirrored or not (the transposed
+        // grid is re-derived too)
         let data =
             test_symbols::stream("0111 11100000 0100 00000011 01100001 01100010 01100011 0000");
         for luma in [
@@ -1082,10 +1125,15 @@ mod tests {
             let pass = decode(&luma, true);
             assert!(pass.found.is_empty(), "{:?}", pass.found);
             assert!(pass.rescue.is_empty());
-            assert_eq!(pass.refused, vec![Veto::Rqrr(b"abc".to_vec())]);
+            let [refusal] = &pass.refused[..] else {
+                panic!("one refused stream: {:?}", pass.refused);
+            };
+            assert_eq!(refusal.rqrr.as_deref(), Some(&b"abc"[..]));
+            assert_eq!(refusal.port, None, "the port refuses it too");
+            assert!(refusal.place.is_some(), "the grid's bounds");
         }
         // above the register: rxing's port signals a designator and reads
-        // "abc" — that content is vetoed too
+        // "abc" — one record names that content too
         let data = test_symbols::stream(
             "0111 11001111 01000010 01000000 0100 00000011 01100001 01100010 01100011 0000",
         );
@@ -1093,16 +1141,17 @@ mod tests {
             test_symbols::from_codewords(qrcode::Version::Normal(1), qrcode::EcLevel::M, &data);
         let pass = decode(&luma, true);
         assert!(pass.found.is_empty());
+        let [refusal] = &pass.refused[..] else {
+            panic!("one refused stream: {:?}", pass.refused);
+        };
+        assert_eq!(refusal.rqrr.as_deref(), Some(&b"abc"[..]));
         assert_eq!(
-            pass.refused,
-            vec![
-                Veto::Rqrr(b"abc".to_vec()),
-                Veto::Port(ContentKey {
-                    raw: b"abc".to_vec(),
-                    eci: EciEvidence::Signalled,
-                    fnc1: Fnc1::None,
-                }),
-            ]
+            refusal.port,
+            Some(ContentKey {
+                raw: b"abc".to_vec(),
+                eci: EciEvidence::Signalled,
+                fnc1: Fnc1::None,
+            })
         );
     }
 

@@ -7,14 +7,28 @@
 //! the FNC1 position only exist here. Differentially pinned against rqrr's
 //! bytes on every clean corpus fixture.
 //!
-//! Refusal-biased: a structure ISO 18004 does not define (a `111xxxxx`
-//! designator, an assignment number above 999999, an unknown mode, an
-//! out-of-range numeric/alphanumeric value, an invalid AIM application
-//! indicator, a truncated count) returns `None` — never a best guess.
-//! [`port_read`] names what a more tolerant reader reports for such a
-//! stream: the content a refusal must veto in that reader's output.
+//! Refusal-biased: a structure ISO/IEC 18004 (with GB/T 18284 for Hanzi)
+//! does not define returns `None` — never a best guess (spec/01 § Refused
+//! streams):
+//!
+//! - an ECI designator whose first codeword is `111xxxxx`, whose value
+//!   exceeds 999999, or that is cut short;
+//! - FNC1 in second position after any data, after FNC1 in first position,
+//!   or twice; FNC1 in first position after FNC1 in second position;
+//! - an FNC1-second application indicator outside 0–99, 165–190 and
+//!   197–222;
+//! - a numeric group of three digits ≥ 1000 (two digits ≥ 100, one digit
+//!   ≥ 10), an alphanumeric pair value ≥ 2025 or a final single value ≥ 45;
+//! - a Hanzi subset other than GB 2312, an unassigned mode indicator, or a
+//!   character count longer than the data.
+//!
+//! FNC1 in first position after data stays accepted. [`port_read`] names
+//! what a more tolerant reader reports for a refused stream: the content a
+//! refusal must withhold in that reader's output.
 
-use crate::engine::content::{EciMark, Fnc1};
+use std::ops::Range;
+
+use crate::engine::content::{DoubleByteMode, DoubleByteSpan, EciMark, Fnc1};
 
 /// The rules a parse applies to designators and FNC1 indicators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,8 +108,22 @@ pub(crate) struct Parsed {
     /// A structured-append header was present: this symbol is one part of
     /// a longer message (consumed, never reassembled).
     pub(crate) structured_append: bool,
+    /// The payload bytes read in Kanji or Hanzi mode: in order, disjoint,
+    /// even-length, adjacent segments of one mode joined.
+    pub(crate) segments: Vec<DoubleByteSpan>,
+    /// Each byte-mode segment's payload range, in stream order (empty
+    /// segments included) — what rxing's general reader lists as its byte
+    /// segments.
+    pub(crate) byte_segments: Vec<Range<usize>>,
+}
+
+impl Parsed {
     /// A Hanzi (GB/T 18284) segment was present.
-    pub(crate) hanzi: bool,
+    pub(crate) fn has_hanzi(&self) -> bool {
+        self.segments
+            .iter()
+            .any(|span| span.mode == DoubleByteMode::Hanzi)
+    }
 }
 
 /// Parse the data segment stream; `None` on any structure ISO 18004 does
@@ -138,7 +166,8 @@ fn parse_with(data: &[u8], version: u8, rules: Rules) -> Option<Parsed> {
     let mut eci = Vec::new();
     let mut fnc1 = Fnc1::None;
     let mut structured_append = false;
-    let mut hanzi = false;
+    let mut segments: Vec<DoubleByteSpan> = Vec::new();
+    let mut byte_segments = Vec::new();
 
     while bits.remaining() >= 4 {
         let mode = bits.take(4)?;
@@ -188,14 +217,30 @@ fn parse_with(data: &[u8], version: u8, rules: Rules) -> Option<Parsed> {
             }
             0b0100 => {
                 let count = bits.take(count_bits(version, mode)?)? as usize;
+                let start = out.len();
                 for _ in 0..count {
                     #[expect(clippy::cast_possible_truncation, reason = "take(8) ≤ 255")]
                     out.push(bits.take(8)? as u8);
                 }
+                byte_segments.push(start..out.len());
             }
             0b1000 | 0b1101 => {
+                let start = out.len();
                 double_byte(&mut bits, mode, version, &mut out)?;
-                hanzi |= mode == 0b1101;
+                let mode = if mode == 0b1000 {
+                    DoubleByteMode::Kanji
+                } else {
+                    DoubleByteMode::Hanzi
+                };
+                match segments.last_mut() {
+                    Some(last) if last.mode == mode && last.end == start => last.end = out.len(),
+                    _ if start == out.len() => {}
+                    _ => segments.push(DoubleByteSpan {
+                        mode,
+                        start,
+                        end: out.len(),
+                    }),
+                }
             }
             _ => return None, // mode indicators ISO 18004 does not assign
         }
@@ -205,7 +250,8 @@ fn parse_with(data: &[u8], version: u8, rules: Rules) -> Option<Parsed> {
         eci,
         fnc1,
         structured_append,
-        hanzi,
+        segments,
+        byte_segments,
     })
 }
 
@@ -386,7 +432,8 @@ mod tests {
         assert_eq!(parsed.bytes, b"01234");
         assert_eq!(parsed.fnc1, Fnc1::None);
         assert!(parsed.eci.is_empty());
-        assert!(!parsed.structured_append && !parsed.hanzi);
+        assert!(!parsed.structured_append && parsed.segments.is_empty());
+        assert!(parsed.byte_segments.is_empty(), "numeric data only");
     }
 
     #[test]
@@ -401,7 +448,13 @@ mod tests {
     fn byte_mode_passthrough() {
         // mode 0100 · count 3 (8 bits) · "qr!"
         let data = stream("0100 00000011 01110001 01110010 00100001 0000");
-        assert_eq!(parse(&data, 1).unwrap().bytes, b"qr!");
+        let parsed = parse(&data, 1).unwrap();
+        assert_eq!(parsed.bytes, b"qr!");
+        assert_eq!(
+            parsed.byte_segments,
+            std::iter::once(0..3).collect::<Vec<_>>()
+        );
+        assert!(parsed.segments.is_empty());
     }
 
     #[test]
@@ -413,7 +466,15 @@ mod tests {
         let data = stream(&format!("1000 00000001 {} 0000", thirteen(value)));
         let parsed = parse(&data, 1).unwrap();
         assert_eq!(parsed.bytes, vec![0x93, 0xFA]);
-        assert!(!parsed.hanzi);
+        assert_eq!(
+            parsed.segments,
+            vec![DoubleByteSpan {
+                mode: DoubleByteMode::Kanji,
+                start: 0,
+                end: 2
+            }]
+        );
+        assert!(!parsed.has_hanzi());
     }
 
     #[test]
@@ -438,7 +499,15 @@ mod tests {
         ));
         let parsed = parse(&data, 1).unwrap();
         assert_eq!(parsed.bytes, vec![0xB0, 0xA1, 0xA1, 0xA1]);
-        assert!(parsed.hanzi);
+        assert!(parsed.has_hanzi());
+        assert_eq!(
+            parsed.segments,
+            vec![DoubleByteSpan {
+                mode: DoubleByteMode::Hanzi,
+                start: 0,
+                end: 4
+            }]
+        );
         // only the GB 2312 subset (1) is defined
         let other = stream(&format!("1101 0010 00000001 {} 0000", thirteen(960)));
         assert!(parse(&other, 1).is_none());
@@ -682,9 +751,35 @@ mod tests {
                     proptest::prop_assert!(mark.start <= parsed.bytes.len());
                     previous = mark.start;
                 }
+                // double-byte spans: in bounds, ordered, disjoint, even and
+                // non-empty; one mode never touches itself
+                let mut end = 0;
+                let mut last: Option<DoubleByteSpan> = None;
+                for span in &parsed.segments {
+                    proptest::prop_assert!(end <= span.start && span.start < span.end);
+                    proptest::prop_assert!(span.end <= parsed.bytes.len());
+                    proptest::prop_assert_eq!((span.end - span.start) % 2, 0);
+                    if let Some(last) = last {
+                        proptest::prop_assert!(last.mode != span.mode || last.end < span.start);
+                    }
+                    end = span.end;
+                    last = Some(*span);
+                }
+                let mut end = 0;
+                for range in &parsed.byte_segments {
+                    proptest::prop_assert!(end <= range.start && range.start <= range.end);
+                    proptest::prop_assert!(range.end <= parsed.bytes.len());
+                    end = range.end;
+                }
                 let evidence = crate::engine::content::EciEvidence::from_marks(parsed.eci);
-                let reading = crate::engine::content::read(&parsed.bytes, &evidence);
-                proptest::prop_assert!(parsed.bytes.is_empty() || !reading.text.is_empty());
+                let reading = crate::engine::content::read(
+                    &parsed.bytes,
+                    &evidence,
+                    &crate::engine::content::Segments::Observed(parsed.segments),
+                    crate::engine::content::EngineReading::None,
+                    true,
+                );
+                proptest::prop_assert_eq!(parsed.bytes.is_empty(), reading.text.is_empty());
             }
         }
     }

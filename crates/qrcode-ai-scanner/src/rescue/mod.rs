@@ -25,7 +25,7 @@ mod ee;
 use std::sync::OnceLock;
 
 use crate::engine::MaskedStream;
-use crate::engine::content::{EciMark, Fnc1};
+use crate::engine::content::{DoubleByteSpan, EciMark, Fnc1};
 use crate::input::LumaImage;
 use crate::matrix::deinterleave::{Block, deinterleave};
 use crate::matrix::sampler::GridSampler;
@@ -69,6 +69,8 @@ pub(crate) struct Rescued {
     pub fnc1: Fnc1,
     /// The ECI designators the stream declared, with their payload offsets.
     pub eci: Vec<EciMark>,
+    /// The Kanji segments of the stream (a Hanzi stream is not rescued).
+    pub segments: Vec<DoubleByteSpan>,
 }
 
 /// ISO/IEC 18004 Annex B misdecode-protection codewords `p` — only the low
@@ -184,13 +186,14 @@ pub(crate) fn attempt(luma: &LumaImage, candidate: &RescueCandidate) -> Option<R
     // append part or a Hanzi segment stays refused here, exactly as before
     // the shared parser learned them (the engines read those symbols when
     // they can).
-    if parsed.bytes.is_empty() || parsed.structured_append || parsed.hanzi {
+    if parsed.bytes.is_empty() || parsed.structured_append || parsed.has_hanzi() {
         return None;
     }
     Some(Rescued {
         raw: parsed.bytes,
         fnc1: parsed.fnc1,
         eci: parsed.eci,
+        segments: parsed.segments,
     })
 }
 
@@ -343,19 +346,66 @@ fn data_capacity() -> &'static [[usize; 4]; 41] {
 /// surface does not exist in any normal build.
 #[cfg(fuzzing)]
 pub(crate) mod fuzz_api {
-    use crate::engine::content::{self, EciEvidence};
+    use crate::engine::content::{
+        self, DoubleByteMode, DoubleByteSpan, EciEvidence, EngineReading, Segments,
+    };
 
-    /// Parse data codewords into payload + designators, then read the
-    /// payload under them — and, separately, the raw input as unmarked and
-    /// as signalled-only content (the interpretation's other attacker-shaped
-    /// entries). Never panics: refusal is `None`, a reading is total.
+    /// Parse data codewords into payload, designators, double-byte spans
+    /// and byte segments, then read the payload under what the parse
+    /// observed; name what the port reports for the stream as the key a
+    /// refusal withholds by; and read the raw input under every other
+    /// observation the interpretation accepts — spans derived from the input
+    /// itself (unordered, overlapping, out of bounds), conflicting
+    /// segments, each engine reading, signalled and unobserved
+    /// declarations. Never panics: refusal is `None`, a reading is total.
     pub(crate) fn parse_bitstream(data: &[u8], version: u8) {
         if let Some(parsed) = super::bitstream::parse(data, version) {
-            let _ = content::read(&parsed.bytes, &EciEvidence::from_marks(parsed.eci));
+            for range in &parsed.byte_segments {
+                let _ = parsed.bytes.get(range.clone());
+            }
+            let _ = content::read(
+                &parsed.bytes,
+                &EciEvidence::from_marks(parsed.eci),
+                &Segments::Observed(parsed.segments),
+                EngineReading::None,
+                true,
+            );
         }
-        let _ = super::bitstream::port_read(data, version);
-        let _ = content::read(data, &EciEvidence::NoEci);
-        let _ = content::read(data, &EciEvidence::Signalled);
+        if let Some(port) = super::bitstream::port_read(data, version) {
+            let _ = crate::engine::port_key(port);
+        }
+        let bound = data.len() + 1;
+        let spans: Vec<DoubleByteSpan> = data
+            .chunks_exact(2)
+            .take(4)
+            .map(|pair| DoubleByteSpan {
+                mode: if pair[0] & 1 == 0 {
+                    DoubleByteMode::Kanji
+                } else {
+                    DoubleByteMode::Hanzi
+                },
+                start: usize::from(pair[0]) % bound,
+                end: usize::from(pair[1]) % bound,
+            })
+            .collect();
+        let engine = EngineReading::of(data, &String::from_utf8_lossy(data));
+        for segments in [
+            Segments::NotObserved,
+            Segments::Observed(spans),
+            Segments::Conflicting,
+        ] {
+            for reading in [engine, EngineReading::ShiftJis, EngineReading::Gb18030] {
+                for eci in [
+                    EciEvidence::NoEci,
+                    EciEvidence::Unobserved,
+                    EciEvidence::Signalled,
+                ] {
+                    for qr_family in [true, false] {
+                        let _ = content::read(data, &eci, &segments, reading, qr_family);
+                    }
+                }
+            }
+        }
     }
 
     /// Errors-and-erasures correct one RS block in place over the QR field;

@@ -78,10 +78,14 @@
       ]
     },
     "Charset": {
+      "description": "How content.text relates to content.raw. utf8 | shift_jis | latin1 | gb18030 (latin1 = WHATWG windows-1252, gb18030 = WHATWG gb18030): text is exactly raw decoded with that decoder. eci: text is raw decoded under the designators listed in content.eci. unknown: text is not a complete decoding; each U+FFFD stands for one byte or one maximal ill-formed sequence the scanner could not read; use raw. unknown is the only lossy value in every version: treat any other value, including one you do not know, as a complete decoding of raw that the scanner checked. A value states the encoder's declared interpretation only when content.eci lists it. Never infer content.eci from charset.",
       "enum": [
         "utf8",
         "shift_jis",
-        "latin1"
+        "latin1",
+        "gb18030",
+        "eci",
+        "unknown"
       ]
     },
     "Grade": {
@@ -443,16 +447,117 @@
       ],
       "properties": {
         "text": {
-          "type": "string"
+          "type": "string",
+          "description": "raw decoded as charset states; empty if and only if raw is empty."
         },
         "raw": {
           "type": "string",
-          "contentEncoding": "base64"
+          "contentEncoding": "base64",
+          "description": "Payload bytes, base64. QR family: the original payload bytes on every decode path, ECI designators excluded. Other symbologies: the bytes of the decoding engine's reading - exact on its non-ECI paths (the ISO/IEC 8859-1 encoding of its text), otherwise the UTF-8 encoding of that text (spec/01 § raw)."
         },
         "charset": {
           "$ref": "#/$defs/Charset"
+        },
+        "eci": {
+          "description": "ECI designators observed, in symbol order. ABSENT when none was observed; [] when the symbol signals ECI use (AIM ]Q2/]Q4/]Q6) but the scanner could not locate its designators.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EciSegment"
+          }
+        },
+        "fnc1": {
+          "description": "FNC1 position. ABSENT when none was observed or the symbology does not report it.",
+          "$ref": "#/$defs/Fnc1Position"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "charset"
+            ],
+            "properties": {
+              "charset": {
+                "const": "eci"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "eci"
+            ],
+            "properties": {
+              "eci": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "eci",
+              "raw"
+            ],
+            "properties": {
+              "eci": {
+                "maxItems": 0
+              },
+              "raw": {
+                "minLength": 1
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "charset": {
+                "const": "unknown"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "raw"
+            ],
+            "properties": {
+              "raw": {
+                "maxLength": 0
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "text": {
+                "maxLength": 0
+              },
+              "charset": {
+                "const": "utf8"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "text"
+            ],
+            "properties": {
+              "text": {
+                "maxLength": 0
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "raw": {
+                "maxLength": 0
+              }
+            }
+          }
+        }
+      ]
     },
     "QrMeta": {
       "type": "object",
@@ -1103,6 +1208,34 @@
           "type": "boolean"
         }
       }
+    },
+    "EciSegment": {
+      "description": "One ECI designator observed in the symbol data (ISO/IEC 18004 7.4.2), with the byte offset in raw where it takes effect.",
+      "type": "object",
+      "required": [
+        "designator",
+        "start"
+      ],
+      "properties": {
+        "designator": {
+          "description": "ECI assignment number as encoded, 0-999999.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999999
+        },
+        "start": {
+          "description": "Byte offset into raw; the designator governs raw from start up to the next entry's start, or the end. A designator whose span is empty governs no byte.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "Fnc1Position": {
+      "description": "FNC1 position (ISO/IEC 18004 7.4.8; AIM identifiers ]Q3-]Q6, ]d2/]d3/]d5/]d6, ]C1/]C2). first: GS1 mode, raw holds GS1 element-string data (QR and Data Matrix transmit 0x1D between fields; GS1-128 read by the current engine does not). second: AIM application mode, raw starts with the application indicator.",
+      "enum": [
+        "first",
+        "second"
+      ]
     }
   }
 }

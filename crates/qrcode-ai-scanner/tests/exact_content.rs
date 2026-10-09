@@ -1939,13 +1939,44 @@ fn fnc1_first_beside_second_over_equal_bytes() {
 
 #[test]
 fn a_gs1_data_matrix_reports_fnc1_first() {
-    // ]d2: FNC1 in first position.
-    let report = scan_content(&fixture("symbology/datamatrix-gs1.png"));
+    // ]d2: FNC1 in first position — a GS1 Data Matrix (zxing-cpp, GS1
+    // mode). rxing transmits no FNC1 for the first position.
+    let report = scan_content(&fixture("symbology/datamatrix-gs1-fnc1.png"));
     let d = one(&report);
     assert_eq!(d.symbology, Symbology::DataMatrix);
-    assert_eq!(content(d)["fnc1"], "first", "{}", content(d));
-    assert!(content(d).get("eci").is_none());
-    assert!(matches!(d.payload, Payload::Gs1 { .. }), "{:?}", d.payload);
+    assert_content(
+        d,
+        r#"{"text":"010950600013435210AB12","raw":"MDEwOTUwNjAwMDEzNDM1MjEwQUIxMg==","charset":"utf8","fnc1":"first"}"#,
+        "GS1 Data Matrix",
+    );
+    let Payload::Gs1 {
+        conformant, gtin, ..
+    } = &d.payload
+    else {
+        panic!("{:?}", d.payload);
+    };
+    assert!(*conformant);
+    assert_eq!(gtin.as_deref(), Some("09506000134352"));
+    // the corpus fixture of that name carries a literal GS before the
+    // element string and no FNC1 codeword (]d1): no position, and the GS1
+    // sniff reports the missing FNC1 mode
+    let report = scan_content(&fixture("symbology/datamatrix-gs1.png"));
+    let d = one(&report);
+    assert_content(
+        d,
+        r#"{"text":"\u001d010950600013435210AB12","raw":"HTAxMDk1MDYwMDAxMzQzNTIxMEFCMTI=","charset":"utf8"}"#,
+        "literal GS lead",
+    );
+    let Payload::Gs1 {
+        conformant, issues, ..
+    } = &d.payload
+    else {
+        panic!("{:?}", d.payload);
+    };
+    assert!(
+        !*conformant && issues.iter().any(|i| i.contains("FNC1")),
+        "{issues:?}"
+    );
 }
 
 #[test]

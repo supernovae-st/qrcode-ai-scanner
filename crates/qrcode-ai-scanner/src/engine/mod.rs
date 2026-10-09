@@ -7,6 +7,8 @@
 
 pub(crate) mod charset;
 pub(crate) mod content;
+pub(crate) mod locate;
+pub(crate) mod reconcile;
 #[cfg(feature = "engine-rqrr")]
 mod rqrr_engine;
 #[cfg(feature = "engine-rxing")]
@@ -17,7 +19,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use crate::input::LumaImage;
 use crate::report::{EcLevel, EngineKind, Point, Symbology};
 use crate::rescue::bitstream::PortRead;
-use content::{ContentKey, EciEvidence, Fnc1};
+use content::{ContentKey, EciEvidence, EngineReading, Fnc1, Segments};
+use locate::{LocateHint, Located};
 
 /// Still-masked codeword bitstream as the engine sampled it (rqrr only) —
 /// feeds the synthetic UEC.
@@ -58,64 +61,80 @@ pub(crate) struct RawDetection {
     pub fnc1: Fnc1,
     /// The scanner's own segment parser read this stream (an rqrr decode's
     /// re-derivation, rxing's codeword output, the rescue): its ECI and
-    /// FNC1 account is exposed, not stated by an engine. A stream proven
-    /// malformed vetoes only reads that are not parsed — equal bytes from
-    /// a parsed stream belong to another, well-formed symbol.
+    /// FNC1 account is exposed, not stated by an engine. A refusal withholds
+    /// only reads that are not parsed — equal bytes from a parsed stream
+    /// belong to another, well-formed symbol.
     pub parsed: bool,
     /// Producing engine.
     pub engine: EngineKind,
+    /// The Kanji/Hanzi segments the scanner's parse observed (`NotObserved`
+    /// when no parse read the stream).
+    pub segments: Segments,
+    /// The engine's own mode-aware reading of a QR-family port read
+    /// (spec/01 rule 1e); `None` elsewhere.
+    pub engine_reading: EngineReading,
+    /// The corner points of the symbol the read came from — never
+    /// published, they keep the reads of different symbols apart: rxing's
+    /// QR-family result points, rqrr's grid bounds. Attempt space here.
+    pub location: Option<[Point; 4]>,
+    /// What the re-read needs, when it may run for this read: a port read
+    /// whose modifier leaves its declarations unverified, an rqrr read whose
+    /// grid decided nothing. Attempt space.
+    pub locate: Option<LocateHint>,
 }
 
-/// What a proven-malformed QR stream refuses — the reads of it that carry
-/// no well-formed stream of their own (ISO 18004 defines no symbol for it).
-/// A refusal is a content, never bytes alone: a well-formed symbol with
-/// equal bytes is another content and keeps its reads.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Veto {
-    /// The content rxing's zxing-cpp port reports for the stream — its
-    /// bytes, a designator signalled iff the port read one, its FNC1
-    /// position: refuses the unparsed QR reads that content admits.
-    Port(ContentKey),
-    /// The bytes rqrr decoded from the stream (its own conversion): refuses
-    /// unparsed rqrr reads of them, nothing else.
-    Rqrr(Vec<u8>),
+/// The content rxing's zxing-cpp port reports for a stream: its bytes, a
+/// designator signalled iff the port read one, its FNC1 position.
+pub(crate) fn port_key(read: PortRead) -> ContentKey {
+    ContentKey {
+        raw: read.bytes,
+        eci: if read.signalled {
+            EciEvidence::Signalled
+        } else {
+            EciEvidence::NoEci
+        },
+        fnc1: read.fnc1,
+    }
 }
 
-impl Veto {
-    /// The refusal of what rxing's port reports for a refused stream.
-    pub(crate) fn port(read: PortRead) -> Self {
-        Self::Port(ContentKey {
-            raw: read.bytes,
-            eci: if read.signalled {
-                EciEvidence::Signalled
-            } else {
-                EciEvidence::NoEci
-            },
-            fnc1: read.fnc1,
+/// One refused QR stream (ISO 18004 defines no symbol for it) and the names
+/// it withholds by — one record per stream (07-pipeline property 6
+/// § Refusal). A refusal is a content, never bytes alone: a well-formed
+/// symbol with equal bytes is another content and keeps its reads; and it
+/// is a place: only reads lying inside the refused symbol are withheld.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Refusal {
+    /// What rxing's port reports for the stream ([`port_key`]): withholds
+    /// the unparsed QR Code reads whose account matches.
+    pub port: Option<ContentKey>,
+    /// The bytes rqrr decoded from the stream (its own conversion):
+    /// withholds unparsed rqrr reads of them, nothing else.
+    pub rqrr: Option<Vec<u8>>,
+    /// Where the refused symbol is: its grid's corners, or the refused
+    /// read's points (attempt space until the ladder rescales it).
+    pub place: Option<[Point; 4]>,
+}
+
+impl Refusal {
+    /// A refused stream's record; `None` when it names nothing to withhold.
+    pub(crate) fn new(
+        port: Option<PortRead>,
+        rqrr: Option<Vec<u8>>,
+        place: Option<[Point; 4]>,
+    ) -> Option<Self> {
+        (port.is_some() || rqrr.is_some()).then(|| Self {
+            port: port.map(port_key),
+            rqrr,
+            place,
         })
     }
+}
 
-    /// Whether this refusal covers one engine hit: an unparsed QR read of
-    /// the refused content.
-    pub(crate) fn refuses(&self, hit: &RawDetection) -> bool {
-        hit.symbology == Symbology::QrCode
-            && !hit.parsed
-            && match self {
-                Self::Port(content) => content.admits(hit),
-                Self::Rqrr(bytes) => hit.engine == EngineKind::Rqrr && hit.raw == *bytes,
-            }
-    }
-
-    /// Whether it covers a detection whose reads are all unparsed — of
-    /// `engines`, reconciled into `key`.
-    pub(crate) fn refuses_content(&self, key: &ContentKey, engines: &[EngineKind]) -> bool {
-        match self {
-            Self::Port(content) => content.agrees(key),
-            Self::Rqrr(bytes) => {
-                key.raw == *bytes && engines.iter().all(|&engine| engine == EngineKind::Rqrr)
-            }
-        }
-    }
+/// The re-read of one read in its attempt image, under its own panic
+/// boundary: a panic is a re-read that could not verify (no engine ran, so
+/// nothing is tallied).
+pub(crate) fn reread(img: &LumaImage, hint: &LocateHint, payload: &[u8]) -> Located {
+    run_isolated(|| locate::locate(img, hint, payload)).unwrap_or(Located::Unverified)
 }
 
 /// Aggregated result of one pass over all enabled engines.
@@ -126,17 +145,40 @@ pub(crate) struct EngineOutcome {
     /// Grids detected but NOT decoded (rqrr `get_raw_data` ok, RS failed) —
     /// the S5 rescue inputs. Corners are in ATTEMPT space here.
     pub rescue: Vec<crate::rescue::RescueCandidate>,
-    /// QR streams proven malformed in this pass, as what they refuse: the
-    /// bytes rqrr decoded from a stream the scanner's parser refuses, and
-    /// the content rxing's port reports for it. The ladder vetoes the reads
-    /// these cover.
-    pub refused: Vec<Veto>,
+    /// QR streams proven malformed in this pass: decodes the rqrr adapter
+    /// refused because their own grid parses malformed. The ladder withholds
+    /// the reads they cover.
+    pub refused: Vec<Refusal>,
     /// Engine panics caught and isolated during this pass. NOTE: isolation
     /// stops the unwind, but the process-global panic HOOK still runs first
     /// — server embedders see a backtrace on stderr per caught panic
     /// (suppress via `std::panic::set_hook` in the application if needed;
     /// a library must not touch the global hook).
     pub panics: u8,
+}
+
+#[cfg(test)]
+impl RawDetection {
+    /// A QR Code read with nothing measured but its content.
+    pub(crate) fn qr(raw: &[u8], eci: EciEvidence, fnc1: Fnc1, engine: EngineKind) -> Self {
+        Self {
+            symbology: Symbology::QrCode,
+            raw: raw.to_vec(),
+            eci,
+            masked_stream: None,
+            corners: None,
+            version: None,
+            ec: None,
+            mask: None,
+            fnc1,
+            parsed: false,
+            engine,
+            segments: Segments::NotObserved,
+            engine_reading: EngineReading::None,
+            location: None,
+            locate: None,
+        }
+    }
 }
 
 /// Run a closure with a panic boundary. `None` = the closure panicked.
@@ -380,7 +422,14 @@ mod tests {
             eci: EciEvidence::Located(vec![content::EciMark { value: 4, start: 0 }]),
             fnc1: Fnc1::None,
         };
-        assert_eq!(content::read(&key.raw, &key.eci).text, "\u{104}");
+        let reading = content::read(
+            &key.raw,
+            &key.eci,
+            &Segments::NotObserved,
+            EngineReading::None,
+            true,
+        );
+        assert_eq!(reading.text, "\u{104}");
         let luma = symbol(true);
         let cells = [
             luma.clone(),
@@ -432,82 +481,33 @@ mod tests {
     }
 
     #[test]
-    fn a_veto_covers_the_unparsed_qr_reads_of_its_content_only() {
-        let hit = |raw: &[u8], eci: EciEvidence, fnc1: Fnc1, engine: EngineKind| RawDetection {
-            symbology: Symbology::QrCode,
-            raw: raw.to_vec(),
-            eci,
-            masked_stream: None,
-            corners: None,
-            version: None,
-            ec: None,
-            mask: None,
-            fnc1,
-            parsed: false,
-            engine,
-        };
+    fn a_refusal_names_the_port_content_and_rqrrs_bytes() {
         // ECI 1000000 + "abc": the port signals a designator
-        let port = Veto::port(PortRead {
+        let signalled = PortRead {
             bytes: b"abc".to_vec(),
             signalled: true,
             fnc1: Fnc1::None,
-        });
-        let signalled = hit(
-            b"abc",
-            EciEvidence::Signalled,
-            Fnc1::None,
-            EngineKind::Rxing,
-        );
-        assert!(port.refuses(&signalled));
-        // rqrr's unverified read of the same bytes observed nothing that
-        // tells it apart: covered
-        let unobserved = hit(
-            b"abc",
-            EciEvidence::Unobserved,
-            Fnc1::None,
-            EngineKind::Rqrr,
-        );
-        assert!(port.refuses(&unobserved));
-        // a plain symbol, a GS1 one, other bytes: other contents
-        for other in [
-            hit(b"abc", EciEvidence::NoEci, Fnc1::None, EngineKind::Rxing),
-            hit(
-                b"abc",
-                EciEvidence::Signalled,
-                Fnc1::First,
-                EngineKind::Rxing,
-            ),
-            hit(
-                b"abd",
-                EciEvidence::Signalled,
-                Fnc1::None,
-                EngineKind::Rxing,
-            ),
-        ] {
-            assert!(!port.refuses(&other), "{other:?}");
-        }
-        // a parsed read carries a well-formed stream; Micro QR another symbol
-        let mut parsed = signalled.clone();
-        parsed.parsed = true;
-        let mut micro = signalled.clone();
-        micro.symbology = Symbology::MicroQrCode;
-        assert!(!port.refuses(&parsed) && !port.refuses(&micro));
-        // rqrr's own bytes cover rqrr's unparsed reads alone
-        let rqrr = Veto::Rqrr(b"abc".to_vec());
-        assert!(rqrr.refuses(&unobserved));
-        assert!(!rqrr.refuses(&signalled), "never the port's read");
-        // detections: the content agrees, or rqrr alone made it
-        let key = |eci: EciEvidence| ContentKey {
-            raw: b"abc".to_vec(),
-            eci,
-            fnc1: Fnc1::None,
         };
-        assert!(port.refuses_content(&key(EciEvidence::Signalled), &[EngineKind::Rxing]));
-        assert!(!port.refuses_content(&key(EciEvidence::NoEci), &[EngineKind::Rxing]));
-        assert!(rqrr.refuses_content(&key(EciEvidence::Unobserved), &[EngineKind::Rqrr]));
-        assert!(!rqrr.refuses_content(
-            &key(EciEvidence::NoEci),
-            &[EngineKind::Rxing, EngineKind::Rqrr]
-        ));
+        assert_eq!(
+            port_key(signalled.clone()),
+            ContentKey {
+                raw: b"abc".to_vec(),
+                eci: EciEvidence::Signalled,
+                fnc1: Fnc1::None,
+            }
+        );
+        let plain = PortRead {
+            signalled: false,
+            fnc1: Fnc1::Second,
+            ..signalled.clone()
+        };
+        assert_eq!(port_key(plain).eci, EciEvidence::NoEci);
+        // one record per stream, both names; nothing named, no record
+        let place = Some([Point { x: 0.0, y: 0.0 }; 4]);
+        let refusal = Refusal::new(Some(signalled), Some(b"abc".to_vec()), place)
+            .expect("names to withhold by");
+        assert_eq!(refusal.rqrr.as_deref(), Some(&b"abc"[..]));
+        assert_eq!(refusal.place, place);
+        assert!(Refusal::new(None, None, place).is_none());
     }
 }
