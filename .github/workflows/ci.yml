@@ -97,6 +97,53 @@ jobs:
           cargo check -p qrcode-ai-scanner-wasm --locked
           --target wasm32-unknown-unknown
 
+  # The npm packages' runtime smokes, on every PR: the Node one ran in no
+  # workflow at all, the wasm one only inside the tag-time publish. Both run
+  # the package as built (release, the publish profile) and assert exact
+  # content with budget-free judgments, so machine load cannot flip them.
+  node-smoke:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: crates/qrcode-ai-scanner-node
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile=false
+      - run: pnpm build
+      - run: node test.mjs
+
+  wasm-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.13.1
+      - name: binaryen version_130 (the wasm-opt npm-publish.yml uses)
+        run: |
+          curl -sSfL https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz | tar xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-version_130/bin" >> "$GITHUB_PATH"
+      # build · wasm-opt · patch · type sync · test.mjs, exactly as published
+      - run: ./scripts/build-wasm.sh
+
   corpus:
     runs-on: ubuntu-24.04
     steps:

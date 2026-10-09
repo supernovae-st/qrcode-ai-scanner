@@ -42,9 +42,18 @@ jobs:
           command: build
           args: --release --locked --out dist
           sccache: "true"
-      - name: install + pytest
+      # Install the wheel just built BY PATH: resolving the name against
+      # --find-links worked only while the local wheel's platform tag outranked
+      # the registry's.
+      - name: install the wheel just built + pytest
         run: |
-          pip install --find-links dist "qrcode-ai-scanner[test]"
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [ "${#wheels[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one wheel in dist/, found: ${wheels[*]}"
+            exit 1
+          fi
+          pip install "${wheels[0]}[test]"
           pytest python/tests -q
 
   wheels:
