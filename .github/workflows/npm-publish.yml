@@ -60,8 +60,10 @@ jobs:
         with:
           tool: cargo-zigbuild
       - run: pnpm install --frozen-lockfile=false
-      # `-- --locked`: napi hands what follows `--` to cargo build.
-      - run: pnpm exec napi build --platform --release --target ${{ matrix.settings.target }} --js native.js --dts native.d.ts ${{ matrix.settings.cross }} -- --locked
+      # `-- --locked`: napi hands what follows `--` to cargo build. --no-js:
+      # the committed native.js is what ships (it reads its own version);
+      # napi's generated loader would bake the version in as a literal.
+      - run: pnpm exec napi build --platform --release --target ${{ matrix.settings.target }} --no-js --dts native.d.ts ${{ matrix.settings.cross }} -- --locked
       - uses: actions/upload-artifact@v7
         with:
           name: binding-${{ matrix.settings.target }}

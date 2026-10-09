@@ -120,7 +120,13 @@ jobs:
           node-version: 22
       - run: pnpm install --frozen-lockfile=false
       - run: pnpm build
+      # test.mjs includes the loader's version check: enforcement on, a
+      # matching and a mismatching platform package, in a node_modules
+      # layout built from the package's `files`.
       - run: node test.mjs
+      - name: pack + inspect the npm tarballs (LICENSE · file set · loader)
+        working-directory: .
+        run: python3 scripts/package-inspect.py node --strict --quiet
 
   wasm-smoke:
     runs-on: ubuntu-24.04

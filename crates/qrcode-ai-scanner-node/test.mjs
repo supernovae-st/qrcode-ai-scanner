@@ -5,7 +5,11 @@
 // score null and this smoke red. The contract markers come from the JSON
 // Schema, which every contract change updates (the AGENTS.md cascade).
 import { scan, scanSync, version } from "./index.js";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 
 const here = (rel) => new URL(rel, import.meta.url);
@@ -144,4 +148,60 @@ assert.throws(() => scanSync(clean, { alphaPalette: ["auto"] }), /unknown palett
 assert.throws(() => scanSync(clean, { alphaPalette: Array.from({ length: 33 }, () => "#ffffff") }),
   /alpha palette too large/, "the anti-DoS cap rejects loudly, never truncates silently");
 
-console.log(`node binding OK — native ${version()}`);
+// The loader's version check. NAPI_RS_ENFORCE_VERSION_CHECK only guards an
+// INSTALLED platform package, never the local .node the scans above loaded,
+// so rebuild the layout npm creates in a scratch node_modules (this package's
+// `files` + package.json, and a platform package around the built binary)
+// and load it in a child process. 0.9.0 shipped comparing against '0.8.1'
+// and refused its own binaries with the check on.
+assert.doesNotMatch(readFileSync(here("./native.js"), "utf8"), /!== '\d+\.\d+\.\d+'|expected \d+\.\d+\.\d+ but got/,
+  "the loader compares against package.json, never a literal version");
+const binaries = readdirSync(here(".")).filter((f) => /^qrcode-ai-scanner\.[\w-]+\.node$/.test(f));
+assert.equal(binaries.length, 1, `exactly one built binary next to native.js: ${binaries}`);
+const [binary] = binaries;
+const platform = `${pkg.name}-${binary.slice("qrcode-ai-scanner.".length, -".node".length)}`;
+const scratch = mkdtempSync(join(tmpdir(), "qrscan-loader-"));
+try {
+  const mainDir = join(scratch, "node_modules", ...pkg.name.split("/"));
+  const platformDir = join(scratch, "node_modules", ...platform.split("/"));
+  mkdirSync(mainDir, { recursive: true });
+  mkdirSync(platformDir, { recursive: true });
+  for (const file of ["package.json", ...pkg.files]) copyFileSync(here(`./${file}`), join(mainDir, file));
+  copyFileSync(here(`./${binary}`), join(platformDir, binary));
+  const probe = `
+    try {
+      const q = require(${JSON.stringify(pkg.name)});
+      const r = q.scanSync(require("node:fs").readFileSync(process.argv[1]), { profile: "fast", budgetMs: 0 });
+      console.log(JSON.stringify({ version: q.version(), texts: r.detections.map((d) => d.content.text) }));
+    } catch (err) {
+      const chain = [];
+      for (let e = err; e; e = e.cause) chain.push(e.message);
+      console.log(JSON.stringify({ error: chain }));
+    }`;
+  const load = (platformVersion, enforce) => {
+    writeFileSync(join(platformDir, "package.json"),
+      JSON.stringify({ name: platform, version: platformVersion, main: binary }));
+    const env = { ...process.env };
+    delete env.NAPI_RS_NATIVE_LIBRARY_PATH;
+    delete env.NAPI_RS_ENFORCE_VERSION_CHECK;
+    if (enforce !== undefined) env.NAPI_RS_ENFORCE_VERSION_CHECK = enforce;
+    const out = execFileSync(process.execPath, ["-e", probe, fileURLToPath(here("../../fixtures/clean/gen_v5_q.png"))],
+      { cwd: scratch, env, encoding: "utf8" });
+    return JSON.parse(out);
+  };
+  const loaded = { version: pkg.version, texts: [V5Q] };
+  assert.deepEqual(load(pkg.version, "1"), loaded, "check on, matching platform package: loads and scans");
+  const mismatch = load("0.0.0-mismatch", "1");
+  assert.ok(Array.isArray(mismatch.error), `check on, mismatching platform package must not load: ${JSON.stringify(mismatch)}`);
+  assert.match(mismatch.error[0], /^Cannot find native binding\./);
+  assert.ok(mismatch.error.includes(
+    `Native binding package version mismatch, expected ${pkg.version} but got 0.0.0-mismatch. ` +
+      "You can reinstall dependencies to fix this issue.",
+  ), `the cause names this package's own version: ${JSON.stringify(mismatch.error)}`);
+  assert.deepEqual(load("0.0.0-mismatch", undefined), loaded, "check off by default");
+  assert.deepEqual(load("0.0.0-mismatch", "0"), loaded, "NAPI_RS_ENFORCE_VERSION_CHECK=0 is off");
+} finally {
+  rmSync(scratch, { recursive: true, force: true });
+}
+
+console.log(`node binding OK — native ${version()} · loader version check exercised via ${platform}`);
