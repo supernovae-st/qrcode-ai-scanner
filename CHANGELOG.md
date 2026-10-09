@@ -23,6 +23,21 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   bench face re-judged 88, byte-stable) — consumers must read a null
   margin as UNMEASURED, never as healthy.
 
+### Fixed
+
+- **Inputs larger than the engine cap keep their rescue decodes** — the
+  S5 erasure rescue kept its candidate geometry in original input
+  coordinates but sampled module confidence on the engine-capped plane,
+  so for any input whose longest side exceeds `max_engine_side` (2048 px
+  in every built-in profile) it read the wrong pixels, and a symbol only
+  the rescue can recover was lost. Candidate geometry is now mapped into
+  the capped sampling plane before sampling, and the reported `corners`
+  stay in original input space. Transparent inputs under automatic
+  background selection now follow the documented stage order: a
+  successful rescue over the automatically chosen background settles the
+  scan, where the opposite-background retry used to run instead (and
+  report `fallback_used: true` when an engine read the other placement).
+
 ### CI
 
 - **The release tooling pins exact** — the v0.9.0 npm-publish legs died
