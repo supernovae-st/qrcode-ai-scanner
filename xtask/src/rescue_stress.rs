@@ -52,6 +52,23 @@
 //!   `d − p` — exactly the knee where "miscorrection onto a valid codeword"
 //!   becomes likely. This is the regime the S5 rescue was built for AND the one
 //!   the QD-2 question interrogates.
+//!
+//! # The capped pass (engine-cap coverage)
+//!
+//! Every render is at most 552 px (v10: 57 modules + 12 quiet ⇒ 69 · 8), so
+//! the Full profile's 2048 px engine cap never fires and the S5 rescue's
+//! capped branch — candidate geometry mapped into the downscaled sampling
+//! plane — would go unmeasured. A second pass therefore scans the SAME grid
+//! with a configuration that differs only by `max_engine_side = 400`. The v2
+//! canvases (296 px) stay uncapped, while v6 (424 px) reach the engines at
+//! ×0.943 and v10 (552 px) at ×0.725: non-integer ratios.
+//!
+//! The zero-wrong gate covers both passes: the process exits 1 when either
+//! pass reports a rescue-path wrong decode. The uncapped summary keeps its
+//! `rescue_succeeded … (correct C, wrong W)` line byte for byte (the line the
+//! deep-checks workflow greps). The capped pass reports
+//! `capped_rescue_decodes … (correct C, wrong W)` instead, a name that grep
+//! can never match.
 
 #![allow(
     clippy::unwrap_used,
@@ -64,6 +81,7 @@
 use std::collections::BTreeMap;
 use std::f32::consts::PI;
 use std::fmt::Write as _;
+use std::io::Write as _;
 
 use image::{GrayImage, Luma};
 use qrcode_ai_scanner::{EngineKind, Hint, ImageInput, ScanProfile, Scanner};
@@ -607,60 +625,109 @@ fn build_grid() -> Vec<Cell> {
     cells
 }
 
+/// Engine cap of the capped pass: below the v6 and v10 canvas sides, so those
+/// cells reach the engines (and the S5 rescue) downscaled at non-integer ratios.
+const CAPPED_ENGINE_SIDE: u32 = 400;
+
+/// One sweep of the grid under one scanner, folded into fixed-order buckets.
+struct Pass {
+    total: Bucket,
+    by_pct: BTreeMap<u32, Bucket>,
+    by_fill_ec: BTreeMap<(usize, usize), Bucket>,
+    by_position: BTreeMap<usize, Bucket>,
+    /// Every wrong decode, in cell order (deterministic ledger).
+    wrong_rows: Vec<WrongRow>,
+    elapsed: std::time::Duration,
+}
+
+fn sweep(scanner: &Scanner, cells: &[Cell]) -> Pass {
+    let started = std::time::Instant::now();
+    // Independent single-threaded scans; collect preserves input order.
+    let results: Vec<(Verdict, Option<WrongRow>)> = cells
+        .par_iter()
+        .map(|cell| scan_cell(scanner, cell))
+        .collect();
+    let elapsed = started.elapsed();
+
+    let mut pass = Pass {
+        total: Bucket::default(),
+        by_pct: BTreeMap::new(),
+        by_fill_ec: BTreeMap::new(),
+        by_position: BTreeMap::new(),
+        wrong_rows: Vec::new(),
+        elapsed,
+    };
+    for (cell, (v, wrong)) in cells.iter().zip(results) {
+        pass.total.add(v);
+        pass.by_pct.entry(cell.occ_pct).or_default().add(v);
+        let fill_ix = FILLS.iter().position(|f| f.0 == cell.fill).unwrap();
+        let ec_ix = EC_LEVELS.iter().position(|e| e.tag == cell.ec.tag).unwrap();
+        pass.by_fill_ec.entry((fill_ix, ec_ix)).or_default().add(v);
+        let pos_ix = POSITIONS.iter().position(|p| p.0 == cell.position).unwrap();
+        pass.by_position.entry(pos_ix).or_default().add(v);
+        if let Some(row) = wrong {
+            pass.wrong_rows.push(row); // cell order ⇒ deterministic ledger
+        }
+    }
+    pass
+}
+
 pub fn run() {
     // budget None ⇒ the ladder always runs to completion ⇒ the report is a pure
     // function of the pixels (the crate's strict-determinism configuration).
     let mut cfg = ScanProfile::Full.config();
     cfg.budget_ms = None;
+    // The capped pass differs ONLY by the engine cap (module docs).
+    let mut capped_cfg = cfg.clone();
+    capped_cfg.max_engine_side = CAPPED_ENGINE_SIDE;
     let scanner = Scanner::builder().profile(ScanProfile::Custom(cfg)).build();
+    let capped_scanner = Scanner::builder()
+        .profile(ScanProfile::Custom(capped_cfg))
+        .build();
 
     let cells = build_grid();
 
-    // Guard: every base symbol decodes clean (0% occlusion). Cheap, and it
-    // turns a silent encode/geometry regression into a loud panic.
+    // Guard: every base symbol decodes clean (0% occlusion) under BOTH
+    // configurations. Cheap, and it turns a silent encode/geometry or cap
+    // regression into a loud panic.
     verify_base_symbols(&scanner);
+    verify_base_symbols(&capped_scanner);
 
-    let started = std::time::Instant::now();
-    // Independent single-threaded scans; collect preserves input order.
-    let results: Vec<(Verdict, Option<WrongRow>)> = cells
-        .par_iter()
-        .map(|cell| scan_cell(&scanner, cell))
-        .collect();
-    let elapsed = started.elapsed();
-
-    // ---- fold into fixed-order buckets ----
-    let mut total = Bucket::default();
-    let mut by_pct: BTreeMap<u32, Bucket> = BTreeMap::new();
-    let mut by_fill_ec: BTreeMap<(usize, usize), Bucket> = BTreeMap::new();
-    let mut by_position: BTreeMap<usize, Bucket> = BTreeMap::new();
-    let mut wrong_rows: Vec<&WrongRow> = Vec::new();
-
-    for (cell, (v, wrong)) in cells.iter().zip(&results) {
-        total.add(*v);
-        by_pct.entry(cell.occ_pct).or_default().add(*v);
-        let fill_ix = FILLS.iter().position(|f| f.0 == cell.fill).unwrap();
-        let ec_ix = EC_LEVELS.iter().position(|e| e.tag == cell.ec.tag).unwrap();
-        by_fill_ec.entry((fill_ix, ec_ix)).or_default().add(*v);
-        let pos_ix = POSITIONS.iter().position(|p| p.0 == cell.position).unwrap();
-        by_position.entry(pos_ix).or_default().add(*v);
-        if let Some(row) = wrong {
-            wrong_rows.push(row); // cell order ⇒ deterministic ledger
-        }
-    }
+    let uncapped = sweep(&scanner, &cells);
+    let capped = sweep(&capped_scanner, &cells);
 
     let mut out = String::new();
-    write_header(&mut out, total.scans);
-    write_tables(&mut out, &by_pct, &by_fill_ec, &by_position, &wrong_rows);
-    write_summary(&mut out, total, &by_pct);
+    write_header(&mut out, uncapped.total.scans);
+    write_tables(
+        &mut out,
+        &uncapped.by_pct,
+        &uncapped.by_fill_ec,
+        &uncapped.by_position,
+        &uncapped.wrong_rows,
+    );
+    write_summary(&mut out, uncapped.total, &uncapped.by_pct);
+    write_capped(&mut out, &capped);
 
     print!("{out}");
     // Wall-clock on stderr ONLY — never in the diffed stdout stream.
     eprintln!(
-        "\n[rescue-stress] {} scans in {:.1}s on {} threads",
-        total.scans,
-        elapsed.as_secs_f64(),
+        "\n[rescue-stress] {} scans in {:.1}s, capped pass in {:.1}s, on {} threads",
+        uncapped.total.scans,
+        uncapped.elapsed.as_secs_f64(),
+        capped.elapsed.as_secs_f64(),
         rayon::current_num_threads()
     );
+
+    // The hard gate: zero rescue-path wrong decodes in EITHER pass.
+    let rescue_wrong = (uncapped.total.rescue_wrong, capped.total.rescue_wrong);
+    if rescue_wrong != (0, 0) {
+        eprintln!(
+            "[rescue-stress] GATE FAILED: rescue-path wrong decodes, uncapped {}, capped {}",
+            rescue_wrong.0, rescue_wrong.1
+        );
+        std::io::stdout().flush().unwrap();
+        std::process::exit(1);
+    }
 }
 
 fn write_header(out: &mut String, scans: u32) {
@@ -686,7 +753,7 @@ fn write_tables(
     by_pct: &BTreeMap<u32, Bucket>,
     by_fill_ec: &BTreeMap<(usize, usize), Bucket>,
     by_position: &BTreeMap<usize, Bucket>,
-    wrong_rows: &[&WrongRow],
+    wrong_rows: &[WrongRow],
 ) {
     // Table A — the QD-2 trend: wrong-rate AND the rescue attempted/refuse/wrong
     // split, vs rising occlusion.
@@ -767,14 +834,18 @@ fn write_tables(
 
     // Ledger — EVERY wrong decode, so the operator sees exactly what miscorrected
     // and through which engine (the deterministic proof behind the rates).
-    writeln!(out, "\n## wrong-decode ledger ({} rows)", wrong_rows.len()).unwrap();
+    write_ledger(out, "wrong-decode ledger", wrong_rows);
+}
+
+fn write_ledger(out: &mut String, title: &str, rows: &[WrongRow]) {
+    writeln!(out, "\n## {title} ({} rows)", rows.len()).unwrap();
     writeln!(
         out,
         "| # | v | ec | fill | position | occ% | engines | via_rescue | hinted | decoded |"
     )
     .unwrap();
     writeln!(out, "|---|---|---|---|---|---|---|---|---|---|").unwrap();
-    for (i, r) in wrong_rows.iter().enumerate() {
+    for (i, r) in rows.iter().enumerate() {
         writeln!(
             out,
             "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
@@ -925,6 +996,63 @@ fn write_decision(out: &mut String, total: Bucket, max_bucket: Bucket) {
     }
 }
 
+/// The capped pass, after the uncapped verdict: the same counters under
+/// distinct keys. Its gate line is `capped_rescue_decodes … (correct C, wrong W)`,
+/// never `rescue_succeeded`, so the uncapped deep-checks grep cannot match it.
+fn write_capped(out: &mut String, pass: &Pass) {
+    let total = pass.total;
+    writeln!(
+        out,
+        "\n## capped pass (max_engine_side = {CAPPED_ENGINE_SIDE})"
+    )
+    .unwrap();
+    writeln!(out, "capped_engine_scale     = {}", capped_scales()).unwrap();
+    writeln!(out, "capped_total_scans      = {}", total.scans).unwrap();
+    writeln!(out, "capped_decoded_correct  = {}", total.correct).unwrap();
+    writeln!(out, "capped_decoded_wrong    = {}", total.wrong).unwrap();
+    writeln!(out, "capped_refused          = {}", total.refused).unwrap();
+    writeln!(
+        out,
+        "capped_rescue_attempted = {} (S5 ran: grid found, engines failed)",
+        total.rescue_attempted
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "  capped_rescue_decodes = {} (correct {}, wrong {})",
+        total.rescue_success, total.rescue_correct, total.rescue_wrong
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "  capped_rescue_refused = {}   capped_rescue_refuse_rate = {}",
+        total.rescue_refused,
+        rate_or_na(total.rescue_refused, total.rescue_attempted)
+    )
+    .unwrap();
+    write_ledger(out, "capped wrong-decode ledger", &pass.wrong_rows);
+}
+
+/// Each version's canvas side and the scale the capped pass hands the
+/// engines, in closed form (the cap maps the longest side onto
+/// `CAPPED_ENGINE_SIDE` when it is larger).
+fn capped_scales() -> String {
+    let parts: Vec<String> = VERSIONS
+        .iter()
+        .map(|&version| {
+            let modules = u32::try_from(version).unwrap() * 4 + 17 + 2 * QUIET_MODULES;
+            let side = modules * MODULE_PX;
+            if side <= CAPPED_ENGINE_SIDE {
+                format!("v{version} {side}px uncapped")
+            } else {
+                let scale = f64::from(CAPPED_ENGINE_SIDE) / f64::from(side);
+                format!("v{version} {side}px ×{scale:.3}")
+            }
+        })
+        .collect();
+    parts.join(" · ")
+}
+
 /// Panic unless every base symbol decodes to its truth with no occlusion —
 /// isolates encode/geometry regressions from the occlusion measurement.
 fn verify_base_symbols(scanner: &Scanner) {
@@ -948,5 +1076,57 @@ fn verify_base_symbols(scanner: &Scanner) {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rescued(correct: u32, wrong: u32) -> Bucket {
+        Bucket {
+            rescue_attempted: correct + wrong,
+            rescue_success: correct + wrong,
+            rescue_correct: correct,
+            rescue_wrong: wrong,
+            ..Bucket::default()
+        }
+    }
+
+    #[test]
+    fn capped_pass_scales_only_the_canvases_above_the_cap() {
+        assert_eq!(
+            capped_scales(),
+            "v2 296px uncapped · v6 424px ×0.943 · v10 552px ×0.725"
+        );
+    }
+
+    #[test]
+    fn uncapped_gate_line_keeps_the_deep_checks_format() {
+        let mut out = String::new();
+        write_summary(&mut out, rescued(3, 0), &BTreeMap::new());
+        assert!(
+            out.contains("\n  rescue_succeeded     = 3 (correct 3, wrong 0)\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn capped_gate_line_can_never_match_the_uncapped_grep() {
+        let pass = Pass {
+            total: rescued(2, 1),
+            by_pct: BTreeMap::new(),
+            by_fill_ec: BTreeMap::new(),
+            by_position: BTreeMap::new(),
+            wrong_rows: Vec::new(),
+            elapsed: std::time::Duration::ZERO,
+        };
+        let mut out = String::new();
+        write_capped(&mut out, &pass);
+        assert!(
+            out.contains("\n  capped_rescue_decodes = 3 (correct 2, wrong 1)\n"),
+            "{out}"
+        );
+        assert!(!out.contains("rescue_succeeded"), "{out}");
     }
 }
