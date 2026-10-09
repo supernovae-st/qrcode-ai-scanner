@@ -8,8 +8,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
 use qrcode_ai_scanner::{
-    AlphaBackground, ImageInput, ScanProfile, ScanReport, Scanner, ScoreCheck, ScorePreset,
-    StressAxis,
+    AlphaBackground, Charset, DecodedContent, ImageInput, ScanProfile, ScanReport, Scanner,
+    ScoreCheck, ScorePreset, StressAxis,
 };
 
 mod term;
@@ -94,10 +94,14 @@ struct Cli {
     score_only: bool,
 }
 
-/// Decoded QR text is ATTACKER-CONTROLLED — strip terminal control bytes
-/// (ANSI/OSC escape injection) before echoing. JSON output is safe (serde
-/// escapes); only this human path needs it.
-fn sanitize_terminal(text: &str) -> String {
+/// Decoded text is ATTACKER-CONTROLLED — never echo terminal controls
+/// (ANSI/OSC escape injection) or spoofing format characters, and never
+/// let a character pass for another: each is shown escaped as `\u{…}`, a
+/// backslash as `\\`, and a U+FFFD the data encodes as `\u{fffd}` — only
+/// under `unknown` is a U+FFFD the scanner's mark for an unread byte, shown
+/// as the glyph. JSON output is safe (serde escapes); only this human path
+/// needs it.
+fn sanitize_terminal(text: &str, charset: Charset) -> String {
     // Cc/C1 controls + the format (Cf) spoofers: bidi overrides flip the
     // visual order of the displayed URL, zero-widths hide segments.
     fn is_spoofing_format(c: char) -> bool {
@@ -107,15 +111,66 @@ fn sanitize_terminal(text: &str) -> String {
             | '\u{2060}'..='\u{2069}' // word-joiner + invisibles + bidi isolates
             | '\u{FEFF}')
     }
-    text.chars()
-        .map(|c| {
-            if (c.is_control() && c != '\t') || is_spoofing_format(c) {
-                char::REPLACEMENT_CHARACTER
-            } else {
-                c
+    let mut shown = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c == '\\' {
+            shown.push_str("\\\\");
+        } else if (c.is_control() && c != '\t')
+            || is_spoofing_format(c)
+            || (c == char::REPLACEMENT_CHARACTER && !charset.is_lossy())
+        {
+            shown.extend(c.escape_unicode());
+        } else {
+            shown.push(c);
+        }
+    }
+    shown
+}
+
+/// A wire name of the report (`charset`, `fnc1`), as JSON spells it.
+fn wire_name(value: serde_json::Result<serde_json::Value>) -> String {
+    value
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unrecognized".to_owned())
+}
+
+/// The pretty view's account of a content: a `charset` line when the
+/// reading is not plain UTF-8 or a declaration was observed (the
+/// designators and where each takes effect; a declaration signalled but
+/// not located; no verified text), and an `fnc1` line when one was
+/// observed.
+fn content_lines(content: &DecodedContent) -> Vec<String> {
+    let mut lines = Vec::new();
+    if content.charset != Charset::Utf8 || content.eci.is_some() {
+        let mut line = format!(
+            "charset   {}",
+            wire_name(serde_json::to_value(content.charset))
+        );
+        match content.eci.as_deref() {
+            Some([]) => line.push_str(" · ECI signalled, not located"),
+            Some(segments) => {
+                let listed: Vec<String> = segments
+                    .iter()
+                    .map(|segment| format!("{}@{}", segment.designator, segment.start))
+                    .collect();
+                line.push_str(" · ECI ");
+                line.push_str(&listed.join(" "));
             }
-        })
-        .collect()
+            None => {}
+        }
+        if content.charset.is_lossy() {
+            line.push_str(" · no verified text (raw: --json)");
+        }
+        lines.push(line);
+    }
+    if let Some(fnc1) = content.fnc1 {
+        lines.push(format!(
+            "fnc1      {}",
+            wire_name(serde_json::to_value(fnc1))
+        ));
+    }
+    lines
 }
 
 /// The alpha block of the pretty view: the flatten verdict line + the
@@ -177,7 +232,13 @@ fn render_pretty(report: &ScanReport) {
     let th = term::Theme::auto();
     match report.detections.first() {
         Some(d) => {
-            println!("content   {}", sanitize_terminal(&d.content.text));
+            println!(
+                "content   {}",
+                sanitize_terminal(&d.content.text, d.content.charset)
+            );
+            for line in content_lines(&d.content) {
+                println!("{line}");
+            }
             println!("symbology {:?}", d.symbology);
             println!("payload   {:?}", d.payload);
             if let (Some(v), Some(m)) = (d.meta.version, d.meta.modules) {

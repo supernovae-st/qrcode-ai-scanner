@@ -1,6 +1,6 @@
 import init, { scan_image, scan_frame, version } from '@supernovae-st/qrcode-ai-scanner-wasm';
 import type {
-  ScanReport, Score, AxisScore, Detection, Payload, Hint,
+  ScanReport, Score, AxisScore, Detection, DecodedContent, Payload, Hint,
   Iso15415Report, IsoParameter, UecReport, Grade, AlphaReport, AlphaEnvelope,
 } from '@supernovae-st/qrcode-ai-scanner-wasm';
 import './style.css';
@@ -66,15 +66,22 @@ const GRADE_LETTER: Record<Grade, string> = {
 const lvl = (letter: string) => `lvl-${letter.toLowerCase()}`;
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
-// Render C0/C1 control bytes (e.g. the GS1 FNC1 separator 0x1D) as visible
-// Unicode "control pictures" — honest display, never a raw control char.
-const printable = (s: string) =>
+// Decoded text is attacker-controlled and must never pass for other text:
+// C0/DEL as visible "control pictures" (e.g. the GS1 separator 0x1D), C1
+// controls and the spoofing format characters (zero-widths, bidi
+// overrides) escaped as \u{…}, a backslash doubled, and a U+FFFD the data
+// encodes escaped — only under `unknown` is U+FFFD the scanner's mark for
+// a byte it could not read, shown as the glyph.
+const SPOOFING = /^[​-‏‪-‮⁠-⁩﻿]$/;
+const printable = (s: string, charset: string) =>
   Array.from(s, (c) => {
-    const code = c.charCodeAt(0);
+    const code = c.codePointAt(0) ?? 0;
     if (code <= 0x1f) return String.fromCharCode(0x2400 + code);
     if (code === 0x7f) return String.fromCharCode(0x2421);
-    if (code >= 0x80 && code <= 0x9f) return String.fromCharCode(0xfffd);
-    return c;
+    if (c === '\\') return '\\\\';
+    const escaped = (code >= 0x80 && code <= 0x9f) || SPOOFING.test(c)
+      || (code === 0xfffd && charset !== 'unknown');
+    return escaped ? `\\u{${code.toString(16)}}` : c;
   }).join("");
 
 const camIdle = (): Kid[] => [h('span', { class: 'cam-glyph', 'aria-hidden': 'true' }, '◉'), ' Live camera ', h('span', { class: 'cam-sub' }, '(scan_frame)')];
@@ -169,7 +176,7 @@ function renderReport(r: ScanReport, wall: number) {
   verdict.append(top);
   verdict.append(
     d
-      ? h('div', { class: 'verdict-text' }, printable(d.content.text) || '(empty)')
+      ? h('div', { class: 'verdict-text' }, printable(d.content.text, d.content.charset) || '(empty)')
       : h('div', { class: 'verdict-text none' }, 'NO QR / BARCODE FOUND — a valid outcome, not an error'),
   );
   report.append(verdict);
@@ -179,7 +186,7 @@ function renderReport(r: ScanReport, wall: number) {
   if (r.score?.uec) report.append(uecModule(r.score.uec));
   if (r.score?.iso15415) report.append(isoModule(r.score.iso15415));
   if (r.score) report.append(hintsModule(r.hints));
-  if (d) report.append(payloadModule(d.payload, d.content.charset));
+  if (d) report.append(payloadModule(d.payload, d.content));
   if (d && d.meta && (d.meta.version != null || d.meta.modules != null)) report.append(metaModule(d));
   report.append(traceModule(r));
   report.append(
@@ -378,7 +385,7 @@ function hintsModule(hints: Hint[]): HTMLElement {
   return mod;
 }
 
-function payloadModule(p: Payload, charset: string): HTMLElement {
+function payloadModule(p: Payload, content: DecodedContent): HTMLElement {
   const dl = h('dl', { class: 'kv' });
   const row = (k: string, v: Kid) => { dl.append(h('dt', {}, k), v instanceof Node ? h('dd', {}, v) : h('dd', {}, String(v))); };
   const link = (url: string): Kid =>
@@ -412,7 +419,17 @@ function payloadModule(p: Payload, charset: string): HTMLElement {
       break;
     }
   }
-  row('charset', charset);
+  // the content's account: how text reads raw, the declarations observed
+  // (where each takes effect), the FNC1 position
+  row('charset', content.charset === 'unknown'
+    ? 'unknown · no verified text (use raw)'
+    : content.charset);
+  if (content.eci) {
+    row('eci', content.eci.length
+      ? content.eci.map((s) => `${s.designator}@${s.start}`).join(' ')
+      : 'signalled, not located');
+  }
+  if (content.fnc1) row('fnc1', content.fnc1);
   return h('section', { class: 'module' }, h('h2', {}, 'Payload'), dl);
 }
 
@@ -430,7 +447,10 @@ function metaModule(d: Detection): HTMLElement {
 
 function traceModule(r: ScanReport): HTMLElement {
   const dl = h('dl', { class: 'kv' });
-  const decoded = r.trace.stages.filter((s) => s.detections_found > 0).map((s) => s.stage).join(', ') || '—';
+  // detections_found counts engine hits, refused or withheld ones too: a
+  // scan decoded something only when it published a detection
+  const hits = r.trace.stages.filter((s) => s.detections_found > 0).map((s) => s.stage).join(', ');
+  const decoded = r.detections.length ? hits || '—' : '—';
   dl.append(h('dt', {}, 'decoded at'), h('dd', {}, decoded));
   dl.append(h('dt', {}, 'stages'), h('dd', {}, r.trace.stages.map((s) => `${s.stage}(${s.ms.toFixed(0)}ms)`).join(' → ')));
   dl.append(h('dt', {}, 'panics'), h('dd', {}, String(r.trace.engine_panics)));
