@@ -13,17 +13,26 @@
 //! Papers: Forney 1965 (10.1109/TIT.1965.1053825) · GMD ordering idea from
 //! Forney 1966 (10.1109/TIT.1966.1053873) · center-submodule confidence per
 //! Halftone QR, Chu et al. 2013 (10.1145/2508363.2508408).
+//!
+//! The codeword half of this module (unmask → de-interleave → RS → segment
+//! parse) is also the scanner's own view of streams the engines DID decode:
+//! [`rederive`] recovers the ECI structure rqrr discards, and
+//! [`version_of_data`] lets rxing's codeword output be parsed.
 
-mod bitstream;
+pub(crate) mod bitstream;
 mod ee;
 
+use std::sync::OnceLock;
+
 use crate::engine::MaskedStream;
+use crate::engine::content::{DoubleByteMode, SegmentMap};
 use crate::input::LumaImage;
-use crate::matrix::deinterleave::deinterleave;
+use crate::matrix::deinterleave::{Block, deinterleave};
 use crate::matrix::sampler::GridSampler;
 use crate::matrix::version_db::format_bits_index;
 use crate::matrix::zigzag::{unmask_to_codewords, zigzag_positions};
 use crate::report::{EcLevel, Point};
+use bitstream::{Fnc1, Parsed};
 
 /// A grid the engines detected but could not decode — the rescue input.
 #[derive(Debug, Clone)]
@@ -41,8 +50,12 @@ pub(crate) struct RescueCandidate {
 /// A successful rescue — feeds the normal merge/report path.
 #[derive(Debug, Clone)]
 pub(crate) struct Rescued {
+    /// Payload bytes, ECI designators excluded.
     pub raw: Vec<u8>,
+    /// FNC1 in first position (GS1).
     pub fnc1: bool,
+    /// The segment structure the payload was parsed with (ECI declarations).
+    pub segments: SegmentMap,
 }
 
 /// ISO/IEC 18004 Annex B misdecode-protection codewords `p` — only the low
@@ -127,12 +140,8 @@ pub(crate) fn attempt(luma: &LumaImage, candidate: &RescueCandidate) -> Option<R
     let margins = codeword_margins(sample_luma, candidate, codewords.len())?;
 
     let p = protection(candidate.version, candidate.ec);
-    let blocks = deinterleave(&codewords, version, format_bits_index(candidate.ec));
-
-    let mut data = Vec::new();
-    for block in &blocks {
+    let data = corrected_data(&codewords, candidate.version, candidate.ec, |block| {
         let len = block.bytes.len();
-        let npar = block.npar;
         // rank this block's codewords by confidence, worst first
         let mut ranked: Vec<(usize, f32)> = block
             .origins
@@ -145,27 +154,130 @@ pub(crate) fn attempt(luma: &LumaImage, candidate: &RescueCandidate) -> Option<R
         // erasure budget: e ≤ npar − p − 1 (leave ≥1 slot of slack so a
         // stray unmarked error can still be located); flag only genuinely
         // weak codewords (margin under 30% of half-span)
-        let budget = npar.saturating_sub(p).saturating_sub(1);
-        let erasures: Vec<usize> = ranked
+        let budget = block.npar.saturating_sub(p).saturating_sub(1);
+        ranked
             .iter()
             .take(budget)
             .filter(|(_, margin)| *margin < 0.30)
             .map(|(pos, _)| len - 1 - pos) // byte index → power position
-            .collect();
+            .collect()
+    })?;
 
-        let mut bytes = block.bytes.clone();
+    let parsed = bitstream::parse(&data, candidate.version)?;
+    // The rescue publishes only streams it fully accounts for: a structured-
+    // append part or a Hanzi segment stays refused here, exactly as before
+    // the shared parser learned them (the engines read those symbols when
+    // they can).
+    if parsed.bytes.is_empty()
+        || parsed.structured_append
+        || parsed
+            .segments
+            .double_byte
+            .iter()
+            .any(|span| span.mode == DoubleByteMode::Hanzi)
+    {
+        return None;
+    }
+    Some(Rescued {
+        raw: parsed.bytes,
+        fnc1: parsed.fnc1 == Fnc1::First,
+        segments: parsed.segments,
+    })
+}
+
+/// RS-correct every block and concatenate its data codewords — the data
+/// stream of ISO 18004 §8.6. `erasures_for` marks each block's erasure
+/// power positions. `None` when a block is beyond capacity or fails the
+/// Annex B guard (`2t + e + p ≤ npar`).
+fn corrected_data(
+    codewords: &[u8],
+    version: u8,
+    ec: EcLevel,
+    mut erasures_for: impl FnMut(&Block) -> Vec<usize>,
+) -> Option<Vec<u8>> {
+    let p = protection(version, ec);
+    let mut data = Vec::new();
+    for block in deinterleave(codewords, usize::from(version), format_bits_index(ec)) {
+        let erasures = erasures_for(&block);
+        let npar = block.npar;
+        let mut bytes = block.bytes;
         let (errors, used) = ee::correct(&mut bytes, npar, &erasures)?;
         if 2 * errors + used + p > npar {
             return None; // Annex B guard
         }
-        data.extend_from_slice(&bytes[..len - npar]);
+        bytes.truncate(bytes.len().saturating_sub(npar));
+        data.extend_from_slice(&bytes);
     }
+    Some(data)
+}
 
-    let (raw, fnc1) = bitstream::parse(&data, candidate.version)?;
-    if raw.is_empty() {
-        return None;
+/// What re-deriving an engine-decoded stream found.
+#[derive(Debug)]
+pub(crate) enum Rederived {
+    /// The RS-verified data codewords, parsed.
+    Parsed(Parsed),
+    /// The codewords verify, but the segment stream is not one ISO 18004
+    /// defines (a `111xxxxx` designator, an assignment number past
+    /// 999999…) — refuse the symbol, as rxing and zbar do.
+    Malformed,
+    /// No verified codewords: a stream shorter than its version, a block
+    /// beyond RS capacity, the Annex B guard — e.g. the unmirrored read of
+    /// a symbol the engine decoded mirrored.
+    Unverified,
+}
+
+/// Re-derive the segment structure of a stream an engine DID decode — the
+/// clean path of [`attempt`]: unmask · de-interleave · RS with errors only
+/// (confidence is moot when the engine already corrected the stream) · the
+/// shared parser.
+pub(crate) fn rederive(stream: &MaskedStream, version: u8, ec: EcLevel, mask: u8) -> Rederived {
+    if !(1..=40).contains(&version) {
+        return Rederived::Unverified;
     }
-    Some(Rescued { raw, fnc1 })
+    let Some(codewords) =
+        unmask_to_codewords(&stream.bits, stream.bit_len, usize::from(version), mask)
+    else {
+        return Rederived::Unverified;
+    };
+    let Some(data) = corrected_data(&codewords, version, ec, |_| Vec::new()) else {
+        return Rederived::Unverified;
+    };
+    match bitstream::parse(&data, version) {
+        Some(parsed) => Rederived::Parsed(parsed),
+        None => Rederived::Malformed,
+    }
+}
+
+/// The QR version whose RS-corrected data stream under `ec` is exactly
+/// `len` codewords. rxing's general reader returns that stream without
+/// its version; at a fixed EC level the data capacity strictly grows with
+/// the version, so the length identifies it (and with it the character-
+/// count widths the parser needs).
+pub(crate) fn version_of_data(len: usize, ec: EcLevel) -> Option<u8> {
+    let column = format_bits_index(ec);
+    let table = data_capacity();
+    (1..=40u8).find(|&version| table[usize::from(version)][column] == len)
+}
+
+/// Data codewords per `[version][format-bits EC index]`, from the same
+/// block table the de-interleave uses (built once: the shapes are all it
+/// needs, so a zero symbol of the largest size stands in for codewords).
+fn data_capacity() -> &'static [[usize; 4]; 41] {
+    static TABLE: OnceLock<[[usize; 4]; 41]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        const LARGEST_SYMBOL: usize = 3706; // version 40 codewords
+        let zeros = vec![0u8; LARGEST_SYMBOL];
+        let mut table = [[0; 4]; 41];
+        for (version, row) in table.iter_mut().enumerate().skip(1) {
+            for (column, cell) in row.iter_mut().enumerate() {
+                *cell = deinterleave(&zeros, version, column)
+                    .iter()
+                    .map(|block| block.bytes.len() - block.npar)
+                    .sum();
+            }
+        }
+        table
+    })
 }
 
 /// Fuzz-only handles onto the two rescue internals that own a decode over
@@ -177,10 +289,19 @@ pub(crate) fn attempt(luma: &LumaImage, candidate: &RescueCandidate) -> Option<R
 /// surface does not exist in any normal build.
 #[cfg(fuzzing)]
 pub(crate) mod fuzz_api {
-    /// Parse rescued data codewords into payload bytes; `None` on any
-    /// malformed structure. Never panics — see `bitstream::parse`.
-    pub(crate) fn parse_bitstream(data: &[u8], version: u8) -> Option<(Vec<u8>, bool)> {
-        super::bitstream::parse(data, version)
+    use crate::engine::content::{self, EciEvidence};
+
+    /// Parse data codewords into payload + segment structure, then read the
+    /// payload under that structure — and, separately, the raw input as an
+    /// engine reading of an unlocated declaration (the interpretation's
+    /// other attacker-shaped entry). Never panics: refusal is `None`, a
+    /// reading is total.
+    pub(crate) fn parse_bitstream(data: &[u8], version: u8) {
+        if let Some(parsed) = super::bitstream::parse(data, version) {
+            let _ = content::read(&parsed.bytes, &EciEvidence::Parsed(parsed.segments));
+        }
+        let engine_text = String::from_utf8_lossy(data).into_owned();
+        let _ = content::read(data, &EciEvidence::Unlocated { engine_text });
     }
 
     /// Errors-and-erasures correct one RS block in place over the QR field;
@@ -346,6 +467,19 @@ mod differential {
                     rescued.raw, engine_raw,
                     "byte divergence vs engine on {path:?}"
                 );
+                // the clean re-derivation (no erasures) is the same path
+                match rederive(
+                    &candidate.stream,
+                    candidate.version,
+                    candidate.ec,
+                    candidate.mask,
+                ) {
+                    Rederived::Parsed(parsed) => assert_eq!(
+                        parsed.bytes, engine_raw,
+                        "re-derivation diverges on {path:?}"
+                    ),
+                    other => panic!("re-derivation failed on clean {path:?}: {other:?}"),
+                }
                 checked += 1;
             }
         }
@@ -353,6 +487,253 @@ mod differential {
             checked >= 10,
             "differential needs the corpus ({checked} symbols)"
         );
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_symbols {
+    //! Symbols for codeword-level tests — rendered from an explicit segment
+    //! stream (the `qrcode` Bits API) or from explicit DATA CODEWORDS (the
+    //! encoder's own RS, placement and masking around any bit stream,
+    //! including ones its Bits API refuses to write, like a `111xxxxx`
+    //! designator).
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use crate::input::LumaImage;
+
+    /// 6 px modules, 4-module quiet zone.
+    pub(crate) fn render(colors: &[qrcode::Color], width: usize) -> LumaImage {
+        const SCALE: usize = 6;
+        const QUIET: usize = 4;
+        let side = (width + 2 * QUIET) * SCALE;
+        let mut data = vec![255u8; side * side];
+        for (i, color) in colors.iter().enumerate() {
+            if *color == qrcode::Color::Dark {
+                let (mx, my) = (i % width + QUIET, i / width + QUIET);
+                for dy in 0..SCALE {
+                    for dx in 0..SCALE {
+                        data[(my * SCALE + dy) * side + mx * SCALE + dx] = 0;
+                    }
+                }
+            }
+        }
+        let side = u32::try_from(side).unwrap();
+        LumaImage::new(data, side, side)
+    }
+
+    /// A symbol from an explicit segment stream (terminator + padding added).
+    pub(crate) fn from_segments(
+        version: qrcode::Version,
+        ec: qrcode::EcLevel,
+        push: impl FnOnce(&mut qrcode::bits::Bits) -> qrcode::types::QrResult<()>,
+    ) -> LumaImage {
+        let mut bits = qrcode::bits::Bits::new(version);
+        push(&mut bits).unwrap();
+        bits.push_terminator(ec).unwrap();
+        let code = qrcode::QrCode::with_bits(bits, ec).unwrap();
+        render(&code.to_colors(), code.width())
+    }
+
+    /// A symbol whose data codewords are exactly `data`, padded with the
+    /// ISO 18004 pad codewords (0xEC, 0x11) to the version's capacity.
+    pub(crate) fn from_codewords(
+        version: qrcode::Version,
+        ec: qrcode::EcLevel,
+        data: &[u8],
+    ) -> LumaImage {
+        let capacity = qrcode::bits::Bits::new(version).max_len(ec).unwrap() / 8;
+        let mut padded = data.to_vec();
+        let mut pads = [0xEC, 0x11].into_iter().cycle();
+        while padded.len() < capacity {
+            padded.push(pads.next().unwrap());
+        }
+        let (data_codewords, ec_codewords) =
+            qrcode::ec::construct_codewords(&padded, version, ec).unwrap();
+        let mut canvas = qrcode::canvas::Canvas::new(version, ec);
+        canvas.draw_all_functional_patterns();
+        canvas.draw_data(&data_codewords, &ec_codewords);
+        let width = usize::try_from(version.width()).unwrap();
+        render(&canvas.apply_best_mask().into_colors(), width)
+    }
+
+    /// Hand-assembled MSB-first bit string → bytes (zero-padded to a byte).
+    pub(crate) fn stream(bits: &str) -> Vec<u8> {
+        let clean: Vec<u8> = bits.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+        clean
+            .chunks(8)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .enumerate()
+                    .fold(0u8, |byte, (i, &b)| byte | (u8::from(b == b'1') << (7 - i)))
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod codewords {
+    //! The shared codeword path on symbols an engine never misreads: the
+    //! clean re-derivation, the rescue's view of FNC1 symbols rqrr refuses,
+    //! and the data-capacity table rxing's general reader needs.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_precision_loss)]
+
+    use super::test_symbols::{from_codewords, from_segments, stream};
+    use super::*;
+    use crate::engine::content::EciMark;
+
+    /// Every grid rqrr detects: its own decode result + the rescue input.
+    fn grids(luma: &LumaImage) -> Vec<(Option<Vec<u8>>, RescueCandidate)> {
+        let width = luma.width() as usize;
+        let data = luma.data();
+        let mut prepared =
+            rqrr::PreparedImage::prepare_from_greyscale(width, luma.height() as usize, |x, y| {
+                data[y * width + x]
+            });
+        prepared
+            .detect_grids()
+            .into_iter()
+            .map(|grid| {
+                let mut decoded = Vec::new();
+                let engine = grid.decode_to(&mut decoded).ok().map(|_| decoded);
+                let (meta, raw_data) = grid.get_raw_data().unwrap();
+                let candidate = RescueCandidate {
+                    stream: MaskedStream {
+                        bits: raw_data.data[..raw_data.len.div_ceil(8)].to_vec(),
+                        bit_len: raw_data.len,
+                    },
+                    corners: grid.bounds.map(|p| Point {
+                        x: p.x as f32,
+                        y: p.y as f32,
+                    }),
+                    version: u8::try_from(meta.version.0).unwrap(),
+                    ec: match meta.ecc_level {
+                        0 => EcLevel::M,
+                        1 => EcLevel::L,
+                        2 => EcLevel::H,
+                        _ => EcLevel::Q,
+                    },
+                    mask: u8::try_from(meta.mask).unwrap(),
+                    inverted: false,
+                };
+                (engine, candidate)
+            })
+            .collect()
+    }
+
+    fn rederived(candidate: &RescueCandidate) -> Rederived {
+        rederive(
+            &candidate.stream,
+            candidate.version,
+            candidate.ec,
+            candidate.mask,
+        )
+    }
+
+    #[test]
+    fn rederivation_recovers_the_declaration_rqrr_discards() {
+        let luma = from_segments(qrcode::Version::Normal(3), qrcode::EcLevel::M, |b| {
+            b.push_eci_designator(4)?;
+            b.push_byte_data(&[0xA1])
+        });
+        let grids = grids(&luma);
+        assert_eq!(grids.len(), 1);
+        let (engine, candidate) = &grids[0];
+        assert_eq!(engine.as_deref(), Some(&[0xA1][..]), "rqrr: bytes only");
+        let Rederived::Parsed(parsed) = rederived(candidate) else {
+            panic!("a clean stream re-derives");
+        };
+        assert_eq!(parsed.bytes, vec![0xA1], "same bytes as rqrr");
+        assert_eq!(parsed.segments.eci, vec![EciMark { value: 4, start: 0 }]);
+    }
+
+    #[test]
+    fn a_malformed_designator_is_refused_by_the_rederivation_too() {
+        // ECI with a 111xxxxx first codeword, then byte "abc": rqrr reads
+        // the designator as one byte and decodes "abc"; the shared parser —
+        // here behind real RS-verified codewords — refuses the stream.
+        let data = stream("0111 11100000 0100 00000011 01100001 01100010 01100011 0000");
+        let luma = from_codewords(qrcode::Version::Normal(1), qrcode::EcLevel::M, &data);
+        let found = grids(&luma);
+        assert_eq!(found.len(), 1);
+        let (engine, candidate) = &found[0];
+        assert_eq!(engine.as_deref(), Some(&b"abc"[..]), "rqrr guesses");
+        assert!(matches!(rederived(candidate), Rederived::Malformed));
+        // control: the same stream with a well-formed designator (ECI 4)
+        let data = stream("0111 00000100 0100 00000011 01100001 01100010 01100011 0000");
+        let luma = from_codewords(qrcode::Version::Normal(1), qrcode::EcLevel::M, &data);
+        let found = grids(&luma);
+        let Rederived::Parsed(parsed) = rederived(&found[0].1) else {
+            panic!("a well-formed designator re-derives");
+        };
+        assert_eq!(parsed.bytes, b"abc");
+        assert_eq!(parsed.segments.eci, vec![EciMark { value: 4, start: 0 }]);
+    }
+
+    #[test]
+    fn a_stream_beyond_rs_capacity_is_unverified_not_malformed() {
+        // a tampered sampled stream (every codeword bit flipped) proves
+        // nothing: the re-derivation declares nothing from it
+        let luma = from_segments(qrcode::Version::Normal(3), qrcode::EcLevel::M, |b| {
+            b.push_eci_designator(4)?;
+            b.push_byte_data(&[0xA1])
+        });
+        let mut candidate = grids(&luma).remove(0).1;
+        for byte in &mut candidate.stream.bits {
+            *byte = !*byte;
+        }
+        assert!(matches!(rederived(&candidate), Rederived::Unverified));
+        // and a version outside the table never reaches the parser
+        candidate.version = 41;
+        assert!(matches!(rederived(&candidate), Rederived::Unverified));
+    }
+
+    #[test]
+    fn rescue_reads_fnc1_second_with_its_indicator_and_double_percent_once() {
+        // rqrr refuses both FNC1 modes, so these are rescue inputs; the
+        // rescue publishes what rxing's port and ISO 15424 transmit
+        let luma = from_segments(qrcode::Version::Normal(3), qrcode::EcLevel::M, |b| {
+            b.push_fnc1_second_position(37)?;
+            b.push_byte_data(b"abc")
+        });
+        let (engine, candidate) = grids(&luma).remove(0);
+        assert!(engine.is_none(), "rqrr refuses FNC1 symbols");
+        let rescued = attempt(&luma, &candidate).expect("a clean stream rescues");
+        assert_eq!(rescued.raw, b"37abc");
+        assert!(!rescued.fnc1, "FNC1 second position is not GS1");
+
+        let luma = from_segments(qrcode::Version::Normal(3), qrcode::EcLevel::M, |b| {
+            b.push_fnc1_first_position()?;
+            b.push_alphanumeric_data(b"10AB%%C")
+        });
+        let (_, candidate) = grids(&luma).remove(0);
+        let rescued = attempt(&luma, &candidate).expect("a clean stream rescues");
+        assert_eq!(rescued.raw, b"10AB%C", "%% is one literal %, never two GS");
+        assert!(rescued.fnc1);
+    }
+
+    #[test]
+    fn data_capacity_identifies_the_version_of_a_codeword_stream() {
+        // independent oracle: the encoder's own data-bit capacity per cell
+        for v in 1..=40i16 {
+            for (ours, theirs) in [
+                (EcLevel::L, qrcode::EcLevel::L),
+                (EcLevel::M, qrcode::EcLevel::M),
+                (EcLevel::Q, qrcode::EcLevel::Q),
+                (EcLevel::H, qrcode::EcLevel::H),
+            ] {
+                let bits = qrcode::bits::Bits::new(qrcode::Version::Normal(v))
+                    .max_len(theirs)
+                    .unwrap();
+                assert_eq!(
+                    version_of_data(bits / 8, ours),
+                    Some(u8::try_from(v).unwrap()),
+                    "v{v} {ours:?}"
+                );
+            }
+        }
+        assert_eq!(version_of_data(0, EcLevel::M), None);
+        assert_eq!(version_of_data(17, EcLevel::M), None, "no v-M has 17");
     }
 }
 

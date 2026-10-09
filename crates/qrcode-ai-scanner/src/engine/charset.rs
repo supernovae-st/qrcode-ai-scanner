@@ -1,7 +1,11 @@
-//! Charset resolution for raw decoded bytes — done ONCE here, never per-engine.
+//! Charset resolution for raw decoded bytes WITHOUT an ECI declaration —
+//! the heuristic `engine::content` applies when no designator is present,
+//! never per-engine — plus what each legacy wire label decodes.
 //!
 //! Order: strict UTF-8 → isolated-byte Latin-1 short-circuit → Shift-JIS
-//! (error-free decode) → windows-1252 (never fails).
+//! (error-free decode) → windows-1252 (never fails). Decoders never sniff a
+//! byte-order mark: a payload starting `FF FE` is not UTF-16 because it
+//! looks like one.
 //!
 //! The short-circuit is the load-bearing part: most Latin-1 accented bytes
 //! (0x81-0x9F · 0xE0-0xFC) followed by an ASCII letter form a VALID
@@ -29,15 +33,42 @@ pub(crate) fn resolve(raw: &[u8]) -> (String, Charset) {
         return (s.to_owned(), Charset::Utf8);
     }
     if all_non_ascii_isolated(raw) {
-        let (text, _, _) = encoding_rs::WINDOWS_1252.decode(raw);
-        return (text.into_owned(), Charset::Latin1);
+        return (windows_1252(raw), Charset::Latin1);
     }
-    let (text, _, had_errors) = encoding_rs::SHIFT_JIS.decode(raw);
-    if !had_errors {
+    if let Some(text) =
+        encoding_rs::SHIFT_JIS.decode_without_bom_handling_and_without_replacement(raw)
+    {
         return (text.into_owned(), Charset::ShiftJis);
     }
-    let (text, _, _) = encoding_rs::WINDOWS_1252.decode(raw);
-    (text.into_owned(), Charset::Latin1)
+    (windows_1252(raw), Charset::Latin1)
+}
+
+/// The `latin1` label's decoder: Windows-1252, total over every byte.
+fn windows_1252(raw: &[u8]) -> String {
+    encoding_rs::WINDOWS_1252
+        .decode_without_bom_handling(raw)
+        .0
+        .into_owned()
+}
+
+/// Decode `raw` the way a legacy wire label promises — `None` when the
+/// label's decoder rejects a byte. `Latin1` means what the heuristic
+/// decodes under it: the Windows-1252 superset, total.
+pub(crate) fn decode_legacy(raw: &[u8], label: Charset) -> Option<String> {
+    match label {
+        Charset::Utf8 => std::str::from_utf8(raw).ok().map(str::to_owned),
+        Charset::ShiftJis => encoding_rs::SHIFT_JIS
+            .decode_without_bom_handling_and_without_replacement(raw)
+            .map(std::borrow::Cow::into_owned),
+        Charset::Latin1 => Some(windows_1252(raw)),
+    }
+}
+
+/// ISO/IEC 8859-1 proper: byte n is U+00nn, C1 controls included. Total and
+/// injective — so also the scanner's lossless rendering of bytes it cannot
+/// read faithfully (distinct bytes never collapse into one text).
+pub(crate) fn iso_8859_1(raw: &[u8]) -> String {
+    raw.iter().map(|&b| char::from(b)).collect()
 }
 
 #[cfg(test)]
@@ -84,6 +115,41 @@ mod tests {
         let (text, charset) = resolve("déjà 日本".as_bytes());
         assert_eq!(text, "déjà 日本");
         assert_eq!(charset, Charset::Utf8);
+    }
+
+    #[test]
+    fn byte_order_marks_are_bytes_not_encoding_switches() {
+        // FF FE looks like a UTF-16LE BOM: a sniffing decoder read this as
+        // "A" and labelled it shift_jis. The bytes are not UTF-16 because
+        // they start like it — Windows-1252 over every byte, as labelled.
+        let (text, charset) = resolve(&[0xFF, 0xFE, 0x41, 0x00]);
+        assert_eq!(text, "ÿþA\u{0}");
+        assert_eq!(charset, Charset::Latin1);
+        assert_eq!(
+            decode_legacy(&[0xFF, 0xFE, 0x41, 0x00], charset).as_deref(),
+            Some("ÿþA\u{0}")
+        );
+    }
+
+    #[test]
+    fn legacy_labels_decode_what_they_promise() {
+        assert_eq!(
+            decode_legacy(&[0xA1], Charset::Latin1).as_deref(),
+            Some("¡")
+        );
+        // the latin1 label is the Windows-1252 superset: 0x80 is '€'
+        assert_eq!(
+            decode_legacy(&[0x80], Charset::Latin1).as_deref(),
+            Some("€")
+        );
+        assert_eq!(decode_legacy(&[0xA1], Charset::Utf8), None);
+        assert_eq!(
+            decode_legacy(&[0x82, 0xB1], Charset::ShiftJis).as_deref(),
+            Some("こ")
+        );
+        assert_eq!(decode_legacy(&[0xFF], Charset::ShiftJis), None);
+        // ISO/IEC 8859-1 proper keeps C1 controls — and is injective
+        assert_eq!(iso_8859_1(&[0x35, 0x80, 0xFF]), "5\u{80}ÿ");
     }
 
     #[test]

@@ -62,11 +62,12 @@ pub mod fuzzing {
         let _ = crate::payload::classify_fnc1(text);
     }
 
-    /// Drive the S5 rescue bitstream parser over attacker-controlled data
-    /// codewords. A rescued stream never reaches the engines, so this parser
-    /// owns the decode and must never panic (refusal is the correct answer).
+    /// Drive the shared segment parser over attacker-controlled data
+    /// codewords, then the content interpretation over what it parsed. A
+    /// rescued stream never reaches the engines, so these own the decode
+    /// and must never panic (refusal is the correct answer).
     pub fn parse_bitstream(data: &[u8], version: u8) {
-        let _ = crate::rescue::fuzz_api::parse_bitstream(data, version);
+        crate::rescue::fuzz_api::parse_bitstream(data, version);
     }
 
     /// Drive the errors-and-erasures RS corrector over an adversarial block,
@@ -133,15 +134,7 @@ impl Scanner {
             && let Some((alt_planes, alt_background)) = context.opposite_planes()
         {
             let alt_outcome = ladder::run(&alt_planes, &self.config, cancel, deadline)?;
-            let rescued = !alt_outcome.merged.is_empty();
-            outcome.trace.stages.extend(alt_outcome.trace.stages);
-            outcome.trace.engine_panics = outcome
-                .trace
-                .engine_panics
-                .saturating_add(alt_outcome.trace.engine_panics);
-            outcome.trace.total_ms += alt_outcome.trace.total_ms;
-            if rescued {
-                outcome.merged = alt_outcome.merged;
+            if outcome.fold_fallback(alt_outcome) {
                 planes = alt_planes;
                 context.adopt_background(alt_background);
                 fallback_used = true;
@@ -260,9 +253,11 @@ impl ScannerBuilder {
     }
 }
 
-/// Assemble the public report from ladder output. Text + charset always come
-/// from our own resolution over raw bytes (consistent pair; exotic ECIs are a
-/// documented limit — `raw` preserves the truth for consumers).
+/// Assemble the public report from ladder output. Text comes from the
+/// scanner's one interpretation (`engine::content`): a declared ECI decides
+/// it, the charset heuristic does when none is declared. `raw` is always
+/// the original payload; a declared reading no legacy label reproduces
+/// keeps the heuristic's label for those bytes.
 fn build_report(
     outcome: ladder::LadderOutcome,
     scored: Option<(Score, Vec<Hint>)>,

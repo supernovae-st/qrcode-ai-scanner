@@ -1,10 +1,12 @@
 //! Decode engines — isolated wrappers around third-party decoders.
 //!
 //! Contract: engines NEVER panic outward (`catch_unwind` boundary), never
-//! decide charset (raw bytes are the truth, resolution happens once here in
-//! `charset`), and only report what they actually measured — no stubs.
+//! decide text (they report payload bytes + what they saw of the ECI
+//! declarations; the interpretation happens once, in `content`), and only
+//! report what they actually measured — no stubs.
 
 pub(crate) mod charset;
+pub(crate) mod content;
 #[cfg(feature = "engine-rqrr")]
 mod rqrr_engine;
 #[cfg(feature = "engine-rxing")]
@@ -14,6 +16,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::input::LumaImage;
 use crate::report::{EcLevel, EngineKind, Point, Symbology};
+use content::EciEvidence;
 
 /// Still-masked codeword bitstream as the engine sampled it (rqrr only) —
 /// feeds the synthetic UEC.
@@ -30,8 +33,12 @@ pub(crate) struct MaskedStream {
 pub(crate) struct RawDetection {
     /// Symbology the engine read this as.
     pub symbology: Symbology,
-    /// Decoded payload bytes (charset-independent truth).
+    /// Payload bytes. QR family: the ORIGINAL bytes, ECI designators
+    /// excluded, whichever engine read them — never engine text re-encoded.
     pub raw: Vec<u8>,
+    /// What the observation saw of the ECI declarations governing `raw`
+    /// (QR family; `Unobserved` elsewhere).
+    pub eci: EciEvidence,
     /// Raw sampled bitstream when the engine exposes it (rqrr).
     pub masked_stream: Option<MaskedStream>,
     /// Symbol corners when the engine provides true bounds (rqrr).
@@ -43,8 +50,9 @@ pub(crate) struct RawDetection {
     /// Mask pattern 0-7 when measured.
     pub mask: Option<u8>,
     /// FNC1-in-first-position symbol (GS1 formatted data — symbology
-    /// `]Q3`/`]Q4`). Only rxing surfaces this; rqrr cannot decode FNC1
-    /// symbols at all (its mode dispatch rejects indicators 0x5/0x9).
+    /// `]Q3`/`]Q4`). rqrr cannot decode FNC1 symbols at all (its mode
+    /// dispatch rejects indicators 0x5/0x9); rxing and the rescue parser
+    /// can. FNC1 in SECOND position is an AIM application, never GS1.
     pub fnc1: bool,
     /// Producing engine.
     pub engine: EngineKind,
@@ -276,6 +284,45 @@ mod tests {
 
         let (t, c) = charset::resolve(&[0xC9, 0xE9]);
         assert_eq!((t.as_str(), c), ("Éé", Charset::Latin1));
+    }
+
+    #[cfg(all(feature = "engine-rxing", feature = "engine-rqrr"))]
+    #[test]
+    fn stress_cell_hits_read_the_declared_text() {
+        // A stress cell survives when an engine hit reads the scored text.
+        // Every hit of an ECI-4 'Ą' symbol — clean, rotated, blurred, from
+        // either engine — reads 'Ą' under the one interpretation, exactly as
+        // the hits of a UTF-8 'Ą' symbol do; the heuristic over the same
+        // bytes reads '¡'. (The cell matcher must therefore compare
+        // `content::read`, not `charset::resolve`.)
+        let luma = crate::rescue::test_symbols::from_segments(
+            qrcode::Version::Normal(3),
+            qrcode::EcLevel::M,
+            |b| {
+                b.push_eci_designator(4)?;
+                b.push_byte_data(&[0xA1])
+            },
+        );
+        let cells = [
+            luma.clone(),
+            crate::score::warp::rotate(&luma, 20.0),
+            crate::transform::gaussian_blur(&luma, 1.5),
+        ];
+        for (i, cell) in cells.iter().enumerate() {
+            let outcome = decode_filtered(cell, FormatFilter::Only(Symbology::QrCode));
+            assert!(!outcome.detections.is_empty(), "cell {i} decodes");
+            for d in &outcome.detections {
+                assert_eq!(d.raw, vec![0xA1], "cell {i} {:?}", d.engine);
+                assert_eq!(
+                    content::read(&d.raw, &d.eci).text,
+                    "\u{104}",
+                    "cell {i} {:?}: {:?}",
+                    d.engine,
+                    d.eci
+                );
+                assert_eq!(charset::resolve(&d.raw).0, "¡");
+            }
+        }
     }
 
     #[test]

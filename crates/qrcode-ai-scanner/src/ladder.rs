@@ -12,10 +12,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use web_time::Instant;
 
+use crate::engine::content::{self, EciEvidence, Reading};
 use crate::engine::{self, MaskedStream, RawDetection};
 use crate::error::{Result, ScanError};
 use crate::input::LumaImage;
-use crate::report::{EcLevel, EngineKind, PipelineTrace, Point, StageTrace};
+use crate::report::{EcLevel, EngineKind, PipelineTrace, Point, StageTrace, Symbology};
 use crate::transform::{self, Channel, SourcePlanes};
 
 /// Cooperative cancellation handle. Cheap to clone; `Send + Sync`.
@@ -374,6 +375,11 @@ impl ScanProfile {
 /// micro-QRs is a CPU/report amplifier, not a use case.
 const MAX_DETECTIONS: usize = 16;
 
+/// Hard cap on physical observations kept while the ladder walks — the
+/// same anti-amplification bound one level down (several observations can
+/// share one detection's text, so it sits above `MAX_DETECTIONS`).
+const MAX_OBSERVATIONS: usize = 4 * MAX_DETECTIONS;
+
 /// One S4 deep-recovery transform recipe. The SAME enumeration drives the
 /// ladder and the score probe ([`crate::score`]'s `CellProbe`) — a symbol
 /// that only decodes via rung N must measure its stress margin in that
@@ -547,11 +553,13 @@ pub(crate) const DEEP_RUNGS: [Rung; 15] = [
 #[derive(Debug, Clone)]
 pub(crate) struct MergedDetection {
     pub symbology: crate::report::Symbology,
+    /// Original payload bytes (the stream source's, when one contributed).
     pub raw: Vec<u8>,
-    /// Charset-resolved text — the merge key (engines may disagree on raw
-    /// byte representation for kanji-mode: rxing re-encodes text as UTF-8,
-    /// rqrr preserves the original Shift-JIS bytes).
+    /// The scanner's one interpretation of the content (`engine::content`)
+    /// — the grouping key: two physical symbols with the same text are
+    /// one detection.
     pub text: String,
+    /// The published label (`engine::content::Reading::label`).
     pub charset: crate::report::Charset,
     pub masked_stream: Option<MaskedStream>,
     pub corners: Option<[Point; 4]>,
@@ -572,7 +580,126 @@ pub(crate) struct MergedDetection {
 #[derive(Debug)]
 pub(crate) struct LadderOutcome {
     pub merged: Vec<MergedDetection>,
+    /// How each merged detection's text was reached, aligned with `merged`.
+    #[cfg(test)]
+    pub readings: Vec<Reading>,
     pub trace: PipelineTrace,
+}
+
+impl LadderOutcome {
+    /// Fold a second walk (the alpha fallback) in: both walks stay in the
+    /// trace, its detections replace these only when it found some.
+    /// Returns whether it did.
+    pub(crate) fn fold_fallback(&mut self, fallback: LadderOutcome) -> bool {
+        let found = !fallback.merged.is_empty();
+        self.trace.stages.extend(fallback.trace.stages);
+        self.trace.engine_panics = self
+            .trace
+            .engine_panics
+            .saturating_add(fallback.trace.engine_panics);
+        self.trace.total_ms += fallback.trace.total_ms;
+        if found {
+            self.merged = fallback.merged;
+            #[cfg(test)]
+            {
+                self.readings = fallback.readings;
+            }
+        }
+        found
+    }
+}
+
+/// One physical symbol as seen so far: every engine hit carrying the SAME
+/// payload bytes with agreeing ECI evidence (an rxing and an rqrr read of
+/// one symbol, the same symbol across attempts). Engines all report the
+/// original bytes, so the bytes are the identity — and an unmarked `A1`
+/// never folds into an ECI-4 `A1`.
+#[derive(Debug, Clone)]
+struct Observation {
+    symbology: Symbology,
+    raw: Vec<u8>,
+    eci: EciEvidence,
+    masked_stream: Option<MaskedStream>,
+    corners: Option<[Point; 4]>,
+    version: Option<u8>,
+    ec: Option<EcLevel>,
+    mask: Option<u8>,
+    fnc1: bool,
+    /// The GEOMETRY SOURCE's attempt photometrically inverted the symbol;
+    /// adopted together with the corners.
+    photometric_inverted: bool,
+    engines: Vec<EngineKind>,
+}
+
+impl Observation {
+    fn new(detection: RawDetection, attempt_inverts: bool) -> Self {
+        Self {
+            symbology: detection.symbology,
+            raw: detection.raw,
+            eci: detection.eci,
+            masked_stream: detection.masked_stream,
+            photometric_inverted: attempt_inverts && detection.corners.is_some(),
+            corners: detection.corners,
+            version: detection.version,
+            ec: detection.ec,
+            mask: detection.mask,
+            fnc1: detection.fnc1,
+            engines: vec![detection.engine],
+        }
+    }
+
+    /// Fold another observation of the same content in. Returns whether it
+    /// became the bitstream source (its raw + format metadata adopted).
+    fn fold(&mut self, other: Self) -> bool {
+        let adopt_stream = self.masked_stream.is_none() && other.masked_stream.is_some();
+        if adopt_stream {
+            // bitstream source (rqrr/rescue): its raw is what the stream
+            // decodes to and its format metadata measured the same grid —
+            // adopt them together (a mixed ec/stream pair would compute UEC
+            // against the wrong RS parameters)
+            self.masked_stream = other.masked_stream;
+            self.raw = other.raw;
+            self.version = other.version.or(self.version);
+            self.ec = other.ec.or(self.ec);
+            self.mask = other.mask.or(self.mask);
+        } else {
+            self.version = self.version.or(other.version);
+            self.ec = self.ec.or(other.ec);
+            self.mask = self.mask.or(other.mask);
+        }
+        // the photometry flag describes the GEOMETRY source — it travels
+        // with newly-adopted corners only
+        if self.corners.is_none() && other.corners.is_some() {
+            self.photometric_inverted = other.photometric_inverted;
+        }
+        self.corners = self.corners.or(other.corners);
+        self.fnc1 |= other.fnc1;
+        self.eci.absorb(other.eci);
+        for engine in other.engines {
+            if !self.engines.contains(&engine) {
+                self.engines.push(engine);
+            }
+        }
+        adopt_stream
+    }
+
+    /// The public shape, under its reading.
+    fn into_merged(self, reading: &Reading) -> MergedDetection {
+        MergedDetection {
+            symbology: self.symbology,
+            charset: reading.label(&self.raw),
+            text: reading.text.clone(),
+            raw: self.raw,
+            masked_stream: self.masked_stream,
+            corners: self.corners,
+            version: self.version,
+            ec: self.ec,
+            mask: self.mask,
+            fnc1: self.fnc1,
+            photometric_inverted: self.photometric_inverted,
+            engines: self.engines,
+        }
+    }
 }
 
 struct Run<'a> {
@@ -581,7 +708,8 @@ struct Run<'a> {
     /// Original input dimensions — every attempt's detections are rescaled
     /// back into this coordinate space (decodes happen on downscales).
     orig: (u32, u32),
-    merged: Vec<MergedDetection>,
+    /// Physical observations, first-seen order (deterministic).
+    observations: Vec<Observation>,
     /// Grids detected but not decoded (rqrr stream readable) — S5 inputs.
     /// Corners already rescaled to original space; capped to bound cost.
     rescue_candidates: Vec<crate::rescue::RescueCandidate>,
@@ -601,78 +729,66 @@ impl Run<'_> {
             .is_some_and(|deadline| Instant::now() >= deadline)
     }
 
-    /// Merge one engine pass into the accumulated detections, keyed by the
-    /// charset-RESOLVED text (linear scan: N is tiny, order deterministic).
-    ///
-    /// Raw bytes are NOT the key: for kanji-mode symbols rxing re-encodes
-    /// the decoded text as UTF-8 while rqrr preserves the original Shift-JIS
-    /// bytes — same symbol, different raw. When a detection carrying the
-    /// engine-sampled bitstream (rqrr) joins a merge, its raw REPLACES the
-    /// text-derived one: original bytes are the truth.
+    /// Reconcile one engine pass into the physical observations (linear
+    /// scan: N is tiny, order deterministic). Identity = (symbology, payload
+    /// bytes) with agreeing ECI evidence — an EAN-13 and a QR carrying the
+    /// same digits stay two. Returns the RAW hit count (pre-merge, the
+    /// trace's `detections_found`).
     fn absorb(&mut self, found: Vec<RawDetection>, attempt_inverts: bool) -> u32 {
         let count = u32::try_from(found.len()).unwrap_or(u32::MAX);
         for detection in found {
-            let (text, charset) = engine::charset::resolve(&detection.raw);
-            // identity = (symbology, text): an EAN-13 and a QR carrying the
-            // same digits are two detections, never one
-            let slot = self.merged.iter().position(|existing| {
-                existing.symbology == detection.symbology && existing.text == text
+            let slot = self.observations.iter().position(|seen| {
+                seen.symbology == detection.symbology
+                    && seen.raw == detection.raw
+                    && seen.eci.agrees_with(&detection.eci)
             });
+            let observation = Observation::new(detection, attempt_inverts);
             match slot {
                 Some(index) => {
-                    let existing = &mut self.merged[index];
-                    if existing.masked_stream.is_none()
-                        && let Some(stream) = detection.masked_stream
-                    {
-                        // bitstream source (rqrr) — its raw is the original
-                        // bytes AND its format metadata measured the same
-                        // grid: adopt them together (a mixed ec/stream pair
-                        // would compute UEC against the wrong RS parameters)
-                        existing.masked_stream = Some(stream);
-                        existing.raw = detection.raw;
-                        existing.charset = charset;
-                        existing.version = detection.version.or(existing.version);
-                        existing.ec = detection.ec.or(existing.ec);
-                        existing.mask = detection.mask.or(existing.mask);
-                    } else {
-                        existing.version = existing.version.or(detection.version);
-                        existing.ec = existing.ec.or(detection.ec);
-                        existing.mask = existing.mask.or(detection.mask);
-                    }
-                    // the photometry flag describes the GEOMETRY source —
-                    // it travels with newly-adopted corners only
-                    if existing.corners.is_none() && detection.corners.is_some() {
-                        existing.photometric_inverted = attempt_inverts;
-                    }
-                    existing.corners = existing.corners.or(detection.corners);
-                    existing.fnc1 |= detection.fnc1;
-                    if !existing.engines.contains(&detection.engine) {
-                        existing.engines.push(detection.engine);
-                    }
+                    self.observations[index].fold(observation);
                 }
-                None if self.merged.len() >= MAX_DETECTIONS => {}
-                None => self.merged.push(MergedDetection {
-                    symbology: detection.symbology,
-                    raw: detection.raw,
-                    text,
-                    charset,
-                    masked_stream: detection.masked_stream,
-                    photometric_inverted: attempt_inverts && detection.corners.is_some(),
-                    corners: detection.corners,
-                    version: detection.version,
-                    ec: detection.ec,
-                    mask: detection.mask,
-                    fnc1: detection.fnc1,
-                    engines: vec![detection.engine],
-                }),
+                None if self.observations.len() >= MAX_OBSERVATIONS => {}
+                None => self.observations.push(observation),
             }
         }
         count
     }
 
+    /// The public detections: physical observations grouped by
+    /// (symbology, text) under their ONE interpretation, first-seen order,
+    /// at most [`MAX_DETECTIONS`]. Two symbols with the same content are
+    /// one detection; the bitstream source of a group supplies its raw and
+    /// reading together.
+    fn detections(&self) -> Vec<(MergedDetection, Reading)> {
+        let mut groups: Vec<(Observation, Reading)> = Vec::new();
+        for observation in &self.observations {
+            let reading = content::read(&observation.raw, &observation.eci);
+            let slot = groups.iter().position(|(group, kept)| {
+                group.symbology == observation.symbology && kept.text == reading.text
+            });
+            match slot {
+                Some(index) => {
+                    let (group, kept) = &mut groups[index];
+                    if group.fold(observation.clone()) {
+                        *kept = reading;
+                    }
+                }
+                None if groups.len() >= MAX_DETECTIONS => {}
+                None => groups.push((observation.clone(), reading)),
+            }
+        }
+        groups
+            .into_iter()
+            .map(|(group, reading)| (group.into_merged(&reading), reading))
+            .collect()
+    }
+
     /// S5 — try the collected rescue candidates; first success absorbs.
     fn rescue_stage(&mut self, luma: &LumaImage, stages: &mut Vec<StageTrace>) -> Result<()> {
-        if !self.merged.is_empty() || self.rescue_candidates.is_empty() || self.out_of_budget() {
+        if !self.observations.is_empty()
+            || self.rescue_candidates.is_empty()
+            || self.out_of_budget()
+        {
             return Ok(());
         }
         let started = Instant::now();
@@ -708,6 +824,7 @@ impl Run<'_> {
                     vec![RawDetection {
                         symbology: crate::report::Symbology::QrCode,
                         raw: rescued.raw,
+                        eci: EciEvidence::Parsed(rescued.segments),
                         masked_stream: Some(candidate.stream.clone()),
                         corners: Some(candidate.corners),
                         version: Some(candidate.version),
@@ -926,7 +1043,7 @@ pub(crate) fn run(
         cancel,
         deadline,
         orig: (planes.luma.width(), planes.luma.height()),
-        merged: Vec::new(),
+        observations: Vec::new(),
         rescue_candidates: Vec::new(),
         panics: 0,
     };
@@ -945,7 +1062,7 @@ pub(crate) fn run(
                 engine::FormatFilter::All,
                 &mut stages,
             )?;
-            if stop || !run.merged.is_empty() {
+            if stop || !run.observations.is_empty() {
                 break 'ladder;
             }
         }
@@ -958,7 +1075,7 @@ pub(crate) fn run(
                 engine::FormatFilter::All,
                 &mut stages,
             )?;
-            if stop || !run.merged.is_empty() {
+            if stop || !run.observations.is_empty() {
                 break 'ladder;
             }
         }
@@ -983,7 +1100,7 @@ pub(crate) fn run(
                 }
             }
             let stop = run.stage("enhance", attempts, engine::FormatFilter::All, &mut stages)?;
-            if stop || !run.merged.is_empty() {
+            if stop || !run.observations.is_empty() {
                 break 'ladder;
             }
         }
@@ -1011,11 +1128,16 @@ pub(crate) fn run(
     // (stable). On a flyer carrying a QR + a retail barcode, the product
     // cares about the QR — and the scored "primary" (detections[0]) must
     // not depend on detector-internal iteration order.
-    let mut merged = run.merged;
-    merged.sort_by_key(|m| !m.symbology.is_qr_family());
+    let mut grouped = run.detections();
+    grouped.sort_by_key(|(merged, _)| !merged.symbology.is_qr_family());
+    #[cfg(test)]
+    let readings = grouped.iter().map(|(_, reading)| reading.clone()).collect();
+    let merged = grouped.into_iter().map(|(merged, _)| merged).collect();
 
     Ok(LadderOutcome {
         merged,
+        #[cfg(test)]
+        readings,
         trace: PipelineTrace {
             stages,
             engine_panics: run.panics,
@@ -1355,10 +1477,9 @@ mod kanji_merge_tests {
     use crate::input::{ImageInput, Limits};
     use crate::transform::normalize;
 
-    /// Kanji-MODE divergence: rqrr returns the original Shift-JIS bytes,
-    /// rxing (no `BYTE_SEGMENTS` for kanji segments) returns UTF-8 of the
-    /// decoded text. Same symbol MUST merge into one detection, raw = the
-    /// original SJIS bytes (rqrr is the byte-truth engine).
+    /// Kanji-MODE symbols: both engines report the original Shift-JIS
+    /// bytes (rxing's re-encoded text is never the payload). Same symbol
+    /// MUST merge into one detection, raw = the original SJIS bytes.
     #[test]
     fn kanji_mode_merges_across_engines_with_sjis_raw() {
         // こんにちは in Shift-JIS — the qrcode crate's optimizer emits
@@ -1388,10 +1509,128 @@ mod kanji_merge_tests {
                 .collect::<Vec<_>>()
         );
         let d = &outcome.merged[0];
-        assert_eq!(d.raw, sjis, "raw must be the ORIGINAL bytes (rqrr truth)");
-        let (text, charset) = crate::engine::charset::resolve(&d.raw);
-        assert_eq!(text, "こんにちは");
-        assert_eq!(charset, crate::report::Charset::ShiftJis);
+        assert_eq!(d.raw, sjis, "raw must be the ORIGINAL bytes");
+        assert_eq!(d.text, "こんにちは");
+        assert_eq!(d.charset, crate::report::Charset::ShiftJis);
+        assert_eq!(d.engines, vec![EngineKind::Rxing, EngineKind::Rqrr]);
+    }
+}
+
+#[cfg(test)]
+mod content_readings {
+    //! The ladder's account of each detection's text, on symbols encoded
+    //! from explicit segment streams: the internal status the published
+    //! three-label `charset` cannot carry yet.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use crate::engine::content::ContentStatus;
+    use crate::input::{ImageInput, Limits};
+    use crate::report::Charset;
+    use crate::transform::normalize;
+
+    /// Walk the camera-frame stages over a v3-M symbol built from `push`.
+    fn walk(
+        push: impl FnOnce(&mut qrcode::bits::Bits) -> qrcode::types::QrResult<()>,
+    ) -> LadderOutcome {
+        let mut bits = qrcode::bits::Bits::new(qrcode::Version::Normal(3));
+        push(&mut bits).unwrap();
+        bits.push_terminator(qrcode::EcLevel::M).unwrap();
+        let code = qrcode::QrCode::with_bits(bits, qrcode::EcLevel::M).unwrap();
+        let img = code
+            .render::<image::Luma<u8>>()
+            .module_dimensions(6, 6)
+            .build();
+        let planes = normalize(
+            &ImageInput::luma8(img.as_raw(), img.width(), img.height()),
+            &Limits::default(),
+        )
+        .unwrap();
+        let mut config = ScanConfig::frame();
+        config.budget_ms = None;
+        run(&planes, &config, &CancelToken::new(), None).unwrap()
+    }
+
+    /// The one detection of a single-symbol walk, with its status.
+    fn single(outcome: &LadderOutcome) -> (&MergedDetection, ContentStatus) {
+        assert_eq!(outcome.merged.len(), 1, "{:?}", outcome.merged);
+        assert_eq!(outcome.readings.len(), 1);
+        assert_eq!(outcome.readings[0].text, outcome.merged[0].text);
+        (&outcome.merged[0], outcome.readings[0].status)
+    }
+
+    #[test]
+    fn declared_eci_text_has_no_legacy_label_yet() {
+        let outcome = walk(|b| {
+            b.push_eci_designator(4)?;
+            b.push_byte_data(&[0xA1])
+        });
+        let (d, status) = single(&outcome);
+        assert_eq!(
+            (d.raw.as_slice(), d.text.as_str()),
+            (&[0xA1][..], "\u{104}")
+        );
+        assert_eq!(status, ContentStatus::Declared(None));
+        // the three-label contract cannot name ISO/IEC 8859-2: the label
+        // stays the heuristic's reading of the bytes until it can
+        assert_eq!(d.charset, Charset::Latin1);
+    }
+
+    #[test]
+    fn eci3_c1_bytes_are_declared_without_a_windows_1252_claim() {
+        let outcome = walk(|b| {
+            b.push_eci_designator(3)?;
+            b.push_byte_data(&[0x35, 0x80])
+        });
+        let (d, status) = single(&outcome);
+        assert_eq!(d.text, "5\u{80}");
+        assert_eq!(status, ContentStatus::Declared(None));
+    }
+
+    #[test]
+    fn honest_statuses_for_declarations_without_a_faithful_reading() {
+        let cases: [(&str, u32, &[u8], ContentStatus); 3] = [
+            ("unsupported", 999, &[0xA1], ContentStatus::UnsupportedEci),
+            ("undecodable", 26, &[0xA1], ContentStatus::Undecodable),
+            (
+                "binary",
+                899,
+                &[0x00, 0xFF, 0x80, 0x7F],
+                ContentStatus::Binary,
+            ),
+        ];
+        for (name, value, bytes, expected) in cases {
+            let outcome = walk(|b| {
+                b.push_eci_designator(value)?;
+                b.push_byte_data(bytes)
+            });
+            let (d, status) = single(&outcome);
+            assert_eq!(status, expected, "{name}");
+            assert_eq!(d.raw, bytes, "{name}");
+            let rendering: String = bytes.iter().map(|&b| char::from(b)).collect();
+            assert_eq!(d.text, rendering, "{name}: lossless byte rendering");
+        }
+    }
+
+    #[test]
+    fn kanji_after_eci26_is_undecodable_not_shift_jis() {
+        let outcome = walk(|b| {
+            b.push_eci_designator(26)?;
+            b.push_byte_data("é".as_bytes())?;
+            b.push_kanji_data(&[0x82, 0xB1, 0x82, 0xF1])
+        });
+        let (d, status) = single(&outcome);
+        assert_eq!(d.raw, vec![0xC3, 0xA9, 0x82, 0xB1, 0x82, 0xF1]);
+        assert_eq!(status, ContentStatus::Undecodable);
+    }
+
+    #[test]
+    fn unmarked_payloads_keep_the_heuristic_status() {
+        let outcome = walk(|b| b.push_byte_data(&[0x35, 0x80]));
+        let (d, status) = single(&outcome);
+        assert_eq!(d.text, "5€");
+        assert_eq!(status, ContentStatus::Heuristic(Charset::Latin1));
+        assert_eq!(d.engines, vec![EngineKind::Rxing, EngineKind::Rqrr]);
     }
 }
 
@@ -1408,7 +1647,6 @@ mod ladder_mutant_kills {
 
     use super::*;
     use crate::input::{ImageInput, Limits};
-    use crate::report::Symbology;
     use crate::transform::normalize;
 
     fn fresh_run(cancel: &CancelToken, orig: (u32, u32)) -> Run<'_> {
@@ -1416,7 +1654,7 @@ mod ladder_mutant_kills {
             cancel,
             deadline: None,
             orig,
-            merged: Vec::new(),
+            observations: Vec::new(),
             rescue_candidates: Vec::new(),
             panics: 0,
         }
@@ -1431,6 +1669,7 @@ mod ladder_mutant_kills {
         RawDetection {
             symbology: Symbology::QrCode,
             raw: raw.to_vec(),
+            eci: EciEvidence::Unobserved,
             masked_stream: None,
             corners,
             version: None,
@@ -1464,14 +1703,26 @@ mod ladder_mutant_kills {
             .collect()
     }
 
-    // ---- Run::absorb ----
+    /// The grouped public detections of a run so far.
+    fn merged(run: &Run<'_>) -> Vec<MergedDetection> {
+        run.detections().into_iter().map(|(m, _)| m).collect()
+    }
+
+    fn eci_mark(value: u32, start: usize) -> EciEvidence {
+        EciEvidence::Parsed(content::SegmentMap {
+            eci: vec![content::EciMark { value, start }],
+            double_byte: Vec::new(),
+        })
+    }
+
+    // ---- Run::absorb · Observation::fold ----
 
     #[test]
     fn absorb_photometry_travels_with_the_first_corners_only() {
-        // 445:51 `&&` -> `||`. The photometry flag is adopted only when the
-        // EXISTING detection has no corners yet AND the incoming one does.
-        // A second corner-carrying attempt (this one INVERTING) must NOT
-        // overwrite the first geometry source's polarity.
+        // `&&` -> `||` in the fold's corner adoption. The photometry flag is
+        // adopted only when the EXISTING observation has no corners yet AND
+        // the incoming one does. A second corner-carrying attempt (this one
+        // INVERTING) must NOT overwrite the first geometry source's polarity.
         let cancel = CancelToken::new();
         let mut run = fresh_run(&cancel, (100, 100));
         let corners_a = Some([Point { x: 1.0, y: 1.0 }; 4]);
@@ -1494,18 +1745,19 @@ mod ladder_mutant_kills {
             )],
             true,
         );
-        assert_eq!(run.merged.len(), 1);
-        assert_eq!(run.merged[0].corners, corners_a, "first corners are kept");
+        let merged = merged(&run);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].corners, corners_a, "first corners are kept");
         assert!(
-            !run.merged[0].photometric_inverted,
-            "445: `||` would adopt the second (inverting) attempt's flag"
+            !merged[0].photometric_inverted,
+            "`||` would adopt the second (inverting) attempt's flag"
         );
     }
 
     #[test]
     fn absorb_fnc1_is_or_accumulated_across_engines() {
-        // 449:35 `|=` -> `&=`. FNC1 is true if ANY contributing engine saw
-        // it; a later engine reporting false must not clear it.
+        // `|=` -> `&=`. FNC1 is true if ANY contributing engine saw it; a
+        // later engine reporting false must not clear it.
         let cancel = CancelToken::new();
         let mut run = fresh_run(&cancel, (100, 100));
         run.absorb(
@@ -1516,18 +1768,18 @@ mod ladder_mutant_kills {
             vec![qr_detection(b"gs1-data", None, EngineKind::Rqrr, false)],
             false,
         );
-        assert_eq!(run.merged.len(), 1);
+        let merged = merged(&run);
+        assert_eq!(merged.len(), 1);
         assert!(
-            run.merged[0].fnc1,
-            "449: `&=` would clear fnc1 when a later engine reports false"
+            merged[0].fnc1,
+            "`&=` would clear fnc1 when a later engine reports false"
         );
     }
 
     #[test]
     fn absorb_unions_distinct_engines() {
-        // 450:24 delete `!`. A merge appends an engine only when it is NOT
-        // already present; dropping the `!` inverts that and refuses the
-        // second engine.
+        // delete `!`. A fold appends an engine only when it is NOT already
+        // present; dropping the `!` inverts that and refuses the second one.
         let cancel = CancelToken::new();
         let mut run = fresh_run(&cancel, (100, 100));
         run.absorb(
@@ -1538,19 +1790,19 @@ mod ladder_mutant_kills {
             vec![qr_detection(b"payload", None, EngineKind::Rqrr, false)],
             false,
         );
-        assert_eq!(run.merged.len(), 1);
+        let merged = merged(&run);
+        assert_eq!(merged.len(), 1);
         assert_eq!(
-            run.merged[0].engines,
+            merged[0].engines,
             vec![EngineKind::Rxing, EngineKind::Rqrr],
-            "450: dropping `!` refuses to append the second engine"
+            "dropping `!` refuses to append the second engine"
         );
     }
 
     #[test]
     fn absorb_caps_distinct_detections_at_max() {
-        // 454:25 match guard `>= MAX_DETECTIONS` -> `false`. The guard drops
-        // NEW symbols once the cap is reached; forcing it false removes the
-        // cap and pushes every distinct symbol.
+        // The grouping guard `>= MAX_DETECTIONS` drops NEW contents once the
+        // cap is reached; forcing it false keeps every distinct symbol.
         let cancel = CancelToken::new();
         let mut run = fresh_run(&cancel, (100, 100));
         for i in 0..(MAX_DETECTIONS + 4) {
@@ -1561,15 +1813,33 @@ mod ladder_mutant_kills {
             );
         }
         assert_eq!(
-            run.merged.len(),
+            merged(&run).len(),
             MAX_DETECTIONS,
-            "454: `false` removes the cap and keeps every distinct symbol"
+            "`false` removes the cap and keeps every distinct symbol"
         );
+        // first-seen order survives the cap
+        assert_eq!(merged(&run)[0].text, "symbol-0");
+    }
+
+    #[test]
+    fn absorb_caps_physical_observations() {
+        // the walk-time bound: distinct payloads past MAX_OBSERVATIONS are
+        // never stored, whatever their text
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, (100, 100));
+        for i in 0..(MAX_OBSERVATIONS + 5) {
+            let raw = format!("tile-{i}");
+            run.absorb(
+                vec![qr_detection(raw.as_bytes(), None, EngineKind::Rxing, false)],
+                false,
+            );
+        }
+        assert_eq!(run.observations.len(), MAX_OBSERVATIONS);
     }
 
     #[test]
     fn absorb_new_upright_detection_is_not_marked_inverted() {
-        // 461:59 `&&` -> `||`. A NEW detection's photometry is
+        // `&&` -> `||`. A NEW observation's photometry is
         // `attempt_inverts && corners.is_some()`. An upright (inverts=false)
         // attempt with corners must land false, not true.
         let cancel = CancelToken::new();
@@ -1583,10 +1853,85 @@ mod ladder_mutant_kills {
             )],
             false,
         );
-        assert_eq!(run.merged.len(), 1);
+        let merged = merged(&run);
+        assert_eq!(merged.len(), 1);
         assert!(
-            !run.merged[0].photometric_inverted,
-            "461: `||` reads true from corners alone on an upright attempt"
+            !merged[0].photometric_inverted,
+            "`||` reads true from corners alone on an upright attempt"
+        );
+    }
+
+    #[test]
+    fn engines_reconcile_on_bytes_with_agreeing_eci_evidence() {
+        // rxing's port: [A1], ECI present but unlocated, its own text 'Ą';
+        // rqrr: [A1] with the re-derived ECI 4 at offset 0. Same bytes,
+        // agreeing evidence → ONE observation, read under the parsed map.
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, (100, 100));
+        let mut rxing = qr_detection(&[0xA1], None, EngineKind::Rxing, false);
+        rxing.eci = EciEvidence::Unlocated {
+            engine_text: "\u{104}".to_owned(),
+        };
+        let mut rqrr = qr_detection(
+            &[0xA1],
+            Some([Point { x: 4.0, y: 4.0 }; 4]),
+            EngineKind::Rqrr,
+            false,
+        );
+        rqrr.eci = eci_mark(4, 0);
+        run.absorb(vec![rxing, rqrr], false);
+        assert_eq!(run.observations.len(), 1);
+        assert_eq!(run.observations[0].eci, eci_mark(4, 0));
+        let grouped = run.detections();
+        assert_eq!(grouped.len(), 1);
+        let (merged, reading) = &grouped[0];
+        assert_eq!(merged.text, "\u{104}");
+        assert_eq!(merged.raw, vec![0xA1]);
+        assert_eq!(merged.engines, vec![EngineKind::Rxing, EngineKind::Rqrr]);
+        assert!(merged.corners.is_some(), "rqrr's geometry rides along");
+        assert_eq!(reading.status, content::ContentStatus::Declared(None));
+    }
+
+    #[test]
+    fn an_unmarked_byte_never_folds_into_a_declared_one() {
+        // [A1] without ECI ('¡') and [A1] under ECI 4 ('Ą') are different
+        // contents: disagreeing evidence keeps them two observations.
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, (100, 100));
+        let mut unmarked = qr_detection(&[0xA1], None, EngineKind::Rqrr, false);
+        unmarked.eci = EciEvidence::Parsed(content::SegmentMap::default());
+        let mut declared = qr_detection(&[0xA1], None, EngineKind::Rqrr, false);
+        declared.eci = eci_mark(4, 0);
+        run.absorb(vec![unmarked, declared], false);
+        let texts: Vec<String> = merged(&run).into_iter().map(|m| m.text).collect();
+        assert_eq!(texts, vec!["¡".to_owned(), "\u{104}".to_owned()]);
+    }
+
+    #[test]
+    fn same_text_groups_and_the_stream_source_supplies_raw_and_label() {
+        // two physical observations reading the same text ('é' as UTF-8 and
+        // as an unmarked Windows-1252 byte) are one detection; the rqrr one
+        // carries the sampled stream, so its bytes and label are published
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, (100, 100));
+        let utf8 = qr_detection("é".as_bytes(), None, EngineKind::Rxing, false);
+        let mut latin1 = qr_detection(&[0xE9], None, EngineKind::Rqrr, false);
+        latin1.masked_stream = Some(MaskedStream {
+            bits: vec![0; 4],
+            bit_len: 32,
+        });
+        latin1.eci = EciEvidence::Parsed(content::SegmentMap::default());
+        run.absorb(vec![utf8, latin1], false);
+        assert_eq!(run.observations.len(), 2);
+        let grouped = run.detections();
+        assert_eq!(grouped.len(), 1);
+        let (merged, reading) = &grouped[0];
+        assert_eq!(merged.text, "é");
+        assert_eq!(merged.raw, vec![0xE9]);
+        assert_eq!(merged.charset, crate::report::Charset::Latin1);
+        assert_eq!(
+            reading.status,
+            content::ContentStatus::Heuristic(crate::report::Charset::Latin1)
         );
     }
 
@@ -1700,7 +2045,7 @@ mod ladder_mutant_kills {
             cancel: &cancel,
             deadline: None,
             orig: (100, 100),
-            merged: Vec::new(),
+            observations: Vec::new(),
             rescue_candidates: vec![dud(), dud(), dud()],
             panics: 0,
         };
