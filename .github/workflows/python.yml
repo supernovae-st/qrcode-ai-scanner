@@ -60,6 +60,10 @@ jobs:
           fi
           pip install "${wheels[0]}[test]"
           pytest python/tests -q
+      # the wheel read back: the AGPL text in .dist-info/licenses/, METADATA
+      # version + license expression, the type stubs, no stray files
+      - name: inspect the wheel
+        run: python3 ../../scripts/package-inspect.py archive dist/*.whl --strict --quiet
 
   wheels:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'

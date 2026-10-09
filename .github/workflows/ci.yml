@@ -153,6 +153,25 @@ jobs:
           echo "$RUNNER_TEMP/binaryen-version_130/bin" >> "$GITHUB_PATH"
       # build · wasm-opt · patch · type sync · test.mjs, exactly as published
       - run: ./scripts/build-wasm.sh
+      - name: pack + inspect the wasm tarball (LICENSE · file set · types)
+        run: python3 scripts/package-inspect.py wasm --no-build --strict --quiet
+
+  # What the registries would receive, read back on every PR
+  # (scripts/package-inspect.py): every LICENSE copy byte-identical to the
+  # root one, every publish surface on one version, and the .crate of each
+  # published crate (LICENSE · README · version · core pin · no stray file).
+  # The npm tarballs are inspected in their smoke jobs, the wheel in
+  # python.yml, right after each build.
+  packaging:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - run: python3 scripts/package-inspect.py licenses --strict --quiet
+      - run: python3 scripts/package-inspect.py versions --strict --quiet
+      - run: python3 scripts/package-inspect.py crates --strict --quiet
 
   corpus:
     runs-on: ubuntu-24.04

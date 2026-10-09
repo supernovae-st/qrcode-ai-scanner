@@ -169,7 +169,7 @@ anything):
    tokens*.
 7. Branch protection: the matrix check `ci / test (ubuntu-latest)` is now
    `test (ubuntu-24.04)`; if it is a required check, update the rule (and
-   add `node-smoke` and `wasm-smoke` if they should be).
+   add `node-smoke`, `wasm-smoke` and `packaging` if they should be).
 
 ## Toolchain — one compiler, pinned
 
