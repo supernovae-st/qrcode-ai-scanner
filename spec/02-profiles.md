@@ -32,15 +32,20 @@ reading "NO" on valid product output is the documented trap.
 
 ## Budget semantics
 
-- ONE wall-clock budget covers the WHOLE scan: ladder + scoring share the
-  same deadline.
+- ONE wall-clock budget covers the scan from the moment its input is
+  ready: the clock starts after the image is decoded, validated and
+  normalized (alpha flattened, luma computed), and the ladder walks,
+  scoring and the envelope share that deadline. Decoding and normalizing
+  the image are bounded by the input limits (§ Anti-DoS limits), not by
+  the budget.
 - Granularity is the ATTEMPT/CELL: an in-flight engine call is not
   interruptible (which is why engine inputs are size-capped — see Limits).
 - Override per call: Rust `ScanProfile::Custom(config)` ·
   CLI `--budget-ms` · Node `budgetMs` ·
   WASM `budget_ms` (positional arg #5 of `scan_image`, #5 of `scan_frame`) ·
   Python `budget_ms` kwarg · Kotlin/Swift (UniFFI) `budget_ms`.
-- `0` or negative = **unbounded** (NOT a zero-millisecond budget). An unset
+- `0` = **unbounded** (WASM: any value at most 0) — NOT a zero-millisecond
+  budget. The other bindings take an unsigned integer. An unset
   `budget_ms` keeps the profile default (`full` 4000 · `fast` 800 · `frame`
   80 ms): reproducible reports need `0` (Rust: `budget_ms: None`).
 - A planned unit the deadline prevents does not run: a ladder attempt or
@@ -95,9 +100,11 @@ Server guidance: lower `maxDimension`/`maxPixels` for untrusted uploads
 
 - Rust: `scan_cancellable(&CancelToken)` — checked between attempts/cells.
 - Node: `AbortSignal` rejects QUEUED tasks only; a RUNNING scan completes
-  within its budget (in-flight cancel is NOT wired — by design at ≤4 s
-  budgets).
-- WASM: synchronous on the calling thread — budget IS the bound.
-- Python / Kotlin / Swift: synchronous like WASM — `budget_ms` is the bound
-  (Python releases the GIL for the scan's duration; mobile callers keep the
-  scan off the main thread).
+  within its budget once its image is decoded (in-flight cancel is NOT
+  wired — by design at ≤4 s budgets).
+- WASM: synchronous on the calling thread — the budget bounds the scan
+  once the image is decoded; the input limits bound the decode.
+- Python / Kotlin / Swift: synchronous like WASM — `budget_ms` bounds the
+  scan once the image is decoded, the input limits the decode (Python
+  releases the GIL for the scan's duration; mobile callers keep the scan
+  off the main thread).

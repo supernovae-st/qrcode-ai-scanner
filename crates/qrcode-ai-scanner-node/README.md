@@ -23,7 +23,9 @@ if (report.detections.length) {
 - `scan(image, { profile, signal, budgetMs })` — async, `full | fast | frame`,
   AbortSignal cancels queued scans. `budgetMs` unset keeps the profile default
   (full 4000 · fast 800 · frame 80 ms); `0` is unbounded, the reproducible mode.
-  A report the budget cut says so: `trace.budget_exhausted === true`.
+  The clock starts once the image is decoded (`maxDimension` / `maxPixels`
+  bound the decode). A report the budget cut says so:
+  `trace.budget_exhausted === true`.
 - `scanSync(image, { profile })` — blocking, scripts only.
 - "No QR found" **resolves** with empty `detections`; rejections carry
   `[QRS-xxx]` codes (invalid input only).

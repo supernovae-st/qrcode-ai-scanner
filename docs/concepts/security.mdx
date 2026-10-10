@@ -17,7 +17,7 @@ and fuzzed.
 | pixel cap (`max_pixels`) | 64 MP — *lower it server-side (16 MP)* |
 | decoder allocation cap | `max_pixels × 8` bytes (decompression-bomb guard) |
 | engine input cap | 2 048 px longest side — one engine call is never unbounded |
-| whole-scan wall clock | profile budget / `budgetMs` |
+| scan wall clock, from the decoded image on (the caps above bound the decode) | profile budget / `budgetMs` |
 | detection cap | 16 per report |
 | engine panics | caught + isolated (`trace.engine_panics`) |
 

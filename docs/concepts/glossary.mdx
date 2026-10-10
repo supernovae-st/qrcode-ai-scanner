@@ -26,7 +26,7 @@ A `qr_code` symbology might carry a `url`, a `wifi`, or plain `text`.
 | **Engine** | A decoder: `rxing` (ZXing lineage) or `rqrr` (quirc lineage); every read is reconciled by content identity, never by decoded text. |
 | **Rescue** | The last-resort stage (`engines: ["rescue"]`) that recovers symbols *both* engines fail on, using errors-and-erasures Reed-Solomon. |
 | **Profile** | The speed-vs-thoroughness setting: `full` (deep, ~4 s), `fast` (~800 ms), `frame` (decode-only, ~80 ms, no score). |
-| **Budget** | The wall-clock bound of a scan (the profile's default, or `budget_ms`; `0` = unbounded). A report it cut says so — `trace.budget_exhausted: true` — and is partial, not final. |
+| **Budget** | The wall-clock bound of a scan once its image is decoded (the profile's default, or `budget_ms`; `0` = unbounded). A report it cut says so — `trace.budget_exhausted: true` — and is partial, not final. |
 | **Inverted** | Light-on-dark polarity — measured, never assumed (`meta.inverted`). |
 
 ## Scannability

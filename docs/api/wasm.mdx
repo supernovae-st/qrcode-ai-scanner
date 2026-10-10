@@ -35,8 +35,11 @@ const frame = scan_frame(new Uint8Array(img.data.buffer),
 <Warning>
 The scan runs **synchronously on the calling thread**. In UI contexts
 either pass `budget_ms` (the verify flow uses 1500 ms) or move the call
-into a Web Worker. `budget_ms: 0` means unbounded (reproducible); unset
-keeps the profile default. A report the budget cut says so
+into a Web Worker. `budget_ms: 0` (or any value at most 0) means unbounded
+(reproducible); unset keeps the profile default. The budget clock starts
+once the image is decoded and normalized, so decoding a large image is
+bounded by `max_dimension` and `max_pixels`, not by `budget_ms`. A report
+the budget cut says so
 (`trace.budget_exhausted === true`): a `null` score beside a detection then
 means "not judged" — never read it as 0.
 </Warning>

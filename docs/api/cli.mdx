@@ -20,7 +20,9 @@ qrscan <image> [--profile full|fast|frame] [--budget-ms <ms>]
 
 `--budget-ms` overrides the profile's wall-clock budget (`full` 4000 ·
 `fast` 800 · `frame` 80 ms); `--budget-ms 0` is unbounded — the
-reproducible mode, the one for CI gates. A report the budget cut says so:
+reproducible mode, the one for CI gates. The clock starts once the image
+is decoded and normalized: decoding is bounded by the input limits, not by
+the budget. A report the budget cut says so:
 `trace.budget_exhausted` is `true`, `--pretty` names what was cut, and
 `--score-only` exits 3 when the budget left a decoded symbol unjudged.
 

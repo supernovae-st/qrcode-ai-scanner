@@ -39,7 +39,9 @@ latency control — and a report it cut says so: `trace.budget_exhausted`
 is `true`, empty detections are then not final, and a `null` score beside
 a detection means "not judged", never 0. `budgetMs: 0` is unbounded and
 reproducible; unset keeps the profile default (full 4000 · fast 800 ·
-frame 80 ms).
+frame 80 ms). The budget clock starts once the image is decoded and
+normalized: `maxDimension` and `maxPixels`, not `budgetMs`, bound the
+decode itself.
 </Warning>
 
 ## Server recipe (Nitro/Express upload endpoint)
