@@ -178,8 +178,15 @@ def test_output_conforms_to_spec_schema(img):
 
 
 def test_symbology_table_covers_every_fixture():
-    on_disk = sorted(p.name for p in (REPO / "fixtures" / "symbology").iterdir() if p.is_file())
-    assert on_disk == sorted(SYMBOLOGY_OF)
+    # Every file is a corpus fixture decoded below, or an exact-content input
+    # that CONTENT-FIXTURES.md documents (not a corpus entry: the core's
+    # exact_content tests pin those) — and that document lists only real files.
+    folder = REPO / "fixtures" / "symbology"
+    notes = folder / "CONTENT-FIXTURES.md"
+    documented = set(re.findall(r"^\| `([^`]+)` \|", notes.read_text(encoding="utf-8"), re.M))
+    on_disk = {p.name for p in folder.iterdir() if p.is_file()} - {notes.name}
+    assert documented and documented <= on_disk
+    assert sorted(on_disk - documented) == sorted(SYMBOLOGY_OF)
 
 
 @pytest.mark.skipif(CORPUS is None, reason="corpus.toml needs tomllib (Python >= 3.11)")
