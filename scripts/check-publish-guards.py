@@ -17,9 +17,10 @@ away from those rules through an unnoticed edit.
 
 Every workflow (*.yml or *.yaml; any other entry in the directory fails):
 read-only top-level permissions; no reference to the `secrets` context
-anywhere (index syntax, toJSON, a workflow-level env and `secrets: inherit`
-included; no workflow here reads a secret); no job-level `uses:` other than
-a local workflow of the same directory, which this check reads.
+anywhere, in any letter case (index syntax, toJSON, a workflow-level env and
+`secrets: inherit` included; GitHub resolves contexts and functions whatever
+their case, and no workflow here reads a secret); no job-level `uses:` other
+than a local workflow of the same directory, which this check reads.
 
 A job is PRIVILEGED when it publishes (cargo publish/yank/owner, npm
 publish/unpublish/deprecate/dist-tag/owner/access/stage, pnpm/yarn/bun
@@ -35,7 +36,7 @@ tokens). Every privileged job must:
                conjunct startsWith(github.ref, 'refs/tags/v'), never under
                `||`; no `#`; no `${{` unless one expression spans the whole
                value (text around one makes a string, always true); and no
-               always(), cancelled(), failure() or success()
+               always(), cancelled(), failure() or success(), in any case
   needs        need the job that inspects what it uploads (INSPECTION)
   environment  name one of crates-io · npm · release · pub
   permissions  declare its own, minimal: contents read (write only to run
@@ -598,7 +599,8 @@ def guarded(condition) -> str:
         if not whole or "${{" in whole.group(1) or "}}" in whole.group(1):
             return f"`if: {raw!r}`: text around `${{{{ }}}}` makes a string, which is always true"
         expr = whole.group(1)
-    if re.search(r"\b(always|cancelled|failure|success)\s*\(", expr):
+    # GitHub's expression functions ignore case: ALWAYS() is always().
+    if re.search(r"\b(always|cancelled|failure|success)\s*\(", expr, re.IGNORECASE):
         return f"`if: {raw!r}` calls a status function: the job would run whatever its needs did"
     expr = _unwrap(expr)
     if len(_top_level(expr, "||")) > 1:
@@ -843,12 +845,14 @@ def check_job(workflow: str, job_id: str, job: dict, wf: dict) -> list:
 
 
 def _mentions_secrets(node) -> bool:
+    """NODE names the secrets context, in any letter case (GitHub resolves
+    `${{ SECRETS.X }}` and `toJSON(Secrets)` like their lower-case forms)."""
     if isinstance(node, dict):
-        return any(key == "secrets" or _mentions_secrets(key) or _mentions_secrets(value)
+        return any(str(key).lower() == "secrets" or _mentions_secrets(key) or _mentions_secrets(value)
                    for key, value in node.items())
     if isinstance(node, list):
         return any(_mentions_secrets(value) for value in node)
-    return node is not None and bool(re.search(r"\bsecrets\b", str(node)))
+    return node is not None and bool(re.search(r"\bsecrets\b", str(node), re.IGNORECASE))
 
 
 def check(workflows: pathlib.Path) -> tuple:
@@ -1163,6 +1167,13 @@ MUTATIONS = (
         "'refs/tags/v')", "'refs/tags/v') && !cancelled()"))], {}, 1, "calls a status function"),
     ("guard && always()", P, [("crates-publish.yml", CRATES_IF, CRATES_IF.replace(
         "'refs/tags/v')", "'refs/tags/v') && always()"))], {}, 1, "calls a status function"),
+    ("guard && ALWAYS(): functions ignore case", P, [("python.yml", PY_IF, PY_IF.replace(
+        "'refs/tags/v')", "'refs/tags/v') && ALWAYS()"))], {}, 1, "calls a status function"),
+    ("guard && !SUCCESS()", P, [("python.yml", PY_IF, PY_IF.replace(
+        "'refs/tags/v')", "'refs/tags/v') && !SUCCESS()"))], {}, 1, "calls a status function"),
+    ("guard && ALWAYS() inside one ${{ }}", P, [("python.yml", PY_IF, PY_IF.replace(
+        "if: startsWith(github.ref, 'refs/tags/v')", "if: ${{ startsWith(github.ref, 'refs/tags/v') && ALWAYS() }}"))],
+     {}, 1, "calls a status function"),
     # -- the inspection job
     ("crates publish no longer needs package", P, [("crates-publish.yml", "  publish:\n    needs: package\n",
                                                     "  publish:\n")], {}, 1, "crates-publish.yml › publish [needs]"),
@@ -1214,6 +1225,17 @@ MUTATIONS = (
     ("a secret in the workflow env", P, [("npm-publish.yml", "env:\n  CARGO_TERM_COLOR: always\n",
                                           "env:\n  CARGO_TERM_COLOR: always\n  NODE_AUTH_TOKEN: ${{ "
                                           "secrets.NPM_TOKEN }}\n")], {}, 1, "npm-publish.yml › (workflow) [secrets]"),
+    ("a secret in the workflow env, the context in capitals", P, [(
+        "npm-publish.yml", "env:\n  CARGO_TERM_COLOR: always\n",
+        "env:\n  CARGO_TERM_COLOR: always\n  NODE_AUTH_TOKEN: ${{ SECRETS.NPM_TOKEN }}\n")], {}, 1,
+     "npm-publish.yml › (workflow) [secrets]"),
+    ("every secret through toJSON(SECRETS)", P, [("crates-publish.yml", "          CARGO_REGISTRY_TOKEN: ${{ "
+                                                  "steps.auth.outputs.token }}", "          CARGO_REGISTRY_TOKEN: ${{ "
+                                                  "steps.auth.outputs.token }}\n          ALL: ${{ toJSON(SECRETS) }}")],
+     {}, 1, "crates-publish.yml › publish [secrets]"),
+    ("every secret handed on by a key spelled Secrets", P, [("crates-publish.yml", None, "\n  elsewhere:\n    uses: "
+                                                             "./.github/workflows/ci.yml\n    Secrets: inherit\n")],
+     {}, 1, "crates-publish.yml › elsewhere [secrets]"),
     ("a job publishing with pnpm and a secret", P, [("npm-publish.yml", None, SNEAKY_PNPM)], {}, 1,
      "npm-publish.yml › sneaky [secrets]"),
     ("a reusable workflow given every secret", P, [("crates-publish.yml", None, REUSABLE)], {}, 1,
