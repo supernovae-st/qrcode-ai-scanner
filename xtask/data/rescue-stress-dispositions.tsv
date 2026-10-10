@@ -29,53 +29,7 @@ floor	dual	348
 engine_panics	uncapped	0
 engine_panics	capped	0
 engine_panics	dual	0
-caught_panics	uncapped	8
+caught_panics	uncapped	0
 caught_panics	capped	0
-caught_panics	dual	2
+caught_panics	dual	0
 pass	cell	label	kind	path	symbology	text_sha256	text_len	engines	reason
-uncapped	1754	1754_v10-m-p60-disc-dark-corner_adjacent-o15	non_qr	engine	upc_e	5fa5c528e1122ced3e56fcd24f0ca894549cace31500e90d45f24a8712f48d9c	8	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	1786	1786_v10-m-p60-disc-gray-corner_adjacent-o15	non_qr	engine	upc_e	5fa5c528e1122ced3e56fcd24f0ca894549cace31500e90d45f24a8712f48d9c	8	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2064	2064_v10-h-p100-square-dark-on_finder-o5	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2065	2065_v10-h-p100-square-dark-on_finder-o10	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2066	2066_v10-h-p100-square-dark-on_finder-o15	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2067	2067_v10-h-p100-square-dark-on_finder-o20	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2068	2068_v10-h-p100-square-dark-on_finder-o25	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2069	2069_v10-h-p100-square-dark-on_finder-o30	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2070	2070_v10-h-p100-square-dark-on_finder-o35	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2071	2071_v10-h-p100-square-dark-on_finder-o40	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2096	2096_v10-h-p100-square-gray-on_finder-o5	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2097	2097_v10-h-p100-square-gray-on_finder-o10	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2098	2098_v10-h-p100-square-gray-on_finder-o15	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2099	2099_v10-h-p100-square-gray-on_finder-o20	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2100	2100_v10-h-p100-square-gray-on_finder-o25	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2101	2101_v10-h-p100-square-gray-on_finder-o30	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2102	2102_v10-h-p100-square-gray-on_finder-o35	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2103	2103_v10-h-p100-square-gray-on_finder-o40	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2128	2128_v10-h-p100-disc-dark-on_finder-o5	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2129	2129_v10-h-p100-disc-dark-on_finder-o10	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2130	2130_v10-h-p100-disc-dark-on_finder-o15	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2131	2131_v10-h-p100-disc-dark-on_finder-o20	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2132	2132_v10-h-p100-disc-dark-on_finder-o25	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2133	2133_v10-h-p100-disc-dark-on_finder-o30	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2134	2134_v10-h-p100-disc-dark-on_finder-o35	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2135	2135_v10-h-p100-disc-dark-on_finder-o40	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2160	2160_v10-h-p100-disc-gray-on_finder-o5	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2161	2161_v10-h-p100-disc-gray-on_finder-o10	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2162	2162_v10-h-p100-disc-gray-on_finder-o15	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2163	2163_v10-h-p100-disc-gray-on_finder-o20	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2164	2164_v10-h-p100-disc-gray-on_finder-o25	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2165	2165_v10-h-p100-disc-gray-on_finder-o30	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2166	2166_v10-h-p100-disc-gray-on_finder-o35	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-uncapped	2167	2167_v10-h-p100-disc-gray-on_finder-o40	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
-dual	1786	1786_v10-m-p60-disc-gray-corner_adjacent-o15-blot_c23_r27	non_qr	engine	upc_e	5fa5c528e1122ced3e56fcd24f0ca894549cace31500e90d45f24a8712f48d9c	8	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
-dual	2097	2097_v10-h-p100-square-gray-on_finder-o10-blot_c39_r3	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
-dual	2099	2099_v10-h-p100-square-gray-on_finder-o20-blot_c42_r24	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
-dual	2101	2101_v10-h-p100-square-gray-on_finder-o30-blot_c37_r47	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
-dual	2102	2102_v10-h-p100-square-gray-on_finder-o35-blot_c44_r7	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
-dual	2103	2103_v10-h-p100-square-gray-on_finder-o40-blot_c45_r16	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
-dual	2160	2160_v10-h-p100-disc-gray-on_finder-o5-blot_c50_r53	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
-dual	2161	2161_v10-h-p100-disc-gray-on_finder-o10-blot_c39_r12	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
-dual	2162	2162_v10-h-p100-disc-gray-on_finder-o15-blot_c48_r20	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
-dual	2164	2164_v10-h-p100-disc-gray-on_finder-o25-blot_c37_r43	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
-dual	2165	2165_v10-h-p100-disc-gray-on_finder-o30-blot_c48_r54	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
-dual	2167	2167_v10-h-p100-disc-gray-on_finder-o40-blot_c54_r21	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)

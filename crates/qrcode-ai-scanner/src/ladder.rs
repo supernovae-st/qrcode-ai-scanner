@@ -9,7 +9,12 @@
 //! still completes, so consensus data within that stage is preserved — and
 //! a stage that found only QR Code reads whose ECI declarations are
 //! signalled, never located, does not end the walk (a later stage may
-//! locate them).
+//! locate them), nor one whose only reads the acceptance holds
+//! (`engine::reconcile`). A read of a symbology the readers invent from
+//! noise gets one decode of that symbology alone on its attempt's plane at
+//! three quarters of its size, right after the attempt (at most one per
+//! content and `MAX_CONFIRMATIONS` per walk, past the deadline too, never
+//! after cancellation): the read at an independent scale it waits for.
 //!
 //! Every attempt runs the engines, re-derives the grids rqrr detected but
 //! could not decode (at most `MAX_RESCUE_CANDIDATES`, while a QR Code read
@@ -414,6 +419,9 @@ const MAX_RESCUE_CANDIDATES: usize = crate::rescue::MAX_CANDIDATES;
 /// error-correction attempts.
 const MAX_REREADS: usize = 16;
 
+/// Confirmation decodes per walk: at most one per (symbology, bytes).
+const MAX_CONFIRMATIONS: usize = 4;
+
 /// One S4 deep-recovery transform recipe. The SAME enumeration drives the
 /// ladder and the score probe ([`crate::score`]'s `CellProbe`) — a symbol
 /// that only decodes via rung N must measure its stress margin in that
@@ -674,6 +682,8 @@ struct Run<'a> {
     rereads: usize,
     /// The contents a margin re-read measured (once each).
     margin_rereads: Vec<(Symbology, ContentKey)>,
+    /// The contents a confirmation decode ran for, in walk order.
+    confirmations: Vec<(Symbology, Vec<u8>)>,
     panics: u8,
     /// The deadline prevented a planned unit of the walk.
     cut: bool,
@@ -716,6 +726,7 @@ impl<'a> Run<'a> {
             attempts: 0,
             rereads,
             margin_rereads: Vec::new(),
+            confirmations: Vec::new(),
             panics: 0,
             cut: false,
         }
@@ -786,6 +797,9 @@ impl Run<'_> {
         read.engine_reading = hit.engine_reading;
         read.parsed = hit.parsed;
         read.margin = hit.margin;
+        read.needs_confirmation = hit.needs_confirmation;
+        let side = dims.0.max(dims.1);
+        read.scales = Some((side, side));
         read.geometry = geometry;
         (read, hit.locate)
     }
@@ -1096,9 +1110,42 @@ impl Run<'_> {
         delivered
     }
 
+    /// The confirmation decodes after an attempt (07-pipeline
+    /// § Acceptance): for each (symbology, bytes) of `pending` — reads of a
+    /// symbology the readers invent from noise — that no read at an
+    /// independent scale confirms yet, one decode of that symbology alone on
+    /// `plane` at three quarters of its size, collected as an attempt of its
+    /// own (its reads in no stage count). At most one per content and
+    /// [`MAX_CONFIRMATIONS`] per walk, whatever the budget left, never after
+    /// cancellation. No `DataBar` (RSS-14) decode runs: the core crate admits
+    /// rxing below 0.9.3, whose RSS-14 reader can underflow, so a `DataBar`
+    /// is confirmed only by a read the walk makes anyway.
+    fn confirm(&mut self, plane: &LumaImage, pending: Vec<(Symbology, Vec<u8>)>, inverts: bool) {
+        for (symbology, raw) in pending {
+            if self.cancel.is_cancelled() || self.confirmations.len() >= MAX_CONFIRMATIONS {
+                return;
+            }
+            if symbology == Symbology::DataBar
+                || self
+                    .confirmations
+                    .iter()
+                    .any(|(own, bytes)| *own == symbology && *bytes == raw)
+                || self.store.confirmed(symbology, &raw)
+            {
+                continue;
+            }
+            self.confirmations.push((symbology, raw));
+            let longest = plane.width().max(plane.height());
+            let small = transform::downscale_to(plane, longest * 3 / 4);
+            let outcome = engine::decode_filtered(&small, engine::FormatFilter::Only(symbology));
+            let _ = self.collect_attempt(&small, outcome, inverts);
+        }
+    }
+
     /// Run one stage as a fixed sequence of lazily-built attempts, each
-    /// collected ([`Run::collect_attempt`]). Returns `Ok(true)` when the
-    /// ladder should stop (budget mid-stage: an attempt did not run).
+    /// collected ([`Run::collect_attempt`]) and followed by its confirmation
+    /// decodes ([`Run::confirm`]). Returns `Ok(true)` when the ladder should
+    /// stop (budget mid-stage: an attempt did not run).
     fn stage(
         &mut self,
         name: &str,
@@ -1118,10 +1165,17 @@ impl Run<'_> {
             }
             let img = (attempt.build)();
             let outcome = engine::decode_filtered(&img, filter);
+            let pending: Vec<(Symbology, Vec<u8>)> = outcome
+                .detections
+                .iter()
+                .filter(|hit| hit.needs_confirmation)
+                .map(|hit| (hit.symbology, hit.raw.clone()))
+                .collect();
             // the trace counts the reads the adapters delivered
             found_total =
                 found_total.saturating_add(self.collect_attempt(&img, outcome, attempt.inverts));
             tried += 1;
+            self.confirm(&img, pending, attempt.inverts);
         }
         stages.push(StageTrace {
             stage: name.to_owned(),
@@ -3094,5 +3148,118 @@ mod ladder_mutant_kills {
         assert_eq!(walked.merged.len(), 1);
         assert!(walked.merged[0].fnc1 && walked.merged[0].corners.is_some());
         assert_eq!(walked.trace.budget_exhausted, Some(false));
+    }
+
+    // ---- acceptance (07-pipeline § Acceptance) ----
+
+    #[test]
+    fn a_read_one_error_past_the_reserve_publishes_nothing_and_reaches_s5() {
+        // v1-L with three corrupted codewords at contrast 120/150: its reads
+        // correct three errors, one past the reserve (⌊(7 − 3)/2⌋ − 3 = −1).
+        // The stage that reads it does not end the walk, nothing is
+        // published, and S5 tries its grid (no erasure there: the rescue's
+        // guard refuses it too)
+        let data =
+            crate::rescue::test_symbols::stream("0100 00000011 01100001 01100010 01100011 0000");
+        let sharp = crate::rescue::test_symbols::from_corrupted_codewords(
+            qrcode::Version::Normal(1),
+            qrcode::EcLevel::L,
+            &data,
+            &[0, 2, 4],
+        );
+        let low = LumaImage::new(
+            sharp
+                .data()
+                .iter()
+                .map(|&px| if px < 128 { 120 } else { 150 })
+                .collect(),
+            sharp.width(),
+            sharp.height(),
+        );
+        let planes = normalize(
+            &ImageInput::luma8(low.data(), low.width(), low.height()),
+            &Limits::default(),
+        )
+        .unwrap();
+        let mut config = ScanConfig::full();
+        config.budget_ms = None;
+        let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
+        assert!(outcome.merged.is_empty(), "{:?}", outcome.merged);
+        let names = stage_names(&outcome);
+        assert!(names.contains(&"enhance"), "{names:?}");
+        let rescue = outcome
+            .trace
+            .stages
+            .iter()
+            .find(|s| s.stage == "rescue")
+            .expect("S5 runs");
+        assert!(rescue.transforms_tried >= 1, "{:?}", outcome.trace);
+        // the stages counted the hits they delivered: read, not published
+        let delivered: u32 = outcome
+            .trace
+            .stages
+            .iter()
+            .map(|s| s.detections_found)
+            .sum();
+        assert!(delivered >= 1, "{:?}", outcome.trace);
+    }
+
+    #[test]
+    fn confirmation_decodes_are_bounded_clock_free_and_cancellable() {
+        // at most one per content and four per walk; no DataBar decode while
+        // rxing below 0.9.3 is admitted; past the deadline too, never after
+        // cancellation
+        let plane = LumaImage::new(vec![255; 64 * 64], 64, 64);
+        let upce = |raw: &[u8]| (Symbology::UpcE, raw.to_vec());
+        let cancel = CancelToken::new();
+        let mut run = Run::new(&cancel, Some(Instant::now()), (64, 64), Seed::default());
+        assert!(run.out_of_budget());
+        let pending = vec![
+            upce(b"1"),
+            upce(b"1"),
+            (Symbology::DataBar, b"2".to_vec()),
+            upce(b"3"),
+            upce(b"4"),
+            upce(b"5"),
+            upce(b"6"),
+        ];
+        let attempts = run.attempts;
+        run.confirm(&plane, pending, false);
+        assert_eq!(
+            run.confirmations,
+            [upce(b"1"), upce(b"3"), upce(b"4"), upce(b"5")]
+        );
+        assert_eq!(run.attempts, attempts + 4, "one rank per decode");
+        cancel.cancel();
+        let mut run = fresh_run(&cancel, (64, 64));
+        run.confirm(&plane, vec![upce(b"7")], false);
+        assert!(run.confirmations.is_empty());
+    }
+
+    #[test]
+    fn a_retail_read_on_the_pyramid_settles_with_no_confirmation_decode() {
+        // EAN-13 is no symbology the readers invent: its attempt ends the
+        // walk and no confirmation decode runs
+        let bytes = std::fs::read(format!(
+            "{}/../../fixtures/symbology/ean13.png",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let img = image::load_from_memory(&bytes).unwrap().to_luma8();
+        let img = image::imageops::resize(
+            &img,
+            img.width() * 2,
+            img.height() * 2,
+            image::imageops::FilterType::Nearest,
+        );
+        let luma = LumaImage::new(img.as_raw().clone(), img.width(), img.height());
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, (luma.width(), luma.height()));
+        let mut stages = Vec::new();
+        let attempts = vec![Attempt::plain(|| transform::downscale_to(&luma, 512))];
+        run.stage("pyramid", attempts, engine::FormatFilter::All, &mut stages)
+            .unwrap();
+        assert!(run.store.settled());
+        assert!(run.confirmations.is_empty());
     }
 }

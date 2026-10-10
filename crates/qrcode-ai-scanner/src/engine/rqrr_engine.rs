@@ -94,6 +94,17 @@ pub(super) fn decode(luma: &LumaImage, orient_candidates: bool) -> Pass {
                 continue;
             }
         };
+        // a word errors alone took past the Annex B reserve publishes nothing
+        // unless another read confirms its content: S5 may rescue its grid
+        if matches!(margin, Margin::Known(margin) if margin < 0) {
+            let input = if orient_candidates && oriented < MAX_CANDIDATES {
+                oriented += 1;
+                rescue_input(&grid)
+            } else {
+                sampled_input(&grid)
+            };
+            pass.rescue.extend(input);
+        }
         // a grid that decided nothing: the re-read may still locate the
         // declarations, at rqrr's bounds and measured version
         let locate = match (&eci, map_ec(meta.ecc_level)) {

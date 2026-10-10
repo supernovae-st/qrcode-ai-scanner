@@ -22,6 +22,15 @@
 //!    form one detection per published identity;
 //! 3. a detection no engine read belongs to is not published; at most
 //!    [`MAX_DETECTIONS`], QR family first, then by earliest read.
+//!
+//! What stands is first weighed by the acceptance (07-pipeline
+//! § Acceptance, [`admitted`]): a read of a symbology the readers invent
+//! from noise waits for a read of its bytes on a plane of independent
+//! scale, and a QR content whose every measured correction margin is
+//! negative is refused, its reads of unknown margin with it. A held read
+//! stays in the walk — it protects agreeing reads and keeps re-derivation
+//! running — but it neither settles a stage nor stops S5, and it is never
+//! published.
 
 use super::content::{ContentKey, DoubleByteSpan, EciEvidence, EngineReading, Fnc1, Segments};
 use super::{MaskedStream, Refusal};
@@ -121,6 +130,13 @@ pub(crate) struct Read {
     /// The best correction margin a read folded into this one measured on
     /// its own received word (`Unknown`: none did).
     pub(crate) margin: Margin,
+    /// Its symbology is one the readers invent from noise: it waits for a
+    /// read of its bytes on a plane of independent scale (cleared when a
+    /// read of it that needs none folds in).
+    pub(crate) needs_confirmation: bool,
+    /// The least and the greatest longest side of the planes it was read
+    /// on (`None`: none recorded).
+    pub(crate) scales: Option<(u32, u32)>,
 }
 
 /// Which read of a fold supplied each part: every part comes from the
@@ -160,6 +176,8 @@ impl Read {
             },
             parsed: false,
             margin: Margin::Unknown,
+            needs_confirmation: false,
+            scales: None,
         }
     }
 
@@ -240,6 +258,13 @@ impl Read {
         }
         self.parsed |= other.parsed;
         self.margin = self.margin.best(other.margin);
+        self.needs_confirmation &= other.needs_confirmation;
+        self.scales = match (self.scales, other.scales) {
+            (Some((lo, hi)), Some((their_lo, their_hi))) => {
+                Some((lo.min(their_lo), hi.max(their_hi)))
+            }
+            (scales, None) | (None, scales) => scales,
+        };
     }
 
     /// An engine delivered it (it is no candidate parse).
@@ -526,6 +551,21 @@ impl ReadStore {
             .collect()
     }
 
+    /// The reads that stand and that the acceptance admits ([`admitted`]).
+    fn accepted(&self) -> Vec<Read> {
+        let live = self.live();
+        live.iter()
+            .filter(|read| admitted(&live, read))
+            .cloned()
+            .collect()
+    }
+
+    /// Whether standing reads of `symbology` and `raw` confirm each other
+    /// ([`confirmed`]): what a confirmation decode waits for.
+    pub(crate) fn confirmed(&self, symbology: Symbology, raw: &[u8]) -> bool {
+        confirmed(&self.live(), symbology, raw)
+    }
+
     /// Whether the walk publishes something — what the S5 trigger asks.
     pub(crate) fn found(&self) -> bool {
         !self.reconcile().is_empty()
@@ -540,13 +580,16 @@ impl ReadStore {
     }
 
     /// Whether the walk may stop after a stage (07-pipeline property 2): an
-    /// engine read stands, and not every QR Code read only signals an ECI
-    /// it could not locate. A signalled read a candidate parse contains
-    /// with an agreeing account counts as located; other symbologies
-    /// neither stop nor prolong the walk.
+    /// engine read stands that the acceptance admits, and not every such QR
+    /// Code read only signals an ECI it could not locate. A signalled read
+    /// a candidate parse contains with an agreeing account counts as
+    /// located; other symbologies neither stop nor prolong the walk.
     pub(crate) fn settled(&self) -> bool {
         let live = self.live();
-        let engine_reads: Vec<&Read> = live.iter().filter(|read| read.by_engine()).collect();
+        let engine_reads: Vec<&Read> = live
+            .iter()
+            .filter(|read| read.by_engine() && admitted(&live, read))
+            .collect();
         if engine_reads.is_empty() {
             return false;
         }
@@ -578,9 +621,10 @@ impl ReadStore {
         }
     }
 
-    /// The distinct contents of the walk (module doc).
+    /// The distinct contents of the walk (module doc): of the reads the
+    /// acceptance admits.
     pub(crate) fn reconcile(&self) -> Vec<Reconciled> {
-        reconcile(self.live())
+        reconcile(self.accepted())
     }
 
     /// The refusal records kept, within capacity and past it.
@@ -588,6 +632,52 @@ impl ReadStore {
     pub(crate) fn records(&self) -> usize {
         self.refusals.len() + self.overflow.len()
     }
+}
+
+/// Whether the acceptance admits a standing read (07-pipeline
+/// § Acceptance): it is no read of a symbology the readers invent from
+/// noise still waiting for confirmation ([`confirmed`]), and its content —
+/// the reads of its symbology whose account agrees with its own — is not
+/// refused for its margins: a refused content has a read with a known
+/// margin and every known margin negative, errors alone having taken each
+/// measured word past the Annex B reserve. Reads of it with no margin
+/// share the refusal (both engines sample the same damaged modules); one
+/// read keeping a margin of zero or more admits them all.
+fn admitted(live: &[Read], read: &Read) -> bool {
+    if read.needs_confirmation && !confirmed(live, read.symbology, &read.key.raw) {
+        return false;
+    }
+    let mut known = live
+        .iter()
+        .filter(|other| other.symbology == read.symbology && other.key.agrees(&read.key))
+        .filter_map(|other| match other.margin {
+            Margin::Known(margin) => Some(margin),
+            Margin::Unknown => None,
+        })
+        .peekable();
+    known.peek().is_none() || known.any(|margin| margin >= 0)
+}
+
+/// Whether reads of `symbology` and `raw` stand confirmed: one of them needs
+/// no confirmation, or two were read on planes whose longest sides differ
+/// by a factor of 1.25 or more (the transforms and colour channels of one
+/// plane, and an inverted attempt, share its size: never independent).
+fn confirmed(live: &[Read], symbology: Symbology, raw: &[u8]) -> bool {
+    let mut span: Option<(u32, u32)> = None;
+    for read in live
+        .iter()
+        .filter(|read| read.symbology == symbology && read.key.raw == raw)
+    {
+        if !read.needs_confirmation {
+            return true;
+        }
+        if let Some((lo, hi)) = read.scales {
+            span = Some(span.map_or((lo, hi), |(own_lo, own_hi)| {
+                (own_lo.min(lo), own_hi.max(hi))
+            }));
+        }
+    }
+    span.is_some_and(|(lo, hi)| u64::from(hi) * 4 >= u64::from(lo) * 5)
 }
 
 /// A signalled QR Code read no agreeing candidate parse contains.
@@ -1922,5 +2012,95 @@ mod tests {
             let shuffled = order.iter().map(|&i| reads[i].clone());
             prop_assert_eq!(summary(&store(shuffled, &[]).reconcile()), expected);
         }
+    }
+
+    /// The read, with a known correction margin of its own word.
+    fn margin(mut read: Read, m: i32) -> Read {
+        read.margin = Margin::Known(m);
+        read
+    }
+
+    #[test]
+    fn a_content_whose_every_known_margin_is_negative_is_refused() {
+        // 07-pipeline § Acceptance: errors alone took every measured word of
+        // the content past the Annex B reserve
+        let rqrr = |m| margin(parsed(read(1, b"abc", NoEci, Q, L)), m);
+        let rxing = read(0, b"abc", NoEci, X, L);
+        // alone: nothing published, nothing settled, S5 not stopped
+        let alone = store([rqrr(-1)], &[]);
+        assert!(alone.reconcile().is_empty() && !alone.settled() && !alone.found());
+        // a read of unknown margin inherits the refusal
+        assert!(store([rqrr(-1), rxing.clone()], &[]).reconcile().is_empty());
+        // one read keeping a margin confirms the content: one detection, the
+        // refused word's engine among its engines
+        let found = every_order(&[rqrr(-1), margin(rxing.clone(), 0)], &[]);
+        assert_eq!(engines(&found), [vec![Rxing, Rqrr]]);
+        // two negative margins never confirm each other
+        assert!(every_order(&[rqrr(-1), margin(rxing.clone(), -2)], &[]).is_empty());
+        // no known margin: published as before
+        assert_eq!(
+            engines(&store([rxing.clone()], &[]).reconcile()),
+            [vec![Rxing]]
+        );
+        // another content is not touched: other bytes, or an account the
+        // refused one does not agree with
+        let other = read(2, b"xyz", NoEci, X, R);
+        let declared = read(3, b"abc", located(&[(26, 0)]), X, R);
+        let found = every_order(&[rqrr(-1), other, declared], &[]);
+        assert_eq!(
+            found.iter().map(|d| d.key.raw.clone()).collect::<Vec<_>>(),
+            [b"xyz".to_vec(), b"abc".to_vec()]
+        );
+        // folded reads keep their best margin
+        let mut folded = store([rqrr(-1)], &[]);
+        folded.collect(margin(parsed(read(4, b"abc", NoEci, Q, L)), 2));
+        assert_eq!(engines(&folded.reconcile()), [vec![Rqrr]]);
+    }
+
+    /// A UPC-E read of `raw` made on a plane whose longest side is `side`.
+    fn upce(n: u32, raw: &[u8], side: u32) -> Read {
+        let mut read = fnc1(read(n, raw, Unobserved, X, NOWHERE), Fnc1::Unobserved);
+        read.symbology = Symbology::UpcE;
+        read.needs_confirmation = true;
+        read.scales = Some((side, side));
+        read
+    }
+
+    #[test]
+    fn a_read_that_needs_confirmation_stands_on_two_independent_scales() {
+        let raw = b"04917052";
+        // one plane: provisional — nothing published or settled, S5 runs
+        let one = store([upce(0, raw, 512)], &[]);
+        assert!(one.reconcile().is_empty() && !one.settled() && !one.found());
+        assert!(!one.confirmed(Symbology::UpcE, raw));
+        // planes of equal dimensions never confirm each other
+        assert!(
+            store([upce(0, raw, 552), upce(1, raw, 552)], &[])
+                .reconcile()
+                .is_empty()
+        );
+        // longest sides 1.25 apart do; just under does not
+        let two = store([upce(0, raw, 512), upce(1, raw, 640)], &[]);
+        assert_eq!(two.reconcile().len(), 1);
+        assert!(two.settled() && two.found() && two.confirmed(Symbology::UpcE, raw));
+        assert!(
+            store([upce(0, raw, 512), upce(1, raw, 639)], &[])
+                .reconcile()
+                .is_empty()
+        );
+        // other bytes of the symbology confirm nothing
+        assert!(
+            store([upce(0, raw, 512), upce(1, b"15658982", 1024)], &[])
+                .reconcile()
+                .is_empty()
+        );
+        // an EAN-13 read alone stands and settles
+        let mut ean = read(0, b"9506000134352", Unobserved, X, NOWHERE);
+        ean.symbology = Symbology::Ean13;
+        ean.scales = Some((512, 512));
+        assert!(store([ean], &[]).settled());
+        // the decision is one of the read set, in every order
+        let reads = [upce(0, raw, 512), upce(1, raw, 552), upce(2, raw, 1024)];
+        assert_eq!(every_order(&reads, &[]).len(), 1);
     }
 }

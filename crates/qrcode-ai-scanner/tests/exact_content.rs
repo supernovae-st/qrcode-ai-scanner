@@ -1272,46 +1272,56 @@ fn a15_mirrored_declarations_are_located_on_the_transposed_grid() {
 }
 
 #[test]
-fn a16_corrections_rqrr_accepted_inside_the_annex_b_reserve_are_located() {
+fn a16_a_symbol_corrected_past_the_annex_b_reserve_publishes_nothing() {
     // v1-M ECI 4 + byte A1 with five corrupted codewords: plain RS (10
     // parity codewords) corrects them and both engines read the symbol, but
-    // 2·5 + 2 exceeds the Annex B budget the scanner keeps for its own
-    // decodes. rqrr already accepted these codewords, so its re-derivation
-    // runs plain RS and locates the declaration.
+    // the correction spends the misdecode-protection reserve (2·5 + 2 > 10):
+    // every read's own word is one error past it (⌊(10 − 2)/2⌋ − 5 = −1) —
+    // the re-read of rxing's read samples the same modules — so no read of
+    // the content keeps a margin and nothing is published. (rqrr's
+    // re-derivation still locates the declaration: the rqrr adapter's unit
+    // rows pin it.)
     let (colors, width) = bit_stream_colors(
         "0111 00000100 0100 00000001 10100001 0000",
         &[6, 8, 10, 12, 14],
     );
-    let report = scan_content(&png_modules(&colors, width, Version::Normal(1), false));
-    let d = one(&report);
-    assert_content(d, A1, "v1-M, 5 errors");
-    assert_both_engines(d);
+    assert_refused(
+        "v1-M, 5 errors",
+        &png_modules(&colors, width, Version::Normal(1), false),
+    );
 }
 
 #[test]
-fn a17_to_a20_low_contrast_and_corrected_declarations_rqrr_alone_reads() {
-    // At contrast 120/150 rxing reads nothing and rqrr alone decodes —
-    // mirrored or not, with codewords its plain RS corrected: its
-    // re-derivation locates the declaration.
-    let privet =
-        r#"{"text":"Привет","raw":"v+DY0tXi","charset":"eci","eci":[{"designator":7,"start":0}]}"#;
+fn a17_a18_a20_corrections_past_the_annex_b_reserve_publish_nothing() {
+    // v1-L with three corrupted codewords (⌊(7 − 3)/2⌋ − 3 = −1) and v1-M with
+    // five (⌊(10 − 2)/2⌋ − 5 = −1): the decoders correct them, but every
+    // read's own word is past the misdecode-protection reserve, so nothing
+    // is published — where rqrr alone reads at contrast 120/150 (A17
+    // mirrored, A20) and where both engines read at full contrast (A18).
     let eci7 =
         "0111 00000111 0100 00000110 10111111 11100000 11011000 11010010 11010101 11100010 0000";
     let eci4 = "0111 00000100 0100 00000001 10100001 0000";
     // A17: v1-L ECI 7, 3 corrupted codewords, mirrored, low contrast
     let (colors, width) = stream_colors(Version::Normal(1), EcLevel::L, eci7, &[0, 1, 2]);
-    let report = scan_content(&png_contrast(&mirror(&colors, width), width, 10, 120, 150));
-    let d = one(&report);
-    assert_content(d, privet, "A17");
-    assert_eq!(d.engines, vec![EngineKind::Rqrr], "A17");
-    assert!(d.corners.is_some(), "A17");
+    assert_refused(
+        "A17",
+        &png_contrast(&mirror(&colors, width), width, 10, 120, 150),
+    );
     // A18: v1-L ECI 4, 3 corrupted codewords, upright, full contrast
     let (colors, width) = stream_colors(Version::Normal(1), EcLevel::L, eci4, &[10, 12, 14]);
-    let report = scan_content(&png_modules(&colors, width, Version::Normal(1), false));
-    let d = one(&report);
-    assert_content(d, A1, "A18");
-    assert_both_engines(d);
-    // A19: mirrored ECI 4, low contrast
+    assert_refused(
+        "A18",
+        &png_modules(&colors, width, Version::Normal(1), false),
+    );
+    // A20: v1-M ECI 4, 5 corrupted codewords, low contrast
+    let (colors, width) = bit_stream_colors(eci4, &[6, 8, 10, 12, 14]);
+    assert_refused("A20", &png_contrast(&colors, width, 6, 120, 150));
+}
+
+#[test]
+fn a19_a_mirrored_low_contrast_declaration_rqrr_alone_reads_is_located() {
+    // At contrast 120/150 rxing reads nothing and rqrr alone decodes the
+    // mirrored symbol: its re-derivation locates the declaration.
     let code = eci4_a1();
     let report = scan_content(&png_contrast(
         &mirror(&code.to_colors(), code.width()),
@@ -1323,12 +1333,6 @@ fn a17_to_a20_low_contrast_and_corrected_declarations_rqrr_alone_reads() {
     let d = one(&report);
     assert_content(d, A1, "A19");
     assert_eq!(d.engines, vec![EngineKind::Rqrr], "A19");
-    // A20: v1-M ECI 4, 5 corrupted codewords, low contrast
-    let (colors, width) = bit_stream_colors(eci4, &[6, 8, 10, 12, 14]);
-    let report = scan_content(&png_contrast(&colors, width, 6, 120, 150));
-    let d = one(&report);
-    assert_content(d, A1, "A20");
-    assert_eq!(d.engines, vec![EngineKind::Rqrr], "A20");
 }
 
 // ------------------------------------- J · rqrr Kanji 5949-5951 (c3)
@@ -2575,8 +2579,19 @@ fn n5_two_data_matrix_symbols_sharing_their_non_ascii_run() {
 #[test]
 fn n8_a_databar_gtin_has_no_fnc1_key() {
     // ]e0: the position is not reported (DataBar's text is the AI-less
-    // GTIN).
-    let report = scan_content(&fixture("symbology/databar-gtin.png"));
+    // GTIN). A DataBar read waits for one at an independent scale: scanned
+    // at twice its size, the 512 px pyramid and the 768 px plane both read
+    // it.
+    let native = image::load_from_memory(&fixture("symbology/databar-gtin.png"))
+        .unwrap()
+        .to_luma8();
+    let twice = image::imageops::resize(
+        &native,
+        native.width() * 2,
+        native.height() * 2,
+        image::imageops::FilterType::Nearest,
+    );
+    let report = scan_content(&encode_png(twice));
     let d = one(&report);
     assert_eq!(d.symbology, Symbology::DataBar);
     assert_content(
@@ -2587,6 +2602,11 @@ fn n8_a_databar_gtin_has_no_fnc1_key() {
     // the payload 0.9 gave it: DataBar is no retail GTIN carrier, and its
     // AI-less digits are no GS1 element string
     assert_eq!(payload(d), wire(r#"{"kind":"text"}"#));
+    // at its native 384 px no plane of another scale reads it, and while the
+    // core crate admits rxing below 0.9.3 no DataBar confirmation decode runs
+    // (that reader can underflow): a lone DataBar below 640 px is refused
+    let report = scan_content(&fixture("symbology/databar-gtin.png"));
+    assert!(report.detections.is_empty(), "{:?}", summary(&report));
 }
 
 // ------------------------------------------------------------ R · re-read

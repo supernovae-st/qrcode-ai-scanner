@@ -2991,6 +2991,94 @@ mod tests {
         }
     }
 
+    /// The scanner's own box downscale (`transform::downscale_to`): the
+    /// longest side to `max_side`, every output pixel the integer mean of
+    /// its source box.
+    fn box_downscale(img: &GrayImage, max_side: u32) -> GrayImage {
+        let (w, h) = (img.width(), img.height());
+        let longest = w.max(h);
+        if longest <= max_side {
+            return img.clone();
+        }
+        let scale =
+            |v: u32| (u64::from(v) * u64::from(max_side) / u64::from(longest)).max(1) as u32;
+        let (new_w, new_h) = (scale(w), scale(h));
+        let span = |o: u32, from: u32, to: u32| {
+            let lo = (u64::from(o) * u64::from(from) / u64::from(to)) as u32;
+            let hi = ((u64::from(o) + 1) * u64::from(from) / u64::from(to)).max(u64::from(lo) + 1);
+            (lo, hi as u32)
+        };
+        GrayImage::from_fn(new_w, new_h, |ox, oy| {
+            let (x0, x1) = span(ox, w, new_w);
+            let (y0, y1) = span(oy, h, new_h);
+            let mut sum = 0u64;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    sum += u64::from(img.get_pixel(x, y).0[0]);
+                }
+            }
+            Luma([(sum / (u64::from(y1 - y0) * u64::from(x1 - x0))) as u8])
+        })
+    }
+
+    fn png_of(img: &GrayImage) -> Vec<u8> {
+        let mut png = Vec::new();
+        image::DynamicImage::ImageLuma8(img.clone())
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        png
+    }
+
+    /// The regression cells, scanned as the gate scans them: two
+    /// ZXing-lineage reads that once published only their byte segments
+    /// (cells 825 and 1882), and two 1D readings of the QR modules (cells
+    /// 2064 and 1754) — also as the input planes that read them: the 512 px
+    /// box downscale of cell 2064, and the 435 px box downscale of cell
+    /// 2067's 512 px plane.
+    #[test]
+    fn regression_cells_publish_only_their_truth() {
+        let mut cfg = ScanProfile::Full.config();
+        cfg.budget_ms = None;
+        let scanner = Scanner::builder().profile(ScanProfile::Custom(cfg)).build();
+        let cells = build_grid();
+        let scan = |png: &[u8]| scanner.scan(ImageInput::encoded(png)).unwrap();
+        for index in [825, 1882] {
+            let cell = &cells[index];
+            let report = scan(&render_cell(cell));
+            let qr: Vec<&Detection> = report
+                .detections
+                .iter()
+                .filter(|d| d.symbology.is_qr_family())
+                .collect();
+            assert_eq!(qr.len(), 1, "{}", cell_label(cell));
+            assert_eq!(qr[0].content.text, cell.truth, "{}", cell_label(cell));
+            assert!(
+                qr[0].engines.contains(&EngineKind::Rxing),
+                "{}",
+                cell_label(cell)
+            );
+        }
+        let no_invention = |name: &str, png: &[u8], truth: &str| {
+            let report = scan(png);
+            for d in &report.detections {
+                assert!(
+                    d.symbology.is_qr_family() && d.content.text == truth,
+                    "{name}: {:?} {}",
+                    d.symbology,
+                    preview(&d.content.text)
+                );
+            }
+        };
+        for index in [2064, 1754] {
+            let cell = &cells[index];
+            no_invention(&cell_label(cell), &render_cell(cell), &cell.truth);
+        }
+        let base512 = box_downscale(&render_canvas(&cells[2064]), 512);
+        no_invention("cell 2064 at 512 px", &png_of(&base512), &cells[2064].truth);
+        let r435 = box_downscale(&box_downscale(&render_canvas(&cells[2067]), 512), 435);
+        no_invention("cell 2067 at 435 px", &png_of(&r435), &cells[2067].truth);
+    }
+
     /// The constructed S5 cell is deterministic and shaped the way its ledger
     /// row and the scanner both need. Whether the scanner then miscorrects is
     /// a sweep fact, recorded in the gate output and held by its ledger row.

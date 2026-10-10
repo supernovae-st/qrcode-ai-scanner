@@ -853,6 +853,46 @@ pub(crate) mod test_symbols {
         (canvas.into_colors(), width)
     }
 
+    /// The 26 interleaved codewords (19 data, 7 EC) of a byte-mode `payload`
+    /// at v1-L.
+    pub(crate) fn v1l_codewords(payload: &[u8]) -> Vec<u8> {
+        let version = qrcode::Version::Normal(1);
+        let mut bits = qrcode::bits::Bits::new(version);
+        bits.push_byte_data(payload).unwrap();
+        bits.push_terminator(qrcode::EcLevel::L).unwrap();
+        let (data, ec) =
+            qrcode::ec::construct_codewords(&bits.into_bytes(), version, qrcode::EcLevel::L)
+                .unwrap();
+        [data, ec].concat()
+    }
+
+    /// A v1-L symbol drawn from its 26 interleaved `codewords` as given,
+    /// mask 3 (a dark module where row + column is a multiple of 3), at 12 px
+    /// per module with a 4-module quiet zone.
+    pub(crate) fn drawn_v1l(codewords: &[u8]) -> LumaImage {
+        let mut canvas =
+            qrcode::canvas::Canvas::new(qrcode::Version::Normal(1), qrcode::EcLevel::L);
+        canvas.draw_all_functional_patterns();
+        canvas.draw_data(&codewords[..19], &codewords[19..]);
+        canvas.apply_mask(qrcode::canvas::MaskPattern::DiagonalLines);
+        let colors = canvas.into_colors();
+        let (scale, quiet, width) = (12, 4, 21);
+        let side = (width + 2 * quiet) * scale;
+        let mut data = vec![255u8; side * side];
+        for (i, color) in colors.iter().enumerate() {
+            if *color == qrcode::Color::Dark {
+                let (row, column) = (i / width + quiet, i % width + quiet);
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        data[(row * scale + dy) * side + column * scale + dx] = 0;
+                    }
+                }
+            }
+        }
+        let side = u32::try_from(side).unwrap();
+        LumaImage::new(data, side, side)
+    }
+
     /// The 44 interleaved codewords (28 data, 16 EC: v2 has one block) of a
     /// byte-mode `payload` at v2-M.
     pub(crate) fn v2m_codewords(payload: &[u8]) -> Vec<u8> {
@@ -1608,7 +1648,7 @@ mod acceptance {
     //! through the ladder, must publish nothing.
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::test_symbols::{smudged_v2m, v2m_codewords};
+    use super::test_symbols::{drawn_v1l, smudged_v2m, v1l_codewords, v2m_codewords};
     use crate::input::{ImageInput, Limits, LumaImage};
     use crate::ladder::{CancelToken, ScanConfig, run};
     use crate::report::EngineKind;
@@ -1662,5 +1702,36 @@ mod acceptance {
         let clean = published(&smudged_v2m(&truth, &[]));
         assert_eq!(clean.len(), 1);
         assert_eq!(clean[0].0, b"https://bank.example/t?a=9");
+    }
+
+    /// A v1-L symbol of `https://ex.am/p=9` whose codewords moved five steps
+    /// toward those of `https://ex.am/p=1` (the data codeword they differ in,
+    /// and four of their EC codewords): three codewords from the second
+    /// content. Every errors-only decoder reads the second content with three
+    /// corrections — one past v1-L's reserve on every engine's word
+    /// (⌊(7 − 3)/2⌋ − 3 = −1). Two engines reading the same damaged modules
+    /// are no independent evidence: nothing may be published.
+    #[test]
+    fn a_word_both_engines_correct_past_the_reserve_publishes_nothing() {
+        let a = v1l_codewords(b"https://ex.am/p=9");
+        let b = v1l_codewords(b"https://ex.am/p=1");
+        let differ: Vec<usize> = (0..26).filter(|&i| a[i] != b[i]).collect();
+        let moved: Vec<usize> = differ
+            .iter()
+            .copied()
+            .filter(|&i| i < 19)
+            .chain(differ.iter().copied().filter(|&i| i >= 19).take(4))
+            .collect();
+        assert_eq!(moved.len(), 5, "{differ:?}");
+        let mut word = a.clone();
+        for &i in &moved {
+            word[i] = b[i];
+        }
+        assert_eq!(published(&drawn_v1l(&word)), Vec::new());
+        // control: the second content's own symbol reads, by both engines
+        let clean = published(&drawn_v1l(&b));
+        assert_eq!(clean.len(), 1);
+        assert_eq!(clean[0].0, b"https://ex.am/p=1");
+        assert_eq!(clean[0].1, [EngineKind::Rxing, EngineKind::Rqrr]);
     }
 }
