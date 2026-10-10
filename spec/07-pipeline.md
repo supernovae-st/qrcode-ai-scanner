@@ -37,10 +37,12 @@ Normative properties:
    that a stage can parse the symbol and locate its declarations. A QR Code
    read that a grid the scanner re-derived contains, with a matching
    account, counts as located. Reads of other symbologies (Micro QR, rMQR
-   and retail barcodes included) neither stop nor prolong the walk. S5 runs
-   only when S1–S4 published nothing: hits the scanner refused or withheld
-   do not count, so `trace.stages[].detections_found` may be non-zero on a
-   walk that went on (read `detections`, not the counter).
+   and retail barcodes included) neither stop nor prolong the walk. A stage
+   whose reads the acceptance holds (§ Acceptance) does not end the walk
+   either; held reads do not count for S5's trigger. S5 runs only when
+   S1–S4 published nothing: hits the scanner refused or withheld do not
+   count, so `trace.stages[].detections_found` may be non-zero on a walk
+   that went on (read `detections`, not the counter).
 3. **Budget + cancel checked between attempts** — an engine call is not
    interruptible; inputs are size-capped instead.
 4. **Engines are panic-isolated** — a third-party decoder panic increments
@@ -85,6 +87,16 @@ Normative properties:
    - rescue streams (S5);
    - the **re-read** (below).
 
+   **Read checks.** A QR Code read of `rxing`'s zxing-cpp-port reader with
+   identifier `]Q1` and a non-empty ASCII text is kept only when its bytes
+   are that text (or, behind a byte-order mark, decode to it the way
+   `rxing` decodes them); an empty text — `rxing`'s rendering of a segment
+   its decoder rejects, such as a Kanji pair 5949–5951 — says nothing of
+   the bytes. A `]Q1` read whose bytes mix ASCII with such a pair keeps a
+   partial ASCII text and is refused; `rqrr`'s read still publishes that
+   content. A DataBar (RSS-14) read whose text is not exactly fourteen
+   ASCII digits is refused.
+
    Error correction accepts any correctable block (2t ≤ the parity
    codewords) on every source except S5 rescue, which keeps the Annex B
    reserve because no engine decoded that stream. In each attempt: the
@@ -108,6 +120,14 @@ Normative properties:
    bytes, a matching account) where the read lies (the read lies inside
    it), or a recorded refusal withholds the read (below). At most 16
    re-reads per scan.
+
+   It also runs, for its correction margin only, for a QR Code port read
+   at EC level L or M that no other read of its content measured with a
+   margin of zero or more (§ Acceptance): candidates are versions 1 and 2
+   only (at most 12 format probes and 12 error-correction attempts), once
+   per content in a walk, within the 16 re-reads per scan. Such a re-read
+   changes nothing else of the read; a re-read that locates a read records
+   the margin of the word it read.
    - The scanner samples the attempt image at the four outer symbol
      corners the engine reports. Candidates are versions 1–40 (`rqrr`: its
      measured version) in both orientations, through three sampler passes
@@ -208,10 +228,42 @@ Normative properties:
    or located; located with an identical list or with signalled. Corners
    are not compared.
 
+## Acceptance
+
+Every read the walk collects is weighed over the whole walk before it may
+settle a stage, stop S5 or be published. A held read stays in the walk: it
+protects reads it agrees with and keeps re-derivation running.
+
+1. **Correction margin.** A read's margin is that of its own received
+   word, when the scanner error-corrected that word itself (the `rqrr`
+   grid, the re-read, S5): the least, over its blocks, of
+   ⌊(npar − p − f)/2⌋ − e, with p from ISO/IEC 18004 Table 9, f erasures
+   and e errors. A QR content — the reads of its symbology whose accounts
+   agree — is refused when at least one of its reads has a known margin
+   and every known margin is negative; its reads of unknown margin share
+   the refusal. One read with a margin of zero or more admits the content.
+   Errors alone reach a negative margin only on v1-L (more than 2 errors),
+   v1-M and v2-L (more than 4). The grid of an `rqrr` read with a negative
+   margin is offered to S5 like an undecoded grid.
+2. **Independent confirmation.** A read of UPC-E, DataBar, DataBar
+   Expanded, or PDF417 at error-correction level 0, 1 or none waits until
+   a read of the same symbology and bytes was made on a plane whose
+   longest side differs from its own by a factor of 1.25 or more (the
+   transforms and colour channels of one plane, and an inverted attempt,
+   share its size). Right after the attempt that first reads such a
+   content with no confirming read yet, the scanner decodes that symbology
+   alone on the attempt's plane downscaled to ⌊3L/4⌋ (L its longest side),
+   once per content and at most four times per walk, whatever the budget
+   left and never after cancellation; the decode is an attempt of its own,
+   its time counted in the stage, its reads in no `detections_found`.
+   While the core crate admits rxing below 0.9.3 no DataBar (RSS-14)
+   decode of that kind runs, and a DataBar is confirmed only by a read the
+   walk makes anyway. A read still waiting when the walk ends is refused.
+
 ## S5 — the erasure rescue (what `engines: ["rescue"]` means)
 
-Trigger: S1–S4 published no detection (refused and withheld reads do not
-count), but rqrr READ a grid + its format info on at least one attempt
+Trigger: S1–S4 published no detection (refused, withheld and held reads do
+not count), but rqrr READ a grid + its format info on at least one attempt
 (`get_raw_data` ok, `decode_to` err). Up to 4 candidates are kept (deduped
 by version/ec/mask/polarity/orientation).
 
@@ -223,7 +275,7 @@ Per candidate:
    codeword's 8 modules, sampled at module centers through the detection
    homography (center-submodule idea: Halftone QR, Chu et al. 2013).
 3. **Erasure marking**: lowest-margin codewords (< 0.30 of half-span)
-   become erasures, budget ≤ npar − p − 1 per block.
+   become erasures, budget ≤ npar − p − 2 per block.
 4. **Errors-and-erasures RS** (Forney 1965): erasure locator Γ, modified
    syndromes Ξ = S·Γ (Berlekamp-Massey on the e-shifted Ξ), combined
    locator Ψ = Λ·Γ, Chien roots, b=0 Forney magnitudes. Capacity law
@@ -232,7 +284,10 @@ Per candidate:
    AND the bitstream must parse as a structurally valid mode-segment stream
    under 01-report § Content (§ Refused streams), and every block must
    error-correct within the Annex B reserve — refusal-biased: no surviving
-   guess ever reaches the report.
+   guess ever reaches the report. A block corrected with erasures must
+   leave at least two parity codewords unspent beyond the reserve
+   (npar − p − f − 2e ≥ 2); a block corrected without erasures keeps the
+   Annex B guard.
 
 Measured yield (v5-H, centered gray disk): engines die past 20% radius;
 rescue decodes through 30% (≈2.2× the occlusion area) — the
