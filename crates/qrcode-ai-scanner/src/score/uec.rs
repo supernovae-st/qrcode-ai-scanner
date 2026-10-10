@@ -461,7 +461,7 @@ mod tests {
                     mask,
                     crate::rescue::Acceptance::Engine
                 ),
-                crate::rescue::Rederived::Unverified
+                crate::rescue::Rederived::Unverified(crate::rescue::Unverified::NothingVerifies)
             ),
             "precondition: no block of it error-corrects"
         );

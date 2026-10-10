@@ -2340,7 +2340,7 @@ mod tests {
     /// erasures, keeps its margin.
     #[test]
     fn a_stream_that_does_not_verify_has_no_uec_and_no_cap() {
-        use crate::rescue::{Acceptance, Rederived};
+        use crate::rescue::{Acceptance, Rederived, Unverified};
         let luma = crate::rescue::test_symbols::from_segments_mirrored(
             qrcode::Version::Normal(3),
             qrcode::EcLevel::M,
@@ -2357,7 +2357,7 @@ mod tests {
         assert!(
             matches!(
                 crate::rescue::rederive(&stream, version, ec, mask, Acceptance::Engine),
-                Rederived::Unverified
+                Rederived::Unverified(Unverified::NothingVerifies)
             ),
             "precondition: the as-sampled stream does not error-correct"
         );
