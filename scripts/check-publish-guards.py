@@ -54,6 +54,12 @@ tokens). Every privileged job must:
                in the job — a `package-inspect.py archive … --strict` step —
                before their first publishing step, so a swapped artifact
                cannot reach a registry on the versions gate alone
+  pypi-live    a job uploading with pypa/gh-action-pypi-publish runs, before
+               its first publishing step, exactly
+               `python3 scripts/package-inspect.py pypi-live dist/* --strict --quiet`
+               (no key but name) and uploads that dist (packages-dir): twine's
+               --skip-existing skips a file PyPI already serves by name alone,
+               so each must first be proven to be the inspected file (sha256)
   toolchains   Rust through rustup or a pinned action at RUST_TOOLCHAIN,
                resolved step > job > workflow to an exact x.y.z and never set
                in a script, no rust-toolchain file; pnpm, Flutter, Dart and
@@ -145,6 +151,11 @@ REINSPECT_JOBS = {
     ("npm-publish.yml", "publish-wasm"),
     ("python.yml", "release"),
 }
+
+# What a job uploading with pypa/gh-action-pypi-publish runs, verbatim, before
+# its first publishing step: every file PyPI already serves at the version must
+# be the local one (sha256), since --skip-existing skips a live file by name.
+PYPI_LIVE_RUN = "python3 scripts/package-inspect.py pypi-live dist/* --strict --quiet"
 
 # The job each publishing job must need: the one that inspects (for the iOS
 # zip, builds) what it uploads. A publishing job missing here fails.
@@ -897,6 +908,16 @@ def check_job(workflow: str, job_id: str, job: dict, wf: dict) -> list:
             for step in steps[:first_publish] for line in _code_lines(step.get("run"))):
         flag("reinspect", "must run `package-inspect.py archive … --strict` on the downloaded artifact before the "
                           "first publishing step (the versions gate does not prove the bytes a sibling job built)")
+    pypi = [step for step in steps if re.fullmatch(r"pypa/gh-action-pypi-publish(/.+)?", _uses(step)[0])]
+    if pypi:
+        inputs = [step.get("with") if isinstance(step.get("with"), dict) else {} for step in pypi]
+        dirs = sorted({str(given.get("packages-dir", "dist")).strip().rstrip("/") for given in inputs})
+        compared = any(set(step) <= {"name", "run"} and str(step.get("run", "")).strip() == PYPI_LIVE_RUN
+                       for step in steps[:first_publish])
+        if not compared or dirs != ["dist"]:
+            flag("pypi-live", f"run exactly `{PYPI_LIVE_RUN}` (no key but name) before the first publishing step and "
+                              f"upload that dist (packages-dir {dirs}): skip-existing skips a file PyPI already serves "
+                              "by name alone, so each must first be proven the inspected file")
     for runtime, block in PRINTED.items():
         setups = [i for i, step in enumerate(steps) if _uses(step)[0] == runtime]
         if setups and not any(set(step) <= {"name", "run"} and _block(step.get("run")) == block
@@ -1136,6 +1157,11 @@ NATIVE_PUBLISH = '                if out=$(npm publish "$tgz" --access public --
 WASM_PUBLISH = ('              echo "publishing $name@$version"\n'
                 '              if out=$(npm publish "$tgz" --access public --ignore-scripts 2>&1); then')
 PYPI = "      - uses: pypa/gh-action-pypi-publish"
+PY_REINSPECT = ("      - name: re-inspect the exact set about to be uploaded\n"
+                "        run: python3 scripts/package-inspect.py archive dist/* --release-set --strict --quiet\n")
+PYPI_LIVE = ("      - name: compare the files PyPI already serves with the inspected set\n"
+             f"        run: {PYPI_LIVE_RUN}\n")
+PYPI_END = "          skip-existing: true\n"
 FLUTTER_PUBLISH = "      - name: publish (OIDC)\n"
 EXTRA_PUBLISHER = """\
 name: release
@@ -1503,16 +1529,29 @@ MUTATIONS = (
     ("publish-wasm drops its re-inspect step", P, [("npm-publish.yml",
         "      - name: re-inspect the wasm tarball about to be uploaded\n        run: python3 scripts/package-inspect.py"
         " archive npm-wasm/*.tgz --strict --quiet\n", "")], {}, 1, "npm-publish.yml › publish-wasm [reinspect]"),
-    ("python release drops its re-inspect step", P, [("python.yml",
-        "      - name: re-inspect the exact set about to be uploaded\n        run: python3 scripts/package-inspect.py"
-        " archive dist/* --release-set --strict --quiet\n", "")], {}, 1, "python.yml › release [reinspect]"),
-    ("python release re-inspects only after publishing", P, [("python.yml",
-        "      - name: re-inspect the exact set about to be uploaded\n        run: python3 scripts/package-inspect.py"
-        " archive dist/* --release-set --strict --quiet\n      - uses: pypa/gh-action-pypi-publish@"
-        "cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0",
-        "      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0\n"
-        "      - name: re-inspect the exact set about to be uploaded\n        run: python3 scripts/package-inspect.py"
-        " archive dist/* --release-set --strict --quiet")], {}, 1, "python.yml › release [reinspect]"),
+    ("python release drops its re-inspect step", P, [("python.yml", PY_REINSPECT, "")], {}, 1,
+     "python.yml › release [reinspect]"),
+    ("python release re-inspects only after publishing", P, [
+        ("python.yml", PY_REINSPECT, ""), ("python.yml", PYPI_END, PYPI_END + PY_REINSPECT)], {}, 1,
+     "python.yml › release [reinspect]"),
+    # -- the PyPI comparison: skip-existing skips a live file by name alone
+    ("python release drops its PyPI comparison", P, [("python.yml", PYPI_LIVE, "")], {}, 1,
+     "python.yml › release [pypi-live]"),
+    ("python release compares with PyPI only after publishing", P, [
+        ("python.yml", PYPI_LIVE, ""), ("python.yml", PYPI_END, PYPI_END + PYPI_LIVE)], {}, 1,
+     "python.yml › release [pypi-live]"),
+    ("the PyPI comparison made non-fatal", P, [
+        ("python.yml", PYPI_LIVE, PYPI_LIVE.replace("--quiet", "--quiet || true"))], {}, 1,
+     "python.yml › release [pypi-live]"),
+    ("the PyPI comparison with continue-on-error", P, [
+        ("python.yml", PYPI_LIVE, PYPI_LIVE + "        continue-on-error: true\n")], {}, 1,
+     "python.yml › release [pypi-live]"),
+    ("the PyPI comparison under a condition", P, [("python.yml", PYPI_LIVE, PYPI_LIVE.replace(
+        "        run:", "        if: github.run_attempt == 1\n        run:"))], {}, 1,
+     "python.yml › release [pypi-live]"),
+    ("the upload from another directory than the one compared", P, [
+        ("python.yml", "          packages-dir: dist\n", "          packages-dir: wheelhouse\n")], {}, 1,
+     "python.yml › release [pypi-live]"),
     # -- the named exception: three exact steps, nothing else
     ("the Flutter waiver claimed by another job", P, [("python.yml", PYPI, "      - run: flutter pub get\n" + PYPI)],
      {}, 1, "FAIL    python.yml › release [unlocked-pub-get]"),

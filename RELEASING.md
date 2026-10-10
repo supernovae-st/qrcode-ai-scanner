@@ -98,7 +98,11 @@ resolves on the registry: a re-run uploads exactly what is still missing,
 and a version npm calls "previously published" (a probe that still answered
 404 after an earlier upload) counts as live. crates-publish compares each
 upload with the archive it inspected; a difference stops the job before the
-next crate, with that crate live (yank it if it must not stay).
+next crate, with that crate live (yank it if it must not stay). python ›
+release stops before uploading anything when a file PyPI already serves
+differs from the inspected one, so a partial PyPI upload is completed by
+re-running the failed jobs, which reuse the inspected wheels; a dispatch
+rebuilds them, and completes it only if every rebuilt file is byte-identical.
 A defect in the workflow itself can no longer be fixed on main and
 re-dispatched from main (that is how 0.9.0's Node packages came to be built
 from post-tag commit 9f8bbcf, 2026-07-20): fix it on main and cut the next
@@ -165,7 +169,7 @@ repository tokens — hence step 0, at merge.
 |---|---|---|---|
 | crates-publish › publish | `crates-io` | crates.io trusted publishing: `rust-lang/crates-io-auth-action` trades the OIDC token for a 30-minute crates.io token | both crates, packed (`cargo package --locked --no-verify`) and inspected in the job before the token is minted; each upload compared with its inspected archive, byte for byte |
 | npm-publish › publish-native · publish-wasm | `npm` | npm trusted publishing (npm CLI ≥ 11.5.1 on Node 24), provenance attested automatically | the very tarballs pack-native and build-wasm packed and inspected, read back again in the job and uploaded unchanged with `npm publish <tarball> --ignore-scripts` |
-| python › release | `release` | PyPI trusted publishing (already live: 0.9.0 carries PEP 740 attestations) | `dist/`, read back in the job: exactly one wheel per row of the wheels matrix and the sdist |
+| python › release | `release` | PyPI trusted publishing (already live: 0.9.0 carries PEP 740 attestations) | `dist/`, read back in the job: exactly one wheel per row of the wheels matrix and the sdist; before the upload, every file PyPI already serves at the version must be the one read back (sha256), and PyPI may serve no other file there, so `skip-existing` (which goes by file name) skips only proven copies |
 | flutter › publish | `pub` | pub.dev automated publishing; a pushed tag only (pub.dev accepts no other trigger) | the package `package-inspect.py flutter` read back in the job (dormant) |
 | mobile › ios-release | `release` | the workflow's own `GITHUB_TOKEN`, `contents: write` | the CI-built xcframework zip only when its sha256 is the one Package.swift pins, compared before the release is created or touched; an attached asset is verified, never replaced |
 

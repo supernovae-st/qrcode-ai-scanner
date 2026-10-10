@@ -10,8 +10,9 @@ name: python
 # them (`inspect`), then stops. PyPI's trusted publisher is bound to this
 # file and the `release` environment (RELEASING.md § Publishing). `release`
 # reads back exactly what it uploads: one wheel per row of the wheels matrix
-# and the sdist, nothing else. The jobs whose outputs ship pin maturin-action
-# by commit and use no sccache on a tag.
+# and the sdist, nothing else; a file PyPI already serves at the version must
+# be the one read back. The jobs whose outputs ship pin maturin-action by
+# commit and use no sccache on a tag.
 
 on:
   push:
@@ -212,6 +213,15 @@ jobs:
       # row of the wheels matrix and the sdist, each passing its inspection.
       - name: re-inspect the exact set about to be uploaded
         run: python3 scripts/package-inspect.py archive dist/* --release-set --strict --quiet
+      # skip-existing below makes twine skip a file PyPI already serves by its
+      # name alone. So each such file must be the very file read back above:
+      # PyPI's JSON for this version (a 404: nothing live) gives every live
+      # file's sha256, and other bytes under a local name, a live file this set
+      # does not hold, or an answer that cannot be read stop the job before
+      # anything is uploaded. The probe reads the public JSON API: no
+      # credential involved.
+      - name: compare the files PyPI already serves with the inspected set
+        run: python3 scripts/package-inspect.py pypi-live dist/* --strict --quiet
       - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
           packages-dir: dist
