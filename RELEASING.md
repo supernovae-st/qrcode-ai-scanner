@@ -273,6 +273,18 @@ only a tag publishes":
   tampered binary from a sound one, so their pinned actions and tools (Zig
   and binaryen by sha256) and the absence of caches on a tag are what holds
   there.
+- Three of the six wheels build in containers that PyO3/maturin-action, at
+  its pinned commit, pulls by a mutable tag at run time (its default image
+  for the row): x86_64 manylinux `quay.io/pypa/manylinux2014_x86_64:latest`,
+  aarch64 manylinux `ghcr.io/rust-cross/manylinux2014-cross:aarch64` and
+  x86_64 musllinux `ghcr.io/rust-cross/rust-musl-cross:x86_64-musl`, the last
+  two from the rust-cross organization, a third party. Their toolchains and
+  libc go into the shipped `.so`, which no inspection can judge. The action
+  supports a digest: its `container` input takes a full image reference and
+  hands it unchanged to `docker pull` and `docker run`, so each row can name
+  `image@sha256:…`. That is a python.yml change, with digests to resolve and
+  to refresh, left to its owner; until then these jobs, which hold no token,
+  build on whatever the tags point to.
 
 **Owner steps, in this order** (repository and registry settings; no workflow
 performs them):
@@ -303,8 +315,16 @@ performs them):
      write` on any dispatch). List them (`git ls-remote --heads origin`, then
      `git show origin/<branch>:.github/workflows/npm-publish.yml`) and delete
      or archive each one not needed. The tags v0.1.0 to v0.9.0 stay: their
-     versions are live, and once the tokens are gone their old jobs fail at
-     authentication.
+     versions are live. Once the tokens are gone, their crates and npm jobs
+     fail at authentication, but two of their jobs need no token: python ›
+     release (v0.5.0 to v0.9.0) publishes to PyPI through OIDC in the
+     `release` environment on any dispatch of the tag, and the `v*` rule
+     admits those tags (PyPI matches the workflow file and the environment,
+     not the ref); mobile › ios (v0.5.0 to v0.9.0) creates the tag's GitHub
+     release with the workflow's own token when it is missing, and attaches
+     its zip when no asset is there. For PyPI the owner's option is step 4:
+     required reviewers on `release`, so that every run on it, an old tag's
+     included, waits for an approval.
 1. **Environments, before steps 2 and 3.** `crates-io`, `npm`, `release` and
    `pub`, each limited to the tag rule `v*` (`release` has it since step 0;
    create the other three). Mandatory before any trusted publisher is
@@ -324,9 +344,12 @@ performs them):
    `qrcode-ai-scanner`, workflow `npm-publish.yml`, environment `npm`; then
    Settings › Publishing access › *Require two-factor authentication and
    disallow tokens*.
-4. **Recommended: required reviewers** on `crates-io` and `npm` (with
-   *Prevent self-review* where staffing allows), so every publish waits for a
-   second person.
+4. **Recommended: required reviewers** on `crates-io`, `npm` and `release`
+   (Settings › Environments › each one › Required reviewers: up to six people
+   or teams, one approval lets the job run; with *Prevent self-review* where
+   staffing allows), so every publish waits for a second person. On `release`
+   it also holds the pre-change python.yml of the tags v0.5.0 to v0.9.0,
+   which no token revocation stops (step 0).
 5. PyPI: confirm the existing trusted publisher still reads owner
    `supernovae-st`, repository `qrcode-ai-scanner`, workflow `python.yml`,
    environment `release` (unchanged here).
