@@ -22,6 +22,23 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   `uec: null` and keep their prior scores unchanged (the youtube-video
   bench face re-judged 88, byte-stable) — consumers must read a null
   margin as UNMEASURED, never as healthy.
+- **Releases publish from a version tag only, through trusted publishing,
+  and upload exactly what they inspected** — crates.io and npm now
+  publish through GitHub OIDC trusted publishing (no workflow reads a
+  long-lived registry token; npm packages carry provenance attestations,
+  as the PyPI wheels already did); every publishing job runs only for a
+  `v*` tag, in its own GitHub environment, after checking that the tag
+  names the version and that this changelog dates it. Each job reads
+  back, in the job itself, the archives it uploads: the npm tarballs go
+  up as packed, with no lifecycle script run; PyPI receives exactly one
+  wheel per platform and the sdist; each crate upload is compared with
+  its inspected archive byte for byte. Publishing jobs run only actions
+  pinned by commit. A run from any other ref builds and inspects every
+  archive and stops, and the npm main package goes up only once every
+  platform package it pins is live.
+- **Source builds of the Python package need maturin 1.9.3 or newer** —
+  the build requirement is now `maturin>=1.9.3,<2.0`, the first maturin
+  that puts PEP 639 license files into source distributions.
 
 ### Fixed
 
@@ -37,6 +54,30 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   successful rescue over the automatically chosen background settles the
   scan, where the opposite-background retry used to run instead (and
   report `fallback_used: true` when an engine read the other placement).
+- **The Node loader enforces its own version, and loads without its
+  manifest** — with `NAPI_RS_ENFORCE_VERSION_CHECK` set (and not `0`),
+  the 0.9.0 loader compared every installed platform package against
+  `0.8.1`, a literal napi-rs wrote when the loader was generated, and
+  refused its own 0.9.0 binaries. The loader now compares against the
+  package's own `package.json`, read only once the check is on: an
+  installed platform package must carry this package's version, and a
+  loader vendored or bundled without its `package.json` still loads
+  with the check off (the default).
+- **Every distributed archive carries the AGPL text** — none of the
+  0.9.0 archives held a LICENSE. Both crates, the npm main, platform and
+  wasm packages, the wheels and the sdist now carry the root text byte
+  for byte (Python through PEP 639 `license-files`, with a
+  `License-File` entry), and CI reads every archive back before
+  anything publishes. Named exceptions: the iOS xcframework zip and the
+  JitPack AAR.
+- **rxing overflow-checks in the Python, Kotlin/Swift and Flutter
+  builds** — cargo reads `[profile]` from the build root only, so the
+  wheels and sdist builds, the UniFFI library and the Flutter crate
+  compiled rxing without the workspace's `overflow-checks`, the guard
+  that turns the crafted-image arithmetic underflow documented in 0.6.0
+  into a caught panic counted in `trace.engine_panics` instead of a
+  runaway allocation. Each of those build roots now restates it.
+  `cargo install qrcode-ai-scanner-cli` still builds without it.
 
 ### CI
 
