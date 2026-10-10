@@ -3,16 +3,18 @@ title: "See it in action"
 description: "Real QR images, real scan reports — what scannability looks like, end to end."
 ---
 
-Every report below is the **actual output** of `qrscan <image> --pretty` on the
-image shown — nothing hand-typed. The scanner is deterministic, so you get the
-same numbers if you run them yourself (the images live in
-[`fixtures/`](https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/fixtures)).
+Every report below is the **actual output** of `qrscan <image> --pretty
+--budget-ms 0` on the image shown — nothing hand-typed. The scanner is
+deterministic, so an unbounded scan gives you the same numbers if you run it
+yourself (the images live in
+[`fixtures/`](https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/fixtures)
+and `docs/images/`).
 
 The point of the gallery: **decoding is binary, scannability is a spectrum.**
 Two codes can both "decode" and have wildly different margins before they fail
 in the real world. That margin is the `score`.
 
-## Clean QR — score 89 / 100 ✅
+## Clean QR — score 100 / 100 ✅
 
 <Frame caption="A clean v2 QR · qrcode-ai.com short link">
   <img src="/images/gallery-clean.png" alt="Clean QR code" width="200" />
@@ -22,15 +24,15 @@ in the real world. That margin is the `score`.
 |---|---|
 | `symbology` | `qr_code` (v2 · 25×25) |
 | `payload.kind` | `url` → https://qrc-ai.com/76xMa |
-| `score` | **89** (`excellent`) |
-| `engines` | `rxing` + `rqrr` (both decoded, merged) |
+| `score` | **100** (`excellent`) |
+| `engines` | `rxing` + `rqrr` (both read it — one content) |
 | `uec` | margin 1.00 · grade A (0 of 16 EC codewords used) |
-| weak axis | `rotation` 1/5 |
+| weak axis | none — every stress cell survives |
 
 **Read it like this:** both engines agree, error-correction is untouched
-(margin 1.00), every stress axis is maxed **except** rotation — so the only
-real-world risk is a heavily tilted scan. A naive scanner would just say
-"decoded"; this tells you the one thing to watch.
+(margin 1.00), every stress axis is maxed — this is what a margin with nothing
+to fix looks like. A naive scanner would just say "decoded"; the codes below
+show what the score adds when something bends.
 
 ## AI-art QR — score 70 / 100 🎨
 
@@ -83,8 +85,8 @@ succeeded; scannability did not. Both facts are reported.
 |---|---|
 | `symbology` | `ean13` |
 | `payload.kind` | `gs1` — AI `01` = GTIN `09506000134352`, `conformant: true` |
-| `score` | **68** (`acceptable`) |
-| weak axis | `resolution` 2/5 → hint `enlarge_modules` |
+| `score` | **70** (`good`) |
+| weak axes | `resolution` 2/5 → hint `enlarge_modules` · `rotation` 2/5 · `blur` 3/5 |
 
 **Read it like this:** the *shape* is a 1D barcode (`symbology: ean13`), but the
 *meaning* is a retail product identifier — so the scanner routes it to a `gs1`
@@ -102,8 +104,8 @@ answers "what does it mean" — two different layers of the report.
 |---|---|
 | `symbology` | `qr_code` |
 | `payload.kind` | `url` → https://qrc-ai.com/black |
-| `score` | **86** (`excellent`) |
-| weak axis | `rotation` 1/5 · `lighting` 3/5 |
+| `score` | **94** (`excellent`) |
+| weak axis | `lighting` 3/5 |
 
 **Read it like this:** an actual product output, scored `excellent` — the verify
 meter on the editor would light up HIGH. This is the loop in production:
@@ -112,9 +114,11 @@ generate → scan → show the user a margin-truthful badge.
 ## Reproduce any of these
 
 ```bash
-qrscan fixtures/clean/OK_68ms_100_4e875a2c.png --pretty   # the clean one above
-qrscan fixtures/degraded/logo-occluded-rescue.png --pretty # the rescue one
+qrscan fixtures/clean/OK_68ms_100_4e875a2c.png --pretty --budget-ms 0   # the clean one above
+qrscan fixtures/degraded/logo-occluded-rescue.png --pretty --budget-ms 0 # the rescue one
 ```
 
-Same input → same output, always. See [Scoring](/concepts/scoring) for what each
-axis and grade means, and [The report](/api/report) for the full JSON contract.
+Same input and configuration → same report, whenever the scan is unbounded or
+says the budget cut nothing (`trace.budget_exhausted: false`). See
+[Scoring](/concepts/scoring) for what each axis and grade means, and
+[The report](/api/report) for the full JSON contract.

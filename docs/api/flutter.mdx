@@ -40,7 +40,12 @@ report the budget cut says so: `report.trace.budgetExhausted == true`; a null
 Unlike the Kotlin/Swift bindings (which return a JSON string), Flutter ships a
 **typed** [`ScanReport`](/api/report) — sealed `Payload`/`Hint`, `Score` with the
 ISO 15415 / UEC grade cards. Unknown enum values and payload kinds decode to
-`unknown` / catch-all variants, never a throw (additively forward-compatible).
+`unknown` / catch-all variants, never a throw (additively forward-compatible) —
+except `Charset`, whose newer wire values decode to `Charset.unrecognized`, a
+complete reading: `Charset.unknown` is the wire's own lossy value, so test
+`d.content.charset.isLossy` (then use `d.content.raw`, the payload's bytes).
+`d.content.eci` and `d.content.fnc1` are null when the symbol declares no ECI
+or FNC1; compare contents by symbology, `raw`, `fnc1` and `eci`, never by text.
 
 ```dart
 if (report.detections.isEmpty) {

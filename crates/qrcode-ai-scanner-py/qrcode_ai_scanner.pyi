@@ -17,7 +17,18 @@ class ScanReport(TypedDict):
 
     detections: list[dict[str, Any]]
     """Empty = no QR found — final only when ``trace["budget_exhausted"]`` is
-    ``False``."""
+    ``False``. Each detection's ``content``: ``raw`` (the payload bytes,
+    base64), ``text`` and ``charset`` — ``"utf8"`` | ``"shift_jis"`` |
+    ``"latin1"`` | ``"gb18030"`` | ``"eci"`` | ``"unknown"``. ``"unknown"``, the
+    only lossy value, means there is no verified reading: use ``raw``; treat
+    any other value, one you do not know included, as a complete reading of
+    ``raw``. The optional ``eci`` key lists the ECI designators
+    (``[{"designator": int, "start": int}]``; ``[]`` when signalled but not
+    located) and ``fnc1`` is ``"first"`` or ``"second"`` when present. Outside
+    the QR family ``raw`` is the decoding engine's reading, which under an ECI
+    can omit a segment the engine could not read. Two detections denote the
+    same content by ``symbology``, ``raw``, ``fnc1`` and ``eci``, never by
+    ``text`` (spec/01 § Content)."""
     score: dict[str, Any] | None
     """The judgment of ``detections[0]``. ``None`` when no judgment was
     published: no detection · a configuration that computes no score

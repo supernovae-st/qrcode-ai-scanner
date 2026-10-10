@@ -61,30 +61,33 @@ Two ideas do all the work:
 
 ## Read a real report field by field
 
-This is the actual `qrscan --pretty` output for the clean QR in the gallery:
+This is the actual `qrscan --pretty --budget-ms 0` output for the clean QR in
+the gallery (`fixtures/clean/OK_68ms_100_4e875a2c.png`):
 
 ```text
-content   https://qrc-ai.com/76xMa          ← decoded text
+content   https://qrc-ai.com/76xMa          ← decoded text (its bytes: --json)
 symbology QrCode                             ← physical code type
 payload   Url { url: "https://qrc-ai.com/76xMa" }   ← classified meaning
 symbol    v2 · 25x25 modules                 ← QR version 2, 25×25 grid
-engines   rxing+rqrr                          ← both engines decoded, merged
-score     89/100 (Excellent)                 ← the margin, not "it decoded"
+engines   rxing+rqrr                          ← both engines read it: one content
+score     100/100 (Excellent)                ← the margin, not "it decoded"
   resolution   5/5   ← survives every downscale rung
   blur         5/5   ← survives focus/motion blur
   contrast     5/5   ← survives contrast crush
   perspective  5/5   ← survives tilt
-  rotation     1/5   ← ⚠ only survives the first rotation rung
-  lighting     4/5   ← survives 4 of 5 lighting defects
+  rotation     5/5   ← survives every rotation rung
+  lighting     5/5   ← survives every lighting defect
   uec margin 1.00 (grade A · worst block 0/16 ec)   ← 0 of 16 error-correction codewords spent
 iso15415  overall A (informed, not certified)
-took      6ms
+took      10ms
 ```
 
-The decode is perfect, but `score` is 89 not 100 — because the **rotation** axis
-is weak (1/5). That single line is the actionable truth: this code is healthy
-everywhere except a steeply rotated scan. See [Scoring](/concepts/scoring) for
-what each axis, the UEC margin, and the ISO card mean.
+A pristine render keeps its whole margin: every stress cell survives and no
+error-correction codeword is spent. On a styled or damaged code, the axis that
+fails first is the actionable line — `rotation 1/5` would mean the code is
+healthy everywhere except a steeply rotated scan. See
+[Scoring](/concepts/scoring) for what each axis, the UEC margin, and the ISO
+card mean.
 
 ## The one knob: the profile
 

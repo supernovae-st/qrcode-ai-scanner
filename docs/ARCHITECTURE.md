@@ -8,7 +8,7 @@
 | Crate | Role |
 |---|---|
 | `qrcode-ai-scanner` | the core library — pure, sync, deterministic |
-| `qrcode-ai-scanner-cli` | `qrscan` binary (JSON default · exit codes 0/1/2) |
+| `qrcode-ai-scanner-cli` | `qrscan` binary (JSON default · exit codes 0/1/2/3) |
 | `qrcode-ai-scanner-node` | napi bindings (phase B) |
 | `qrcode-ai-scanner-wasm` | browser wasm (phase C) |
 | `xtask` | repo automation: gen-fixtures · corpus-report · baseline |
@@ -27,7 +27,10 @@ skips them by design — see the root `Cargo.toml` comment):
 1. **No QR found is `Ok`** with empty `detections` — `Err` only for real
    faults (`QRS-001..004` invalid input, `QRS-005` cancellation).
 2. **Deterministic**: same bytes + same config + same versions ⇒ the same
-   report bit-for-bit (trace wall-clock fields excepted). No RNG anywhere.
+   report bit-for-bit (trace wall-clock fields excepted) for an unbounded
+   scan, or whenever `trace.budget_exhausted` is `false`; a budget cut is
+   flagged, never partial. No RNG anywhere (rxing's PDF417 decoder breaks
+   its ties in randomized order: the one dependency exception).
 3. **Sync by design**: async belongs to the bindings.
 4. **Engine-isolated**: third-party decoder panics are caught at the engine
    boundary (`catch_unwind`), counted in the trace, never propagated.
@@ -44,6 +47,11 @@ skips them by design — see the root `Cargo.toml` comment):
    and reconciled once at the end — identical reads fold; reads of one
    content join by their account and where they lie (spec/07 property 6).
    Text is never an identity.
+7. **Nothing the evidence cannot stand behind**: a malformed stream is
+   refused whichever engine reads it; a QR content corrected past the
+   Annex B reserve and an invention-prone barcode read no independent
+   read confirmed are not published (spec/07 § Acceptance) — absent,
+   never wrong.
 
 ## Decode pipeline
 
@@ -61,10 +69,14 @@ ImageInput (Encoded | Rgba8 | Luma8)
                      + binarization grid
        S5 rescue     engines failed but a grid was read: errors-and-erasures
                      RS (Forney 1965) with confidence-marked erasures —
-                     e + 2t ≤ d − p, twice the budget where the art lives
+                     e + 2t ≤ d − p, twice the budget where the art lives,
+                     two parity codewords left unspent per erased block
                      per attempt: engines → re-derived grids (candidate
                      parses) → the re-read at rxing's corner points →
-                     refusals → the read set
+                     refusals → the read set → confirmation decodes for
+                     held reads
+  → acceptance       correction margins and independent confirmations,
+                     weighed over the whole walk (spec/07 § Acceptance)
   → reconcile        the walk's read set → the distinct contents the scanner
                      can tell apart; each content read once → engines consensus
   → score            contract v5 (see SCORING.md) — Full/Fast profiles only

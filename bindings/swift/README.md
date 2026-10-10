@@ -45,6 +45,15 @@ import QrcodeAiScanner
 let json = try scan(image: imageData, profile: "full")  // empty detections = no QR (not an error)
 ```
 
+Reading the report: `content.charset` is a `String` — test it against
+`"unknown"`, the only lossy value (no verified reading: use `content.raw`,
+the payload's bytes in base64), and read any other value, one your decoder
+does not know included, as a complete reading. `content.eci` and
+`content.fnc1` are optional keys. Compare contents by `symbology`, `raw`,
+`fnc1` and `eci`, never by `text`. A report is final only when
+`trace.budget_exhausted` is `false`; a `null` score beside detections then
+means "not judged", never 0 (spec/01).
+
 ## Build the xcframework locally
 
 ```bash

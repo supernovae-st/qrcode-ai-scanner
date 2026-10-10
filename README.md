@@ -52,24 +52,30 @@ is built specifically for them · and it doesn't just say *"decoded"*, it
 tells you **how much margin** the code has before it stops scanning in the
 real world.
 
-Six things no other pure-Rust library ships together:
+Seven things no other pure-Rust library ships together:
 
 1. **A deterministic multi-engine decode ladder** tuned on artistic
    corpora (rxing + rqrr, curated preprocessing rungs · no RNG anywhere:
-   same input, same result, always).
+   same input and configuration, same report — unbounded, or whenever the
+   report says the budget cut nothing, `trace.budget_exhausted: false`;
+   PDF417 excepted).
 2. **Score contract v5** · survival ramps across six stress axes
    (resolution · blur · contrast · **perspective** · **rotation** ·
    **lighting** · the documented blind spots of naive scorers), with
-   structural caps on finder damage and quiet-zone violations.
+   structural caps on finder damage and quiet-zone violations and the
+   error-correction margin cap — a whole judgment or none: a budget never
+   ships a partial score.
 3. **Synthetic UEC** · the ISO 15415 *Unused Error Correction* margin,
-   computed from the engine's own sampled bitstream via RS syndromes +
-   Berlekamp-Massey. The real "how close to failure is this code" number.
+   computed from the stream of the orientation the decoder verified, via
+   RS syndromes + Berlekamp-Massey, only when it error-corrects. The real
+   "how close to failure is this code" number; below 0.5 it caps the
+   score.
 4. **An ISO 15415-informed grade card** (`score.iso15415`) · Symbol
    Contrast, Modulation, Axial Nonuniformity, Fixed Pattern Damage and UEC,
    each `{value, grade}` in the ISO bands, with `overall` = lowest
-   parameter (the ISO rule). Honest by construction: parameters that NEED
-   verifier hardware (Grid Nonuniformity, Reflectance Margin) are reported
-   absent, never faked.
+   measured parameter (the ISO rule). Honest by construction: parameters
+   that NEED verifier hardware (Grid Nonuniformity, Reflectance Margin) are
+   reported absent, never faked.
 
 5. **An erasure-rescue decode stage** · when both engines give up, the
    scanner re-decodes the sampled bitstream itself with errors-and-erasures
@@ -88,6 +94,14 @@ Six things no other pure-Rust library ships together:
    with tested probes (`alpha.envelope`: safe luma bands + a
    `light_only`/`dark_only`/`any` placement verdict, every endpoint a
    measured background, never interpolation).
+
+7. **Exact content** · `content.raw` is the payload's original bytes on
+   every decode path, with its ECI and FNC1 declarations read once;
+   `charset: "unknown"` is the only lossy reading. Detections are the
+   distinct contents the scanner can tell apart, never keyed on text, and a
+   read it cannot stand behind (a malformed stream, a correction past the
+   standard's misdecode reserve, an unconfirmed barcode a reader could
+   invent from noise) is refused: absent, never wrong.
 
 Plus machine-actionable **hints** (`raise_error_correction`,
 `fix_finder_pattern`, `low_correction_margin`, …) · the feedback loop for
@@ -131,7 +145,8 @@ cargo install qrcode-ai-scanner-cli
 qrscan image.png              # full ScanReport JSON
 qrscan image.png --pretty     # human summary
 qrscan image.png -s           # score only
-# exit codes: 0 found · 1 none · 2 invalid input
+qrscan image.png -s --budget-ms 0   # unbounded: reproducible, never cut
+# exit codes: 0 found · 1 none · 2 invalid input/usage · 3 (-s) not judged within the budget
 ```
 
 ## Corpus results

@@ -22,11 +22,15 @@ ImageInput (Encoded | Rgba8 | Luma8)
   S5 rescue     errors-and-erasures RS over grids the engines read
                 but could not decode
   → (alpha auto, zero detections) retry over the OPPOSITE background
-  → merge (text-keyed) → score → alpha placement envelope → ScanReport
+  → reconcile reads by content identity → score → alpha placement
+    envelope → ScanReport
 ```
 
 A stage that finds something still **completes** (consensus inside the
-stage is preserved), then the ladder stops. Each later stage exists for a
+stage is preserved), then the ladder stops — unless every QR code read so
+far only signals an ECI it could not locate: then the later stages run, so
+that one of them can locate the declarations. Reads the acceptance holds
+(below) do not end the walk either. Each later stage exists for a
 documented failure class:
 
 | Stage | Recovers |
@@ -38,6 +42,55 @@ documented failure class:
 | S4 morphological closes | **blob/dot pixel styles** — gaps between sub-module blobs read as noise until closed |
 | S5 rescue | **logo-occluded symbols** past the engines' RS error wall |
 | alpha flatten + retry | **transparent exports** — the class where the verdict used to depend on which tool wrote the PNG (canvas stores black under the alpha, editors often white); the flatten pins it, the opposite-background retry kills the false "no detection", and `report.alpha.envelope` answers *over which backgrounds the design keeps decoding* with tested probes |
+
+## From reads to detections
+
+Engines report **reads**, never text. The scanner error-corrects and
+parses QR streams itself, so `content.raw` is the original payload and
+the declarations (ECI, FNC1, Kanji and Hanzi segments) are read once:
+
+- **Sources.** The grid `rqrr` decoded (in the orientation that
+  error-corrects); grids `rqrr` detected but could not decode — FNC1,
+  Hanzi, structured-append and damaged symbols — re-derived by the
+  scanner; the codewords of `rxing`'s ZXing-lineage reader; S5 rescue
+  streams; and the re-read.
+- **The re-read.** When a read's declarations are not observed yet — it
+  signals an ECI or FNC1, or its bytes are not UTF-8 — the scanner
+  samples the symbol again at the corners the engine reported and parses
+  it to locate them: at most 16 times per scan, with no time budget and
+  nothing added to the trace. A port read at EC level L or M is re-read
+  on versions 1 and 2 for its correction margin.
+- **Refusals.** A stream the scanner can error-correct but that parses as
+  malformed is refused whichever decoder reads it, and a tolerant reading
+  of the same symbol is withheld.
+- **Reconciliation.** At the end of the walk, reads are grouped into the
+  distinct contents the scanner can tell apart — same symbology, bytes,
+  FNC1 position and ECI declarations, where they lie — never by `text`.
+  Engines are the union of a detection's reads.
+
+**Acceptance.** Every read is weighed over the whole walk before it may
+settle a stage, stop S5 or be published:
+
+- **Correction margin.** A QR content whose every measured margin is
+  negative — corrected past the ISO/IEC 18004 Annex B reserve, which only
+  happens on versions 1 and 2 at low EC levels — is refused; one read
+  with a margin of zero or more admits it.
+- **Independent confirmation.** UPC-E, DataBar, DataBar Expanded and
+  PDF417 at EC level 0, 1 or none — the symbologies a reader can invent
+  from noise — wait for a second read of the same symbology and bytes
+  from a plane at least 1.25× larger or smaller; right after the first
+  read the scanner decodes that symbology once on the plane at three
+  quarters of its size (not yet for DataBar, until the core crate
+  requires rxing 0.9.3). A read still waiting when the walk ends is
+  refused.
+- **Read checks.** A DataBar text is exactly fourteen digits; a plain port
+  read whose bytes are not its text is refused.
+
+| Engine | Reads | Contributes |
+|---|---|---|
+| `rxing` (zxing-cpp port; ZXing-lineage reader only when the port finds nothing) | every symbology, light-on-dark included | the EC level; corner points used internally |
+| `rqrr` (quirc lineage) | QR, mirrored grids retried | geometry, version, mask and the raw stream that feeds UEC and S5 |
+| `rescue` (ours) | QR grids no engine decoded | the S5 stage only (`engines: ["rescue"]`) |
 
 ## S5 — the erasure rescue
 
@@ -56,6 +109,9 @@ sampled bitstream is recoverable:
   <Step title="Erasure marking">
     Low-confidence codewords become **erasures** — known-position losses
     that cost HALF an unknown error in the capacity law `e + 2t ≤ d − p`.
+    A block corrected with erasures must keep two parity codewords unspent
+    beyond the Annex B reserve, so a wrong correction passes about once in
+    65 536.
   </Step>
   <Step title="Errors-and-erasures Reed-Solomon">
     Forney 1965: erasure locator, modified syndromes, Berlekamp-Massey,
@@ -79,8 +135,8 @@ same attempt sequence, bit for bit on a given platform. A wall-clock budget
 makes the *cut point* machine-dependent, and the report says when it cut:
 a planned stage, attempt or rescue candidate the deadline prevents sets
 `trace.budget_exhausted: true` (partial); `false` is the unbounded report.
-The grid re-derivations, the re-read and the end-of-walk pass have no
-budget and never set it. Cross-platform, libm transcendentals may differ in
+The grid re-derivations, the re-read, the end-of-walk pass and the
+confirmation decodes have no budget and never set it. Cross-platform, libm transcendentals may differ in
 the last ulp; rxing's PDF417 decoder breaks ties in randomized order (the
 one engine exception).
 </Note>

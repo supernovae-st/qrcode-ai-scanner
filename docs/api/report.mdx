@@ -139,24 +139,31 @@ Machine-readable mirrors — load these directly in tools and agents:
     "symbology": "qr_code",
     "content": { "text": "https://qrcode-ai.com/rescue-pin", "raw": "aHR0cHM…", "charset": "utf8" },
     "payload": { "kind": "url", "url": "https://qrcode-ai.com/rescue-pin" },
-    "corners": [{ "x": 32.0, "y": 32.0 }, { "x": 327.0, "y": 32.0 },
-                 { "x": 327.0, "y": 327.0 }, { "x": 32.0, "y": 327.0 }],
+    "corners": [{ "x": 32.0, "y": 32.0 }, { "x": 336.0, "y": 32.0 },
+                 { "x": 336.0, "y": 336.0 }, { "x": 32.0, "y": 336.0 }],
     "meta": { "version": 5, "ec_level": "h", "mask": 3, "modules": 37, "inverted": false },
     "engines": ["rescue"]
   }],
-  "score": { "value": 40, "grade": "fair", "axes": ["…"], "structural": null,
-             "uec": { "margin": 0.0, "grade": "f", "worst_block_errors": 13, "worst_block_capacity": 22 },
-             "iso15415": null },
-  "hints": [{ "hint": "low_correction_margin", "errors": 13, "capacity": 22 }],
+  "score": { "value": 0, "grade": "poor", "weights_run": 100, "axes": ["…"],
+             "structural": { "finder_integrity": [1.0, 1.0, 1.0], "quiet_zone_ok": true },
+             "uec": { "margin": 0.0, "grade": "f", "worst_block_errors": 11, "worst_block_capacity": 22 },
+             "iso15415": { "…": "…", "overall": "f" } },
+  "hints": [{ "hint": "increase_contrast" }, { "hint": "enlarge_modules" },
+            { "hint": "reduce_art_texture" },
+            { "hint": "low_correction_margin", "errors": 11, "capacity": 22 }],
   "trace": { "stages": [
-    { "stage": "direct", "transforms_tried": 1, "ms": 8.4, "detections_found": 0 },
-    { "stage": "enhance", "transforms_tried": 3, "ms": 18.7, "detections_found": 0 },
-    { "stage": "deep", "transforms_tried": 17, "ms": 127.7, "detections_found": 0 },
-    { "stage": "rescue", "transforms_tried": 1, "ms": 9.1, "detections_found": 1 }
-  ], "engine_panics": 0, "total_ms": 164.2 },
-  "versions": { "scanner": "0.6.0", "pipeline": 1, "score_contract": 3 }
+    { "stage": "direct", "transforms_tried": 1, "ms": 19.5, "detections_found": 0 },
+    { "stage": "enhance", "transforms_tried": 3, "ms": 58.8, "detections_found": 0 },
+    { "stage": "deep", "transforms_tried": 17, "ms": 75.4, "detections_found": 0 },
+    { "stage": "rescue", "transforms_tried": 1, "ms": 0.1, "detections_found": 1 }
+  ], "engine_panics": 0, "total_ms": 153.8, "budget_exhausted": false },
+  "versions": { "scanner": "0.9.0", "pipeline": 3, "score_contract": 5 }
 }
 ```
+
+Trimmed from the golden
+[`spec/examples/rescued-occluded.json`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/examples/rescued-occluded.json),
+scanned unbounded (`--budget-ms 0`), so the report is final.
 
 The full field-by-field normative reference is
 [`spec/01-report.md`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/01-report.md).

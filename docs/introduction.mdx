@@ -51,6 +51,12 @@ artifacts off one Rust core.
    re-decodes the bitstream itself with errors-and-erasures Reed-Solomon.
    Measured: center-logo occlusion tolerance grows from 20% to **30%
    radius** (2.2× the area).
+6. **Exact content** — `content.raw` is the payload's original bytes, its
+   ECI and FNC1 declarations are read once, and `charset: "unknown"` is the
+   only lossy reading. Detections are the distinct contents the scanner can
+   tell apart, never keyed on text, and a read it cannot stand behind (a
+   malformed stream, a correction past the standard's misdecode reserve) is
+   refused: absent, never wrong.
 
 And it reads **every mainstream symbology**, not just QR: Micro QR · rMQR
 · Data Matrix · Aztec · PDF417 · MaxiCode · EAN-13/8 · UPC-A/E ·

@@ -11,7 +11,7 @@ workflows, CI bots) consuming the scanner.
 | Artifact | Use |
 |---|---|
 | [`spec/scan-report.schema.json`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/scan-report.schema.json) | validate any report you receive or mock |
-| [`spec/examples/*.json`](https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/spec/examples) | real binary outputs covering: clean URL, rescued occlusion, artistic blob, GS1 Digital Link, no-detection |
+| [`spec/examples/*.json`](https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/spec/examples) | real binary outputs, each from a committed fixture (`spec/README.md` § Examples): clean URL, artistic, rescued occlusion, wifi / MECARD / SMS / crypto / GS1 Digital Link payloads, ECI 4 and ECI 899, Hanzi, GS1 under FNC1, transparent designs, other symbologies, no-detection |
 | `report-types.d.ts` (in both npm packages) | typed access in JS/TS tools |
 | [`spec/`](https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/spec) markdown | the normative semantics (≈15 min read) |
 
@@ -50,6 +50,10 @@ workflows, CI bots) consuming the scanner.
    judged, re-scan), or a contained fault. A present score is always a
    complete judgment.
 8. `meta`/`corners` are measured or `null` — never fabricated.
+9. Reads the scanner cannot stand behind are not published — a QR stream
+   corrected past ISO/IEC 18004's misdecode reserve, or a UPC-E, DataBar
+   or low-EC PDF417 read no independent read confirmed: absent, never
+   wrong.
 
 ## The regenerate loop
 

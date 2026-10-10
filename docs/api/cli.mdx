@@ -35,7 +35,8 @@ renders the flatten verdict plus the placement-envelope strip
 
 ## Example (`--pretty`)
 
-Real output for a clean QR — `qrscan fixtures/clean/OK_68ms_100_4e875a2c.png --pretty`:
+Real output for a clean QR —
+`qrscan fixtures/clean/OK_68ms_100_4e875a2c.png --pretty --budget-ms 0`:
 
 ```text
 content   https://qrc-ai.com/76xMa
@@ -43,21 +44,26 @@ symbology QrCode
 payload   Url { url: "https://qrc-ai.com/76xMa" }
 symbol    v2 · 25x25 modules
 engines   rxing+rqrr
-score     89/100 (Excellent)
+score     100/100 (Excellent)
   resolution   5/5
   blur         5/5
   contrast     5/5
   perspective  5/5
-  rotation     1/5          ← the one weak axis: a steeply rotated scan
-  lighting     4/5
+  rotation     5/5
+  lighting     5/5
   uec margin 1.00 (grade A · worst block 0/16 ec)
 iso15415  overall A (informed, not certified)
   contrast 1.00/A · modulation 1.00/A · axial 0.001/A · fixed-pattern 1.00/A
-took      6ms
+took      10ms
 ```
 
-The decode is perfect, yet the score is 89 — `rotation` is the only soft axis.
-That single line is the actionable truth a plain "decoded" never gives you. See
+A pristine render survives every stress cell, keeps its whole
+error-correction budget (`uec margin 1.00`) and grades A. On a styled or
+damaged code the weak axes show up line by line, each one the actionable
+truth a plain "decoded" never gives you. A symbol that declares more than
+plain text adds a `charset` line (`charset   eci · ECI 4@0`, or `unknown ·
+no verified text (raw: --json)`) and, for GS1 or AIM data, an `fnc1` line;
+controls and spoofing characters print as `\u{…}`. See
 [How it works](/tutorial) for the field-by-field walkthrough and
 [Scoring](/concepts/scoring) for what each axis means.
 

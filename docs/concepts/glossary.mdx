@@ -20,8 +20,10 @@ A `qr_code` symbology might carry a `url`, a `wifi`, or plain `text`.
 
 | Term | In one sentence |
 |---|---|
-| **Detection** | One decoded symbol found in the image — its text, symbology, payload, geometry and which engines confirmed it. |
-| **Engine** | A decoder: `rxing` (ZXing lineage) or `rqrr` (quirc lineage); their results are merged by decoded text. |
+| **Detection** | One distinct content found in the image — its bytes and their reading, symbology, payload, geometry and which engines read it. |
+| **Content** | `content.raw` is the payload's bytes; `text` reads them as `charset` says. `unknown` — the only lossy charset — means there is no verified reading: use `raw`. |
+| **Content identity** | Same symbology, bytes, FNC1 position and ECI declarations: how reads become detections, and how to deduplicate — never by `text`. |
+| **Engine** | A decoder: `rxing` (ZXing lineage) or `rqrr` (quirc lineage); every read is reconciled by content identity, never by decoded text. |
 | **Rescue** | The last-resort stage (`engines: ["rescue"]`) that recovers symbols *both* engines fail on, using errors-and-erasures Reed-Solomon. |
 | **Profile** | The speed-vs-thoroughness setting: `full` (deep, ~4 s), `fast` (~800 ms), `frame` (decode-only, ~80 ms, no score). |
 | **Budget** | The wall-clock bound of a scan (the profile's default, or `budget_ms`; `0` = unbounded). A report it cut says so — `trace.budget_exhausted: true` — and is partial, not final. |
