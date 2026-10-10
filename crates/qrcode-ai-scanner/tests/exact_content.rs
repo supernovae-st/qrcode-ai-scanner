@@ -683,18 +683,17 @@ fn a2_eci4_full_profile_scores_with_geometry_sections() {
 }
 
 #[test]
-#[ignore = "needs score matching by content identity"]
 fn a2_eci4_axes_match_the_utf8_control() {
     // Same layout, same text 'Ą': ECI 4 [A1] versus ECI 26 [C4 84]. Stress
-    // survival must not depend on which declaration carried the text.
+    // survival must not depend on which declaration carried the text: cells
+    // match the content (bytes and declarations), never its text. Full
+    // profile, unbounded.
     let eci26 = v3(|b| {
         b.push_eci_designator(26)?;
         b.push_byte_data("\u{104}".as_bytes())
     });
     let scan = |code: &QrCode| {
-        Scanner::default()
-            .scan(ImageInput::encoded(&png(code, false)))
-            .unwrap()
+        scan_scored(&png(code, false))
             .score
             .expect("Full scores the primary")
     };
@@ -713,6 +712,83 @@ fn a2_eci4_axes_match_the_utf8_control() {
             axis.passed
         );
     }
+}
+
+#[test]
+fn stress_cells_read_the_content_whatever_decided_its_text() {
+    // A stress cell counts when one of its reads carries the primary's
+    // content (07-pipeline property 7). Each primary's text rests on more
+    // than its bytes — the Kanji or Hanzi segments of a parsed stream, the
+    // engine's own Kanji reading, a pair no decoding reads — so a cell
+    // read's bytes, resolved alone, never reproduce it: matched by content,
+    // the cells read every symbol and each scores as it survives. Full
+    // profile, unbounded.
+    let micro = fixture("symbology/microqr-kanji-yamada.png");
+    let cases: [(&str, Vec<u8>, &str, u8); 6] = [
+        (
+            "Kanji 9F FD",
+            png(&v3(|b| b.push_kanji_data(&[0x9F, 0xFD])), false),
+            r#"{"text":"�","raw":"n/0=","charset":"unknown"}"#,
+            100,
+        ),
+        (
+            "Kanji 9F FE",
+            png(&v3(|b| b.push_kanji_data(&[0x9F, 0xFE])), false),
+            r#"{"text":"�","raw":"n/4=","charset":"unknown"}"#,
+            100,
+        ),
+        (
+            "Kanji 9F FF",
+            png(&v3(|b| b.push_kanji_data(&[0x9F, 0xFF])), false),
+            r#"{"text":"�","raw":"n/8=","charset":"unknown"}"#,
+            100,
+        ),
+        (
+            "Kanji 山田",
+            png(&v3(|b| b.push_kanji_data(&YAMADA_SJIS)), false),
+            r#"{"text":"山田","raw":"jlKTYw==","charset":"shift_jis"}"#,
+            100,
+        ),
+        (
+            "Hanzi 中文",
+            stream_png(Stream::default().hanzi(&ZHONGWEN_GB)),
+            r#"{"text":"中文","raw":"1tDOxA==","charset":"gb18030"}"#,
+            92,
+        ),
+        (
+            "Micro QR 山田",
+            micro,
+            r#"{"text":"山田","raw":"jlKTYw==","charset":"shift_jis"}"#,
+            97,
+        ),
+    ];
+    for (name, png, expected, value) in cases {
+        let report = scan_scored(&png);
+        assert_content(one(&report), expected, name);
+        let score = report.score.as_ref().expect("Full scores the primary");
+        assert_eq!(score.value, value, "{name}: {:?}", score.axes);
+    }
+}
+
+#[test]
+fn envelope_probes_read_the_content_whatever_decided_its_text() {
+    // Envelope probes match the primary's content like stress cells: the
+    // transparent ECI 4 [A1] design ('Ą', declared) keeps decoding over
+    // light backgrounds, though no lone probe read resolves 'Ą'.
+    let code = eci4_a1();
+    let report = scan_scored(&png_transparent(&code.to_colors(), code.width()));
+    assert_content(one(&report), A1, "transparent ECI 4");
+    let envelope = report
+        .alpha
+        .as_ref()
+        .and_then(|alpha| alpha.envelope.as_ref())
+        .expect("Full sweeps the envelope of a transparent design");
+    let white = envelope
+        .probes
+        .iter()
+        .find(|p| p.background_luma == 255)
+        .expect("the white rung");
+    assert!(white.decoded, "{envelope:?}");
 }
 
 #[test]

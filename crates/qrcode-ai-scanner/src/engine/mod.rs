@@ -407,7 +407,7 @@ mod tests {
         // blurred, from either engine, located or only signalled — is
         // admitted by the detection's key, while its heuristic text ('¡')
         // differs from the detection's ('Ą'), and an unmarked [A1] hit is
-        // refused. (The cell matcher must compare `ContentKey::admits`.)
+        // refused. (The cell matcher compares `ContentKey::admits`.)
         let symbol = |eci: bool| {
             crate::rescue::test_symbols::from_segments(
                 qrcode::Version::Normal(3),

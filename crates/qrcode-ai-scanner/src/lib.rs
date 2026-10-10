@@ -145,16 +145,23 @@ impl Scanner {
                 fallback_used = true;
             }
         }
-        // Score the primary (first) detection when the profile asks for it.
+        // Score the primary (first) detection when the profile asks for it;
+        // its stress cells and envelope probes match its content (aligned
+        // with it in `contents`), never its text.
         // The scoring stage shares the engine panic posture: a panic in the
         // math path degrades to "no score", never a crash (native unwind;
         // on wasm panics trap regardless — documented limitation).
-        let scored = match (outcome.merged.first(), self.config.score_depth) {
-            (Some(detection), depth @ (ScoreDepth::Reduced | ScoreDepth::Full)) => {
+        let primary = outcome
+            .merged
+            .first()
+            .zip(outcome.contents.first().map(|(key, _)| key));
+        let scored = match (primary, self.config.score_depth) {
+            (Some((detection, key)), depth @ (ScoreDepth::Reduced | ScoreDepth::Full)) => {
                 let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     score::evaluate(
                         &planes.luma,
                         detection,
+                        key,
                         depth,
                         &self.config.score_skip_axes,
                         &self.config.score_skip_checks,
@@ -174,8 +181,8 @@ impl Scanner {
         // report section. Same panic posture as scoring: the sweep shares
         // the score module's math path, so a panic there degrades to "no
         // envelope", never a crash out of the public API.
-        let envelope = match (&alpha_context, outcome.merged.first()) {
-            (Some(context), Some(primary))
+        let envelope = match (&alpha_context, primary) {
+            (Some(context), Some((detection, key)))
                 if self.config.score_depth == ScoreDepth::Full
                     && !self
                         .config
@@ -184,8 +191,8 @@ impl Scanner {
             {
                 let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     context.envelope(
-                        &primary.text,
-                        primary.symbology,
+                        key,
+                        detection.symbology,
                         &self.config.alpha_palette,
                         cancel,
                         deadline,

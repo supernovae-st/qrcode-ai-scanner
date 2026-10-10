@@ -27,7 +27,7 @@ pub(crate) mod warp;
 
 use web_time::Instant;
 
-use crate::engine::{self};
+use crate::engine::{self, content::ContentKey};
 use crate::error::Result;
 use crate::input::LumaImage;
 use crate::ladder::{CancelToken, MergedDetection, ScoreDepth};
@@ -86,10 +86,13 @@ fn uec_margin_cap(margin: f32) -> u8 {
     cap
 }
 
-fn detections_match(found: &[engine::RawDetection], expected_text: &str) -> bool {
-    found
-        .iter()
-        .any(|d| engine::charset::resolve(&d.raw).0 == expected_text)
+/// Whether a cell's reads carry the scored content: one read that would join
+/// the primary detection — identical bytes, an agreeing FNC1 position, a
+/// compatible ECI account ([`ContentKey::admits`], 07-pipeline property 7).
+/// Neither text nor corners are compared; [`cell_decode`] filters the
+/// symbology.
+fn detections_match(found: &[engine::RawDetection], expected: &ContentKey) -> bool {
+    found.iter().any(|d| expected.admits(d))
 }
 
 /// Stress cells decode ONLY the scored symbology — survival of the same
@@ -194,17 +197,18 @@ pub(crate) struct CellProbe {
 
 impl CellProbe {
     /// Calibrate on the unstressed base: direct → otsu → first decoding
-    /// deep rung. `None` = the base does not decode at stress scale at
-    /// all (score legitimately reads zero margin).
+    /// deep rung that reads `expected`, the primary's content. `None` = the
+    /// base does not decode at stress scale at all (score legitimately reads
+    /// zero margin).
     pub(crate) fn calibrate(
         base: &LumaImage,
-        expected_text: &str,
+        expected: &ContentKey,
         symbology: crate::report::Symbology,
     ) -> Option<Self> {
         // a fresh token, no deadline, no quota: this walk is never cut
         let never = CancelToken::new();
         let mut unbounded = Bound::new(&never, None);
-        match Self::calibrate_within(base, expected_text, symbology, &mut unbounded) {
+        match Self::calibrate_within(base, expected, symbology, &mut unbounded) {
             Ok(Calibrated::Class(probe)) => Some(probe),
             Ok(Calibrated::Undecodable | Calibrated::Interrupted) | Err(_) => None,
         }
@@ -215,7 +219,7 @@ impl CellProbe {
     /// rung one more: up to 16 steps, never one past the deadline.
     fn calibrate_within(
         base: &LumaImage,
-        expected_text: &str,
+        expected: &ContentKey,
         symbology: crate::report::Symbology,
         bound: &mut Bound<'_>,
     ) -> Result<Calibrated> {
@@ -226,7 +230,7 @@ impl CellProbe {
         if !bound.admit()? {
             return Ok(Calibrated::Interrupted);
         }
-        if cell_passes(base, expected_text, shallow) {
+        if cell_passes(base, expected, shallow) {
             return Ok(Calibrated::Class(shallow));
         }
         for rung in crate::ladder::DEEP_RUNGS {
@@ -234,7 +238,7 @@ impl CellProbe {
                 return Ok(Calibrated::Interrupted);
             }
             let boosted = rung.apply(base);
-            if detections_match(&cell_decode(&boosted, symbology).detections, expected_text) {
+            if detections_match(&cell_decode(&boosted, symbology).detections, expected) {
                 return Ok(Calibrated::Class(Self {
                     rung: Some(rung),
                     symbology,
@@ -246,32 +250,31 @@ impl CellProbe {
 }
 
 /// One stress cell: did the (transformed) image still decode to the same
-/// SYMBOL? Identity is the charset-RESOLVED text, not raw bytes — for
-/// kanji-mode symbols rxing re-encodes text as UTF-8 while rqrr keeps the
-/// original Shift-JIS bytes (the exact divergence the ladder merge handles;
-/// raw-keyed cells silently failed every rxing-only kanji survival).
+/// SYMBOL? Identity is the content, never its text (07-pipeline property
+/// 7): a cell's read counts when it would join the primary detection — the
+/// same bytes, an agreeing FNC1 position, a compatible ECI account. A lone
+/// cell read cannot see what decided the primary's text — the segments or
+/// declarations a parse of the symbol observed — so a text match failed
+/// symbols that survived: unmarked Kanji or Hanzi, declared bytes.
 ///
 /// Probe = direct + otsu + the baseline's deep rung when it needed one —
 /// the margin is measured RELATIVE to the symbol's own decode class, never
 /// with the full ladder's recovery power (that asymmetry is the point).
-pub(crate) fn cell_passes(img: &LumaImage, expected_text: &str, probe: CellProbe) -> bool {
-    if detections_match(&cell_decode(img, probe.symbology).detections, expected_text) {
+pub(crate) fn cell_passes(img: &LumaImage, expected: &ContentKey, probe: CellProbe) -> bool {
+    if detections_match(&cell_decode(img, probe.symbology).detections, expected) {
         return true;
     }
     let binarized = transform::otsu_threshold(img);
     if detections_match(
         &cell_decode(&binarized, probe.symbology).detections,
-        expected_text,
+        expected,
     ) {
         return true;
     }
     match probe.rung {
         Some(rung) => {
             let boosted = rung.apply(img);
-            detections_match(
-                &cell_decode(&boosted, probe.symbology).detections,
-                expected_text,
-            )
+            detections_match(&cell_decode(&boosted, probe.symbology).detections, expected)
         }
         None => false,
     }
@@ -303,7 +306,7 @@ fn lighting_indices(depth: ScoreDepth) -> &'static [usize] {
 /// the quota cut a planned cell before the ramp could say where it breaks.
 fn run_ramp(
     base: &LumaImage,
-    expected_text: &str,
+    expected: &ContentKey,
     bound: &mut Bound<'_>,
     probe: CellProbe,
     indices: &[usize],
@@ -315,7 +318,7 @@ fn run_ramp(
             return Ok(None);
         }
         let cell = build(base, i);
-        if !cell_passes(&cell, expected_text, probe) {
+        if !cell_passes(&cell, expected, probe) {
             return Ok(Some((passed, Some(i))));
         }
         passed += 1;
@@ -354,7 +357,7 @@ fn cell_label(axis: StressAxis, i: usize) -> &'static str {
 /// it. Deadline or quota cut / no knee / Reduced depth → honestly absent.
 fn refine_knee(
     base: &LumaImage,
-    expected_text: &str,
+    expected: &ContentKey,
     probe: CellProbe,
     axis: StressAxis,
     knee: usize,
@@ -365,7 +368,7 @@ fn refine_knee(
         return Ok(None);
     }
     let (cell, label) = refine(base, knee);
-    Ok(Some(if cell_passes(&cell, expected_text, probe) {
+    Ok(Some(if cell_passes(&cell, expected, probe) {
         cell_label(axis, knee).to_owned()
     } else {
         label
@@ -379,7 +382,7 @@ fn refine_knee(
 /// or the quota cut one.
 fn run_lighting(
     base: &LumaImage,
-    expected_text: &str,
+    expected: &ContentKey,
     depth: ScoreDepth,
     bound: &mut Bound<'_>,
     probe: CellProbe,
@@ -413,7 +416,7 @@ fn run_lighting(
         if !bound.admit()? {
             return Ok(None);
         }
-        if cell_passes(&lighting_cells[i](base), expected_text, probe) {
+        if cell_passes(&lighting_cells[i](base), expected, probe) {
             lighting_passed += 1;
         } else if first_failed.is_none() {
             first_failed = Some(i);
@@ -437,7 +440,7 @@ fn run_lighting(
 /// one.
 fn run_axes(
     base: &LumaImage,
-    expected_text: &str,
+    expected: &ContentKey,
     depth: ScoreDepth,
     skip: &[StressAxis],
     bound: &mut Bound<'_>,
@@ -514,8 +517,7 @@ fn run_axes(
         if skip.contains(&axis) {
             continue; // never built, never run — absent from the report
         }
-        let Some((passed, knee)) = run_ramp(base, expected_text, bound, probe, indices, build)?
-        else {
+        let Some((passed, knee)) = run_ramp(base, expected, bound, probe, indices, build)? else {
             return Ok(None);
         };
         if let Some(i) = knee {
@@ -531,7 +533,7 @@ fn run_axes(
     }
 
     if !skip.contains(&StressAxis::Lighting) {
-        let Some(lighting) = run_lighting(base, expected_text, depth, bound, probe)? else {
+        let Some(lighting) = run_lighting(base, expected, depth, bound, probe)? else {
             return Ok(None);
         };
         axes.push(lighting);
@@ -543,7 +545,7 @@ fn run_axes(
         for (slot, knee, refine) in knees {
             if let Some(entry) = axes.get_mut(slot) {
                 entry.refined_failed_at =
-                    refine_knee(base, expected_text, probe, entry.axis, knee, bound, refine)?;
+                    refine_knee(base, expected, probe, entry.axis, knee, bound, refine)?;
             }
         }
     }
@@ -687,13 +689,19 @@ fn compose(
 }
 
 /// Evaluate score v3 for the primary detection under the scan's shared
-/// deadline. `None` when no cell is planned (every axis skipped — an
-/// axis-less composite would be fiction; callers treat it exactly like
-/// `ScoreDepth::Off`) and when the deadline cuts the judgment: absent,
-/// never partial. A cancelled token is `Err(Cancelled)` (`QRS-005`).
+/// deadline, its cells matching `key`, the detection's content. `None` when
+/// no cell is planned (every axis skipped — an axis-less composite would be
+/// fiction; callers treat it exactly like `ScoreDepth::Off`) and when the
+/// deadline cuts the judgment: absent, never partial. A cancelled token is
+/// `Err(Cancelled)` (`QRS-005`).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the primary (detection + content), its config and the scan's limits"
+)]
 pub(crate) fn evaluate(
     luma: &LumaImage,
     detection: &MergedDetection,
+    key: &ContentKey,
     depth: ScoreDepth,
     skip: &[StressAxis],
     skip_checks: &[crate::ladder::ScoreCheck],
@@ -701,19 +709,21 @@ pub(crate) fn evaluate(
     deadline: Option<Instant>,
 ) -> Result<Option<(Score, Vec<Hint>)>> {
     let mut bound = Bound::new(cancel, deadline);
-    match judge(luma, detection, depth, skip, skip_checks, &mut bound)? {
+    match judge(luma, detection, key, depth, skip, skip_checks, &mut bound)? {
         Judgment::Complete(score, hints) => Ok(Some((score, hints))),
         Judgment::NoAxes | Judgment::Interrupted => Ok(None),
     }
 }
 
 /// Judge the primary detection under `bound`: calibration, every planned
-/// cell, then the knee bisections. Structural, UEC and ISO run only once
-/// every planned cell has run — a judgment the deadline or the quota cuts is
+/// cell, then the knee bisections — every cell matching `key`, the
+/// detection's content. Structural, UEC and ISO run only once every planned
+/// cell has run — a judgment the deadline or the quota cuts is
 /// `Interrupted`, while a cancelled token is `Err(Cancelled)` (`QRS-005`).
 pub(crate) fn judge(
     luma: &LumaImage,
     detection: &MergedDetection,
+    key: &ContentKey,
     depth: ScoreDepth,
     skip: &[StressAxis],
     skip_checks: &[crate::ladder::ScoreCheck],
@@ -724,18 +734,17 @@ pub(crate) fn judge(
     }
     let base = transform::downscale_to(luma, STRESS_BASE_SIDE);
     // calibrate the cell probe on the unstressed base (its decode class)
-    let probe =
-        match CellProbe::calibrate_within(&base, &detection.text, detection.symbology, bound)? {
-            Calibrated::Class(probe) => probe,
-            // no class reads the unstressed base: the shallow probe measures
-            // it anyway — a legitimately (near-)zero margin, fully judged
-            Calibrated::Undecodable => CellProbe {
-                rung: None,
-                symbology: detection.symbology,
-            },
-            Calibrated::Interrupted => return Ok(Judgment::Interrupted),
-        };
-    let Some(axes) = run_axes(&base, &detection.text, depth, skip, bound, probe)? else {
+    let probe = match CellProbe::calibrate_within(&base, key, detection.symbology, bound)? {
+        Calibrated::Class(probe) => probe,
+        // no class reads the unstressed base: the shallow probe measures
+        // it anyway — a legitimately (near-)zero margin, fully judged
+        Calibrated::Undecodable => CellProbe {
+            rung: None,
+            symbology: detection.symbology,
+        },
+        Calibrated::Interrupted => return Ok(Judgment::Interrupted),
+    };
+    let Some(axes) = run_axes(&base, key, depth, skip, bound, probe)? else {
         return Ok(Judgment::Interrupted);
     };
     // Photometric checks sample the ORIGINAL luma — when the geometry came
@@ -1215,11 +1224,27 @@ mod tests {
         );
     }
 
+    /// The content of a plain byte-mode symbol of the `qrcode` encoder: its
+    /// bytes, no ECI declaration, no FNC1 — what both engines read of it.
+    fn plain_key(payload: &[u8]) -> ContentKey {
+        ContentKey {
+            raw: payload.to_vec(),
+            eci: crate::engine::content::EciEvidence::NoEci,
+            fnc1: crate::engine::content::Fnc1::None,
+        }
+    }
+
+    /// The primary detection of an unbounded Full walk and its content.
+    fn primary_of(planes: &crate::transform::SourcePlanes) -> (MergedDetection, ContentKey) {
+        let outcome = ladder::run(planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
+        (outcome.merged[0].clone(), outcome.contents[0].0.clone())
+    }
+
     /// Decode a pristine QR and hand back the calibrated stress base + probe,
     /// so the private `run_axes` can be driven directly (its internals never
     /// had a value-level test — the lighting accumulator and deadline break
     /// only surface here).
-    fn clean_base_and_probe() -> (LumaImage, String, CellProbe) {
+    fn clean_base_and_probe() -> (LumaImage, ContentKey, CellProbe) {
         let code =
             qrcode::QrCode::with_error_correction_level(b"stress-axis pin", qrcode::EcLevel::Q)
                 .unwrap();
@@ -1232,11 +1257,10 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
         let planes = normalize(&ImageInput::encoded(&png), &Limits::default()).unwrap();
-        let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
-        let d = &outcome.merged[0];
+        let (d, key) = primary_of(&planes);
         let base = transform::downscale_to(&planes.luma, STRESS_BASE_SIDE);
-        let probe = CellProbe::calibrate(&base, &d.text, d.symbology).unwrap();
-        (base, d.text.clone(), probe)
+        let probe = CellProbe::calibrate(&base, &key, d.symbology).unwrap();
+        (base, key, probe)
     }
 
     /// Every COMPLETE judgment's axes are honest: `passed == total` exactly
@@ -1272,14 +1296,14 @@ mod tests {
     /// `run_axes` with no deadline and no quota — never cut.
     fn unbounded_axes(
         base: &LumaImage,
-        text: &str,
+        key: &ContentKey,
         skip: &[StressAxis],
         probe: CellProbe,
     ) -> Vec<AxisScore> {
         let cancel = CancelToken::new();
         let axes = run_axes(
             base,
-            text,
+            key,
             ScoreDepth::Full,
             skip,
             &mut Bound::new(&cancel, None),
@@ -1295,6 +1319,7 @@ mod tests {
     fn judged(
         luma: &LumaImage,
         detection: &MergedDetection,
+        key: &ContentKey,
         depth: ScoreDepth,
         skip: &[StressAxis],
         checks: &[crate::ladder::ScoreCheck],
@@ -1302,6 +1327,7 @@ mod tests {
         let (score, hints) = evaluate(
             luma,
             detection,
+            key,
             depth,
             skip,
             checks,
@@ -1325,8 +1351,8 @@ mod tests {
     /// (`radius/0.18` whites the whole frame → the cell fails → 4/5 here).
     #[test]
     fn pristine_symbol_survives_all_lighting_cells() {
-        let (base, text, probe) = clean_base_and_probe();
-        let axes = unbounded_axes(&base, &text, &[], probe);
+        let (base, key, probe) = clean_base_and_probe();
+        let axes = unbounded_axes(&base, &key, &[], probe);
         let lighting = axes
             .iter()
             .find(|a| a.axis == StressAxis::Lighting)
@@ -1357,10 +1383,8 @@ mod tests {
             let path = format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"));
             let bytes = std::fs::read(&path).expect("builder fixture present");
             let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
-            let outcome =
-                ladder::run(&planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
-            let detection = &outcome.merged[0];
-            judged(&planes.luma, detection, ScoreDepth::Full, &[], &[])
+            let (detection, key) = primary_of(&planes);
+            judged(&planes.luma, &detection, &key, ScoreDepth::Full, &[], &[])
         };
 
         // (a) the default render: a perfect score is REACHABLE.
@@ -1416,10 +1440,10 @@ mod tests {
             .build();
         let (w, h) = (img.width(), img.height());
         let base = LumaImage::new(img.into_raw(), w, h);
-        let text = "rotation probe: the frame must never eat the finders";
-        let probe = CellProbe::calibrate(&base, text, crate::report::Symbology::QrCode)
+        let key = plain_key(b"rotation probe: the frame must never eat the finders");
+        let probe = CellProbe::calibrate(&base, &key, crate::report::Symbology::QrCode)
             .expect("flawless base calibrates");
-        let axes = unbounded_axes(&base, text, &[], probe);
+        let axes = unbounded_axes(&base, &key, &[], probe);
         let rotation = axes
             .iter()
             .find(|a| a.axis == StressAxis::Rotation)
@@ -1438,11 +1462,11 @@ mod tests {
     /// preview has no capture angle — perspective + rotation are noise there.
     #[test]
     fn skipped_axes_never_run_and_the_composite_renormalizes() {
-        let (base, text, probe) = clean_base_and_probe();
-        let full = unbounded_axes(&base, &text, &[], probe);
+        let (base, key, probe) = clean_base_and_probe();
+        let full = unbounded_axes(&base, &key, &[], probe);
         let skipped = unbounded_axes(
             &base,
-            &text,
+            &key,
             &[StressAxis::Perspective, StressAxis::Rotation],
             probe,
         );
@@ -1510,10 +1534,10 @@ mod tests {
             }
         }
         let base = LumaImage::new(canvas, cw, ch);
-        let probe =
-            CellProbe::calibrate(&base, "canvas glare pin", crate::report::Symbology::QrCode)
-                .expect("corner symbol calibrates");
-        let axes = unbounded_axes(&base, "canvas glare pin", &[], probe);
+        let key = plain_key(b"canvas glare pin");
+        let probe = CellProbe::calibrate(&base, &key, crate::report::Symbology::QrCode)
+            .expect("corner symbol calibrates");
+        let axes = unbounded_axes(&base, &key, &[], probe);
         let lighting = axes
             .iter()
             .find(|a| a.axis == StressAxis::Lighting)
@@ -1535,8 +1559,8 @@ mod tests {
     /// symbol survives ≥1 of the five lighting cells, so the count must move.
     #[test]
     fn lighting_pass_count_accumulates() {
-        let (base, text, probe) = clean_base_and_probe();
-        let axes = unbounded_axes(&base, &text, &[], probe);
+        let (base, key, probe) = clean_base_and_probe();
+        let axes = unbounded_axes(&base, &key, &[], probe);
         let lighting = axes
             .iter()
             .find(|a| a.axis == StressAxis::Lighting)
@@ -1553,10 +1577,10 @@ mod tests {
     /// would run the set and report survivors.
     #[test]
     fn a_past_deadline_stops_the_lighting_set() {
-        let (base, text, probe) = clean_base_and_probe();
+        let (base, key, probe) = clean_base_and_probe();
         let cancel = CancelToken::new();
         let mut bound = Bound::new(&cancel, Some(Instant::now()));
-        let lighting = run_lighting(&base, &text, ScoreDepth::Full, &mut bound, probe).unwrap();
+        let lighting = run_lighting(&base, &key, ScoreDepth::Full, &mut bound, probe).unwrap();
         assert!(
             lighting.is_none(),
             "a past deadline interrupts the set: {lighting:?}"
@@ -1565,10 +1589,12 @@ mod tests {
     }
 
     /// Kanji-mode regression for the SCORING path (the ladder-side fix has
-    /// its own test): stress cells must match by resolved text — raw-keyed
-    /// cells silently failed every rxing-only survival on kanji symbols.
+    /// its own test): stress cells match by content — both engines read the
+    /// original Shift JIS bytes, so an rxing-only survival counts. Keyed on
+    /// rxing's re-encoded bytes, cells silently failed every such survival
+    /// on Kanji symbols.
     #[test]
-    fn kanji_symbol_scores_with_text_keyed_cells() {
+    fn kanji_symbol_scores_with_content_keyed_cells() {
         let sjis: &[u8] = &[0x82, 0xB1, 0x82, 0xF1, 0x82, 0xC9, 0x82, 0xBF, 0x82, 0xCD];
         let code = qrcode::QrCode::with_error_correction_level(sjis, qrcode::EcLevel::Q).unwrap();
         let img = code
@@ -1580,13 +1606,13 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
         let planes = normalize(&ImageInput::encoded(&png), &Limits::default()).unwrap();
-        let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
-        let detection = &outcome.merged[0];
+        let (detection, key) = primary_of(&planes);
         assert_eq!(detection.text, "こんにちは");
 
-        let (score, _) = judged(&planes.luma, detection, ScoreDepth::Full, &[], &[]);
+        let (score, _) = judged(&planes.luma, &detection, &key, ScoreDepth::Full, &[], &[]);
         // a pristine 8px/module symbol survives the early cells of every
-        // axis — raw-keyed matching scored this ZERO on rxing-only cells
+        // axis — keyed on rxing's re-encoded bytes, its rxing-only cells
+        // scored ZERO
         let total_passed: u32 = score.axes.iter().map(|a| u32::from(a.passed)).sum();
         assert!(
             total_passed >= 12,
@@ -1603,8 +1629,9 @@ mod tests {
     #[test]
     fn skip_checks_null_their_sections_and_leave_value_alone() {
         use crate::ladder::ScoreCheck;
-        let (luma, detection) = pristine_q_example();
-        let run = |checks: &[ScoreCheck]| judged(&luma, &detection, ScoreDepth::Full, &[], checks);
+        let (luma, detection, key) = pristine_q_example();
+        let run =
+            |checks: &[ScoreCheck]| judged(&luma, &detection, &key, ScoreDepth::Full, &[], checks);
 
         // Default: every section present on a clean bitstream decode.
         let (full, _) = run(&[]);
@@ -1642,7 +1669,7 @@ mod tests {
     /// block, so the margin reads `1 − 2k/22`, while every module boundary
     /// stays crisp and the stress cells keep decoding. 10 px modules on the
     /// standard 4-module quiet zone, decoded by the unbounded Full ladder.
-    fn thin_margin_v2q(k: u8) -> (LumaImage, MergedDetection) {
+    fn thin_margin_v2q(k: u8) -> (LumaImage, MergedDetection, ContentKey) {
         const MODULE: usize = 10;
         const QUIET: usize = 4;
         let code = qrcode::QrCode::with_version(
@@ -1675,9 +1702,8 @@ mod tests {
         let side = u32::try_from(side).unwrap();
         let planes =
             normalize(&ImageInput::luma8(&pixels, side, side), &Limits::default()).unwrap();
-        let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
-        let detection = outcome.merged[0].clone();
-        (planes.luma, detection)
+        let (detection, key) = primary_of(&planes);
+        (planes.luma, detection, key)
     }
 
     /// Skip invariance on the case the margin-1.0 sibling cannot see: a
@@ -1689,7 +1715,7 @@ mod tests {
         use crate::ladder::ScoreCheck;
         use crate::report::UecGrade;
         const K: u8 = 8;
-        let (luma, detection) = thin_margin_v2q(K);
+        let (luma, detection, key) = thin_margin_v2q(K);
         assert!(
             detection.masked_stream.is_some(),
             "precondition: the rqrr stream is present — the margin is measurable"
@@ -1704,7 +1730,14 @@ mod tests {
             StressAxis::Lighting,
         ];
         let run = |checks: &[ScoreCheck]| {
-            judged(&luma, &detection, ScoreDepth::Full, &only_contrast, checks)
+            judged(
+                &luma,
+                &detection,
+                &key,
+                ScoreDepth::Full,
+                &only_contrast,
+                checks,
+            )
         };
 
         let (shown, shown_hints) = run(&[]);
@@ -1775,7 +1808,7 @@ mod tests {
 
     /// The pristine EC-Q symbol of the section-skip seam — a clean rqrr
     /// decode whose every stress cell survives.
-    fn pristine_q_example() -> (LumaImage, MergedDetection) {
+    fn pristine_q_example() -> (LumaImage, MergedDetection, ContentKey) {
         let code =
             qrcode::QrCode::with_error_correction_level(b"https://example.com", qrcode::EcLevel::Q)
                 .unwrap();
@@ -1788,9 +1821,8 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
         let planes = normalize(&ImageInput::encoded(&png), &Limits::default()).unwrap();
-        let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
-        let detection = outcome.merged[0].clone();
-        (planes.luma, detection)
+        let (detection, key) = primary_of(&planes);
+        (planes.luma, detection, key)
     }
 
     /// A deadline that expired before scoring judged NOTHING — so the report
@@ -1798,12 +1830,13 @@ mod tests {
     /// a pristine symbol came back 0/poor with four fabricated hints.
     #[test]
     fn an_expired_deadline_yields_no_judgment() {
-        let (luma, detection) = pristine_q_example();
+        let (luma, detection, key) = pristine_q_example();
         let cancel = CancelToken::new();
         for depth in [ScoreDepth::Full, ScoreDepth::Reduced] {
             let outcome = evaluate(
                 &luma,
                 &detection,
+                &key,
                 depth,
                 &[],
                 &[],
@@ -1817,7 +1850,7 @@ mod tests {
             );
             // not even calibration ran: the deadline is checked before every step
             let mut bound = Bound::new(&cancel, Some(Instant::now()));
-            let outcome = judge(&luma, &detection, depth, &[], &[], &mut bound).unwrap();
+            let outcome = judge(&luma, &detection, &key, depth, &[], &[], &mut bound).unwrap();
             assert!(
                 matches!(outcome, Judgment::Interrupted),
                 "{depth:?}: {outcome:?}"
@@ -1831,7 +1864,7 @@ mod tests {
     /// judge nothing and spend nothing.
     #[test]
     fn no_planned_cell_judges_nothing() {
-        let (luma, detection) = pristine_q_example();
+        let (luma, detection, key) = pristine_q_example();
         let cancel = CancelToken::new();
         let every_axis: Vec<StressAxis> = WEIGHTS.iter().map(|&(axis, _)| axis).collect();
         for (depth, skip) in [
@@ -1840,13 +1873,14 @@ mod tests {
             (ScoreDepth::Off, &[][..]),
         ] {
             let mut bound = Bound::new(&cancel, None);
-            let outcome = judge(&luma, &detection, depth, skip, &[], &mut bound).unwrap();
+            let outcome = judge(&luma, &detection, &key, depth, skip, &[], &mut bound).unwrap();
             assert!(
                 matches!(outcome, Judgment::NoAxes),
                 "{depth:?}: {outcome:?}"
             );
             assert_eq!(bound.spent(), 0);
-            let outcome = evaluate(&luma, &detection, depth, skip, &[], &cancel, None).unwrap();
+            let outcome =
+                evaluate(&luma, &detection, &key, depth, skip, &[], &cancel, None).unwrap();
             assert!(outcome.is_none(), "{depth:?}: {outcome:?}");
         }
     }
@@ -1855,11 +1889,19 @@ mod tests {
     /// included (its walk used to run up to 17 decodes deaf to the token).
     #[test]
     fn cancellation_reaches_calibration() {
-        let (luma, detection) = pristine_q_example();
+        let (luma, detection, key) = pristine_q_example();
         let cancel = CancelToken::new();
         cancel.cancel();
         let mut bound = Bound::new(&cancel, None);
-        let outcome = judge(&luma, &detection, ScoreDepth::Full, &[], &[], &mut bound);
+        let outcome = judge(
+            &luma,
+            &detection,
+            &key,
+            ScoreDepth::Full,
+            &[],
+            &[],
+            &mut bound,
+        );
         assert!(
             matches!(outcome, Err(crate::error::ScanError::Cancelled)),
             "{outcome:?}"
@@ -1868,42 +1910,44 @@ mod tests {
     }
 
     /// A committed fixture decoded by the unbounded Full ladder.
-    fn fixture_example(rel: &str) -> (LumaImage, MergedDetection) {
+    fn fixture_example(rel: &str) -> (LumaImage, MergedDetection, ContentKey) {
         let path = format!("{}/../../fixtures/{rel}", env!("CARGO_MANIFEST_DIR"));
         let bytes = std::fs::read(&path).expect("fixture present");
         let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
-        let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
-        let detection = outcome.merged[0].clone();
-        (planes.luma, detection)
+        let (detection, key) = primary_of(&planes);
+        (planes.luma, detection, key)
     }
 
     /// The blob-style production template: it decodes only through a morph
     /// rung and its ramps knee.
-    fn kneed_example() -> (LumaImage, MergedDetection) {
+    fn kneed_example() -> (LumaImage, MergedDetection, ContentKey) {
         fixture_example("artistic/blob-style-monkey-logo.webp")
     }
 
     /// The logo-occluded v5-H symbol only the S5 rescue decodes (errors and
     /// erasures): no stress-cell decode class reads its base — the
     /// Undecodable boundary, still a complete judgment.
-    fn rescue_example() -> (LumaImage, MergedDetection) {
-        let (luma, detection) = fixture_example("degraded/logo-occluded-rescue.png");
+    fn rescue_example() -> (LumaImage, MergedDetection, ContentKey) {
+        let (luma, detection, key) = fixture_example("degraded/logo-occluded-rescue.png");
         assert_eq!(
             detection.engines,
             vec![crate::report::EngineKind::Rescue],
             "precondition: a rescue-only decode"
         );
-        (luma, detection)
+        (luma, detection, key)
     }
 
     /// The unbounded calibration walk: how it ended and the steps it took.
-    fn calibration_walk(luma: &LumaImage, detection: &MergedDetection) -> (Calibrated, u32) {
+    fn calibration_walk(
+        luma: &LumaImage,
+        detection: &MergedDetection,
+        key: &ContentKey,
+    ) -> (Calibrated, u32) {
         let base = transform::downscale_to(luma, STRESS_BASE_SIDE);
         let cancel = CancelToken::new();
         let mut walk = Bound::new(&cancel, None);
         let calibrated =
-            CellProbe::calibrate_within(&base, &detection.text, detection.symbology, &mut walk)
-                .unwrap();
+            CellProbe::calibrate_within(&base, key, detection.symbology, &mut walk).unwrap();
         (calibrated, walk.spent())
     }
 
@@ -1911,8 +1955,13 @@ mod tests {
     /// `judge`: the calibration walk (to a class, or through every class when
     /// none reads the base), then every PLANNED cell — a ramp runs through
     /// its knee, the lighting set runs whole.
-    fn complete_units(luma: &LumaImage, detection: &MergedDetection, score: &Score) -> u32 {
-        let (calibrated, walk) = calibration_walk(luma, detection);
+    fn complete_units(
+        luma: &LumaImage,
+        detection: &MergedDetection,
+        key: &ContentKey,
+        score: &Score,
+    ) -> u32 {
+        let (calibrated, walk) = calibration_walk(luma, detection, key);
         assert!(
             !matches!(calibrated, Calibrated::Interrupted),
             "an unbounded walk ends"
@@ -1939,13 +1988,14 @@ mod tests {
         name: &str,
         luma: &LumaImage,
         detection: &MergedDetection,
+        key: &ContentKey,
         reference: &Score,
         bisections: usize,
     ) {
         match name {
             "kneed" => assert!(bisections > 0, "precondition: knees to bisect"),
             "undecodable" => {
-                let (calibrated, walk) = calibration_walk(luma, detection);
+                let (calibrated, walk) = calibration_walk(luma, detection, key);
                 assert!(matches!(calibrated, Calibrated::Undecodable));
                 let every_class = u32::try_from(crate::ladder::DEEP_RUNGS.len()).unwrap() + 1;
                 assert_eq!(walk, every_class, "shallow class + every deep rung tried");
@@ -1965,19 +2015,26 @@ mod tests {
     #[test]
     fn work_quota_cuts_are_absent_never_partial() {
         let cancel = CancelToken::new();
-        for (name, (luma, detection)) in [
+        for (name, (luma, detection, key)) in [
             ("pristine", pristine_q_example()),
             ("kneed", kneed_example()),
             ("undecodable", rescue_example()),
         ] {
             let mut free = Bound::new(&cancel, None);
-            let Judgment::Complete(reference, reference_hints) =
-                judge(&luma, &detection, ScoreDepth::Full, &[], &[], &mut free).unwrap()
-            else {
+            let Judgment::Complete(reference, reference_hints) = judge(
+                &luma,
+                &detection,
+                &key,
+                ScoreDepth::Full,
+                &[],
+                &[],
+                &mut free,
+            )
+            .unwrap() else {
                 panic!("{name}: an unbounded judgment completes");
             };
             assert_honest_axes(&reference.axes, ScoreDepth::Full);
-            let complete = complete_units(&luma, &detection, &reference);
+            let complete = complete_units(&luma, &detection, &key, &reference);
             let bisections = reference
                 .axes
                 .iter()
@@ -1985,10 +2042,18 @@ mod tests {
                 .count();
             let total = complete + u32::try_from(bisections).unwrap();
             assert_eq!(free.spent(), total, "{name}: no hidden step");
-            assert_sweep_preconditions(name, &luma, &detection, &reference, bisections);
+            assert_sweep_preconditions(name, &luma, &detection, &key, &reference, bisections);
             for quota in 0..=total + 1 {
                 let mut bound = Bound::new(&cancel, None).with_quota(quota);
-                let outcome = judge(&luma, &detection, ScoreDepth::Full, &[], &[], &mut bound);
+                let outcome = judge(
+                    &luma,
+                    &detection,
+                    &key,
+                    ScoreDepth::Full,
+                    &[],
+                    &[],
+                    &mut bound,
+                );
                 assert!(bound.spent() <= quota, "{name}: the quota bounds the spend");
                 let (score, hints) = match outcome.unwrap() {
                     Judgment::Complete(score, hints) => (score, hints),
@@ -2168,20 +2233,19 @@ mod tests {
         );
         let bytes = std::fs::read(&path).expect("fixture present");
         let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
-        let outcome = ladder::run(&planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
-        let d = &outcome.merged[0];
+        let (d, key) = primary_of(&planes);
         assert_eq!(d.symbology, crate::report::Symbology::Pdf417);
         let base = transform::downscale_to(&planes.luma, STRESS_BASE_SIDE);
-        let probe = CellProbe::calibrate(&base, &d.text, d.symbology).expect("base decodes");
+        let probe = CellProbe::calibrate(&base, &key, d.symbology).expect("base decodes");
         let survives = |img: &LumaImage| {
             (0..RUNS)
-                .filter(|_| detections_match(&cell_decode(img, d.symbology).detections, &d.text))
+                .filter(|_| detections_match(&cell_decode(img, d.symbology).detections, &key))
                 .count()
         };
         for side in [358u32, 256, 179, 128, 90] {
             let cell = transform::downscale_to(&base, side);
             let judged = (0..RUNS)
-                .filter(|_| cell_passes(&cell, &d.text, probe))
+                .filter(|_| cell_passes(&cell, &key, probe))
                 .count();
             println!(
                 "{side}px cell ({}x{}): direct {}/{RUNS} · otsu {}/{RUNS} · cell_passes {judged}/{RUNS}",

@@ -13,6 +13,7 @@
 
 use web_time::Instant;
 
+use crate::engine::content::ContentKey;
 use crate::error::{Result, ScanError};
 use crate::input::{LumaImage, bt601};
 use crate::ladder::{AlphaBackground, CancelToken};
@@ -186,7 +187,9 @@ impl AlphaContext {
     /// stress-cell philosophy (direct → otsu → the deep rung the base
     /// needed), calibrated on the design over its PRIMARY background. A
     /// raw direct-only decode would read an all-fail envelope for an
-    /// artistic design that legitimately decodes through a boost rung.
+    /// artistic design that legitimately decodes through a boost rung. A
+    /// probe decodes when one of its reads carries `expected`, the primary
+    /// detection's content (07-pipeline property 7), as stress cells do.
     ///
     /// `Ok(None)` when the budget ran out mid-sweep — a partial envelope
     /// would read as a verdict about backgrounds that were never tested.
@@ -196,7 +199,7 @@ impl AlphaContext {
     /// cancellation contract).
     pub(crate) fn envelope(
         &self,
-        expected_text: &str,
+        expected: &ContentKey,
         symbology: Symbology,
         palette: &[[u8; 3]],
         cancel: &CancelToken,
@@ -248,7 +251,7 @@ impl AlphaContext {
             self.background[1],
             self.background[2],
         ));
-        let Some(cell) = crate::score::CellProbe::calibrate(&base, expected_text, symbology) else {
+        let Some(cell) = crate::score::CellProbe::calibrate(&base, expected, symbology) else {
             return Ok(None);
         };
 
@@ -259,11 +262,7 @@ impl AlphaContext {
             if deadline.is_some_and(|d| Instant::now() >= d) {
                 return Ok(None);
             }
-            Ok(Some(crate::score::cell_passes(
-                &over(bg),
-                expected_text,
-                cell,
-            )))
+            Ok(Some(crate::score::cell_passes(&over(bg), expected, cell)))
         };
 
         let mut probes: Vec<(u8, bool)> = Vec::with_capacity(ENVELOPE_RUNGS.len() + 4);

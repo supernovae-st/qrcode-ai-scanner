@@ -124,14 +124,10 @@ pub(crate) struct ContentKey {
 }
 
 // The score cells and the alpha envelope match their reads by content
-// identity through these (spec/07 property 7); until those matchers are
-// swapped over, only tests use them outside reconciliation.
+// identity through `admits` (spec/07 property 7).
 impl ContentKey {
     /// The content one engine hit reports.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the probe matchers' content identity")
-    )]
+    #[cfg(test)]
     pub(crate) fn of(hit: &RawDetection) -> Self {
         Self {
             raw: hit.raw.clone(),
@@ -143,10 +139,6 @@ impl ContentKey {
     /// Whether an engine hit reads this same content: identical bytes,
     /// agreeing ECI accounts, no FNC1 position conflict. Symbology is the
     /// caller's filter.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the probe matchers' content identity")
-    )]
     pub(crate) fn admits(&self, hit: &RawDetection) -> bool {
         self.raw == hit.raw && self.eci.agrees_with(&hit.eci) && self.fnc1.agrees_with(hit.fnc1)
     }
