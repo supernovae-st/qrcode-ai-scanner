@@ -191,7 +191,8 @@ Known limits of what a report shows — reported, never judged:
   budget-bound, a work ratio of 1, a concordant `McNemar` pair); their
   count per class is `budget_bound.same_cut`;
 - a decode the budget costs one side only becomes an A/B-disagreement
-  exclusion, outside the `McNemar` tests; the status line names it;
+  exclusion, outside the `McNemar` tests; the status line names it, and a
+  dry run's pre-screen reports its share per set;
 - an engine retry that re-flattens an alpha image between two walks
   spends time `total_ms` does not cover (the walk comparison still sees a
   truncated retry), and a lighting set that 0.9.0 cuts right after a
@@ -289,6 +290,14 @@ retried (three attempts in all), never adjusted.
 A dry run enforces only the host floor: it refuses to start, and stops,
 while load1 > 30, swap use > 8 GB or another bench run holds the lock; once
 stopped it starts no new phase.
+
+A dry run also pre-screens instability, before any quiet window: per
+budgeted mode and set, the share of images whose A/B outputs disagree —
+between the variants, or across one variant's repetitions — with the sets
+above 10 % flagged, since there the exclusion rule would make every gated
+run `partial` (`prescreen` in `receipt.json`, a table in `receipt.md`).
+It is information for re-scoping such a mode first, never a gated
+decision.
 
 ```sh
 xtask bench gate                # exit 0 open, 3 closed

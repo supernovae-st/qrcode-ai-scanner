@@ -1547,6 +1547,55 @@ pub(crate) fn set_rows(m: &Measurement) -> SetRows {
     rows
 }
 
+/// The instability pre-screen of a dry run: per budgeted-mode segment and
+/// set, the images whose A/B outputs disagree — between the variants, or
+/// across one variant's repetitions — as a share of the set's images. Above
+/// 10 %, the exclusion rule would make every gated run of that mode
+/// partial: information to re-scope the mode before any gated timing,
+/// never a decision.
+fn prescreen(m: &Measurement) -> Vec<Value> {
+    let mut rows = Vec::new();
+    let sets = classes(&m.images);
+    for segment in m
+        .segments
+        .iter()
+        .filter(|s| s.outcome == Outcome::Measured && s.mode.budgeted())
+    {
+        let target = format!("{}/{}", segment.runtime.as_str(), segment.mode.as_str());
+        for class in sets.iter().filter(|c| c.level == "set") {
+            let sides = class_sides(segment, class);
+            let (Some(base), Some(candidate)) =
+                (sides.get(&Variant::Base), sides.get(&Variant::Candidate))
+            else {
+                continue;
+            };
+            let by_image: BTreeMap<usize, &ImageSide> =
+                candidate.iter().map(|(i, s)| (*i, s)).collect();
+            let (mut compared, mut disagreement, mut unstable) = (0usize, 0usize, 0usize);
+            for (index, a) in base {
+                let Some(b) = by_image.get(index) else {
+                    continue;
+                };
+                compared += 1;
+                match pair_status(a, b, m.options.reps, segment.mode) {
+                    Err(Excluded::Disagreement) => disagreement += 1,
+                    Err(Excluded::Unstable) => unstable += 1,
+                    _ => {}
+                }
+            }
+            let images = class.members.len();
+            let flagged = disagreement + unstable;
+            rows.push(json!({
+                "target": target, "set": class.name, "images": images, "compared": compared,
+                "disagreement": disagreement, "unstable": unstable,
+                "share_pct": r3(100.0 * float(flagged as u64) / float(images.max(1) as u64)),
+                "above_limit": 10 * flagged > images,
+            }));
+        }
+    }
+    rows
+}
+
 /// The run's status and exit code: refused 3 (gate, host floor) or 2
 /// (parity, inputs) · failed 1 (any resource failure or protocol failure,
 /// dry runs included) · exploratory 3 (a dry run never passes) ·
@@ -1694,7 +1743,8 @@ fn known_limits() -> Value {
         "alpha_envelope": "full mode: a deadline that cuts the alpha placement envelope leaves the walk and the judgment unchanged, so the truncation test cannot see it; images whose scan flattened transparency are flagged (alpha), and timed calls whose alpha state differs from their reference walk's are counted (information)",
         "budget_exhausted": "the build's own trace.budget_exhausted, when it reports one, is recorded per call and counted per side (information)",
         "same_cut": "pairs both variants cut at the same share of their own reference walks carry no speed verdict; budget_bound.same_cut counts them per class",
-        "lost_decodes": "a decode the budget costs one side only is an A/B disagreement exclusion, outside the McNemar tests; the status line names it",
+        "lost_decodes": "a decode the budget costs one side only is an A/B disagreement exclusion, outside the McNemar tests; the status line names it, and a dry run's pre-screen reports its share per set",
+        "prescreen": "dry runs: per budgeted mode and set, the images whose A/B outputs disagree between the variants or across one variant's repetitions, as a share of the set's images; above 10 % a gated run of that mode would end partial — information to re-scope the mode before any gated timing, never a gated decision",
     })
 }
 
@@ -2159,6 +2209,34 @@ pub(crate) fn write(m: &Measurement, out: &Path) -> Result<i32, String> {
         .wasm
         .as_ref()
         .map(|w| wasm_json(m, w, exploratory, &mut declared, &mut body));
+    // a dry run pre-screens the instability a gated run would exclude
+    let screened = exploratory.then(|| prescreen(m));
+    if let Some(rows) = screened.as_ref().filter(|rows| !rows.is_empty()) {
+        let _ = writeln!(
+            body,
+            "\n## Instability pre-screen (dry run: information, no gated decision)\n\n\
+             | target | set | images | compared | A/B disagree | unstable | share % | above 10 % |\n\
+             |---|---|---|---|---|---|---|---|"
+        );
+        for row in rows {
+            let _ = writeln!(
+                body,
+                "| {} | {} | {} | {} | {} | {} | {} | {} |",
+                row["target"].as_str().unwrap_or("?"),
+                row["set"].as_str().unwrap_or("?"),
+                row["images"],
+                row["compared"],
+                row["disagreement"],
+                row["unstable"],
+                row["share_pct"],
+                if row["above_limit"] == true {
+                    "yes"
+                } else {
+                    "no"
+                }
+            );
+        }
+    }
     unmeasured_rows(m, &mut declared);
     let (state, exit) = status(m, &declared);
     let (detail, detail_line) = status_detail(m, &excluded);
@@ -2217,6 +2295,7 @@ pub(crate) fn write(m: &Measurement, out: &Path) -> Result<i32, String> {
         "gate": m.readings,
         "segments": segments,
         "cross_runtime_agreement_full_unbounded": cross_runtime(m),
+        "prescreen": screened,
         "throughput": throughput,
         "wasm": wasm,
         "verdicts": declared.iter().map(|d| json!({"target": d.target, "class": d.class, "metric": d.metric, "verdict": d.verdict, "estimate_pct": d.estimate_pct, "ci95_pct": d.ci_pct, "p_one_sided": d.p_value, "discordant": d.discordant, "note": d.note})).collect::<Vec<_>>(),
@@ -3011,6 +3090,91 @@ mod tests {
                 String::from("node/full vendored: 5 valid pairs"),
                 String::from("node/full vendored: 5 of 10 images excluded"),
             ]
+        );
+    }
+
+    /// A dry run pre-screens instability: per budgeted mode and set, the
+    /// images whose A/B outputs disagree — two of ten here, the candidate
+    /// decoding other text — or vary across one variant's repetitions (one
+    /// more), as a share of the set; 3 of 10 is above the 10 % that would
+    /// make a gated run partial. Information only: the run's status is the
+    /// dry run's own, an unbudgeted mode is not screened, and a gated run
+    /// reports no pre-screen.
+    #[test]
+    fn dry_runs_prescreen_the_ab_disagreement_share() {
+        let screened_segment = |mode: Mode| {
+            let mut seg = segment(10, 10.0, 1.0);
+            seg.mode = mode;
+            for i in [0, 1] {
+                for s in seg
+                    .samples
+                    .get_mut(&i)
+                    .and_then(|v| v.get_mut(&Variant::Candidate))
+                    .expect("image")
+                {
+                    s.units = Some(vec![Unit::of("qr_code", b"other")]);
+                }
+            }
+            if let Some(calls) = seg
+                .samples
+                .get_mut(&2)
+                .and_then(|v| v.get_mut(&Variant::Base))
+            {
+                calls[3].units = Some(vec![Unit::of("qr_code", b"flicker")]);
+            }
+            seg
+        };
+        let mut dry = complete_scope();
+        dry.push("--dry-run");
+        let m = measurement(
+            &dry,
+            10,
+            vec![
+                screened_segment(Mode::Frame),
+                screened_segment(Mode::FullUnbounded),
+            ],
+        );
+        let rows = prescreen(&m);
+        assert_eq!(
+            rows,
+            vec![json!({
+                "target": "lib/frame", "set": "vendored", "images": 10, "compared": 10,
+                "disagreement": 2, "unstable": 1, "share_pct": 30.0, "above_limit": true,
+            })],
+            "one row per budgeted segment and set"
+        );
+        let dir =
+            std::env::temp_dir().join(format!("qrscan-bench-prescreen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        assert_eq!(write(&m, &dir), Ok(3), "a dry run stays exploratory");
+        let receipt: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("receipt.json")).expect("receipt"),
+        )
+        .expect("json");
+        let md = std::fs::read_to_string(dir.join("receipt.md")).expect("receipt.md");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(receipt["prescreen"], json!(rows));
+        assert!(
+            md.contains("| lib/frame | vendored | 10 | 10 | 2 | 1 | 30.0 | yes |"),
+            "{md}"
+        );
+        let gated = measurement(&complete_scope(), 10, vec![screened_segment(Mode::Frame)]);
+        let dir = std::env::temp_dir().join(format!(
+            "qrscan-bench-prescreen-gated-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        write(&gated, &dir).expect("written");
+        let receipt: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("receipt.json")).expect("receipt"),
+        )
+        .expect("json");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            receipt["prescreen"].is_null(),
+            "no pre-screen in a gated run"
         );
     }
 
