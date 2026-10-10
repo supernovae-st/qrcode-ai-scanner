@@ -21,9 +21,13 @@ env:
 jobs:
   # Sharded: the suite outgrew a single runner (the un-sharded job hit the
   # 90-min wall on 2026-07-05; 8 shards then had TWO shards hit it again on
-  # a 284-test suite). 16 shards now (12→16 with NEXTEST_TEST_THREADS=2 —
-  # the OOM fix serializes test pressure, the extra shards buy the time
-  # back). Add shards if the wall returns, never a longer wall (that just
+  # a 284-test suite). 12→16 came with NEXTEST_TEST_THREADS=2 (the OOM fix
+  # serializes test pressure, the extra shards buy the time back). 16→85:
+  # run 38027683008 lost 4 of 16 shards at the 85-min work-step wall (2114
+  # mutants), and the crate has since grown to 2964 mutants, a rebuild ~1.5x
+  # slower and a suite ~1.7x longer; that run's per-mutant costs, replayed
+  # over cargo-mutants' slice sharding, put the slowest of 85 shards near
+  # 55 min. Add shards if the wall returns, never a longer wall (that just
   # delays the report a week).
   #
   # The timeout lives on the WORK STEP, not the job: a job-level timeout
@@ -41,7 +45,94 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        # 0..84: the `--shard N/85` of the work step and mutants-summary's
+        # directory list name the same count.
+        shard:
+          - 0
+          - 1
+          - 2
+          - 3
+          - 4
+          - 5
+          - 6
+          - 7
+          - 8
+          - 9
+          - 10
+          - 11
+          - 12
+          - 13
+          - 14
+          - 15
+          - 16
+          - 17
+          - 18
+          - 19
+          - 20
+          - 21
+          - 22
+          - 23
+          - 24
+          - 25
+          - 26
+          - 27
+          - 28
+          - 29
+          - 30
+          - 31
+          - 32
+          - 33
+          - 34
+          - 35
+          - 36
+          - 37
+          - 38
+          - 39
+          - 40
+          - 41
+          - 42
+          - 43
+          - 44
+          - 45
+          - 46
+          - 47
+          - 48
+          - 49
+          - 50
+          - 51
+          - 52
+          - 53
+          - 54
+          - 55
+          - 56
+          - 57
+          - 58
+          - 59
+          - 60
+          - 61
+          - 62
+          - 63
+          - 64
+          - 65
+          - 66
+          - 67
+          - 68
+          - 69
+          - 70
+          - 71
+          - 72
+          - 73
+          - 74
+          - 75
+          - 76
+          - 77
+          - 78
+          - 79
+          - 80
+          - 81
+          - 82
+          - 83
+          - 84
     steps:
       - uses: actions/checkout@v7
       # Forensic history of the silent runner deaths (6 runs, always the same
@@ -86,11 +177,11 @@ jobs:
       # let every shard finish and report, so no continue-on-error is needed.
       # --cargo-arg=--locked reaches every cargo call cargo-mutants makes: a
       # stale lockfile is a baseline failure, never a silent re-resolution.
-      - name: cargo mutants (shard ${{ matrix.shard }}/16)
+      - name: cargo mutants (shard ${{ matrix.shard }}/85)
         run: |
           ulimit -v 6291456
           status=0
-          cargo mutants -p qrcode-ai-scanner --in-place --cargo-arg=--locked --shard ${{ matrix.shard }}/16 --minimum-test-timeout 120 -- --all-features || status=$?
+          cargo mutants -p qrcode-ai-scanner --in-place --cargo-arg=--locked --shard ${{ matrix.shard }}/85 --minimum-test-timeout 120 -- --all-features || status=$?
           echo "$status" > mutants-exit-code.txt
           case "$status" in
             0|2|3)
@@ -113,7 +204,7 @@ jobs:
             mutants-exit-code.txt
             mem-telemetry.log
 
-  # The mutation verdict: all 16 shards judged together. A missing or
+  # The mutation verdict: all 85 shards judged together. A missing or
   # unfinished shard, a baseline failure, a tool-level exit code, or any
   # MISSED / TIMEOUT mutant without a covering entry in
   # .cargo/mutants-dispositions.toml fails this job, and with it the run.
@@ -133,7 +224,7 @@ jobs:
           path: mutants-shards
       - name: the gate's own scenarios
         run: python3 scripts/check-mutants-outcome.py --self-test
-      # 0..15 spelled out (= the matrix): a shard whose artifact never
+      # 0..84 spelled out (= the matrix): a shard whose artifact never
       # arrived is a named failure, not a silently shorter list.
       - name: every missed or timed-out mutant is dispositioned
         if: ${{ !cancelled() }}
@@ -141,7 +232,7 @@ jobs:
           python3 scripts/check-mutants-outcome.py
           --dispositions .cargo/mutants-dispositions.toml
           --markdown "$GITHUB_STEP_SUMMARY"
-          mutants-shards/mutants-report-shard-{0..15}
+          mutants-shards/mutants-report-shard-{0..84}
 
   fuzz:
     runs-on: ubuntu-24.04

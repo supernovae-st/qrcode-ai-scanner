@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mutation verdict over sharded cargo-mutants runs — the honest ratchet.
 
-deep-checks.yml shards cargo-mutants 16 ways. The shards used to run under
+deep-checks.yml shards cargo-mutants 85 ways. The shards used to run under
 `continue-on-error`, so weekly run 37262272113 (2026-10-05) concluded success
 over 77 missed and 5 timed-out mutants, with 12 of 16 shards exiting 2 or 3 —
 and a baseline failure (exit 4) would have read green too. This gate reads

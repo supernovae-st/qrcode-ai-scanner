@@ -56,7 +56,7 @@ node crates/qrcode-ai-scanner-node/test.mjs   # node smoke (build first: npm run
 node crates/qrcode-ai-scanner-wasm/test.mjs   # wasm smoke (build first)
 ```
 
-Deep checks (weekly `deep-checks.yml`): cargo-mutants in 16 shards, judged
+Deep checks (weekly `deep-checks.yml`): cargo-mutants in 85 shards, judged
 by the `mutants-summary` job — red on a baseline failure or on any missed /
 timed-out mutant absent from `.cargo/mutants-dispositions.toml` (after an
 edit there: `python3 scripts/check-mutants-outcome.py --self-test`) · fuzz
