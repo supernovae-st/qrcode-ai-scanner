@@ -573,7 +573,14 @@ class Iso15415Report {
   final IsoParameter modulation;
   final IsoParameter axialNonuniformity;
   final IsoParameter fixedPatternDamage;
+
+  /// The synthetic UEC margin in ISO bands — null without a measured margin,
+  /// or withheld when the `uec` check is skipped (its grade still counts in
+  /// [overall]).
   final IsoParameter? unusedErrorCorrection;
+
+  /// The ISO rule: the lowest MEASURED parameter — a withheld one counts
+  /// too, so a skipped check never moves it.
   final LetterGrade overall;
   const Iso15415Report(
       this.symbolContrast,
@@ -604,6 +611,10 @@ class Score {
   final int weightsRun;
   final List<AxisScore> axes;
   final StructuralReport? structural;
+
+  /// The synthetic UEC margin of the verified orientation's stream — null
+  /// when no stream error-corrects errors-only, or when the `uec` check is
+  /// skipped (the measured margin still caps [value]).
   final UecReport? uec;
   final Iso15415Report? iso15415;
   const Score(this.value, this.grade, this.weightsRun, this.axes,
@@ -667,7 +678,7 @@ class AlphaProbe {
   /// Neutral background luma composited under the content (0-255).
   final int backgroundLuma;
 
-  /// The composite still decoded to the primary symbol's text.
+  /// One of the composite's reads denotes the same content as the primary.
   final bool decoded;
   const AlphaProbe(this.backgroundLuma, this.decoded);
   factory AlphaProbe.fromJson(Map<String, dynamic> j) => AlphaProbe(
@@ -729,7 +740,9 @@ class AlphaReport {
   /// The opposite background rescued a zero-detection scan (auto only).
   final bool fallbackUsed;
 
-  /// Full profile only; null when skipped or budget-exhausted.
+  /// Full profile only; null when skipped, cut by the budget
+  /// (`trace.budgetExhausted == true`), or when no probe class reads the
+  /// design.
   final AlphaEnvelope? envelope;
   const AlphaReport(this.coverage, this.contentLuma, this.mode,
       this.background, this.fallbackUsed, this.envelope);
@@ -855,12 +868,20 @@ class StageTrace {
 class PipelineTrace {
   final List<StageTrace> stages;
   final int enginePanics;
+
+  /// Wall-clock milliseconds of the ladder walk(s) only.
   final double totalMs;
-  const PipelineTrace(this.stages, this.enginePanics, this.totalMs);
+
+  /// true: partial (the budget cut planned work); false: final; null: a
+  /// report older than score_contract 5 (unknown, never false).
+  final bool? budgetExhausted;
+  const PipelineTrace(this.stages, this.enginePanics, this.totalMs,
+      [this.budgetExhausted]);
   factory PipelineTrace.fromJson(Map<String, dynamic> j) => PipelineTrace(
         _objList(j['stages']).map(StageTrace.fromJson).toList(),
         _int(j['engine_panics']) ?? 0,
         _double(j['total_ms']),
+        j['budget_exhausted'] as bool?,
       );
 }
 
@@ -878,10 +899,15 @@ class Versions {
 // ─────────────────────────── ScanReport ───────────────────────────
 
 class ScanReport {
-  /// Empty = no QR found (a valid outcome, not an error).
+  /// Empty = no QR found (a valid outcome, not an error) — final only when
+  /// `trace.budgetExhausted == false`.
   final List<Detection> detections;
 
-  /// null in the `frame` profile.
+  /// The judgment of `detections[0]`; null when no judgment was published: no
+  /// detection · a configuration that computes no score (the `frame`
+  /// profile, every axis skipped) · a judgment the budget interrupted
+  /// (`trace.budgetExhausted == true`: not judged, retry with a larger or no
+  /// budget) · a contained fault. Never partial; never read null as 0.
   final Score? score;
   final List<Hint> hints;
 

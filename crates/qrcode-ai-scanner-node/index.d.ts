@@ -32,8 +32,12 @@ export interface ScanOptions {
   /** Max accepted total pixels (default 64_000_000; servers: e.g. 16_000_000). */
   maxPixels?: number;
   /**
-   * Override the profile's wall-clock budget in ms (0 = unbounded) —
-   * bound tail latency without giving up the deep ladder.
+   * Override the profile's wall-clock budget in ms — bound tail latency
+   * without giving up the deep ladder. Unset keeps the profile default
+   * (full 4000 · fast 800 · frame 80 ms); 0 = unbounded, the reproducible
+   * mode. A report the budget cut says so (`trace.budget_exhausted ===
+   * true`): empty detections are then not final, and a null score beside
+   * detections means "not judged" — never 0.
    */
   budgetMs?: number;
   /**
@@ -44,11 +48,11 @@ export interface ScanOptions {
    */
   scoreSkipAxes?: StressAxis[];
   /**
-   * Report SECTIONS excluded at the source: never computed, the wire
-   * carries `null`, and the UEC-driven hints never fire. The composite
-   * value does not move — this is surface truth, not score surgery. Hosts
-   * that display neither the correction margin nor the ISO parameters pass
-   * `["uec", "iso15415"]`. Unknown names reject loudly.
+   * Report SECTIONS withheld: the wire carries `null` and the section-driven
+   * hints never fire. The UEC margin is still measured and caps the value,
+   * so the composite never moves — this is surface truth, not score
+   * surgery. Hosts that display neither the correction margin nor the ISO
+   * parameters pass `["uec", "iso15415"]`. Unknown names reject loudly.
    */
   scoreSkipChecks?: ScoreCheck[];
   /**

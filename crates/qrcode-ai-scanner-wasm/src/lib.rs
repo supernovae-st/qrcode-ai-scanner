@@ -48,9 +48,10 @@ fn config_from(
             })
             .collect::<Result<_, _>>()?,
     };
-    // Section skips (`uec` / `iso15415`) ride the same seam: a host that
-    // displays neither block skips them at the source — never computed,
-    // wire carries null, UEC-driven hints silent. Same loud-typo posture.
+    // Section skips (`uec` / `iso15415` / `alpha_envelope`) ride the same
+    // seam: a host that displays neither block withholds them — wire carries
+    // null, section-driven hints silent; the UEC margin is still measured and
+    // caps the composite, which never moves. Same loud-typo posture.
     let checks: Vec<ScoreCheck> = match &score_skip_checks {
         None => Vec::new(),
         Some(names) => names
@@ -119,7 +120,8 @@ fn config_from(
     // wasm runs the scan ON the caller's thread (browser main thread unless
     // the embedder uses a worker) — budget control is how a verify-while-
     // typing UI keeps the worst case bounded without giving up the deep
-    // ladder. 0/negative = unbounded.
+    // ladder. 0/negative = unbounded (the reproducible mode); unset keeps
+    // the profile default. A cut report says so (`trace.budget_exhausted`).
     if budget_ms.is_none()
         && skip.is_empty()
         && checks.is_empty()
@@ -186,14 +188,17 @@ fn run_scan(
 
 /// Scan encoded image bytes (PNG/JPEG/WebP/GIF). Profile: full | fast |
 /// frame. `budget_ms` overrides the profile's wall-clock budget (the scan
-/// runs synchronously on the calling thread — bound it in UI contexts).
+/// runs synchronously on the calling thread — bound it in UI contexts;
+/// `0` = unbounded, unset = the profile default). A report the budget cut
+/// says so (`trace.budget_exhausted: true`): a `null` score beside
+/// detections then means "not judged", never 0.
 /// `score_skip_axes` (wire names, e.g. `["perspective","rotation"]`)
 /// excludes axes from scoring: their cells never run and the composite
 /// renormalizes engine-side — the generated-preview integration config.
-/// `score_skip_checks` (`["uec","iso15415","alpha_envelope"]`) excludes
-/// report SECTIONS the host does not display: never computed, wire carries
-/// null, and the section-driven hints never fire. The composite value does
-/// not move. `alpha_background` (`auto` | `white` | `black` | `none` |
+/// `score_skip_checks` (`["uec","iso15415","alpha_envelope"]`) withholds
+/// report SECTIONS the host does not display: wire carries null, and the
+/// section-driven hints never fire. The UEC margin is still measured and
+/// caps the value, so the composite never moves. `alpha_background` (`auto` | `white` | `black` | `none` |
 /// `#rrggbb`) picks the background flattened under transparent pixels —
 /// `auto` (default) reads the design's own content and retries the
 /// opposite on a zero-detection scan; opaque inputs are untouched.

@@ -24,6 +24,7 @@ assert.equal(version(), pkg.version);
 // scan_image: clean symbol → exact content + a complete unbudgeted judgment
 const cleanBytes = fixture("clean/OK_68ms_100_4e875a2c.png");
 const clean = scan_image(cleanBytes, "full", undefined, undefined, 0);
+assert.equal(clean.trace.budget_exhausted, false, "an unbounded scan is final");
 assert.deepEqual(clean.versions, {
   scanner: pkg.version,
   pipeline: markers.pipeline.const,
@@ -59,6 +60,10 @@ const whole = scan_image(degraded, "full", undefined, undefined, 0);
 assert.deepEqual(texts(cut), []);
 assert.deepEqual(texts(whole), [], "the negative sample never decodes");
 assert.ok(attempts(cut) < attempts(whole), `1 ms: ${attempts(cut)} attempts · unbounded: ${attempts(whole)}`);
+// fewer attempts than the unbounded walk = planned attempts the budget
+// prevented: the cut report says it is partial, the unbounded one final
+assert.equal(cut.trace.budget_exhausted, true, "the empty 1 ms report is not a final no-QR");
+assert.equal(whole.trace.budget_exhausted, false);
 // 0 = UNBOUNDED, not a 0 ms budget (that would return empty before any attempt)
 const v2l = fixture("clean/gen_v2_l.png");
 assert.deepEqual(texts(scan_image(v2l, "fast", undefined, undefined, 0)), ["qrc.ai/v2l"], "budget 0 means unbounded");

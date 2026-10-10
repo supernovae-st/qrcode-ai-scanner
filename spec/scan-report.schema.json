@@ -27,7 +27,8 @@
         {
           "type": "null"
         }
-      ]
+      ],
+      "description": "Judgment of detections[0]. null when no judgment was published: no detection; a configuration that computes no score (frame profile, every stress axis skipped); a judgment the wall-clock budget interrupted (trace.budget_exhausted true); a contained internal fault. Never partial: a present score is complete and its value does not depend on the budget. Never read null as 0."
     },
     "hints": {
       "type": "array",
@@ -1026,6 +1027,10 @@
         "total_ms": {
           "type": "number",
           "minimum": 0
+        },
+        "budget_exhausted": {
+          "type": "boolean",
+          "description": "Emitted by every report from score_contract 5 on. true: the wall-clock budget prevented planned work (a ladder attempt or stage, the opposite-background walk, a rescue candidate, a score calibration step or stress cell, a knee bisection, an envelope probe) - the report is partial. false: every planned unit ran - the report is final. Absent: a report older than score_contract 5 - unknown, never false."
         }
       }
     },

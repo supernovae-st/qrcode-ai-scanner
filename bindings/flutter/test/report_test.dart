@@ -129,6 +129,26 @@ void main() {
     });
   });
 
+  group('budget flag (spec/02 § Budget semantics)', () {
+    ScanReport withTrace(String trace) => ScanReport.parse(
+        '{"detections":[],"score":null,"hints":[],"trace":$trace,'
+        '"versions":{"scanner":"0.9.0","pipeline":3,"score_contract":5}}');
+
+    test('an older report without the flag reads as unknown, never final', () {
+      final r = withTrace('{"stages":[],"engine_panics":0,"total_ms":0}');
+      expect(r.trace.budgetExhausted, isNull);
+    });
+
+    test('a cut and a final report keep their flag', () {
+      final cut = withTrace(
+          '{"stages":[],"engine_panics":0,"total_ms":0,"budget_exhausted":true}');
+      expect(cut.trace.budgetExhausted, isTrue);
+      final whole = withTrace(
+          '{"stages":[],"engine_panics":0,"total_ms":0,"budget_exhausted":false}');
+      expect(whole.trace.budgetExhausted, isFalse);
+    });
+  });
+
   group('content contract (spec/01 § Content)', () {
     test('every charset label decodes; unknown is the only lossy one', () {
       expect(Charset.from('utf8'), Charset.utf8);

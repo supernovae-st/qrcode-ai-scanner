@@ -53,6 +53,14 @@ const read = () => page.evaluate(() => {
     alphaPlacement: txt('.alpha-placement'),
     alphaProbes: document.querySelectorAll('.alpha-probe').length,
     alphaTiles: document.querySelectorAll('.alpha-tile').length,
+    // the flag rides in the raw report the page prints
+    budgetExhausted: (() => {
+      try {
+        return JSON.parse(txt('details.raw pre') ?? 'null')?.trace?.budget_exhausted ?? null;
+      } catch {
+        return null;
+      }
+    })(),
   };
 });
 
@@ -83,7 +91,9 @@ await page.check('input[name="profile"][value="frame"]');
 await page.waitForTimeout(400);
 const frame = await read();
 const profileTest = {
-  fast_scored: fast.score !== null,
+  // under the page's budget a judgment may be cut: absent with the flag set,
+  // or present (a present score is always complete)
+  fast_scored: fast.score !== null || fast.budgetExhausted === true,
   frame_no_score: frame.score === null,
   frame_still_decoded: frame.verdict?.includes('qrc-ai.com'),
 };

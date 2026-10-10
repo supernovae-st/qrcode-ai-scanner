@@ -64,6 +64,13 @@ jobs:
           fi
           pip install "${wheels[0]}[test]"
           pytest python/tests -q
+      # The type stub as the oldest supported checker target reads it:
+      # NotRequired comes from typing_extensions below Python 3.11, and the
+      # report's optional keys and nullable score must type-check there.
+      - name: type-check the stub for Python 3.10
+        run: |
+          pip install "mypy==1.15.0"
+          mypy --python-version 3.10 --strict qrcode_ai_scanner.pyi
       # The sdist on every PR too: its file set and its PEP 639 license files
       # are judged here, not first at the tag.
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0

@@ -139,6 +139,26 @@ def test_generous_budget_keeps_the_contract():
     assert budgeted["score"] == unbounded["score"]
 
 
+def test_cut_judgment_is_absent_and_flagged():
+    # Where a 1 ms budget cuts depends on the machine, never the verdict: a
+    # judgment it interrupts is absent (None, never a deflated value) and the
+    # report says the budget cut it; a report that says it is final is the
+    # unbounded one.
+    whole = qr.scan(V5Q.read_bytes(), "full", budget_ms=0)
+    assert whole["trace"]["budget_exhausted"] is False
+    cut = qr.scan(V5Q.read_bytes(), "full", budget_ms=1)
+    assert isinstance(cut["trace"]["budget_exhausted"], bool)
+    if cut["score"] is None:
+        assert cut["trace"]["budget_exhausted"] is True
+        assert cut["hints"] == []
+    else:
+        for key in ("value", "grade", "weights_run", "uec", "iso15415"):
+            assert cut["score"][key] == whole["score"][key], key
+    if cut["trace"]["budget_exhausted"] is False:
+        assert cut["detections"] == whole["detections"]
+        assert cut["score"] == whole["score"]
+
+
 @pytest.mark.skipif(not HAS_PIL, reason="needs Pillow")
 def test_scan_frame_accepts_budget():
     im = Image.open(V5Q).convert("RGBA")

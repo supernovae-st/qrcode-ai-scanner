@@ -10,14 +10,20 @@ import { scan } from "@supernovae-st/qrcode-ai-scanner";
 const report = await scan(imageBuffer); // profile: full (quality gate)
 if (report.detections.length) {
   console.log(report.detections[0].content.text);
-  console.log(report.score.value, report.score.grade); // 0-100 + band
-  console.log(report.score.uec);  // real error-correction margin (ISO 15415)
-  console.log(report.hints);      // machine-actionable: raise_error_correction…
+  if (report.score) {
+    console.log(report.score.value, report.score.grade); // 0-100 + band
+    console.log(report.score.uec); // real error-correction margin (ISO 15415)
+  } else if (report.trace.budget_exhausted) {
+    // not judged within the budget — never a zero: scan again with budgetMs: 0
+  }
+  console.log(report.hints); // machine-actionable: raise_error_correction…
 }
 ```
 
-- `scan(image, { profile, signal })` — async, `full | fast | frame`,
-  AbortSignal cancels queued scans.
+- `scan(image, { profile, signal, budgetMs })` — async, `full | fast | frame`,
+  AbortSignal cancels queued scans. `budgetMs` unset keeps the profile default
+  (full 4000 · fast 800 · frame 80 ms); `0` is unbounded, the reproducible mode.
+  A report the budget cut says so: `trace.budget_exhausted === true`.
 - `scanSync(image, { profile })` — blocking, scripts only.
 - "No QR found" **resolves** with empty `detections`; rejections carry
   `[QRS-xxx]` codes (invalid input only).

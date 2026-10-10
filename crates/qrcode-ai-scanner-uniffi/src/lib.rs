@@ -80,10 +80,10 @@ fn profile_from(
             })
             .collect::<Result<_, _>>()?,
     };
-    // score_skip_checks: report SECTIONS excluded at the source (`uec` /
-    // `iso15415` — spec/04 § skipping checks): never computed, wire carries
-    // null, UEC-driven hints silent, composite untouched. Same loud-typo
-    // posture as the axes.
+    // score_skip_checks: report SECTIONS withheld (`uec` / `iso15415` /
+    // `alpha_envelope` — spec/04 § skipping checks): wire carries null,
+    // section-driven hints silent; the UEC margin is still measured and caps
+    // the composite, which never moves. Same loud-typo posture as the axes.
     let checks: Vec<ScoreCheck> = match &score_skip_checks {
         None => Vec::new(),
         Some(names) => names
@@ -181,8 +181,11 @@ fn limits_from(max_dimension: Option<u32>, max_pixels: Option<u64>) -> Limits {
 ///
 /// `max_dimension` / `max_pixels` cap the input before any pixel work
 /// (defaults 10000 px / 64 MP — lower them on server/mobile hardening paths).
-/// `budget_ms` overrides the profile's wall-clock budget (0 = unbounded); the
-/// scan is synchronous, so a UI embedder bounds its scan thread with it.
+/// `budget_ms` overrides the profile's wall-clock budget (0 = unbounded, the
+/// reproducible mode; unset = the profile default); the scan is synchronous,
+/// so a UI embedder bounds its scan thread with it. A report the budget cut
+/// says so (`trace.budget_exhausted: true`): a `null` score beside detections
+/// then means "not judged", never 0.
 #[uniffi::export(default(profile = "full", max_dimension = None, max_pixels = None, budget_ms = None, score_skip_axes = None, score_skip_checks = None, alpha_background = None, alpha_palette = None, score_preset = None))]
 #[expect(
     clippy::too_many_arguments,
@@ -308,6 +311,7 @@ mod tests {
         assert!(!text.is_empty(), "a clean QR must decode to non-empty text");
         // full profile scores the primary detection (frame leaves it null).
         assert!(v["score"].is_object(), "full profile must populate score");
+        assert_eq!(v["trace"]["budget_exhausted"], false, "an unbounded scan is final");
     }
 
     #[test]
@@ -471,6 +475,7 @@ mod tests {
             v["score"].is_object(),
             "full profile must still score unbounded"
         );
+        assert_eq!(v["trace"]["budget_exhausted"], false, "an unbounded scan is final");
     }
 
     #[test]
@@ -587,6 +592,8 @@ mod tests {
             )
             .unwrap(),
         );
+        // a null score would make every key below read null too
+        assert!(v["score"].is_object(), "the unbounded scan judges: {v}");
         assert!(v["score"]["uec"].is_null(), "skipped uec must be null");
         assert!(
             v["score"]["iso15415"].is_null(),

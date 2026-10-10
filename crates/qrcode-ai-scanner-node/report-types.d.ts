@@ -119,11 +119,18 @@ export interface AxisScore {
   /**
    * The knee bisected once (Full depth, ordered ramps): the tightest
    * TESTED failing intensity ("blur 2.25"…). ABSENT when no refinement
-   * ran. Informational — the composite never reads it.
+   * ran — a budget cut included (the score stands; trace.budget_exhausted
+   * is then true). Informational — the composite never reads it.
    */
   refined_failed_at?: string;
 }
 export interface StructuralReport { finder_integrity: [number, number, number]; quiet_zone_ok: boolean }
+/**
+ * Synthetic ISO 15415 unused-error-correction margin (1 − 2t/d, worst RS
+ * block), measured on the stream of the orientation the decode verified,
+ * only when every block error-corrects errors-only under the detection's
+ * version, EC level and mask (an S5 rescue stream keeps its own count).
+ */
 export interface UecReport {
   margin: number;
   grade: UecGrade;
@@ -151,25 +158,34 @@ export interface Iso15415Report {
   axial_nonuniformity: IsoParameter;
   /** Worst finder integrity; quiet-zone violation caps at D. */
   fixed_pattern_damage: IsoParameter;
-  /** Synthetic UEC margin in ISO bands — null without a bitstream. */
+  /**
+   * Synthetic UEC margin in ISO bands — null without a measured margin, or
+   * withheld when the uec check is skipped (its grade still counts in overall).
+   */
   unused_error_correction: IsoParameter | null;
-  /** The ISO rule: lowest measured parameter. */
+  /** The ISO rule: lowest MEASURED parameter — a withheld one counts too, so a skip never moves it. */
   overall: IsoGrade;
 }
 
+/** A complete judgment: its calibration and every planned stress cell ran, so no budget moves it. */
 export interface Score {
+  /** Composite 0-100: weighted survival, then the structural caps and the UEC margin cap. */
   value: number;
   grade: Grade;
   /**
    * Σ contract weights of the axes that RAN (100 = the full six-axis
    * contract · 70 with perspective+rotation skipped). The honesty
    * integer: two 85s with different weights_run are different promises.
-   * Absent on pre-0.9 reports.
+   * Only skipped axes lower it, never the budget. Absent on pre-0.9 reports.
    */
   weights_run: number;
   axes: AxisScore[];
   structural: StructuralReport | null;
-  /** Synthetic ISO 15415 unused-error-correction margin. */
+  /**
+   * Synthetic ISO 15415 unused-error-correction margin — null when no stream
+   * error-corrects errors-only, or when the uec check is skipped (the
+   * measured margin still caps value).
+   */
   uec: UecReport | null;
   /** ISO 15415-informed grade card — null when no geometry was measured. */
   iso15415: Iso15415Report | null;
@@ -260,13 +276,24 @@ export interface AlphaReport {
 }
 
 export interface StageTrace { stage: string; transforms_tried: number; ms: number; detections_found: number }
-export interface PipelineTrace { stages: StageTrace[]; engine_panics: number; total_ms: number }
+export interface PipelineTrace {
+  stages: StageTrace[];
+  engine_panics: number;
+  /** Wall-clock milliseconds of the ladder walk(s) only. */
+  total_ms: number;
+  /** true: the budget cut planned work (partial). false: final. Absent before score_contract 5 (unknown); test === false. */
+  budget_exhausted?: boolean;
+}
 export interface Versions { scanner: string; pipeline: number; score_contract: number }
 
 export interface ScanReport {
-  /** Empty = no QR found (a valid outcome, not an error). */
+  /** Empty = no QR found (a valid outcome, not an error) — final only when trace.budget_exhausted === false. */
   detections: Detection[];
-  /** null in the frame profile. */
+  /**
+   * Judgment of detections[0]. null when no judgment was published: no detection; a configuration that computes
+   * no score (frame, every axis skipped); a judgment the budget interrupted (trace.budget_exhausted === true: retry
+   * with a larger or no budget); a contained fault (native; wasm throws). Never partial; never read null as 0.
+   */
   score: Score | null;
   hints: Hint[];
   /** ABSENT (not null) for opaque inputs and under alphaBackground "none". */

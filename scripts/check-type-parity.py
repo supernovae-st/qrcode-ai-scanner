@@ -75,14 +75,16 @@ CONTRACT_STRUCTS = [
     (REPORT_RS, "ScanReport"),
 ]
 
-# Fields the wire OMITS entirely when None (serde skip_serializing_if):
-# present in the Rust struct + TS (`?:`) + Dart reads, ABSENT from the
-# schema's `required` (but its `properties` must still describe them).
+# Fields the wire OMITS entirely when None (serde skip_serializing_if), or
+# that reports older than the field lack: present in the Rust struct + TS
+# (`?:`) + Dart reads, ABSENT from the schema's `required` (but its
+# `properties` must still describe them).
 OPTIONAL_FIELDS: dict[str, set[str]] = {
     "ScanReport": {"alpha"},
     "Score": {"weights_run"},
     "AxisScore": {"refined_failed_at"},
     "DecodedContent": {"eci", "fnc1"},
+    "PipelineTrace": {"budget_exhausted"},
 }
 
 # Flat enums with a same-named schema $def (rust ↔ ts ↔ schema).

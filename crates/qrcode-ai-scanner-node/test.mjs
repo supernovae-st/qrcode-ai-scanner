@@ -29,6 +29,7 @@ assert.equal(version(), pkg.version);
 
 const clean = fixture("clean/gen_v5_q.png");
 const report = await scan(clean, { profile: "full", budgetMs: 0 });
+assert.equal(report.trace.budget_exhausted, false, "an unbounded scan is final");
 assert.deepEqual(report.versions, {
   scanner: pkg.version,
   pipeline: markers.pipeline.const,
@@ -79,6 +80,10 @@ const whole = scanSync(degraded, { profile: "full", budgetMs: 0 });
 assert.equal(cut.detections.length, 0);
 assert.equal(whole.detections.length, 0, "the negative sample never decodes");
 assert.ok(attempts(cut) < attempts(whole), `1 ms: ${attempts(cut)} attempts · unbounded: ${attempts(whole)}`);
+// fewer attempts than the unbounded walk = planned attempts the budget
+// prevented: the cut report says it is partial, the unbounded one final
+assert.equal(cut.trace.budget_exhausted, true, "the empty 1 ms report is not a final no-QR");
+assert.equal(whole.trace.budget_exhausted, false);
 // 0 = UNBOUNDED, not a 0 ms budget (that would return empty before any attempt)
 assert.deepEqual(scanSync(clean, { profile: "fast", budgetMs: 0 }).detections.map((d) => d.content.text), [V5Q]);
 
