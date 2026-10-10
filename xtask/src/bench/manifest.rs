@@ -708,9 +708,10 @@ pub(crate) fn stamp_build(
 /// options of the line that runs `wasm-opt` (its command word, after any
 /// `VAR=value`) up to its `-o`, and the `RUSTFLAGS="…"` value. A line that
 /// only mentions it — `command -v wasm-opt`, `wasm-opt --version` — is no
-/// recipe.
+/// recipe. CRLF line ends (a Windows checkout) read as LF, so a line that
+/// continues with `\` still joins the next one.
 pub(crate) fn script_recipe(script: &str) -> (Vec<String>, Option<String>) {
-    let joined = script.replace("\\\n", " ");
+    let joined = script.replace("\r\n", "\n").replace("\\\n", " ");
     let flags = joined
         .lines()
         .find_map(|line| {
@@ -1590,6 +1591,11 @@ mod tests {
                 ],
                 Some(String::from("-C target-feature=+simd128"))
             )
+        );
+        assert_eq!(
+            script_recipe("RUSTFLAGS=\"-C x\" b\r\nwasm-opt in.wasm \\\r\n  -O3 \\\r\n  -o o\r\n"),
+            (vec![String::from("-O3")], Some(String::from("-C x"))),
+            "a checkout with CRLF line ends reads the same recipe"
         );
         assert_eq!(script_recipe("echo nothing"), (Vec::new(), None));
         assert_eq!(
