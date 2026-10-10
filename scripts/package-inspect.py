@@ -1123,6 +1123,15 @@ def cmd_flutter(host: Host) -> None:
     if escaping:
         art.blocked("the Rust crate's path dependency leaves the package, so the published package cannot "
                     f"build its core ({'; '.join(escaping)}); pub.dev's first publish is also manual")
+    # The publish step passes --release-set: there, unlike flutter › test, the
+    # inspection must have read pub's real file tree (not the git ls-files
+    # fallback) and the package must not be BLOCKED — nothing that cannot build
+    # for a consumer, or whose file list was never parsed, may be uploaded.
+    if host.args.release_set:
+        art.check("pub publish --dry-run printed the real file tree (not the git ls-files fallback)",
+                  bool(source) and "git ls-files" not in source, source or "no listing")
+        if art.forced == BLOCKED:
+            art.check("the published package can build for a consumer (not BLOCKED)", False, art.reason)
 
 
 # ---------------------------------------------------------------- licenses · versions
@@ -1864,7 +1873,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--release-set", action="store_true",
                         help="node · archive: the set about to publish, complete and nothing else — npm: the main "
                              "package pins every napi target at this version and every pin has its platform "
-                             "package; Python: one wheel per row of python.yml's matrix and one sdist")
+                             "package; Python: one wheel per row of python.yml's matrix and one sdist. flutter: the "
+                             "stricter publish mode — a BLOCKED package or the git ls-files fallback fails")
     return parser
 
 

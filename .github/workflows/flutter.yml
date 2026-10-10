@@ -179,9 +179,13 @@ jobs:
           channel: stable
       - run: flutter pub get
       # The package about to be uploaded, read back first (`pub publish
-      # --dry-run`, which runs no package code), as flutter › test does.
+      # --dry-run`, which runs no package code). --release-set is the stricter
+      # publish mode: unlike flutter › test, a BLOCKED package (the crate's
+      # path dependency still leaves the package) or a git ls-files fallback
+      # (pub printed no tree) fails here, so an unbuildable or unparsed package
+      # is never uploaded.
       - name: inspect the pub.dev package about to be uploaded
         working-directory: .
-        run: python3 scripts/package-inspect.py flutter --strict --quiet
+        run: python3 scripts/package-inspect.py flutter --strict --quiet --release-set
       - name: publish (OIDC)
         run: flutter pub publish --force
