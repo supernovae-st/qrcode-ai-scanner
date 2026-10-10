@@ -2,7 +2,7 @@
 
 QR decoding + scannability scoring for **artistic, AI-generated, and
 photo-captured** QR codes. Deterministic multi-engine ladder (rxing + rqrr),
-score contract v3 (six survival-ramp stress axes incl. perspective/rotation/
+score contract v5 (six survival-ramp stress axes incl. perspective/rotation/
 lighting, finder-integrity + quiet-zone caps), and the **synthetic UEC** —
 the ISO 15415 unused-error-correction margin computed from the engine's own
 sampled bitstream. Machine-actionable hints close the generate → scan →

@@ -1,4 +1,4 @@
-# 07 · The decode pipeline (normative behavior)
+# 07 · The decode pipeline v3 (normative behavior)
 
 ```
 ImageInput (Encoded | Rgba8 | Luma8)
@@ -19,7 +19,7 @@ ImageInput (Encoded | Rgba8 | Luma8)
     walks stay in the trace; `alpha.fallback_used` marks a rescue
   → merge        reconcile reads (property 6) → content interpreted once per
                  detection (01-report § Content)
-  → score        contract v4 (04-score.md) — Full/Fast only
+  → score        contract v5 (04-score.md) — Full/Fast only
   → alpha placement envelope (Full only) — 01-report § Alpha
   → ScanReport
 ```

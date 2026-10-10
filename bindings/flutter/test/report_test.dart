@@ -30,7 +30,7 @@ void main() {
       expect(files, isNotEmpty);
       for (final f in files) {
         final r = ScanReport.parse(f.readAsStringSync());
-        expect(r.versions.scoreContract, 4, reason: f.path);
+        expect(r.versions.scoreContract, 5, reason: f.path);
         expect(r.detections, isA<List<Detection>>(), reason: f.path);
       }
     }, skip: skipReason);

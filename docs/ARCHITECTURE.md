@@ -67,7 +67,7 @@ ImageInput (Encoded | Rgba8 | Luma8)
                      refusals → the read set
   → reconcile        the walk's read set → the distinct contents the scanner
                      can tell apart; each content read once → engines consensus
-  → score            contract v3 (see SCORING.md) — Full/Fast profiles only
+  → score            contract v5 (see SCORING.md) — Full/Fast profiles only
   → ScanReport       versioned serde contract (snake_case · raw as base64)
 ```
 

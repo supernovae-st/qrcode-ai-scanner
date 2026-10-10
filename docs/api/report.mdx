@@ -70,9 +70,12 @@ Machine-readable mirrors — load these directly in tools and agents:
 </ResponseField>
 
 <ResponseField name="versions" type="Versions" required>
-  Contract markers: `scanner` (semver), `pipeline` (2: transparent
-  inputs flatten before decode), `score_contract` (4: alpha inputs
-  score their flattened image).
+  Contract markers: `scanner` (semver), `pipeline` (3: exact content —
+  the original bytes, declarations read once, reads reconciled by content
+  identity; since 2, transparent inputs flatten before decode),
+  `score_contract` (5: the correction-margin cap on the verified
+  orientation's stream, interrupted judgments absent, probes matched by
+  content identity).
 </ResponseField>
 
 ## Detection

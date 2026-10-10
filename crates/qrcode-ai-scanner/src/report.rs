@@ -836,10 +836,13 @@ impl Versions {
     pub fn current() -> Self {
         Self {
             scanner: env!("CARGO_PKG_VERSION").to_owned(),
-            // pipeline 2: transparent inputs flatten before decode (0.9.0)
-            pipeline: 2,
-            // score contract 4: alpha inputs score their flattened image
-            score_contract: 4,
+            // pipeline 3: exact content — every read is collected, then
+            // reconciled by content identity (spec/01 § Content)
+            pipeline: 3,
+            // score contract 5: the correction-margin cap on the verified
+            // orientation's stream, interrupted judgments absent, probes
+            // matched by content identity
+            score_contract: 5,
         }
     }
 }
@@ -1166,12 +1169,14 @@ mod tests {
         let v = Versions::current();
         assert_eq!(v.scanner, env!("CARGO_PKG_VERSION"));
         assert_eq!(
-            v.pipeline, 2,
-            "pipeline v2 = alpha flatten before decode; a bump must be deliberate"
+            v.pipeline, 3,
+            "pipeline v3 = collect-then-reconcile reads and exact content; \
+             a bump must be deliberate"
         );
         assert_eq!(
-            v.score_contract, 4,
-            "score contract v4 = alpha inputs score their flattened image"
+            v.score_contract, 5,
+            "score contract v5 = the margin cap on the verified stream, interrupted \
+             judgments absent, probes matched by content identity"
         );
     }
 

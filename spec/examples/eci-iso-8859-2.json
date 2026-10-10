@@ -1,0 +1,149 @@
+{
+  "detections": [
+    {
+      "symbology": "qr_code",
+      "content": {
+        "text": "Ą",
+        "raw": "oQ==",
+        "charset": "eci",
+        "eci": [
+          {
+            "designator": 4,
+            "start": 0
+          }
+        ]
+      },
+      "payload": {
+        "kind": "text"
+      },
+      "corners": [
+        {
+          "x": 32.0,
+          "y": 32.0
+        },
+        {
+          "x": 272.0,
+          "y": 32.0
+        },
+        {
+          "x": 272.0,
+          "y": 272.0
+        },
+        {
+          "x": 32.0,
+          "y": 272.0
+        }
+      ],
+      "meta": {
+        "version": 3,
+        "ec_level": "m",
+        "mask": 4,
+        "modules": 29,
+        "inverted": false
+      },
+      "engines": [
+        "rxing",
+        "rqrr"
+      ]
+    }
+  ],
+  "score": {
+    "value": 100,
+    "weights_run": 100,
+    "grade": "excellent",
+    "axes": [
+      {
+        "axis": "resolution",
+        "passed": 5,
+        "total": 5,
+        "failed_at": null
+      },
+      {
+        "axis": "blur",
+        "passed": 5,
+        "total": 5,
+        "failed_at": null
+      },
+      {
+        "axis": "contrast",
+        "passed": 5,
+        "total": 5,
+        "failed_at": null
+      },
+      {
+        "axis": "perspective",
+        "passed": 5,
+        "total": 5,
+        "failed_at": null
+      },
+      {
+        "axis": "rotation",
+        "passed": 5,
+        "total": 5,
+        "failed_at": null
+      },
+      {
+        "axis": "lighting",
+        "passed": 5,
+        "total": 5,
+        "failed_at": null
+      }
+    ],
+    "structural": {
+      "finder_integrity": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "quiet_zone_ok": true
+    },
+    "uec": {
+      "margin": 1.0,
+      "grade": "a",
+      "worst_block_errors": 0,
+      "worst_block_capacity": 26
+    },
+    "iso15415": {
+      "symbol_contrast": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "modulation": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "axial_nonuniformity": {
+        "value": 0.0,
+        "grade": "a"
+      },
+      "fixed_pattern_damage": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "unused_error_correction": {
+        "value": 1.0,
+        "grade": "a"
+      },
+      "overall": "a"
+    }
+  },
+  "hints": [],
+  "trace": {
+    "stages": [
+      {
+        "stage": "direct",
+        "transforms_tried": 1,
+        "ms": 2.6672089999999997,
+        "detections_found": 2
+      }
+    ],
+    "engine_panics": 0,
+    "total_ms": 2.6865840000000003,
+    "budget_exhausted": false
+  },
+  "versions": {
+    "scanner": "0.9.0",
+    "pipeline": 3,
+    "score_contract": 5
+  }
+}

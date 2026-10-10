@@ -57,7 +57,7 @@ Six things no other pure-Rust library ships together:
 1. **A deterministic multi-engine decode ladder** tuned on artistic
    corpora (rxing + rqrr, curated preprocessing rungs · no RNG anywhere:
    same input, same result, always).
-2. **Score contract v4** · survival ramps across six stress axes
+2. **Score contract v5** · survival ramps across six stress axes
    (resolution · blur · contrast · **perspective** · **rotation** ·
    **lighting** · the documented blind spots of naive scorers), with
    structural caps on finder damage and quiet-zone violations.

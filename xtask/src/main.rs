@@ -1,7 +1,8 @@
 //! Repo automation. Commands:
 //!
-//! - `gen-fixtures` — deterministic clean matrix + degraded variants (run
-//!   once, outputs committed; re-running must be byte-identical).
+//! - `gen-fixtures` — deterministic clean matrix + degraded variants + the
+//!   generated golden sources of `spec/README.md` § Examples (run once,
+//!   outputs committed; re-running must be byte-identical).
 //! - `corpus-report` — run the scanner over `corpus.toml`, print per-category
 //!   results, and rewrite the README managed block (derived numbers are
 //!   never hand-typed). `--external` runs the external-corpus truth gate
@@ -294,6 +295,173 @@ fn gen_fixtures() {
         &low,
         &root.join("fixtures/degraded/gen_v5_q_lowcontrast.png"),
     );
+    gen_content_fixtures(&root);
+    gen_payload_fixtures(&root);
+}
+
+/// The golden sources of the content contract (spec/README § Examples):
+/// each symbol is the explicit segment stream an `exact_content` row pins,
+/// so its bytes, declarations and FNC1 position are known exactly.
+fn gen_content_fixtures(root: &Path) {
+    use qrcode::{EcLevel, Version};
+    // ECI 4 (ISO/IEC 8859-2) over byte A1: 'Ą'.
+    let eci4 = v3_m(|b| {
+        b.push_eci_designator(4)?;
+        b.push_byte_data(&[0xA1])
+    });
+    save_modules(
+        &eci4.to_colors(),
+        eci4.width(),
+        8,
+        &root.join("fixtures/eci/eci4-a1.png"),
+    );
+    // ECI 899 (binary) over four bytes no text encoding reads.
+    let binary = v3_m(|b| {
+        b.push_eci_designator(899)?;
+        b.push_byte_data(&[0x00, 0xFF, 0x80, 0x7F])
+    });
+    save_modules(
+        &binary.to_colors(),
+        binary.width(),
+        8,
+        &root.join("fixtures/eci/eci899-binary.png"),
+    );
+    // ECI 26 + FNC1 in first position + a GTIN element string (numeric).
+    let gs1 = v3_m(|b| {
+        b.push_eci_designator(26)?;
+        b.push_fnc1_first_position()?;
+        b.push_numeric_data(b"0109506000134352")
+    });
+    save_modules(
+        &gs1.to_colors(),
+        gs1.width(),
+        8,
+        &root.join("fixtures/clean/gs1-fnc1.png"),
+    );
+    // 中文 (GB 2312 D6 D0 CE C4) in one Hanzi segment, GB/T 18284 subset 1:
+    // a mode the encoder's Bits API cannot write, so the data codewords are
+    // assembled here (v2-M, as the exact_content rows render it).
+    let mut stream: Vec<bool> = Vec::new();
+    let mut push = |value: u32, n: u32| stream.extend((0..n).rev().map(|i| value >> i & 1 == 1));
+    push(0b1101, 4);
+    push(1, 4);
+    push(2, 8);
+    for pair in [[0xD6u8, 0xD0], [0xCE, 0xC4]] {
+        let p = u32::from(pair[0]) << 8 | u32::from(pair[1]);
+        let v = if p <= 0xAAFE { p - 0xA1A1 } else { p - 0xA6A1 };
+        push((v >> 8) * 0x60 + (v & 0xFF), 13);
+    }
+    push(0, 4);
+    let (colors, width) = stream_symbol(Version::Normal(2), EcLevel::M, &stream);
+    save_modules(
+        &colors,
+        width,
+        8,
+        &root.join("fixtures/eci/hanzi-zhongwen.png"),
+    );
+}
+
+/// A version-3 / EC M symbol from an explicit segment stream (terminator
+/// and padding added).
+fn v3_m(
+    push: impl FnOnce(&mut qrcode::bits::Bits) -> qrcode::types::QrResult<()>,
+) -> qrcode::QrCode {
+    let mut bits = qrcode::bits::Bits::new(qrcode::Version::Normal(3));
+    push(&mut bits).unwrap();
+    bits.push_terminator(qrcode::EcLevel::M).unwrap();
+    qrcode::QrCode::with_bits(bits, qrcode::EcLevel::M).unwrap()
+}
+
+/// The golden sources of the payload kinds that have no corpus image: one
+/// symbol per kind at the smallest version its EC level fits, 6 px per
+/// module.
+fn gen_payload_fixtures(root: &Path) {
+    use qrcode::{EcLevel, QrCode};
+    let payloads: [(&str, &str, EcLevel); 5] = [
+        (
+            "wifi",
+            "WIFI:T:WPA;S:QRCodeAI Guest;P:sunrise2027;;",
+            EcLevel::Q,
+        ),
+        (
+            "me_card",
+            "MECARD:N:Doe,Jane;TEL:+33600000000;URL:https://qrcode-ai.com;;",
+            EcLevel::Q,
+        ),
+        (
+            "crypto-bitcoin",
+            "bitcoin:bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq?amount=0.01",
+            EcLevel::Q,
+        ),
+        ("sms", "SMSTO:+33600000000:Hello from a QR", EcLevel::H),
+        (
+            "gs1-digital-link",
+            "https://id.gs1.org/01/09506000134352/10/LOT1?17=271231",
+            EcLevel::Q,
+        ),
+    ];
+    for (name, text, ec) in payloads {
+        let code = QrCode::with_error_correction_level(text, ec).unwrap();
+        save_modules(
+            &code.to_colors(),
+            code.width(),
+            6,
+            &root.join(format!("fixtures/payloads/{name}.png")),
+        );
+    }
+}
+
+/// The module colors of a symbol whose data codewords are `stream` (MSB
+/// first, terminator included), zero-padded to a byte and then filled with
+/// the ISO pad codewords 0xEC / 0x11: the encoder's own error correction,
+/// placement and masking around a stream its Bits API refuses to write.
+fn stream_symbol(
+    version: qrcode::Version,
+    ec: qrcode::EcLevel,
+    stream: &[bool],
+) -> (Vec<qrcode::Color>, usize) {
+    let mut data: Vec<u8> = stream
+        .chunks(8)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .enumerate()
+                .fold(0u8, |byte, (i, &bit)| byte | (u8::from(bit) << (7 - i)))
+        })
+        .collect();
+    let capacity = qrcode::bits::Bits::new(version).max_len(ec).unwrap() / 8;
+    assert!(data.len() <= capacity, "the stream fits {version:?} {ec:?}");
+    let mut pads = [0xEC, 0x11].into_iter().cycle();
+    while data.len() < capacity {
+        data.push(pads.next().unwrap());
+    }
+    let (data_codewords, ec_codewords) =
+        qrcode::ec::construct_codewords(&data, version, ec).unwrap();
+    let mut canvas = qrcode::canvas::Canvas::new(version, ec);
+    canvas.draw_all_functional_patterns();
+    canvas.draw_data(&data_codewords, &ec_codewords);
+    let colors = canvas.apply_best_mask().into_colors();
+    (colors, usize::try_from(version.width()).unwrap())
+}
+
+/// Module colors (row-major, `width` per row) as a luma PNG: `px` pixels per
+/// module inside the 4-module quiet zone, dark modules black on white.
+fn save_modules(colors: &[qrcode::Color], width: usize, px: u32, path: &Path) {
+    let modules = u32::try_from(width).unwrap();
+    let side = (modules + 8) * px;
+    let mut img = image::GrayImage::from_pixel(side, side, image::Luma([255]));
+    for (i, color) in colors.iter().enumerate() {
+        if *color == qrcode::Color::Dark {
+            let i = u32::try_from(i).unwrap();
+            let (mx, my) = (4 + i % modules, 4 + i / modules);
+            for dy in 0..px {
+                for dx in 0..px {
+                    img.put_pixel(mx * px + dx, my * px + dy, image::Luma([0]));
+                }
+            }
+        }
+    }
+    save_luma(&img, path);
 }
 
 // ------------------------------------------------------------------ report

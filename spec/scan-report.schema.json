@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/supernovae-st/qrcode-ai-scanner/spec/scan-report.schema.json",
   "title": "ScanReport",
-  "description": "qrcode-ai-scanner wire contract (versions.pipeline=2, score_contract=4). Additive evolution: consumers must tolerate unknown fields and unknown enum/tag values.",
+  "description": "qrcode-ai-scanner wire contract (versions.pipeline=3, score_contract=5). Additive evolution: consumers must tolerate unknown fields and unknown enum/tag values.",
   "type": "object",
   "required": [
     "detections",
@@ -1047,11 +1047,11 @@
         },
         "pipeline": {
           "type": "integer",
-          "const": 2
+          "const": 3
         },
         "score_contract": {
           "type": "integer",
-          "const": 4
+          "const": 5
         }
       }
     },

@@ -5,30 +5,37 @@
   "trace": {
     "stages": [
       {
+        "stage": "pyramid",
+        "transforms_tried": 1,
+        "ms": 25.238541,
+        "detections_found": 0
+      },
+      {
         "stage": "direct",
         "transforms_tried": 1,
-        "ms": 0.340333,
+        "ms": 58.593959,
         "detections_found": 0
       },
       {
         "stage": "enhance",
-        "transforms_tried": 3,
-        "ms": 1.4860419999999999,
+        "transforms_tried": 6,
+        "ms": 362.848209,
         "detections_found": 0
       },
       {
         "stage": "deep",
-        "transforms_tried": 17,
-        "ms": 0.805083,
+        "transforms_tried": 25,
+        "ms": 237.32362500000002,
         "detections_found": 0
       }
     ],
     "engine_panics": 0,
-    "total_ms": 2.639459
+    "total_ms": 684.082458,
+    "budget_exhausted": false
   },
   "versions": {
-    "scanner": "0.3.0",
-    "pipeline": 2,
-    "score_contract": 4
+    "scanner": "0.9.0",
+    "pipeline": 3,
+    "score_contract": 5
   }
 }

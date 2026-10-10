@@ -435,7 +435,7 @@ counter, to know what was found.
 // `scanner` is illustrative — it carries whatever workspace release produced
 // the report. `pipeline` and `score_contract` are the normative compatibility
 // anchors (bumped only on breaking / semantic change).
-{ "scanner": "0.9.0", "pipeline": 2, "score_contract": 4 }
+{ "scanner": "0.9.0", "pipeline": 3, "score_contract": 5 }
 ```
 
 ## Score — see [04-score.md](04-score.md) for full semantics

@@ -23,7 +23,7 @@ void main() {
     expect(report.detections, isNotEmpty);
     expect(report.detections.first.content.text, isNotEmpty);
     expect(report.detections.first.symbology, Symbology.qrCode);
-    expect(report.versions.scoreContract, 3);
+    expect(report.versions.scoreContract, 5);
   });
 
   testWidgets('a blank RGBA frame is "no QR", not an error', (tester) async {

@@ -6,11 +6,14 @@
 //! 2. every example must validate against `spec/scan-report.schema.json`
 //!    (a schema that lags the wire breaks this),
 //! 3. a freshly-scanned report must round-trip serde AND validate too
-//!    (a NEW field the schema doesn't know breaks this).
+//!    (a NEW field the schema doesn't know breaks this),
+//! 4. every golden is a final report of THIS build (unbounded, its markers
+//!    and crate version), with no two detections that denote one content,
+//!    and `spec/README.md` names the committed fixture each one comes from.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use qrcode_ai_scanner::{ImageInput, ScanReport, Scanner};
+use qrcode_ai_scanner::{Detection, ImageInput, ScanReport, Scanner, Versions};
 
 fn spec_path(rel: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../../spec/{rel}"))
@@ -55,6 +58,105 @@ fn golden_examples_deserialize_and_validate() {
         checked += 1;
     }
     assert!(checked >= 5, "expected the golden set, found {checked}");
+}
+
+/// Every golden, by file name, parsed through the real serde types.
+fn goldens() -> Vec<(String, ScanReport)> {
+    let mut all: Vec<(String, ScanReport)> = std::fs::read_dir(spec_path("examples"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("json"))
+        .map(|path| {
+            let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+            let report = serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            (name, report)
+        })
+        .collect();
+    all.sort_by(|a, b| a.0.cmp(&b.0));
+    all
+}
+
+/// Two detections denote the same content (spec/01 § Comparing contents):
+/// equal symbology, `raw` and FNC1 position, and compatible declarations —
+/// both absent, or both present and one `[]` or both lists equal.
+fn same_content(a: &Detection, b: &Detection) -> bool {
+    let compatible = match (&a.content.eci, &b.content.eci) {
+        (None, None) => true,
+        (Some(x), Some(y)) => x.is_empty() || y.is_empty() || x == y,
+        _ => false,
+    };
+    a.symbology == b.symbology
+        && a.content.raw == b.content.raw
+        && a.content.fnc1 == b.content.fnc1
+        && compatible
+}
+
+#[test]
+fn goldens_are_final_reports_of_this_build() {
+    let goldens = goldens();
+    assert!(!goldens.is_empty(), "the golden set");
+    for (name, report) in &goldens {
+        // Goldens are unbounded scans (`--budget-ms 0`): the budget cut no
+        // planned work, so the report is final and reproducible.
+        assert_eq!(
+            report.trace.budget_exhausted,
+            Some(false),
+            "{name}: a golden is a final report"
+        );
+        // The markers and the crate version of the build that produced it:
+        // a marker or version bump regenerates the goldens (spec/README).
+        assert_eq!(
+            report.versions,
+            Versions::current(),
+            "{name}: regenerate the goldens with this build"
+        );
+        for (i, a) in report.detections.iter().enumerate() {
+            for b in &report.detections[i + 1..] {
+                assert!(
+                    !same_content(a, b),
+                    "{name}: two detections denote one content: {:?} / {:?}",
+                    a.content,
+                    b.content
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn every_golden_names_its_committed_fixture() {
+    // spec/README.md § Examples: one row per golden — its file, then the
+    // committed fixture the real binary scanned (the layout table's
+    // `examples/` row names the directory, not a golden).
+    let readme = std::fs::read_to_string(spec_path("README.md")).unwrap();
+    let mut listed = Vec::new();
+    let golden_rows = readme
+        .lines()
+        .filter(|l| l.starts_with("| [`examples/") && l.contains(".json`]"));
+    for row in golden_rows {
+        let cells: Vec<&str> = row.split('|').map(str::trim).collect();
+        let golden = cells[1]
+            .split('`')
+            .nth(1)
+            .and_then(|path| path.strip_prefix("examples/"))
+            .unwrap_or_else(|| panic!("a golden cell: {row}"));
+        let fixture = cells[2]
+            .split('`')
+            .nth(1)
+            .unwrap_or_else(|| panic!("a fixture cell: {row}"));
+        let on_disk = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(fixture);
+        assert!(
+            on_disk.is_file(),
+            "{golden}: fixture {fixture} is committed"
+        );
+        listed.push(golden.to_owned());
+    }
+    listed.sort();
+    let goldens: Vec<String> = goldens().into_iter().map(|(name, _)| name).collect();
+    assert_eq!(listed, goldens, "spec/README.md lists every golden once");
 }
 
 /// A validator for one `$defs` entry of the spec schema.
