@@ -236,9 +236,37 @@ fn budget_cuts_never_ship_a_partial_judgment() {
             report.detections.is_empty() || report.detections == reference.detections,
             "{at}"
         );
+        let flagged = report.trace.budget_exhausted == Some(true);
+        if !flagged {
+            assert_eq!(
+                report.trace.budget_exhausted,
+                Some(false),
+                "{at}: every report carries the flag"
+            );
+            let (mut report, mut reference) = (report.clone(), reference.clone());
+            for r in [&mut report, &mut reference] {
+                r.trace.total_ms = 0.0;
+                r.trace.stages.iter_mut().for_each(|s| s.ms = 0.0);
+            }
+            assert_eq!(
+                report, reference,
+                "{at}: a final report is the unbudgeted one"
+            );
+        }
         match &report.score {
-            None => assert!(report.hints.is_empty(), "{at}: {:?}", report.hints),
+            None => {
+                assert!(report.hints.is_empty(), "{at}: {:?}", report.hints);
+                assert!(flagged, "{at}: a missing judgment says the budget cut it");
+            }
             Some(cut) => {
+                if cut
+                    .axes
+                    .iter()
+                    .zip(&score.axes)
+                    .any(|(a, r)| a.refined_failed_at != r.refined_failed_at)
+                {
+                    assert!(flagged, "{at}: a missing knee label says the budget cut it");
+                }
                 assert_eq!(report.detections, reference.detections, "{at}");
                 assert_eq!(
                     (cut.value, cut.grade, cut.weights_run),

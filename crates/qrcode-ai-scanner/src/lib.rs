@@ -7,13 +7,21 @@
 //!
 //! - **No QR found is `Ok`** with empty detections — `Err` is reserved for real
 //!   faults (corrupt image, invalid buffer, cancellation).
-//! - **Deterministic**: same bytes + same config + same versions ⇒ the same
-//!   attempt sequence, bit for bit on a given platform/build — no RNG
-//!   anywhere. Two caveats, both bounded: a wall-clock budget makes the CUT
-//!   point machine-dependent (set `budget_ms: None` for strictly identical
-//!   reports), and CROSS-platform the libm transcendentals (warp kernels,
-//!   gaussian blur) may differ in the last ulp — a stress cell sitting
-//!   exactly on a knee can flip between platforms.
+//! - **Deterministic**: same bytes + same config + same scanner build ⇒ the
+//!   same report, bit for bit on a given platform (wall clock aside) — no
+//!   RNG anywhere. Three caveats, all bounded:
+//!   - a wall-clock budget makes the CUT point machine-dependent. A cut
+//!     report says so (`trace.budget_exhausted: true`), one that does not
+//!     is the unbounded report, and a judgment the budget cannot complete
+//!     is absent, never partial. Set `budget_ms: None` for strictly
+//!     identical reports; a cancelled scan stays `QRS-005`;
+//!   - CROSS-platform the libm transcendentals (warp kernels, gaussian
+//!     blur) may differ in the last ulp — a stress cell sitting exactly on
+//!     a knee can flip between platforms;
+//!   - rxing's PDF417 decoder (0.9.1–0.9.3) breaks codeword-confidence ties
+//!     in randomized `HashMap` order, so a PDF417 symbol near a decode
+//!     threshold can score, and a marginal one decode, differently between
+//!     runs.
 //! - **Sync by design**: async belongs to the bindings (napi/wasm), never here.
 //! - **Engine-isolated**: third-party decoder panics are caught at the engine
 //!   boundary and recorded in the trace; the ladder continues.
@@ -133,12 +141,17 @@ impl Scanner {
         // stream the first walk refused stays refused in the second: it
         // starts from the first walk's refusals and parsed contents.
         let mut fallback_used = false;
+        // Every planned unit the deadline prevented after the first walk —
+        // the second walk's, the judgment's, the envelope's — leaves the
+        // report partial (`trace.budget_exhausted`).
+        let mut cut = false;
         if outcome.merged.is_empty()
             && let Some(context) = &mut alpha_context
             && let Some((alt_planes, alt_background)) = context.opposite_planes()
         {
             let alt_outcome =
                 ladder::run_seeded(&alt_planes, &self.config, cancel, deadline, outcome.seed())?;
+            cut |= alt_outcome.trace.budget_exhausted == Some(true);
             if outcome.fold_fallback(alt_outcome) {
                 planes = alt_planes;
                 context.adopt_background(alt_background);
@@ -150,7 +163,8 @@ impl Scanner {
         // with it in `contents`), never its text.
         // The scoring stage shares the engine panic posture: a panic in the
         // math path degrades to "no score", never a crash (native unwind;
-        // on wasm panics trap regardless — documented limitation).
+        // on wasm panics trap regardless — documented limitation). A
+        // contained panic is a fault, not a cut: it sets no flag.
         let primary = outcome
             .merged
             .first()
@@ -170,7 +184,11 @@ impl Scanner {
                     )
                 }));
                 match attempt {
-                    Ok(result) => result?,
+                    Ok(result) => {
+                        let evaluation = result?;
+                        cut |= evaluation.cut;
+                        evaluation.judged
+                    }
                     Err(_) => None,
                 }
             }
@@ -199,12 +217,22 @@ impl Scanner {
                     )
                 }));
                 match attempt {
-                    Ok(result) => result?,
+                    Ok(result) => match result? {
+                        alpha::Envelope::Measured(envelope) => Some(envelope),
+                        alpha::Envelope::Undecodable => None,
+                        alpha::Envelope::Cut => {
+                            cut = true;
+                            None
+                        }
+                    },
                     Err(_) => None,
                 }
             }
             _ => None,
         };
+        if cut {
+            outcome.trace.budget_exhausted = Some(true);
+        }
         let alpha_report =
             alpha_context.map(|context| context.into_report(fallback_used, envelope));
         Ok(build_report(outcome, scored, alpha_report))

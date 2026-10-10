@@ -9,8 +9,10 @@
 # serially). The others are the suite's heaviest CPU consumers, which starve
 # any budget running beside them: the artistic score pins (deep-ladder decode
 # + full stress score), the threaded-determinism pin (four budget-free
-# full-ladder scans at once) and the two score sweeps (one judgment per work
-# quota of three symbols · one scan per budget step). All share one
+# full-ladder scans at once), the score sweeps (one judgment per work quota
+# of three symbols · one scan per budget step) and the budget-flag sweeps
+# (one scan per budget step of six symbols · unbounded scans of eight across
+# three profiles). All share one
 # serialized group AND reserve every scheduler slot
 # (`threads-required = "num-cpus"`): the group alone only serialized them
 # against EACH OTHER while the other ~300 tests kept running beside them and
@@ -23,6 +25,6 @@
 wall-clock = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'test(artistic_image_that_decodes_must_not_score_zero) + test(blob_style_template_decodes_and_scores) + test(legacy_artistic_image_decodes_within_full_ladder) + test(concurrent_scans_yield_byte_identical_reports) + test(work_quota_cuts_are_absent_never_partial) + test(budget_cuts_never_ship_a_partial_judgment)'
+filter = 'test(artistic_image_that_decodes_must_not_score_zero) + test(blob_style_template_decodes_and_scores) + test(legacy_artistic_image_decodes_within_full_ladder) + test(concurrent_scans_yield_byte_identical_reports) + test(work_quota_cuts_are_absent_never_partial) + test(budget_cuts_never_ship_a_partial_judgment) + test(a_present_score_is_budget_independent) + test(flag_false_means_final) + test(unbounded_scans_never_set_the_flag)'
 test-group = 'wall-clock'
 threads-required = "num-cpus"

@@ -1,4 +1,4 @@
-//! Score contract v3 — survival ramps · structural caps · hints.
+//! The score (spec/04-score.md) — survival ramps · caps · UEC · hints.
 //!
 //! Output language: VALIDATION, never ISO verification (no calibrated
 //! optics). Geometry-class signals (perspective/rotation survival, finder
@@ -18,7 +18,10 @@
 //! absent. An unrun cell is not a failed one — read as a failure, a
 //! deadline cut would ship a pristine symbol as a fragile verdict. Only the
 //! deadline (or the test-only work quota) makes a judgment absent; a
-//! cancelled token stays an error (`QRS-005`, the scan-wide contract).
+//! cancelled token stays an error (`QRS-005`, the scan-wide contract). The
+//! bound remembers every step it refused — an absent judgment, or a knee
+//! bisection a complete one could not run — and the report says the budget
+//! cut planned work (`trace.budget_exhausted`).
 
 pub(crate) mod iso15415;
 pub(crate) mod structural;
@@ -42,6 +45,13 @@ type RampRefiner<'a> = &'a dyn Fn(&LumaImage, usize) -> (LumaImage, String);
 
 /// Stress cells run on a ≤512px base — bounded cost, consistent geometry.
 const STRESS_BASE_SIDE: u32 = 512;
+
+#[cfg(test)]
+thread_local! {
+    /// Stress bases built on this thread — the witness that a judgment the
+    /// deadline refuses at its first step costs nothing.
+    static STRESS_BASES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
 
 /// Composite weights per axis (sum = 100). The contract constants of v3.
 const WEIGHTS: [(StressAxis, u32); 6] = [
@@ -104,15 +114,17 @@ fn cell_decode(img: &LumaImage, symbology: crate::report::Symbology) -> engine::
 
 /// The limits one judgment runs under — the shared scan deadline, the
 /// cancel token and, in tests, a deterministic work quota — plus the work
-/// units it spent. One unit = one probe step: a calibration decode class
-/// or one stress cell. Each step is admitted BEFORE it runs (an in-flight
-/// decode is not interruptible), so a quota cuts exactly where a deadline
-/// can, but on the same step every run.
+/// units it spent. One unit = one probe step: a calibration decode class,
+/// one stress cell, one knee bisection or one envelope probe. Each step is
+/// admitted BEFORE it runs (an in-flight decode is not interruptible), so a
+/// quota cuts exactly where a deadline can, but on the same step every run.
 pub(crate) struct Bound<'a> {
     cancel: &'a CancelToken,
     deadline: Option<Instant>,
     quota: Option<u32>,
     spent: u32,
+    /// A planned step was refused.
+    cut: bool,
 }
 
 impl<'a> Bound<'a> {
@@ -123,6 +135,7 @@ impl<'a> Bound<'a> {
             deadline,
             quota: None,
             spent: 0,
+            cut: false,
         }
     }
 
@@ -142,21 +155,35 @@ impl<'a> Bound<'a> {
     }
 
     /// Admit one probe step — `Ok(false)` once the deadline passed or the
-    /// quota is spent: the step must not run and the judgment is absent. A
-    /// cancelled token is `Err(Cancelled)` instead — cancellation is the
-    /// caller's `QRS-005`, never an absent judgment.
-    fn admit(&mut self) -> Result<bool> {
+    /// quota is spent: the step must not run, and the bound remembers the
+    /// cut. A cancelled token is `Err(Cancelled)` instead — cancellation is
+    /// the caller's `QRS-005`, never an absent judgment.
+    pub(crate) fn admit(&mut self) -> Result<bool> {
         if self.cancel.is_cancelled() {
             return Err(crate::error::ScanError::Cancelled);
         }
         if self.deadline.is_some_and(|d| Instant::now() >= d)
             || self.quota.is_some_and(|units| self.spent >= units)
         {
+            self.cut = true;
             return Ok(false);
         }
         self.spent += 1;
         Ok(true)
     }
+
+    /// Whether a planned step was refused — the judgment is then absent, or
+    /// a knee bisection of a complete one is missing.
+    pub(crate) fn cut(&self) -> bool {
+        self.cut
+    }
+}
+
+/// Whether a judgment at `depth` that skips `skip` plans any stress cell:
+/// `false` for depth `Off` or with every axis skipped. The one rule behind
+/// [`crate::ScanConfig::computes_score`] and [`Judgment::NoAxes`].
+pub(crate) fn plans_cells(depth: ScoreDepth, skip: &[StressAxis]) -> bool {
+    !depth_indices(depth).is_empty() && !WEIGHTS.iter().all(|(axis, _)| skip.contains(axis))
 }
 
 /// What one bounded judgment produced.
@@ -173,7 +200,7 @@ pub(crate) enum Judgment {
 }
 
 /// How a bounded calibration walk ended.
-enum Calibrated {
+pub(crate) enum Calibrated {
     /// The cheapest decode class that reads the base.
     Class(CellProbe),
     /// No class reads the base at stress scale (the score then
@@ -200,6 +227,7 @@ impl CellProbe {
     /// deep rung that reads `expected`, the primary's content. `None` = the
     /// base does not decode at stress scale at all (score legitimately reads
     /// zero margin).
+    #[cfg(test)]
     pub(crate) fn calibrate(
         base: &LumaImage,
         expected: &ContentKey,
@@ -217,7 +245,23 @@ impl CellProbe {
     /// The calibration walk under a judgment's bound. The shallow class
     /// (direct + otsu — what every cell tries first) is one step, each deep
     /// rung one more: up to 16 steps, never one past the deadline.
+    #[cfg(test)]
     fn calibrate_within(
+        base: &LumaImage,
+        expected: &ContentKey,
+        symbology: crate::report::Symbology,
+        bound: &mut Bound<'_>,
+    ) -> Result<Calibrated> {
+        if !bound.admit()? {
+            return Ok(Calibrated::Interrupted);
+        }
+        Self::calibrate_admitted(base, expected, symbology, bound)
+    }
+
+    /// The calibration walk once `bound` admitted its first step, the
+    /// shallow class: its caller admits that step before building `base`,
+    /// so a walk the deadline already prevents costs no pixel work.
+    pub(crate) fn calibrate_admitted(
         base: &LumaImage,
         expected: &ContentKey,
         symbology: crate::report::Symbology,
@@ -227,9 +271,6 @@ impl CellProbe {
             rung: None,
             symbology,
         };
-        if !bound.admit()? {
-            return Ok(Calibrated::Interrupted);
-        }
         if cell_passes(base, expected, shallow) {
             return Ok(Calibrated::Class(shallow));
         }
@@ -688,11 +729,22 @@ fn compose(
     (score, hints)
 }
 
-/// Evaluate score v3 for the primary detection under the scan's shared
-/// deadline, its cells matching `key`, the detection's content. `None` when
-/// no cell is planned (every axis skipped — an axis-less composite would be
-/// fiction; callers treat it exactly like `ScoreDepth::Off`) and when the
-/// deadline cuts the judgment: absent, never partial. A cancelled token is
+/// What scoring the primary published, and whether the deadline cut it.
+#[derive(Debug)]
+pub(crate) struct Evaluation {
+    /// The complete judgment — `None` when no cell is planned or the
+    /// deadline interrupted it.
+    pub judged: Option<(Score, Vec<Hint>)>,
+    /// The deadline prevented a planned step: the judgment's (then absent),
+    /// or a knee bisection's (the score stands, its label is missing).
+    pub cut: bool,
+}
+
+/// Evaluate the score for the primary detection under the scan's shared
+/// deadline, its cells matching `key`, the detection's content. No judgment
+/// when no cell is planned (every axis skipped — an axis-less composite
+/// would be fiction; callers treat it exactly like `ScoreDepth::Off`) and
+/// when the deadline cuts it: absent, never partial. A cancelled token is
 /// `Err(Cancelled)` (`QRS-005`).
 #[expect(
     clippy::too_many_arguments,
@@ -707,12 +759,16 @@ pub(crate) fn evaluate(
     skip_checks: &[crate::ladder::ScoreCheck],
     cancel: &CancelToken,
     deadline: Option<Instant>,
-) -> Result<Option<(Score, Vec<Hint>)>> {
+) -> Result<Evaluation> {
     let mut bound = Bound::new(cancel, deadline);
-    match judge(luma, detection, key, depth, skip, skip_checks, &mut bound)? {
-        Judgment::Complete(score, hints) => Ok(Some((score, hints))),
-        Judgment::NoAxes | Judgment::Interrupted => Ok(None),
-    }
+    let judged = match judge(luma, detection, key, depth, skip, skip_checks, &mut bound)? {
+        Judgment::Complete(score, hints) => Some((score, hints)),
+        Judgment::NoAxes | Judgment::Interrupted => None,
+    };
+    Ok(Evaluation {
+        judged,
+        cut: bound.cut(),
+    })
 }
 
 /// Judge the primary detection under `bound`: calibration, every planned
@@ -729,12 +785,19 @@ pub(crate) fn judge(
     skip_checks: &[crate::ladder::ScoreCheck],
     bound: &mut Bound<'_>,
 ) -> Result<Judgment> {
-    if depth_indices(depth).is_empty() || WEIGHTS.iter().all(|(axis, _)| skip.contains(axis)) {
+    if !plans_cells(depth, skip) {
         return Ok(Judgment::NoAxes);
     }
+    // the calibration's first step is admitted before the stress base is
+    // built: a judgment the deadline already prevents costs nothing
+    if !bound.admit()? {
+        return Ok(Judgment::Interrupted);
+    }
+    #[cfg(test)]
+    STRESS_BASES.with(|built| built.set(built.get() + 1));
     let base = transform::downscale_to(luma, STRESS_BASE_SIDE);
     // calibrate the cell probe on the unstressed base (its decode class)
-    let probe = match CellProbe::calibrate_within(&base, key, detection.symbology, bound)? {
+    let probe = match CellProbe::calibrate_admitted(&base, key, detection.symbology, bound)? {
         Calibrated::Class(probe) => probe,
         // no class reads the unstressed base: the shallow probe measures
         // it anyway — a legitimately (near-)zero margin, fully judged
@@ -1324,7 +1387,7 @@ mod tests {
         skip: &[StressAxis],
         checks: &[crate::ladder::ScoreCheck],
     ) -> (Score, Vec<Hint>) {
-        let (score, hints) = evaluate(
+        let evaluation = evaluate(
             luma,
             detection,
             key,
@@ -1334,8 +1397,11 @@ mod tests {
             &CancelToken::new(),
             None,
         )
-        .unwrap()
-        .expect("an unbounded judgment with axes completes");
+        .unwrap();
+        assert!(!evaluation.cut, "an unbounded judgment is never cut");
+        let (score, hints) = evaluation
+            .judged
+            .expect("an unbounded judgment with axes completes");
         assert_honest_axes(&score.axes, depth);
         (score, hints)
     }
@@ -1845,9 +1911,10 @@ mod tests {
             )
             .unwrap();
             assert!(
-                outcome.is_none(),
+                outcome.judged.is_none(),
                 "{depth:?}: an expired deadline must yield no judgment, got {outcome:?}"
             );
+            assert!(outcome.cut, "{depth:?}: and says the deadline cut it");
             // not even calibration ran: the deadline is checked before every step
             let mut bound = Bound::new(&cancel, Some(Instant::now()));
             let outcome = judge(&luma, &detection, &key, depth, &[], &[], &mut bound).unwrap();
@@ -1857,6 +1924,124 @@ mod tests {
             );
             assert_eq!(bound.spent(), 0, "{depth:?}: no calibration step, no cell");
         }
+    }
+
+    /// A judgment the bound refuses at its first step builds nothing — not
+    /// even the stress base: the deadline is checked before any pixel work.
+    #[test]
+    fn a_judgment_refused_at_its_first_step_builds_nothing() {
+        let (luma, detection, key) = pristine_q_example();
+        let cancel = CancelToken::new();
+        let built = || STRESS_BASES.with(std::cell::Cell::get);
+        let before = built();
+        let mut bound = Bound::new(&cancel, None).with_quota(0);
+        let outcome = judge(
+            &luma,
+            &detection,
+            &key,
+            ScoreDepth::Full,
+            &[],
+            &[],
+            &mut bound,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Judgment::Interrupted), "{outcome:?}");
+        assert_eq!(bound.spent(), 0);
+        assert_eq!(built() - before, 0, "no stress base for a refused judgment");
+        // one admitted step builds the base once
+        let mut bound = Bound::new(&cancel, None).with_quota(1);
+        let outcome = judge(
+            &luma,
+            &detection,
+            &key,
+            ScoreDepth::Full,
+            &[],
+            &[],
+            &mut bound,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Judgment::Interrupted), "{outcome:?}");
+        assert_eq!(built() - before, 1);
+    }
+
+    /// A knee bisection the bound refuses drops only its label: the score
+    /// stands, and the evaluation reports the cut (the report's flag).
+    #[test]
+    fn a_cut_bisection_keeps_the_score_and_reports_the_cut() {
+        let (luma, detection, key) = kneed_example();
+        let cancel = CancelToken::new();
+        let mut free = Bound::new(&cancel, None);
+        let Judgment::Complete(reference, _) = judge(
+            &luma,
+            &detection,
+            &key,
+            ScoreDepth::Full,
+            &[],
+            &[],
+            &mut free,
+        )
+        .unwrap() else {
+            panic!("an unbounded judgment completes");
+        };
+        assert!(!free.cut(), "an unbounded judgment is never cut");
+        let complete = complete_units(&luma, &detection, &key, &reference);
+        assert!(
+            free.spent() > complete,
+            "precondition: knees to bisect after the cells"
+        );
+        let mut bound = Bound::new(&cancel, None).with_quota(complete);
+        let Judgment::Complete(score, _) = judge(
+            &luma,
+            &detection,
+            &key,
+            ScoreDepth::Full,
+            &[],
+            &[],
+            &mut bound,
+        )
+        .unwrap() else {
+            panic!("every planned cell fits the quota");
+        };
+        assert_eq!(
+            (score.value, score.grade),
+            (reference.value, reference.grade)
+        );
+        assert!(score.axes.iter().all(|a| a.refined_failed_at.is_none()));
+        assert!(bound.cut(), "the refused bisections are a cut");
+    }
+
+    /// `ScanConfig::computes_score` and `Judgment::NoAxes` are one rule:
+    /// whatever the depth and the skipped axes, a configuration judges
+    /// nothing exactly when it computes no score.
+    #[test]
+    fn judge_no_axes_iff_config_computes_no_score() {
+        let (luma, detection, key) = pristine_q_example();
+        let cancel = CancelToken::new();
+        let every: Vec<StressAxis> = WEIGHTS.iter().map(|&(axis, _)| axis).collect();
+        let skips: [&[StressAxis]; 4] = [
+            &[],
+            &[StressAxis::Lighting],
+            &every[..every.len() - 1],
+            &every,
+        ];
+        for depth in [ScoreDepth::Off, ScoreDepth::Reduced, ScoreDepth::Full] {
+            for skip in skips {
+                let mut config = ScanConfig::full();
+                config.score_depth = depth;
+                config.score_skip_axes = skip.to_vec();
+                // a quota of 0: a planned judgment is interrupted at its first
+                // step, so the rule is read without running a cell
+                let mut bound = Bound::new(&cancel, None).with_quota(0);
+                let outcome = judge(&luma, &detection, &key, depth, skip, &[], &mut bound).unwrap();
+                assert_eq!(
+                    matches!(outcome, Judgment::NoAxes),
+                    !config.computes_score(),
+                    "{depth:?} skipping {skip:?}: {outcome:?}"
+                );
+            }
+        }
+        assert!(ScanConfig::full().computes_score() && ScanConfig::fast().computes_score());
+        assert!(!ScanConfig::frame().computes_score());
     }
 
     /// No planned cell, no judgment — every axis skipped (an axis-less
@@ -1881,7 +2066,10 @@ mod tests {
             assert_eq!(bound.spent(), 0);
             let outcome =
                 evaluate(&luma, &detection, &key, depth, skip, &[], &cancel, None).unwrap();
-            assert!(outcome.is_none(), "{depth:?}: {outcome:?}");
+            assert!(
+                outcome.judged.is_none() && !outcome.cut,
+                "{depth:?}: nothing planned, nothing cut: {outcome:?}"
+            );
         }
     }
 
@@ -2055,6 +2243,11 @@ mod tests {
                     &mut bound,
                 );
                 assert!(bound.spent() <= quota, "{name}: the quota bounds the spend");
+                assert_eq!(
+                    bound.cut(),
+                    quota < total,
+                    "{name}: quota {quota} of {total}: the bound reports a refused step"
+                );
                 let (score, hints) = match outcome.unwrap() {
                     Judgment::Complete(score, hints) => (score, hints),
                     Judgment::Interrupted => {

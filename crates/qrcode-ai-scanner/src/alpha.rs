@@ -14,12 +14,13 @@
 use web_time::Instant;
 
 use crate::engine::content::ContentKey;
-use crate::error::{Result, ScanError};
+use crate::error::Result;
 use crate::input::{LumaImage, bt601};
 use crate::ladder::{AlphaBackground, CancelToken};
 use crate::report::{
     AlphaEnvelope, AlphaMode, AlphaPaletteProbe, AlphaPlacement, AlphaProbe, AlphaReport, Symbology,
 };
+use crate::score::{Bound, Calibrated, CellProbe};
 use crate::transform::{self, SourcePlanes};
 
 /// Envelope probes run on a ≤512px premultiplied base — one probe costs
@@ -83,6 +84,21 @@ pub(crate) fn content_stats(rgba: &[u8]) -> ContentStats {
         transparent,
         content_luma,
     }
+}
+
+/// What the placement envelope found.
+#[derive(Debug)]
+pub(crate) enum Envelope {
+    /// Every planned probe ran.
+    Measured(AlphaEnvelope),
+    /// No probe decode class reads the design at probe scale (its primary
+    /// came through the channel-split or rescue stages): no envelope rather
+    /// than a false all-fail verdict contradicting the successful scan.
+    Undecodable,
+    /// The deadline prevented a planned calibration step or probe: no
+    /// envelope — a partial one would read as a verdict about backgrounds
+    /// that were never tested — and the report is partial.
+    Cut,
 }
 
 /// Per-scan alpha context — built by `transform::normalize_with` when the
@@ -191,8 +207,9 @@ impl AlphaContext {
     /// probe decodes when one of its reads carries `expected`, the primary
     /// detection's content (07-pipeline property 7), as stress cells do.
     ///
-    /// `Ok(None)` when the budget ran out mid-sweep — a partial envelope
-    /// would read as a verdict about backgrounds that were never tested.
+    /// Every calibration step and probe is admitted by the scan's deadline
+    /// like a score cell: [`Envelope::Cut`] when it refused one, and the
+    /// first step is admitted before any pixel work.
     ///
     /// # Errors
     /// `QRS-005` when cancellation fires between probes (the scan-wide
@@ -204,12 +221,10 @@ impl AlphaContext {
         palette: &[[u8; 3]],
         cancel: &CancelToken,
         deadline: Option<Instant>,
-    ) -> Result<Option<AlphaEnvelope>> {
-        if cancel.is_cancelled() {
-            return Err(ScanError::Cancelled);
-        }
-        if deadline.is_some_and(|d| Instant::now() >= d) {
-            return Ok(None);
+    ) -> Result<Envelope> {
+        let mut bound = Bound::new(cancel, deadline);
+        if !bound.admit()? {
+            return Ok(Envelope::Cut);
         }
         let premultiplied: Vec<u8> = self
             .fg_luma
@@ -243,23 +258,20 @@ impl AlphaContext {
         // image the verdict stands on, at probe scale) — colored custom
         // backgrounds calibrate at their BT.601 luma (probes are a luma-
         // space sweep by construction). A design that does not decode in
-        // the probe class AT ALL (its primary detection came through the
-        // channel-split or rescue stages) gets NO envelope rather than a
-        // false all-fail verdict contradicting the successful scan.
+        // the probe class AT ALL gets NO envelope (`Undecodable`).
         let base = over(bt601(
             self.background[0],
             self.background[1],
             self.background[2],
         ));
-        let Some(cell) = crate::score::CellProbe::calibrate(&base, expected, symbology) else {
-            return Ok(None);
+        let cell = match CellProbe::calibrate_admitted(&base, expected, symbology, &mut bound)? {
+            Calibrated::Class(cell) => cell,
+            Calibrated::Undecodable => return Ok(Envelope::Undecodable),
+            Calibrated::Interrupted => return Ok(Envelope::Cut),
         };
 
-        let probe = |bg: u8| -> Result<Option<bool>> {
-            if cancel.is_cancelled() {
-                return Err(ScanError::Cancelled);
-            }
-            if deadline.is_some_and(|d| Instant::now() >= d) {
+        let mut probe = |bg: u8| -> Result<Option<bool>> {
+            if !bound.admit()? {
                 return Ok(None);
             }
             Ok(Some(crate::score::cell_passes(&over(bg), expected, cell)))
@@ -269,7 +281,7 @@ impl AlphaContext {
         for bg in ENVELOPE_RUNGS {
             match probe(bg)? {
                 Some(decoded) => probes.push((bg, decoded)),
-                None => return Ok(None),
+                None => return Ok(Envelope::Cut),
             }
         }
         // One bisection probe per verdict boundary tightens each band edge
@@ -280,7 +292,7 @@ impl AlphaContext {
                 let mid = u8::midpoint(pair[0].0, pair[1].0);
                 match probe(mid)? {
                     Some(decoded) => refinements.push((mid, decoded)),
-                    None => return Ok(None),
+                    None => return Ok(Envelope::Cut),
                 }
             }
         }
@@ -298,12 +310,12 @@ impl AlphaContext {
                     background_luma: luma,
                     decoded,
                 }),
-                None => return Ok(None),
+                None => return Ok(Envelope::Cut),
             }
         }
 
         let (safe_luma, placement) = classify(&probes);
-        Ok(Some(AlphaEnvelope {
+        Ok(Envelope::Measured(AlphaEnvelope {
             probes: probes
                 .into_iter()
                 .map(|(background_luma, decoded)| AlphaProbe {
@@ -539,5 +551,68 @@ mod tests {
         assert_eq!(background_name([255; 3]), "white");
         assert_eq!(background_name([0; 3]), "black");
         assert_eq!(background_name([26, 26, 46]), "#1a1a2e");
+    }
+
+    /// A transparent design: dark modules opaque black, every other pixel
+    /// fully transparent (6 px modules, a 4-module quiet zone).
+    fn transparent_qr(content: &str) -> (Vec<u8>, u32) {
+        let code = qrcode::QrCode::new(content.as_bytes()).unwrap();
+        let width = code.width();
+        let side = (width + 8) * 6;
+        let mut rgba = vec![0u8; side * side * 4];
+        for (i, color) in code.to_colors().iter().enumerate() {
+            if *color == qrcode::Color::Dark {
+                let (mx, my) = (i % width + 4, i / width + 4);
+                for y in my * 6..(my + 1) * 6 {
+                    for x in mx * 6..(mx + 1) * 6 {
+                        rgba[(y * side + x) * 4 + 3] = 255;
+                    }
+                }
+            }
+        }
+        (rgba, u32::try_from(side).unwrap())
+    }
+
+    /// A budget-dropped envelope and a design no probe class reads are two
+    /// answers: the first leaves the report partial, the second is final.
+    #[test]
+    fn a_cut_envelope_is_told_from_an_undecodable_one() {
+        use crate::input::{ImageInput, Limits};
+        let (rgba, side) = transparent_qr("https://qrcode-ai.com/envelope-cut");
+        let normalized = crate::transform::normalize_with(
+            &ImageInput::rgba8(&rgba, side, side),
+            &Limits::default(),
+            AlphaBackground::Auto,
+        )
+        .unwrap();
+        let context = normalized.alpha.expect("a transparent input");
+        let cancel = CancelToken::new();
+        let walked = crate::ladder::run(
+            &normalized.planes,
+            &crate::ladder::ScanConfig::full(),
+            &cancel,
+            None,
+        )
+        .unwrap();
+        let key = walked.contents[0].0.clone();
+        let envelope = |key: &ContentKey, deadline| {
+            context.envelope(key, Symbology::QrCode, &[], &cancel, deadline)
+        };
+        assert!(matches!(
+            envelope(&key, None).unwrap(),
+            Envelope::Measured(_)
+        ));
+        assert!(matches!(
+            envelope(&key, Some(Instant::now())).unwrap(),
+            Envelope::Cut
+        ));
+        let other = ContentKey {
+            raw: b"another content".to_vec(),
+            ..key
+        };
+        assert!(matches!(
+            envelope(&other, None).unwrap(),
+            Envelope::Undecodable
+        ));
     }
 }

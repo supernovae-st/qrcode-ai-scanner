@@ -394,7 +394,8 @@ pub struct AxisScore {
     /// TIGHTEST TESTED failing intensity — the midpoint label when the
     /// midpoint probe failed, the knee cell's label when it held. Key
     /// ABSENT when no refinement ran (Reduced depth · no knee · lighting ·
-    /// budget cut). Informational: the composite never reads it.
+    /// budget cut — the score stands, and `trace.budget_exhausted` says the
+    /// budget cut it). Informational: the composite never reads it.
     #[cfg_attr(
         feature = "serde",
         serde(default, skip_serializing_if = "Option::is_none")
@@ -526,25 +527,33 @@ pub struct Iso15415Report {
     /// the grade at D. (No clock-track subtest.)
     pub fixed_pattern_damage: IsoParameter,
     /// Unused Error Correction — the synthetic UEC margin, ISO bands
-    /// (A ≥0.62 · B ≥0.50 · C ≥0.37 · D ≥0.25). `None` without a bitstream.
+    /// (A ≥0.62 · B ≥0.50 · C ≥0.37 · D ≥0.25). `None` without a measured
+    /// margin, or withheld when the `uec` check is skipped (its grade still
+    /// counts in `overall`).
     pub unused_error_correction: Option<IsoParameter>,
-    /// Overall = LOWEST measured parameter (the ISO rule), Decode = A
-    /// implicit (only decoded symbols are graded).
+    /// Overall = LOWEST measured parameter (the ISO rule) — a parameter
+    /// withheld by `score_skip_checks` (`uec`) still counts, so a skip never
+    /// moves it. Decode = A implicit (only decoded symbols are graded).
     pub overall: IsoGrade,
 }
 
-/// Scannability score — contract v3: survival ramps + structural caps.
-/// Validation, NOT ISO verification (no calibrated optics).
+/// Scannability score — survival ramps, structural caps and the UEC margin
+/// cap (spec/04-score.md). Validation, NOT ISO verification (no calibrated
+/// optics). A present score is a COMPLETE judgment: its calibration and
+/// every planned stress cell ran, so no budget moves it — only a knee
+/// bisection (`AxisScore::refined_failed_at`) may be missing.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct Score {
-    /// Composite 0-100 (weighted axis survival, structurally capped).
+    /// Composite 0-100 (weighted axis survival, then the structural caps and
+    /// the UEC margin cap).
     pub value: u8,
     /// Σ contract weights of the axes that RAN (100 = the full six-axis
     /// contract · 70 with perspective+rotation skipped). The honesty
-    /// integer: a partial score SAYS how much contract stands behind it —
-    /// two 85s with different `weights_run` are different promises.
+    /// integer: a score on skipped axes SAYS how much contract stands
+    /// behind it — two 85s with different `weights_run` are different
+    /// promises. Only skipped axes lower it, never the budget.
     /// Lenient default 0 when parsing pre-0.9 reports.
     #[cfg_attr(feature = "serde", serde(default))]
     pub weights_run: u8,
@@ -666,8 +675,8 @@ pub struct AlphaReport {
     /// produced the detections (`auto` only).
     pub fallback_used: bool,
     /// The placement envelope — Full profile only; `None` when skipped
-    /// (`score_skip_checks: ["alpha_envelope"]`), budget-exhausted, or
-    /// nothing decoded.
+    /// (`score_skip_checks: ["alpha_envelope"]`), cut by the budget
+    /// (`trace.budget_exhausted`), or when no probe class reads the design.
     pub envelope: Option<AlphaEnvelope>,
 }
 
@@ -756,7 +765,7 @@ pub struct StageTrace {
 }
 
 /// Pipeline execution trace — why a scan succeeded or came back empty.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct PipelineTrace {
@@ -764,8 +773,32 @@ pub struct PipelineTrace {
     pub stages: Vec<StageTrace>,
     /// Engine panics caught and isolated during this scan.
     pub engine_panics: u8,
-    /// Total wall-clock milliseconds.
+    /// Wall-clock milliseconds of the ladder walk(s) only.
     pub total_ms: f64,
+    /// `Some(true)`: the wall-clock budget prevented planned work — a
+    /// ladder attempt or stage, the opposite-background walk, a rescue
+    /// candidate, a score calibration step or stress cell, a knee bisection,
+    /// an envelope probe — and the report is PARTIAL. `Some(false)`: every
+    /// planned unit ran and the report is final, equal to the unbounded one
+    /// (wall clock aside). `None`: unknown, a report older than this field;
+    /// this crate always writes `Some`, and an unbounded scan `Some(false)`.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub budget_exhausted: Option<bool>,
+}
+
+impl Default for PipelineTrace {
+    /// An empty walk that skipped nothing: the trace of a final report.
+    fn default() -> Self {
+        Self {
+            stages: Vec::new(),
+            engine_panics: 0,
+            total_ms: 0.0,
+            budget_exhausted: Some(false),
+        }
+    }
 }
 
 /// Contract version markers carried by every report.
@@ -812,12 +845,18 @@ impl Versions {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct ScanReport {
-    /// Decoded symbols (empty = nothing found; multi-QR future-proof).
+    /// Decoded symbols (empty = nothing found — final only when
+    /// `trace.budget_exhausted` is `Some(false)`; multi-QR future-proof).
     pub detections: Vec<Detection>,
-    /// Scannability score of the PRIMARY detection (the first-discovered
-    /// symbol — for single-QR inputs, THE symbol). `None` in the `Frame`
-    /// profile. Per-detection scoring for multi-QR scenes is a future
-    /// additive extension.
+    /// Scannability score of the PRIMARY detection (`detections[0]` — for
+    /// single-QR inputs, THE symbol). `None` exactly when no judgment was
+    /// published: no detection; a configuration that computes no score
+    /// ([`crate::ScanConfig::computes_score`]: the `Frame` profile, every
+    /// axis skipped); a judgment the budget interrupted
+    /// (`trace.budget_exhausted` is then `Some(true)`); a contained internal
+    /// fault in the score computation. Never partial, never a zero.
+    /// Per-detection scoring for multi-QR scenes is a future additive
+    /// extension.
     pub score: Option<Score>,
     /// Machine-actionable improvement hints.
     pub hints: Vec<Hint>,
@@ -1001,6 +1040,7 @@ mod tests {
                 }],
                 engine_panics: 0,
                 total_ms: 12.5,
+                budget_exhausted: Some(false),
             },
             versions: Versions::current(),
         }
@@ -1135,6 +1175,34 @@ mod tests {
         assert!(report.score.is_none());
         assert!(report.hints.is_empty());
         assert_eq!(report.versions, Versions::current());
+    }
+
+    /// Every report this crate writes says whether the budget cut planned
+    /// work; a report without the key predates it, and reads as unknown —
+    /// never as "final".
+    #[cfg(feature = "serde")]
+    #[test]
+    fn the_budget_flag_is_written_always_and_read_absent_as_unknown() {
+        let old: PipelineTrace =
+            serde_json::from_str(r#"{"stages":[],"engine_panics":0,"total_ms":0.0}"#).unwrap();
+        assert_eq!(old.budget_exhausted, None, "absent reads as unknown");
+        assert_eq!(
+            serde_json::to_value(&old).unwrap(),
+            serde_json::json!({"stages": [], "engine_panics": 0, "total_ms": 0.0}),
+            "an unknown flag is re-written absent, never as false"
+        );
+        let cut: PipelineTrace = serde_json::from_str(
+            r#"{"stages":[],"engine_panics":0,"total_ms":0.0,"budget_exhausted":true}"#,
+        )
+        .unwrap();
+        assert_eq!(cut.budget_exhausted, Some(true));
+        assert_eq!(
+            serde_json::to_value(&cut).unwrap()["budget_exhausted"],
+            true
+        );
+        assert_eq!(PipelineTrace::default().budget_exhausted, Some(false));
+        let empty = serde_json::to_value(ScanReport::empty()).unwrap();
+        assert_eq!(empty["trace"]["budget_exhausted"], false, "{empty}");
     }
 
     #[test]

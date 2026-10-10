@@ -9,7 +9,8 @@ expression: "ScanReport::empty()"
   "trace": {
     "stages": [],
     "engine_panics": 0,
-    "total_ms": 0.0
+    "total_ms": 0.0,
+    "budget_exhausted": false
   },
   "versions": {
     "scanner": "[crate-version]",

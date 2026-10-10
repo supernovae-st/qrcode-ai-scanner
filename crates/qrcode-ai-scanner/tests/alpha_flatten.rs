@@ -375,6 +375,16 @@ fn envelope_absent_when_the_budget_cannot_carry_it() {
             "a cut budget must drop the whole envelope, not truncate it"
         );
     }
+    // unbudgeted, this design is judged and sweeps its envelope: either one
+    // missing means the budget cut planned work, and the report says so
+    if report.score.is_none() || report.alpha.as_ref().is_none_or(|a| a.envelope.is_none()) {
+        assert_eq!(
+            report.trace.budget_exhausted,
+            Some(true),
+            "{:?}",
+            report.trace
+        );
+    }
 }
 
 /// Palette probes: per-color verdicts inside ONE scan, request order —

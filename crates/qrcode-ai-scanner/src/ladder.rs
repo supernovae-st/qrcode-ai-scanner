@@ -86,11 +86,13 @@ pub enum ScoreDepth {
 )]
 pub struct ScanConfig {
     /// Wall-clock budget in milliseconds. `None` = unbounded: the scan runs the full
-    /// ladder, bounded only by the input-size `Limits`, never by time. Every built-in
-    /// profile sets one (full 4 s · fast 800 ms · frame 80 ms) and server callers
-    /// should keep a budget; leave it `None` only for offline/batch decoding where
-    /// reading every symbol outweighs latency. (`Some(0)` cuts immediately; bindings
-    /// exposing a numeric budget may map `0` → unbounded — see each binding's docs.)
+    /// ladder, bounded only by the input-size `Limits`, never by time — the mode for
+    /// strictly reproducible reports. Every built-in profile sets one (full 4 s · fast
+    /// 800 ms · frame 80 ms) and server callers should keep a budget. A planned unit
+    /// the deadline prevents does not run and the report says so
+    /// (`trace.budget_exhausted`): a judgment it interrupts is absent, never partial.
+    /// (`Some(0)` cuts immediately; bindings exposing a numeric budget map `0` →
+    /// unbounded — see each binding's docs.)
     pub budget_ms: Option<u64>,
     /// S1 — decode a ≤`pyramid_side` downscale first (cheapest win).
     pub pyramid: bool,
@@ -123,12 +125,12 @@ pub struct ScanConfig {
     /// Score SECTIONS excluded from the report — the same integration seam
     /// as `score_skip_axes`, for report blocks instead of stress axes. A
     /// host that displays neither the correction margin nor the ISO
-    /// parameters skips `uec` + `iso15415`: the sections are never computed
-    /// (no UEC bitstream walk · no ISO parameter sweep), the wire carries
-    /// `null`, and the UEC-driven hints never fire. The composite
-    /// `score.value` is axis-based and does NOT move — skipping checks is
-    /// surface truth, never score surgery. Empty (every profile's default)
-    /// = every section runs, byte for byte.
+    /// parameters skips `uec` + `iso15415`: the wire carries `null` for
+    /// them and the UEC-driven hints never fire. The UEC margin is still
+    /// measured and caps the composite, so `score.value`, `score.grade` and
+    /// the ISO `overall` never move — skipping checks is surface truth,
+    /// never score surgery. Empty (every profile's default) = every section
+    /// runs, byte for byte.
     pub score_skip_checks: Vec<ScoreCheck>,
     /// Background handling for inputs that carry transparent pixels — the
     /// flatten runs BEFORE luma conversion and RGB extraction, so every
@@ -152,14 +154,16 @@ pub struct ScanConfig {
 /// A skippable score SECTION — the same integration seam as
 /// [`crate::report::StressAxis`]-skipping, for report blocks instead of stress axes. A host
 /// that displays neither the correction margin nor the ISO parameters skips
-/// them at scan time: the sections are never computed, the wire carries
-/// `null`, and the UEC-driven hints never fire. Config-only (never
+/// them at scan time: the wire carries `null` for them and the section-driven
+/// hints never fire; the verdict never moves. Config-only (never
 /// serialized) — the report self-describes through the absent sections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScoreCheck {
     /// Unused-error-correction margin (`score.uec`) — skipping it also
-    /// silences the two hints it drives (the thin-margin priority path of
-    /// `raise_error_correction`, and `low_correction_margin`).
+    /// withholds the ISO `unused_error_correction` parameter and silences
+    /// the two hints it drives (the thin-margin priority path of
+    /// `raise_error_correction`, and `low_correction_margin`). The margin is
+    /// still measured: it caps the composite either way.
     Uec,
     /// ISO 15415-informed parameters (`score.iso15415`). Independent of
     /// [`ScoreCheck::Uec`]: skipping UEC alone nulls only the
@@ -347,6 +351,15 @@ impl ScanConfig {
             score_depth: ScoreDepth::Off,
             ..Self::full()
         }
+    }
+
+    /// Whether this configuration judges a detection at all: `false` for
+    /// score depth [`ScoreDepth::Off`] (the `frame` profile) and when every
+    /// stress axis is skipped — such scans publish `score: null` whatever
+    /// they decode and whatever the budget.
+    #[must_use]
+    pub fn computes_score(&self) -> bool {
+        crate::score::plans_cells(self.score_depth, &self.score_skip_axes)
     }
 }
 
@@ -660,6 +673,8 @@ struct Run<'a> {
     /// Re-reads the scan spent.
     rereads: usize,
     panics: u8,
+    /// The deadline prevented a planned unit of the walk.
+    cut: bool,
 }
 
 /// The candidate geometry: its grid's corners with the photometry of its
@@ -699,6 +714,7 @@ impl<'a> Run<'a> {
             attempts: 0,
             rereads,
             panics: 0,
+            cut: false,
         }
     }
 }
@@ -714,6 +730,17 @@ impl Run<'_> {
     fn out_of_budget(&self) -> bool {
         self.deadline
             .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    /// Whether the deadline still lets one more planned unit run — a stage,
+    /// an attempt, a rescue candidate. Once it passed, the unit does not run
+    /// and the walk remembers it (`trace.budget_exhausted`).
+    fn admit(&mut self) -> bool {
+        if self.out_of_budget() {
+            self.cut = true;
+            return false;
+        }
+        true
     }
 
     /// The next attempt's rank.
@@ -868,7 +895,7 @@ impl Run<'_> {
     /// nothing (refused and withheld reads do not count); the first success
     /// is collected.
     fn rescue_stage(&mut self, luma: &LumaImage, stages: &mut Vec<StageTrace>) -> Result<()> {
-        if self.rescue_candidates.is_empty() || self.out_of_budget() || self.store.found() {
+        if self.rescue_candidates.is_empty() || self.store.found() || !self.admit() {
             return Ok(());
         }
         let started = Instant::now();
@@ -877,7 +904,7 @@ impl Run<'_> {
         let mut found = 0u32;
         for candidate in self.rescue_candidates.clone() {
             self.check_cancel()?;
-            if self.out_of_budget() {
+            if !self.admit() {
                 break;
             }
             tried += 1;
@@ -1034,7 +1061,7 @@ impl Run<'_> {
 
     /// Run one stage as a fixed sequence of lazily-built attempts, each
     /// collected ([`Run::collect_attempt`]). Returns `Ok(true)` when the
-    /// ladder should stop (budget mid-stage).
+    /// ladder should stop (budget mid-stage: an attempt did not run).
     fn stage(
         &mut self,
         name: &str,
@@ -1048,7 +1075,7 @@ impl Run<'_> {
         let mut stop = false;
         for attempt in attempts {
             self.check_cancel()?;
-            if self.out_of_budget() {
+            if !self.admit() {
                 stop = true;
                 break;
             }
@@ -1196,10 +1223,12 @@ pub(crate) fn run_seeded(
     let luma = &work;
     let longest = luma.width().max(luma.height());
 
+    // Each gate admits a stage the walk reaches and plans (`Run::admit`):
+    // one the deadline already prevents is a cut, not a skip.
     'ladder: {
         // S1 — pyramid: a ≤pyramid_side downscale is the cheapest decode AND
         // often the most effective one on artistic codes.
-        if config.pyramid && longest > config.pyramid_side && !run.out_of_budget() {
+        if config.pyramid && longest > config.pyramid_side && run.admit() {
             let side = config.pyramid_side;
             let stop = run.stage(
                 "pyramid",
@@ -1213,7 +1242,7 @@ pub(crate) fn run_seeded(
         }
 
         // S2 — direct full resolution.
-        if config.direct && !run.out_of_budget() {
+        if config.direct && run.admit() {
             let stop = run.stage(
                 "direct",
                 vec![Attempt::plain(|| luma.clone())],
@@ -1226,7 +1255,7 @@ pub(crate) fn run_seeded(
         }
 
         // S3 — enhance: fixed transform set at full resolution.
-        if config.enhance && !run.out_of_budget() {
+        if config.enhance && run.admit() {
             let mut attempts: Vec<Attempt<'_>> = vec![
                 Attempt::plain(|| transform::otsu_threshold(luma)),
                 Attempt::inverting(|| transform::invert(luma)),
@@ -1252,7 +1281,7 @@ pub(crate) fn run_seeded(
 
         // S4 — deep: the curated boost rungs (v0.2 empirical known-good)
         // first, then the size × contrast × binarization grid.
-        if config.deep && !run.out_of_budget() {
+        if config.deep && run.admit() {
             // deep is QR-calibrated recovery: the multi-format detectors on
             // 17 rungs would starve the budget for nothing
             let _ = run.stage(
@@ -1319,6 +1348,7 @@ impl Run<'_> {
                 stages,
                 engine_panics: self.panics,
                 total_ms: started.elapsed().as_secs_f64() * 1_000.0,
+                budget_exhausted: Some(self.cut),
             },
         })
     }
@@ -1447,6 +1477,11 @@ mod tests {
             .map(|s| s.transforms_tried)
             .sum();
         assert_eq!(attempts, 0, "zero budget must not run engine attempts");
+        assert_eq!(
+            outcome.trace.budget_exhausted,
+            Some(true),
+            "every planned stage was cut at its gate: not a final no-QR"
+        );
     }
 
     #[test]
@@ -1470,6 +1505,11 @@ mod tests {
         // deep on a small image: 15 deep rungs (12 boost + 3 morph) +
         // full-res stretch×{otsu,invert}.
         assert_eq!(outcome.trace.stages[2].transforms_tried, 17);
+        assert_eq!(
+            outcome.trace.budget_exhausted,
+            Some(false),
+            "an unbounded walk never cuts"
+        );
     }
 
     #[test]
@@ -2760,8 +2800,8 @@ mod ladder_mutant_kills {
 
     #[test]
     fn pyramid_runs_when_image_exceeds_pyramid_side() {
-        // delete `!` before `out_of_budget()`: with an available budget the
-        // pyramid MUST run on an oversized image.
+        // the gate's `run.admit()` replaced by `false`: with an available
+        // budget the pyramid MUST run on an oversized image.
         let data = vec![255u8; 700 * 700];
         let planes = normalize(&ImageInput::luma8(&data, 700, 700), &Limits::default()).unwrap();
         let mut config = ScanConfig::full(); // pyramid_side = 512
@@ -2852,5 +2892,119 @@ mod ladder_mutant_kills {
             "{:?}",
             stage_names(&outcome)
         );
+    }
+
+    // ---- the budget flag (trace.budget_exhausted) ----
+
+    /// A walk whose deadline has already passed.
+    fn late_run(cancel: &CancelToken, orig: (u32, u32)) -> Run<'_> {
+        Run::new(cancel, Some(Instant::now()), orig, Seed::default())
+    }
+
+    /// A rescue candidate `rescue::attempt` rejects at its version check.
+    fn dud_candidate() -> crate::rescue::RescueCandidate {
+        crate::rescue::RescueCandidate {
+            stream: engine::MaskedStream {
+                bits: Vec::new(),
+                bit_len: 0,
+            },
+            corners: [Point { x: 0.0, y: 0.0 }; 4],
+            version: 0,
+            ec: EcLevel::M,
+            mask: 0,
+            inverted: false,
+            transposed: false,
+            rederived: None,
+        }
+    }
+
+    #[test]
+    fn an_attempt_the_deadline_prevents_is_flagged() {
+        // the stage stops before its first attempt and the walk says so
+        let cancel = CancelToken::new();
+        let luma = LumaImage::new(vec![255u8; 64 * 64], 64, 64);
+        let mut run = late_run(&cancel, (64, 64));
+        let mut stages = Vec::new();
+        let stop = run
+            .stage(
+                "direct",
+                vec![Attempt::plain(|| luma.clone())],
+                engine::FormatFilter::All,
+                &mut stages,
+            )
+            .unwrap();
+        assert!(stop, "a cut stage stops the ladder");
+        assert_eq!(stages[0].transforms_tried, 0);
+        let walked = run.finish(stages, Instant::now()).unwrap();
+        assert_eq!(walked.trace.budget_exhausted, Some(true));
+    }
+
+    #[test]
+    fn a_rescue_candidate_the_deadline_skips_is_flagged() {
+        let cancel = CancelToken::new();
+        let luma = LumaImage::new(vec![255u8; 100 * 100], 100, 100);
+        let mut run = late_run(&cancel, (100, 100));
+        run.rescue_candidates = vec![dud_candidate()];
+        let mut stages = Vec::new();
+        run.rescue_stage(&luma, &mut stages).unwrap();
+        assert!(stages.is_empty(), "no candidate was tried: {stages:?}");
+        let walked = run.finish(stages, Instant::now()).unwrap();
+        assert_eq!(walked.trace.budget_exhausted, Some(true));
+        // nothing planned, nothing cut: S5 has no candidate to try
+        let mut run = late_run(&cancel, (100, 100));
+        run.rescue_stage(&luma, &mut Vec::new()).unwrap();
+        let walked = run.finish(Vec::new(), Instant::now()).unwrap();
+        assert_eq!(walked.trace.budget_exhausted, Some(false));
+    }
+
+    #[test]
+    fn the_reread_never_sets_the_flag() {
+        // the re-read belongs to the attempt that read: past the deadline it
+        // still runs, locates the declaration, and leaves the report final
+        let luma = crate::rescue::test_symbols::from_segments(
+            qrcode::Version::Normal(3),
+            qrcode::EcLevel::M,
+            |b| {
+                b.push_eci_designator(4)?;
+                b.push_byte_data(&[0xA1])
+            },
+        );
+        let dims = (luma.width(), luma.height());
+        let port: Vec<RawDetection> = engine::decode_filtered(&luma, engine::FormatFilter::All)
+            .detections
+            .into_iter()
+            .filter(|d| d.engine == EngineKind::Rxing)
+            .collect();
+        assert!(!port.is_empty(), "precondition: the port reads the symbol");
+        let cancel = CancelToken::new();
+        let mut run = late_run(&cancel, dims);
+        let outcome = engine::EngineOutcome {
+            detections: port,
+            ..engine::EngineOutcome::default()
+        };
+        run.collect_attempt(&luma, outcome, false);
+        assert_eq!(run.rereads, 1, "the re-read ran past the deadline");
+        let walked = run.finish(Vec::new(), Instant::now()).unwrap();
+        assert_eq!(walked.contents[0].0.eci, eci_mark(4, 0));
+        assert_eq!(walked.trace.budget_exhausted, Some(false));
+    }
+
+    #[test]
+    fn the_end_of_walk_pass_runs_past_the_deadline_unflagged() {
+        // rqrr's grid from one attempt, rxing's read from another: the pass
+        // that brings them together has no budget and cuts nothing
+        let cancel = CancelToken::new();
+        let luma = eci26_gs1();
+        let dims = (luma.width(), luma.height());
+        let outcome = engine::decode_filtered(&luma, engine::FormatFilter::All);
+        let mut run = late_run(&cancel, dims);
+        run.collect_rescue(outcome.rescue, dims, false);
+        for (read, _) in reads_of(&run, outcome.detections, 1, dims) {
+            run.store.collect(read);
+        }
+        let walked = run.finish(Vec::new(), Instant::now()).unwrap();
+        assert_eq!(walked.merged.len(), 1);
+        assert!(walked.merged[0].fnc1 && walked.merged[0].corners.is_some());
+        assert_eq!(walked.trace.budget_exhausted, Some(false));
     }
 }
