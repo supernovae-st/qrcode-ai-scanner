@@ -84,6 +84,11 @@ for wf in ci python flutter mobile; do
 done   # four lines of "success", or no tag
 ```
 
+npm-publish runs on no pull request: its builds, its inspections and
+`operand-proof` (npm must read every `npm publish` operand as a file, §
+Publishing) first run on the tag, unless the owner dispatches it on the
+release branch before tagging, which publishes nothing.
+
 ## 5 · Tag + push the tag
 
 Annotated tag `vX.Y.Z` (headline + expected-red note), `git push origin vX.Y.Z`.
@@ -175,7 +180,7 @@ repository tokens — hence step 0, at merge.
 | Workflow › job | Environment | Credential | What it uploads |
 |---|---|---|---|
 | crates-publish › publish | `crates-io` | crates.io trusted publishing: `rust-lang/crates-io-auth-action` trades the OIDC token for a 30-minute crates.io token | both crates, packed (`cargo package --locked --no-verify`) and inspected in the job before the token is minted; each upload compared with its inspected archive, byte for byte |
-| npm-publish › publish-native · publish-wasm | `npm` | npm trusted publishing (npm CLI ≥ 11.5.1 on Node 24), provenance attested automatically | the very tarballs pack-native and build-wasm packed and inspected, read back again in the job and uploaded unchanged with `npm publish <tarball> --ignore-scripts`; each `npm publish` first checks that its operand is a regular `.tgz` file whose path and sha256 the in-job re-inspection recorded, and stops the job otherwise |
+| npm-publish › publish-native · publish-wasm | `npm` | npm trusted publishing (npm CLI ≥ 11.5.1 on Node 24), provenance attested automatically | the very tarballs pack-native and build-wasm packed and inspected, read back again in the job and uploaded unchanged with `npm publish <tarball> --ignore-scripts`; each `npm publish` first checks that its operand is an absolute path to a regular `.tgz` file whose path and sha256 the in-job re-inspection recorded, and stops the job otherwise; after every upload, and for a version already live, the registry's `dist.integrity` must be that tarball's sha512 |
 | python › release | `release` | PyPI trusted publishing (already live: 0.9.0 carries PEP 740 attestations) | `dist/`, read back in the job: exactly one wheel per row of the wheels matrix and the sdist; before the upload, every file PyPI already serves at the version must be the one read back (sha256), and PyPI may serve no other file there, so `skip-existing` (which goes by file name) skips only proven copies |
 | flutter › publish | `pub` | pub.dev automated publishing; a pushed tag only (pub.dev accepts no other trigger) | the package `package-inspect.py flutter` read back in the job (dormant) |
 | mobile › ios-release | `release` | the workflow's own `GITHUB_TOKEN`, `contents: write` | the CI-built xcframework zip only when its sha256 is the one Package.swift pins, compared before the release is created or touched; an attached asset is verified, never replaced |
@@ -185,6 +190,22 @@ required only where a registry has no OIDC path: the first version of a NEW
 crate on crates.io, the first version of a NEW npm package (a new napi
 target, say — or `npm stage publish`), and pub.dev's first upload, which
 must be a user's.
+
+**What npm reads as the operand.** npm reads a relative path with one slash
+(`npm-wasm/<file>.tgz`) as the GitHub repository of that name, not as a
+file: npm-package-arg looks for a hosted-git shorthand before a file. So the
+npm jobs spell every tarball path from `"$PWD"`, the same way in the
+re-inspection record and in the operand, and `npm-publish › operand-proof`,
+which both publishing jobs need, lays the files out as they do, expands every
+operand exactly as they spell it and parses each with the npm-package-arg of
+the npm they publish with (the same setup-node pin, Node 24): each must be a
+file. It only parses (no registry call, no token, no cache). npm-publish.yml
+runs on no pull request, so the proof runs on every branch dispatch and on
+the tag, where its failure stops the run before a publishing job can ask for
+an OIDC token; a dispatch of npm-publish.yml on the release branch before
+tagging builds, inspects and parses everything without publishing, and is the
+owner's call. On a pull request, ci › lint holds the spellings themselves
+(absolute and identical in the operand, the record and the proof).
 
 **What a publishing job may run.** A job holding `id-token: write` exposes
 the OIDC token request to every one of its steps, and ios-release holds
@@ -199,8 +220,8 @@ the OIDC token request to every one of its steps, and ios-release holds
 - nothing installed or fetched on demand: no npm/pnpm/yarn install, exec or
   dlx, no pip, uv tool, cargo install or binstall, pub global or dart run;
   the crates go up with `cargo publish --locked --no-verify` (no build
-  script runs), and the npm packages with `npm publish <tarball>
-  --ignore-scripts` (no lifecycle script runs, nothing is repacked);
+  script runs), and the npm packages with `npm publish <absolute tarball
+  path> --ignore-scripts` (no lifecycle script runs, nothing is repacked);
 - `actions/setup-node` and `actions/setup-python` are the one relaxation:
   pinned by SHA, on a release line (Node 24) or an exact version, never
   `lts/*`, `latest`, `current` or a range. Security point releases of the line

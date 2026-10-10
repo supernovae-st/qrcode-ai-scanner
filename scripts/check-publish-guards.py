@@ -80,20 +80,37 @@ tokens). Every privileged job must:
                upgrade without --enforce-lockfile, pub global, dart run,
                gem/go install, a download piped into a shell
   publish      `cargo publish` with --locked --no-verify; `npm publish` whose
-               operand (its first non-option word) is a tarball (`*.tgz`, or a
-               variable named *tgz) and which carries --ignore-scripts as an
-               option; never pnpm, yarn or bun publish. A trailing shell
-               comment is stripped from every code line first, so the required
-               words cannot hide in one
+               operand (its first non-option word) is a variable named *tgz
+               or an absolute *.tgz path (/…, or from $PWD, $GITHUB_WORKSPACE
+               or $RUNNER_TEMP: npm reads a relative dir/file.tgz as a GitHub
+               repository) and which carries --ignore-scripts as an option;
+               never pnpm, yarn or bun publish. A trailing shell comment is
+               stripped from every code line first, so the required words
+               cannot hide in one
   operand      `publish` reads how the operand is spelled, and a variable
                named *tgz may hold a directory: so every `npm publish` command
                line comes right after the command line `inspected <its
                operand>`, in a step that defines `inspected` once, exactly as
-               NPM_OPERAND_CHECK says (a regular .tgz file, no directory or
-               link, whose path and sha256 the job's re-inspection recorded),
-               and that re-inspection runs with --record NPM_RECORD
+               NPM_OPERAND_CHECK says (an absolute path to a regular .tgz
+               file, no directory or link, whose path and sha256 the job's
+               re-inspection recorded), and that re-inspection runs with
+               --record NPM_RECORD. The tarball paths the publishing step
+               iterates or assigns, the archives that re-inspection records
+               and the ones OPERAND_PROOF parses are spelled absolute
+               ("$PWD"/… or /…) and identically, and the job needs
+               OPERAND_PROOF
   concurrency  join publish-${{ github.workflow }}-${{ github.ref }}, never
                cancelling, so a re-run on the tag waits instead of racing
+
+OPERAND_PROOF, the job every job running `npm publish` needs, is not
+privileged and is held to this: contents read and nothing else, no `if:` or
+continue-on-error; every action by commit SHA, a checkout without
+credentials; the publishing jobs' very setup-node (same pin and node-version)
+with package-manager-cache false, its versions printed as PRINTED says; every
+artifact they download, by the same name to the same path; no cache; and
+exactly OPERAND_PROOF_RUN, which expands every operand as they spell it and
+fails unless that npm's own npm-package-arg reads each as a file. It only
+parses: no registry call.
 
 Every job whose outputs a privileged job publishes (the jobs whose artifacts
 it downloads, then theirs, looked for among the jobs it needs) restores no
@@ -143,6 +160,7 @@ import contextlib
 import dataclasses
 import fnmatch
 import io
+import itertools
 import os
 import pathlib
 import re
@@ -177,20 +195,53 @@ REINSPECT_JOBS = {
 PYPI_LIVE_RUN = "python3 scripts/package-inspect.py pypi-live dist/* --strict --quiet"
 
 # The check every `npm publish` runs on its operand first, in the same step,
-# as its command lines read (comments stripped): the operand must be a regular
+# as its command lines read (comments stripped): the operand must be an
+# absolute path (npm reads dir/file.tgz as a GitHub repository) to a regular
 # .tgz file, not a link, whose path and sha256 the job's re-inspection wrote to
 # NPM_RECORD (`package-inspect.py archive … --record`). Anything else exits.
 NPM_RECORD = "$RUNNER_TEMP/npm-inspected.sha256"
 NPM_OPERAND_CHECK = (
     "inspected() {",
-    'if [ -f "$1" ] && [ ! -L "$1" ] && [[ "$1" == *.tgz ]] &&',
+    'if [[ "$1" == /* ]] && [ -f "$1" ] && [ ! -L "$1" ] && [[ "$1" == *.tgz ]] &&',
     f'grep -qxF "$(sha256sum -- "$1")" "{NPM_RECORD}"; then',
     "return 0",
     "fi",
-    'echo "::error::$1 is not a regular .tgz file the re-inspection recorded (path and sha256)"',
+    'echo "::error::$1 is not an absolute path to a regular .tgz file the re-inspection recorded (path and sha256)"',
     "exit 1",
     "}",
 )
+# How a publishing step, its re-inspection and OPERAND_PROOF spell a tarball
+# path (shell words, quotes kept): from "$PWD" (or GITHUB_WORKSPACE,
+# RUNNER_TEMP) or a literal /…, never relative, and the same in all three.
+ABSOLUTE_TGZ = re.compile(r'(?:/|"\$\{?(?:PWD|GITHUB_WORKSPACE|RUNNER_TEMP)\}?"/)\S*\.tgz')
+
+# The job that parses every operand of the npm publishing jobs as they spell
+# it, with their npm's own npm-package-arg (no registry call): each needs it.
+# Its proof step runs exactly OPERAND_PROOF_RUN.
+OPERAND_PROOF = "operand-proof"
+OPERAND_PROOF_RUN = "\n".join((
+    "set -euo pipefail",
+    "shopt -s nullglob",
+    'native=("$PWD"/npm-release/*/*.tgz)',
+    'wasm=("$PWD"/npm-wasm/*.tgz)',
+    'if [ "${#native[@]}" -eq 0 ] || [ "${#wasm[@]}" -eq 0 ]; then',
+    '  echo "::error::no operand to parse: native [${native[*]}], wasm [${wasm[*]}]"',
+    "  exit 1",
+    "fi",
+    "node -e '",
+    "  const npa = require(process.argv[1]);",
+    "  let wrong = 0;",
+    "  for (const operand of process.argv.slice(2)) {",
+    "    const type = npa(operand).type;",
+    '    console.log(type + "  " + operand);',
+    '    if (type !== "file") {',
+    '      console.log("::error::npm reads " + operand + " as " + type + ", not as a tarball file");',
+    "      wrong += 1;",
+    "    }",
+    "  }",
+    "  process.exit(wrong ? 1 : 0);",
+    """' "$(npm root -g)/npm/node_modules/npm-package-arg" "${native[@]}" "${wasm[@]}\"""",
+))
 
 # Steps that can restore a cache into a job whose outputs are published: these
 # actions whatever their inputs (mlugg/setup-zig restores its Zig tarball under
@@ -267,7 +318,11 @@ PUBLISHING_ACTIONS = ("pypa/gh-action-pypi-publish", "rust-lang/crates-io-auth-a
 NPM_FETCH = frozenset({"install", "i", "in", "ins", "inst", "insta", "instal", "isnt", "isnta", "isntal",
                        "isntall", "add", "update", "up", "upgrade", "udpate", "exec", "x", "init", "create",
                        "innit", "install-test", "it"})
-TGZ_ARG = re.compile(r"\S*\.tgz|\$\{?\w*tgz\}?")
+# An `npm publish` operand npm can only read as a file (quotes stripped): a
+# variable named *tgz, which the operand check proves absolute at run time, or
+# an absolute *.tgz path spelled out. npm reads a relative dir/file.tgz as the
+# GitHub repository dir/file.tgz (a hosted-git shorthand wins over a file).
+TGZ_ARG = re.compile(r'\$\{?\w*tgz\}?|/\S*\.tgz|\$\{?(?:PWD|GITHUB_WORKSPACE|RUNNER_TEMP)\}?"?/\S*\.tgz')
 # npm publish options that take the next word as their value: that word is not
 # the package operand (`npm publish --access public <tgz>`).
 NPM_VALUE_OPTS = frozenset({"--access", "--tag", "--otp", "--registry", "-w", "--workspace", "--userconfig",
@@ -611,8 +666,9 @@ def _operand_check_problems(lines: list) -> list:
     defined = [k for k, line in enumerate(lines) if re.match(r"function\s+inspected\b|inspected\s*\(\s*\)", line)]
     problems = []
     if len(found) != 1 or defined != found:
-        problems.append("the step must define `inspected` once, exactly as NPM_OPERAND_CHECK says (a regular .tgz "
-                        f"file, no directory or link, whose path and sha256 the re-inspection wrote to {NPM_RECORD})")
+        problems.append("the step must define `inspected` once, exactly as NPM_OPERAND_CHECK says (an absolute path "
+                        "to a regular .tgz file, no directory or link, whose path and sha256 the re-inspection wrote "
+                        f"to {NPM_RECORD})")
     for k in uploads:
         parsed = _npm_publish_operand(lines[k])
         operand = parsed[0] if parsed else None
@@ -630,6 +686,36 @@ def _records_operands(line: str) -> bool:
     if not re.search(r"package-inspect\.py\s+archive\b", line) or "--strict" not in words or "--record" not in words:
         return False
     return words[words.index("--record") + 1:][:1] == [NPM_RECORD]
+
+
+def _recorded_paths(line: str) -> list:
+    """The archives a re-inspection LINE names, as spelled (quotes kept): the
+    words after `package-inspect.py archive` up to its first option."""
+    words = line.split()
+    for i, word in enumerate(words[:-1]):
+        if word.endswith("package-inspect.py") and words[i + 1] == "archive":
+            return list(itertools.takewhile(lambda w: not w.startswith("-"), words[i + 2:]))
+    return []
+
+
+def _tarball_paths(lines: list) -> list:
+    """How LINES (a script's command lines) spell the tarball paths they take
+    (quotes kept): the *.tgz words of a `for … in` list, of an array assignment
+    and of a scalar assignment."""
+    found = []
+    for line in lines:
+        words = []
+        if loop := re.match(r"for\s+\w+\s+in\s+(.*?)(?:\s*;\s*do\b.*)?$", line):
+            words += loop.group(1).split()
+        words += [w for array in re.finditer(r"(?:^|[\s;])(?:local\s+|declare\s+-a\s+)?\w+=\(([^)]*)\)", line)
+                  for w in array.group(1).split()]
+        words += [scalar.group(1) for scalar in re.finditer(r"(?:^|[\s;])(?:local\s+)?\w+=([^\s;()]+)", line)]
+        found += [word.rstrip(";") for word in words if word.rstrip(";").rstrip("\"'").endswith(".tgz")]
+    return found
+
+
+def _runs_npm_publish(job: dict) -> bool:
+    return any(_invokes(line, "npm", NPM_UPLOAD) for step in _steps(job) for line in _code_lines(step.get("run")))
 
 
 def _words(text: str) -> list:
@@ -831,6 +917,92 @@ def _artifact_lineage(wf: dict, job_id: str) -> list:
                 lineage.append(producer)
                 todo.append(producer)
     return lineage
+
+
+def _operand_spelling_problems(steps: list, needs: list, wf: dict) -> list:
+    """Why an npm publishing job does not spell its tarball paths absolute and
+    identically where its publishing step takes them, where its re-inspection
+    records them and where OPERAND_PROOF parses them, or does not need that
+    proof; [] when it does all of it."""
+    problems = []
+    proof = wf["jobs"].get(OPERAND_PROOF)
+    if not isinstance(proof, dict):
+        problems.append(f"no {OPERAND_PROOF!r} job in this workflow to need: it parses every operand with the npm "
+                        "that publishes it (npm reads a relative dir/file.tgz as a GitHub repository)")
+    elif OPERAND_PROOF not in needs:
+        problems.append(f"needs {needs}: must include {OPERAND_PROOF!r}, the job that parses every operand with "
+                        "the npm that publishes it (npm reads a relative dir/file.tgz as a GitHub repository)")
+    taken = sorted({path for step in steps if _runs_npm_publish({"steps": [step]})
+                    for path in _tarball_paths(_code_lines(step.get("run")))})
+    recorded = sorted({path for step in steps for line in _code_lines(step.get("run")) if _records_operands(line)
+                       for path in _recorded_paths(line)})
+    parsed = sorted({path for step in _steps(proof) for path in _tarball_paths(_code_lines(step.get("run")))}) \
+        if isinstance(proof, dict) else []
+    if not taken:
+        problems.append("the publishing step takes its tarballs from no `for … in` list or assignment of *.tgz "
+                        "paths: nothing ties its operand to what the re-inspection recorded")
+    for path in sorted({p for p in taken + recorded + parsed if not ABSOLUTE_TGZ.fullmatch(p)}):
+        problems.append(f"`{path}` is relative: npm reads dir/file.tgz as a GitHub repository; spell it from "
+                        "\"$PWD\" (or /…)")
+    if taken != recorded:
+        problems.append(f"the publishing step takes {taken}, the re-inspection records {recorded}: spell them "
+                        "identically, the record holding the very path the operand check greps")
+    if isinstance(proof, dict) and not set(taken) <= set(parsed):
+        problems.append(f"{OPERAND_PROOF} parses {parsed}, not {taken}: it must expand every operand exactly as "
+                        "this job spells it")
+    return problems
+
+
+def _operand_proof_problems(wf: dict, publishers: list) -> list:
+    """(message, step index or -1) for each way OPERAND_PROOF falls short of
+    parsing every operand of PUBLISHERS with their npm, hermetically; [] when it
+    does not, or when the workflow has no such job (each publisher's `needs`
+    finding names it)."""
+    proof = wf["jobs"].get(OPERAND_PROOF)
+    if not isinstance(proof, dict):
+        return []
+    out, steps = [], _steps(proof)
+    if proof.get("permissions") != {"contents": "read"}:
+        out.append((f"permissions {proof.get('permissions')!r}: exactly contents read, the proof needs no token", -1))
+    for key in ("if", "continue-on-error"):
+        if key in proof:
+            out.append((f"`{key}:` on the proof: a publishing job could run on a proof that did not pass", -1))
+    for i, step in enumerate(steps):
+        action, ref = _uses(step)
+        if step.get("uses") is not None and not SHA.fullmatch(ref):
+            out.append((f"{step.get('uses')} is not pinned by commit SHA", i))
+        if action == "actions/checkout" and str((step.get("with") or {}).get("persist-credentials")) != "false":
+            out.append(("actions/checkout without `persist-credentials: false`", i))
+        if what := _cache(step):
+            out.append((f"{what}: the proof restores no cache", i))
+
+    def setups(job: dict) -> list:
+        return [(step.get("uses"), str((step.get("with") or {}).get("node-version"))) for step in _steps(job)
+                if _uses(step)[0] == "actions/setup-node"]
+
+    def downloads(job: dict) -> list:
+        return [(step.get("uses"), (step.get("with") or {}).get("name"), (step.get("with") or {}).get("path"))
+                for step in _steps(job) if _uses(step)[0] == "actions/download-artifact"]
+
+    for publisher in publishers:
+        if setups(proof) != setups(wf["jobs"][publisher]):
+            out.append((f"sets up node {setups(proof)}, {publisher} {setups(wf['jobs'][publisher])}: the proof parses "
+                        "with the npm that publishes", -1))
+        if missing := [d for d in downloads(wf["jobs"][publisher]) if d not in downloads(proof)]:
+            out.append((f"does not download {missing} as {publisher} does: the proof reads their files at their "
+                        "paths", -1))
+    node = max((i for i, step in enumerate(steps) if _uses(step)[0] == "actions/setup-node"), default=None)
+    run = [i for i, step in enumerate(steps) if set(step) <= {"name", "run"} and
+           _block(step.get("run")) == OPERAND_PROOF_RUN]
+    printed = [i for i, step in enumerate(steps) if set(step) <= {"name", "run"} and
+               _block(step.get("run")) == PRINTED["actions/setup-node"]]
+    if not run:
+        out.append(("no step runs exactly OPERAND_PROOF_RUN (no key but name): the npm-package-arg parse of every "
+                    "operand", -1))
+    elif node is None or not any(node < p < run[0] for p in printed):
+        out.append(("print the resolved versions exactly as PRINTED says, after the setup-node step and before the "
+                    "proof", -1))
+    return out
 
 
 def publishing_steps(steps) -> list:
@@ -1039,8 +1211,9 @@ def check_job(workflow: str, job_id: str, job: dict, wf: dict) -> list:
                 operand, opts = parsed if parsed else (None, [])
                 if operand is None or not TGZ_ARG.fullmatch(operand) or \
                         not {"--ignore-scripts", "--ignore-scripts=true"} & set(opts):
-                    flag("npm-publish", f"`{line}`: npm publish takes the inspected tarball (`*.tgz`, or a variable "
-                                        "named *tgz) as its operand and --ignore-scripts as an option", i)
+                    flag("npm-publish", f"`{line}`: npm publish takes the inspected tarball (a variable named *tgz, "
+                                        "or an absolute *.tgz path: npm reads a relative dir/file.tgz as a GitHub "
+                                        "repository) as its operand and --ignore-scripts as an option", i)
             for tool in ("pnpm", "yarn", "bun"):
                 if _invokes(line, tool, {"publish"}):
                     flag("npm-publish", f"`{line}`: {tool} publish packs a directory and runs its scripts; upload "
@@ -1065,6 +1238,9 @@ def check_job(workflow: str, job_id: str, job: dict, wf: dict) -> list:
             _records_operands(line) for step in steps[:first_publish] for line in _code_lines(step.get("run"))):
         flag("npm-operand", f"re-inspect with `package-inspect.py archive … --strict --record \"{NPM_RECORD}\"` "
                             "before the first publishing step: the operand check reads that record")
+    if _runs_npm_publish(job):
+        for message in _operand_spelling_problems(steps, needs, wf):
+            flag("npm-operand", message)
     pypi = [step for step in steps if re.fullmatch(r"pypa/gh-action-pypi-publish(/.+)?", _uses(step)[0])]
     if pypi:
         inputs = [step.get("with") if isinstance(step.get("with"), dict) else {} for step in pypi]
@@ -1112,7 +1288,7 @@ def check(workflows: pathlib.Path) -> tuple:
                                     f"top-level permissions must be read-only, got {top!r}"))
         if _mentions_secrets({key: value for key, value in wf.items() if key != "jobs"}):
             findings.append(Finding(name, "(workflow)", "secrets", "references the secrets context"))
-        privileged, cached = [], set()
+        privileged, publishers, cached = [], [], set()
         for job_id, job in wf["jobs"].items():
             job = job if isinstance(job, dict) else {}
             if _mentions_secrets(job):
@@ -1125,6 +1301,8 @@ def check(workflows: pathlib.Path) -> tuple:
             if publishing_steps(_steps(job)) or _write_permissions(job.get("permissions")):
                 judged.append(f"{name} › {job_id}")
                 privileged.append(job_id)
+            if _runs_npm_publish(job):
+                publishers.append(job_id)
             found = check_job(name, job_id, job, wf)
             steps = _steps(job)
             visited.add((name, job_id))
@@ -1136,6 +1314,9 @@ def check(workflows: pathlib.Path) -> tuple:
                 else:
                     stale.append(f"{name} › {job_id}: {code} on {step}")
             findings += found
+        if publishers:
+            findings += [Finding(name, OPERAND_PROOF, "operand-proof", message, step)
+                         for message, step in _operand_proof_problems(wf, publishers)]
         for job_id in privileged:
             for producer in _artifact_lineage(wf, job_id):
                 for i, step in enumerate(_steps(wf["jobs"][producer])):
@@ -1327,20 +1508,28 @@ WASM_PUBLISH = ('              echo "publishing $name@$version"\n'
                 '              if out=$(npm publish "$tgz" --access public --ignore-scripts 2>&1); then')
 OPERAND_CHECK = """\
           inspected() {
-            if [ -f "$1" ] && [ ! -L "$1" ] && [[ "$1" == *.tgz ]] &&
+            if [[ "$1" == /* ]] && [ -f "$1" ] && [ ! -L "$1" ] && [[ "$1" == *.tgz ]] &&
               grep -qxF "$(sha256sum -- "$1")" "$RUNNER_TEMP/npm-inspected.sha256"; then
               return 0
             fi
-            echo "::error::$1 is not a regular .tgz file the re-inspection recorded (path and sha256)"
+            echo "::error::$1 is not an absolute path to a regular .tgz file the re-inspection recorded (path and sha256)"
             exit 1
           }
 """
 RECORDED = '          --record "$RUNNER_TEMP/npm-inspected.sha256"\n'
 NATIVE_REINSPECT = ("      - name: re-inspect the release set about to be uploaded\n        run: >\n"
-                    "          python3 scripts/package-inspect.py archive npm-release/*/*.tgz --release-set --strict"
-                    " --quiet\n" + RECORDED)
+                    '          python3 scripts/package-inspect.py archive "$PWD"/npm-release/*/*.tgz\n'
+                    "          --release-set --strict --quiet\n" + RECORDED)
 WASM_REINSPECT = ("      - name: re-inspect the wasm tarball about to be uploaded\n        run: >\n"
-                  "          python3 scripts/package-inspect.py archive npm-wasm/*.tgz --strict --quiet\n" + RECORDED)
+                  '          python3 scripts/package-inspect.py archive "$PWD"/npm-wasm/*.tgz --strict --quiet\n'
+                  + RECORDED)
+WASM_TARBALLS = '          tarballs=("$PWD"/npm-wasm/*.tgz)\n'
+PROOF_HEAD = ("  operand-proof:\n    needs: [pack-native, build-wasm]\n    runs-on: ubuntu-24.04\n    permissions:\n"
+              "      contents: read\n")
+PROOF_NODE = "          node-version: 24\n          package-manager-cache: false\n"
+PROOF_WASM_DOWNLOAD = ("      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2\n"
+                       "        with:\n          name: npm-wasm-tarball\n          path: npm-wasm\n"
+                       "      - name: npm reads every operand")
 ZIG_STEP = "      - name: Zig 0.14.1, sha256-verified\n"
 SETUP_ZIG = ("      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1\n"
              "        if: ${{ contains(matrix.settings.target, 'musl') }}\n        with:\n          version: 0.14.1\n")
@@ -1770,6 +1959,47 @@ MUTATIONS = (
     ("the record written where the operand check does not read", P, [
         ("npm-publish.yml", RECORDED, RECORDED.replace("npm-inspected", "other"))], {}, 1,
      "npm-publish.yml › publish-native [npm-operand]"),
+    ("the operand check without its absolute-path test", P, [
+        ("npm-publish.yml", OPERAND_CHECK, OPERAND_CHECK.replace('[[ "$1" == /* ]] && ', ""))], {}, 1,
+     "npm-publish.yml › publish-native [npm-operand] (step 7) the step must define `inspected` once"),
+    # -- how the operand is spelled: npm reads a relative dir/file.tgz as the
+    #    GitHub repository dir/file.tgz, so every spelling is absolute and the
+    #    same in the publishing step, the record and the operand proof
+    ("a one-slash relative operand: the wasm tarball globbed relative", P, [
+        ("npm-publish.yml", WASM_TARBALLS, WASM_TARBALLS.replace('"$PWD"/', ""))], {}, 1,
+     "npm-publish.yml › publish-wasm [npm-operand] `npm-wasm/*.tgz` is relative"),
+    ("a one-slash relative operand spelled out", P, [
+        ("npm-publish.yml", WASM_PUBLISH, WASM_PUBLISH.replace('"$tgz"', "npm-wasm/x.tgz"))], {}, 1,
+     "npm-publish.yml › publish-wasm [npm-publish]"),
+    ("the record spelled relative, the operand absolute", P, [
+        ("npm-publish.yml", WASM_REINSPECT, WASM_REINSPECT.replace('"$PWD"/', ""))], {}, 1,
+     "npm-publish.yml › publish-wasm [npm-operand] the publishing step takes"),
+    ("the record and the operand both absolute, spelled differently", P, [
+        ("npm-publish.yml", NATIVE_REINSPECT, NATIVE_REINSPECT.replace('"$PWD"/npm-release', '"$PWD"/./npm-release'))],
+     {}, 1, "npm-publish.yml › publish-native [npm-operand] the publishing step takes"),
+    ("a publishing job that does not need the operand proof", P, [
+        ("npm-publish.yml", "  publish-wasm:\n    needs: [build-wasm, operand-proof]\n",
+         "  publish-wasm:\n    needs: build-wasm\n")], {}, 1,
+     "npm-publish.yml › publish-wasm [npm-operand] needs ['build-wasm']: must include 'operand-proof'"),
+    ("the operand proof under another name", P, [
+        ("npm-publish.yml", PROOF_HEAD, PROOF_HEAD.replace("operand-proof:", "parse-proof:"))], {}, 1,
+     "npm-publish.yml › publish-native [npm-operand] no 'operand-proof' job"),
+    ("the operand proof parsing another spelling than the operand", P, [
+        ("npm-publish.yml", 'wasm=("$PWD"/npm-wasm/*.tgz)', "wasm=(./npm-wasm/*.tgz)")], {}, 1,
+     "npm-publish.yml › publish-wasm [npm-operand] operand-proof parses"),
+    ("the operand proof passing whatever npm reads", P, [
+        ("npm-publish.yml", "process.exit(wrong ? 1 : 0);", "process.exit(0);")], {}, 1,
+     "npm-publish.yml › operand-proof [operand-proof] no step runs exactly OPERAND_PROOF_RUN"),
+    ("the operand proof on another npm (Node 22)", P, [("npm-publish.yml", PROOF_NODE, PROOF_NODE.replace("24", "22"))],
+     {}, 1, "npm-publish.yml › operand-proof [operand-proof] sets up node"),
+    ("the operand proof asking for the OIDC token", P, [
+        ("npm-publish.yml", PROOF_HEAD, PROOF_HEAD + "      id-token: write\n")], {}, 1,
+     "npm-publish.yml › operand-proof [operand-proof] permissions"),
+    ("the operand proof restoring an npm cache", P, [("npm-publish.yml", PROOF_NODE, "          node-version: 24\n")],
+     {}, 1, "npm-publish.yml › operand-proof [operand-proof] (step 2) actions/setup-node caches"),
+    ("the operand proof without the wasm tarball", P, [
+        ("npm-publish.yml", PROOF_WASM_DOWNLOAD, "      - name: npm reads every operand")], {}, 1,
+     "npm-publish.yml › operand-proof [operand-proof] does not download"),
     # -- no cache on a tag in a job whose outputs are published
     ("setup-zig back in build-native", P, [("npm-publish.yml", ZIG_STEP, SETUP_ZIG + ZIG_STEP)], {}, 1,
      "npm-publish.yml › build-native [tag-cache]"),
