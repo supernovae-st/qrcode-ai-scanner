@@ -1,12 +1,15 @@
 ---
 title: "Nuxt verify flow (qrcode-ai.com)"
-description: "The exact pattern the landing's editor uses — swap-in reference."
+description: "A verify-flow pattern for a Nuxt editor like qrcode-ai.com's — swap-in reference."
 ---
 
-This is the production integration shipped to the qrcode-ai.com editor
+This pattern comes from the qrcode-ai.com editor's integration
 ([PR #11](https://github.com/supernovae-studio/qrcode-ai_landing/pull/11)):
 one native-resolution scan replaces a 3-level canvas filter loop, and the
-quality meter maps from a real margin score.
+quality meter maps from a real margin score. It is a reference, not a
+description of the live site: what the site runs depends on the package
+version it ships, and the `NOT_JUDGED` status needs reports that carry
+`trace.budget_exhausted` (score contract 5 and later).
 
 ## The verify handler
 

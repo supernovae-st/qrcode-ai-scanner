@@ -39,7 +39,7 @@ wasm decoder) inside a hand-tuned retry loop. Field by field:
 | Logo-occluded codes | fails past the RS error wall | erasure rescue decodes through **30% center occlusion** (vs 20%) |
 | Wrong-decode protection | none — a miscorrection reads as success | UEC margin catches it (`low_correction_margin` distrust signal — proven on the public zxing corpus) |
 | Barcodes / other symbologies | QR only | **19 symbologies**, labeled |
-| Determinism | not guaranteed (CNN) | bit-for-bit reproducible (no RNG) |
+| Determinism | not guaranteed (CNN) | bit-for-bit reproducible on a given platform when the scan is unbounded or uncut (no RNG; PDF417 tie order excepted) |
 | Feedback to the generator | none | machine-actionable hints (`fix_finder_pattern`, `raise_error_correction`, …) |
 | Import an existing code | impossible | drop / browse / **paste** → decode locally → editor prefilled with the detected type |
 | Verifiable claims | — | measured: zxing ground-truth **169/179** (at or above ZXing's own pass thresholds on all 6 suites, above on 4) · production templates **15/15** |

@@ -52,13 +52,13 @@ is built specifically for them · and it doesn't just say *"decoded"*, it
 tells you **how much margin** the code has before it stops scanning in the
 real world.
 
-Seven things no other pure-Rust library ships together:
+Seven things this library ships together:
 
 1. **A deterministic multi-engine decode ladder** tuned on artistic
-   corpora (rxing + rqrr, curated preprocessing rungs · no RNG anywhere:
-   same input and configuration, same report — unbounded, or whenever the
-   report says the budget cut nothing, `trace.budget_exhausted: false`;
-   PDF417 excepted).
+   corpora (rxing + rqrr, curated preprocessing rungs · no RNG in the
+   scanner: on a given platform, same input, configuration and build,
+   same report — unbounded, or whenever the report says the budget cut
+   nothing, `trace.budget_exhausted: false`; PDF417 excepted).
 2. **Score contract v5** · survival ramps across six stress axes
    (resolution · blur · contrast · **perspective** · **rotation** ·
    **lighting** · the documented blind spots of naive scorers), with
@@ -208,10 +208,11 @@ cargo run --release -p xtask -- corpus-report --external
 ```
 
 Verifies presence + sha256 of every manifested file, rescans every image
-(budget-free full ladder · machine-independent per the determinism
-contract; scoring off), prints the per-suite table, and exits non-zero on
-any divergence: a regression AND a fresh decode of a pinned-blind image
-both fail, so pins are flipped deliberately by regenerating —
+(budget-free full ladder, so no machine's speed decides a result · the
+determinism contract holds per platform; scoring off), prints the
+per-suite table, and exits non-zero on any divergence: a regression AND
+a fresh decode of a pinned-blind image both fail, so pins are flipped
+deliberately by regenerating —
 `cargo run --release -p xtask -- gen-external-manifest` (~20 s) · and
 committing the diff. When `corpus-external/` is absent (CI checkouts) the
 gate skips gracefully but loudly, printing exactly how many pins went

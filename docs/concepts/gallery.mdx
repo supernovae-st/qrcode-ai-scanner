@@ -118,7 +118,8 @@ qrscan fixtures/clean/OK_68ms_100_4e875a2c.png --pretty --budget-ms 0   # the cl
 qrscan fixtures/degraded/logo-occluded-rescue.png --pretty --budget-ms 0 # the rescue one
 ```
 
-Same input and configuration → same report, whenever the scan is unbounded or
-says the budget cut nothing (`trace.budget_exhausted: false`). See
+Same input, configuration and scanner build on the same platform → same
+report, whenever the scan is unbounded or says the budget cut nothing
+(`trace.budget_exhausted: false`). See
 [Scoring](/concepts/scoring) for what each axis and grade means, and
 [The report](/api/report) for the full JSON contract.

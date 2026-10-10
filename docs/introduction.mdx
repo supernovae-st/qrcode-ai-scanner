@@ -34,9 +34,11 @@ artifacts off one Rust core.
 ## What makes it different
 
 1. **A deterministic multi-engine decode ladder** — rxing (ZXing lineage)
-   + rqrr (quirc lineage) + curated preprocessing rungs. No RNG anywhere:
-   same input and configuration, same report — unbounded, or whenever the
-   report says the budget cut nothing (`trace.budget_exhausted: false`).
+   + rqrr (quirc lineage) + curated preprocessing rungs. No RNG in the
+   scanner: on a given platform, the same input, configuration and build
+   give the same report — unbounded, or whenever the report says the
+   budget cut nothing (`trace.budget_exhausted: false`). The one exception
+   is rxing's PDF417 decoder, which breaks ties in randomized order.
 2. **Score contract v5** — survival ramps across six stress axes with
    structural caps and the error-correction margin cap. The 0-100 value is
    a real *margin* measure, not "did it decode" — and a whole judgment or
