@@ -287,6 +287,61 @@ impl Memory {
     }
 }
 
+/// `PF_EXITING`, the task flag the Linux kernel sets as a process starts
+/// to exit (`include/linux/sched.h`).
+#[cfg(any(test, all(target_os = "linux", target_pointer_width = "64")))]
+const PF_EXITING: u64 = 0x4;
+
+/// A Linux process's memory from its `/proc/<pid>/status` text: `VmRSS`
+/// and `VmHWM`. A process without them has no address space left: a
+/// zombie (`State: Z` or `X`), or a process that is exiting, whose memory
+/// the kernel releases before it turns zombie — in between, its state
+/// still reads `R`. Only then is `flags` called, to read `/proc/<pid>/stat`:
+/// with `PF_EXITING` set the process is done, not unreadable, so a quick
+/// child sampled in that window is never killed as one the caps cannot
+/// follow.
+#[cfg(any(test, all(target_os = "linux", target_pointer_width = "64")))]
+fn proc_status_memory(status: &str, flags: impl FnOnce() -> Option<u64>) -> Option<Memory> {
+    let kib = |key: &str| -> Option<u64> {
+        let value: u64 = status
+            .lines()
+            .find_map(|l| l.strip_prefix(key))?
+            .trim()
+            .trim_end_matches("kB")
+            .trim()
+            .parse()
+            .ok()?;
+        Some(value * 1024)
+    };
+    let zombie = status
+        .lines()
+        .find_map(|l| l.strip_prefix("State:"))
+        .is_some_and(|s| matches!(s.trim().chars().next(), Some('Z' | 'X')));
+    match (kib("VmRSS:"), kib("VmHWM:")) {
+        (Some(now), Some(peak)) => Some(Memory {
+            now,
+            peak,
+            exited: zombie,
+        }),
+        _ if zombie || flags().is_some_and(|f| f & PF_EXITING != 0) => Some(Memory {
+            now: 0,
+            peak: 0,
+            exited: true,
+        }),
+        _ => None,
+    }
+}
+
+/// The flags field of a `/proc/<pid>/stat` line, its ninth. The command
+/// name in parentheses may hold spaces and parentheses, so the fields are
+/// counted after the last `)`: `state`, `ppid`, `pgrp`, `session`,
+/// `tty_nr`, `tpgid`, `flags`.
+#[cfg(any(test, all(target_os = "linux", target_pointer_width = "64")))]
+fn stat_flags(stat: &str) -> Option<u64> {
+    let (_, fields) = stat.rsplit_once(')')?;
+    fields.split_whitespace().nth(6)?.parse().ok()
+}
+
 /// Where the caps hold: 64-bit macOS and Linux, whose `wait4`, `waitid`,
 /// process groups, signals and memory probes this file codes.
 #[cfg(all(
@@ -531,35 +586,15 @@ mod sys {
         })
     }
 
-    /// The memory of `pid` from `/proc/<pid>/status`: `VmRSS`, `VmHWM`, and
-    /// a zombie's state (it has no memory left to report).
+    /// The memory of `pid` from `/proc/<pid>/status`, and from the flags of
+    /// `/proc/<pid>/stat` when the status shows none (`proc_status_memory`).
     #[cfg(not(target_os = "macos"))]
     pub(super) fn memory(pid: u32) -> Option<Memory> {
         let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-        let kib = |key: &str| -> Option<u64> {
-            let value: u64 = status
-                .lines()
-                .find_map(|l| l.strip_prefix(key))?
-                .trim()
-                .trim_end_matches("kB")
-                .trim()
-                .parse()
-                .ok()?;
-            Some(value * 1024)
-        };
-        let exited = status
-            .lines()
-            .find_map(|l| l.strip_prefix("State:"))
-            .is_some_and(|s| matches!(s.trim().chars().next(), Some('Z' | 'X')));
-        match (kib("VmRSS:"), kib("VmHWM:")) {
-            (Some(now), Some(peak)) => Some(Memory { now, peak, exited }),
-            _ if exited => Some(Memory {
-                now: 0,
-                peak: 0,
-                exited,
-            }),
-            _ => None,
-        }
+        super::proc_status_memory(&status, || {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            super::stat_flags(&stat)
+        })
     }
 }
 
@@ -1323,6 +1358,38 @@ pub(crate) mod tests {
         assert_eq!(done.failure, None, "an exit code is the caller's to read");
         assert!(done.ns > 0);
         assert!(done.usage.max_rss.is_some_and(|rss| rss > 0));
+    }
+
+    /// Linux releases an exiting process's memory before it turns zombie:
+    /// in between, its status has no `Vm` lines and reads `State: R`. Only
+    /// `PF_EXITING` tells that process from one that cannot be sampled; a
+    /// one-shot child sampled in the window was killed as `unsampled`.
+    #[test]
+    fn an_exiting_linux_process_reads_as_exited() {
+        let running = "Name:\tsh\nState:\tS (sleeping)\nVmHWM:\t    2048 kB\nVmRSS:\t    1932 kB\n";
+        assert_eq!(
+            proc_status_memory(running, || unreachable!("flags only without memory")),
+            Some(Memory {
+                now: 1932 * 1024,
+                peak: 2048 * 1024,
+                exited: false,
+            })
+        );
+        let gone = Some(Memory {
+            now: 0,
+            peak: 0,
+            exited: true,
+        });
+        assert_eq!(proc_status_memory("State:\tZ (zombie)\n", || None), gone);
+        let exiting = "Name:\tsh\nState:\tR (running)\nThreads:\t1\n";
+        assert_eq!(proc_status_memory(exiting, || Some(0x0040_0144)), gone);
+        assert_eq!(proc_status_memory(exiting, || Some(0x0040_0140)), None);
+        assert_eq!(proc_status_memory(exiting, || None), None);
+        assert_eq!(
+            stat_flags("4242 (a) (b c) R 1 4242 4242 0 -1 4194628 7 0 0"),
+            Some(0x0040_0144)
+        );
+        assert_eq!(stat_flags("4242 (sh"), None);
     }
 
     /// A pipe deadlock: 1 MiB on stderr before stdout would block both
