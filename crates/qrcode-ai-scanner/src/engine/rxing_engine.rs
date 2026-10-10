@@ -9,7 +9,10 @@
 //!   only Micro QR / rMQR reader): the ORIGINAL payload bytes, ECI
 //!   designators excluded — exact, but the designators themselves are not
 //!   exposed (only their presence, through the AIM modifier `]Q2`/`]Q4`/
-//!   `]Q6`);
+//!   `]Q6`). A plain (`]Q1`) read of ASCII text carries that text's bytes,
+//!   or a byte-order mark and the bytes rxing decoded the text from; a read
+//!   that carries anything else is no payload of this reader and is
+//!   refused;
 //! - its `ZXing`-lineage reader (when the port fails): the RS-corrected
 //!   data codewords — parsed here with the scanner's segment parser, and
 //!   kept only when the parse's byte-mode segments are the reader's own.
@@ -204,7 +207,16 @@ fn observe(result: &rxing::RXingResult) -> Option<RawDetection> {
     detection.location = location(result.getPoints());
     match reader(symbology, ec_level)? {
         Reader::Port => {
-            detection.raw = result.getRawBytes().to_vec();
+            let raw = result.getRawBytes();
+            // a plain read of ASCII text carries that text's bytes: anything
+            // else is not the port's payload (another reader's shape)
+            if identifier == "]Q1"
+                && result.getText().is_ascii()
+                && !reads_as(raw, result.getText())
+            {
+                return None;
+            }
+            detection.raw = raw.to_vec();
             // AIM modifier (ISO 18004 Annex F): 2 · 4 · 6 = ECI in use,
             // 3/4 = FNC1 first (GS1), 5/6 = FNC1 second (an AIM application),
             // 0-2 = no FNC1 — observed; an identifier that does not parse
@@ -255,6 +267,19 @@ fn observe(result: &rxing::RXingResult) -> Option<RawDetection> {
         }
     }
     Some(detection)
+}
+
+/// Whether a port read's bytes are its text: the text's own bytes or, behind
+/// a byte-order mark, the text rxing decodes them to — its decoders sniff
+/// and strip the mark (`encoding_rs`'s `Encoding::decode`, the call rxing
+/// makes).
+fn reads_as(raw: &[u8], text: &str) -> bool {
+    match raw {
+        [0xEF, 0xBB, 0xBF, ..] | [0xFE, 0xFF, ..] | [0xFF, 0xFE, ..] => {
+            encoding_rs::UTF_8.decode(raw).0 == text
+        }
+        _ => raw == text.as_bytes(),
+    }
 }
 
 /// A non-QR read's bytes (spec/01 § raw): the ISO/IEC 8859-1 encoding of
@@ -578,6 +603,142 @@ mod tests {
         let d = observe(&general_reader_result(digits.clone(), "0", &[])).expect("parses");
         assert_eq!(d.raw, b"12345");
         assert!(observe(&general_reader_result(digits, "0", &[b"12345"])).is_none());
+    }
+
+    #[test]
+    fn general_reader_codewords_must_carry_the_readers_own_byte_text() {
+        // equal segment count and length, other bytes: not what it decoded
+        assert!(observe(&general_reader_result(mixed_codewords(), "0", &[b"abd"])).is_none());
+        let d = observe(&general_reader_result(mixed_codewords(), "0", &[b"abc"])).expect("parses");
+        assert_eq!(d.raw, b"12345abc");
+    }
+
+    #[test]
+    fn class_crossing_lengths_parse_only_at_their_own_level() {
+        // 154 data codewords are v8-M and v10-Q, 1276 are v25-L and v40-H:
+        // under the other level's digit the length names another version,
+        // whose character-count widths misread the numeric segment
+        use qrcode::EcLevel as L;
+        let mixed = |b: &mut qrcode::bits::Bits| {
+            b.push_numeric_data(b"12345")?;
+            b.push_byte_data(b"abc")
+        };
+        for (version, level, right, wrong) in [(10, L::Q, "3", "0"), (40, L::H, "2", "1")] {
+            let stream = codewords(version, level, mixed);
+            assert!(
+                observe(&general_reader_result(stream.clone(), wrong, &[b"abc"])).is_none(),
+                "v{version} {level:?} read under digit {wrong}"
+            );
+            let d = observe(&general_reader_result(stream, right, &[b"abc"]))
+                .unwrap_or_else(|| panic!("v{version} {level:?} parses under digit {right}"));
+            assert_eq!(d.raw, b"12345abc");
+        }
+    }
+
+    /// A result shaped like rxing's zxing-cpp port output: the EC level as a
+    /// letter, the modifier `identifier`.
+    fn port_result(text: &str, raw: Vec<u8>, identifier: &str) -> rxing::RXingResult {
+        let mut result =
+            rxing::RXingResult::new(text, raw, Vec::new(), rxing::BarcodeFormat::QR_CODE);
+        result.putMetadata(
+            MetaKey::ERROR_CORRECTION_LEVEL,
+            MetaValue::ErrorCorrectionLevel("M".to_owned()),
+        );
+        result.putMetadata(
+            MetaKey::SYMBOLOGY_IDENTIFIER,
+            MetaValue::SymbologyIdentifier(identifier.to_owned()),
+        );
+        result
+    }
+
+    #[test]
+    fn a_plain_port_read_is_kept_only_when_its_bytes_are_its_text() {
+        // ]Q1 and an ASCII text: the bytes are the text's own, or the codewords
+        // of a misread reader shape (refused)
+        assert!(observe(&port_result("12345abc", mixed_codewords(), "]Q1")).is_none());
+        let d = observe(&port_result("12345abc", b"12345abc".to_vec(), "]Q1")).expect("its text");
+        assert_eq!(d.raw, b"12345abc");
+        // behind a byte-order mark: the text rxing decodes the bytes to (it
+        // sniffs and strips the mark), the bytes kept whole
+        let bom = |rest: &[u8]| [&[0xEF, 0xBB, 0xBF][..], rest].concat();
+        let url = b"https://qrc-ai.com/K1Ng2";
+        let d = observe(&port_result("https://qrc-ai.com/K1Ng2", bom(url), "]Q1")).expect("BOM");
+        assert_eq!(d.raw, bom(url));
+        let utf16 = vec![0xFE, 0xFF, 0x00, b'a', 0x00, b'b', 0x00, b'c'];
+        assert!(observe(&port_result("abc", utf16, "]Q1")).is_some());
+        let utf16le = vec![0xFF, 0xFE, b'a', 0x00, b'b', 0x00, b'c', 0x00];
+        assert!(observe(&port_result("abc", utf16le, "]Q1")).is_some());
+        assert!(observe(&port_result("abc", bom(b"abd"), "]Q1")).is_none());
+        // the rule reads only plain reads of ASCII text: a declared ECI or a
+        // non-ASCII text is the content contract's to decide
+        assert!(observe(&port_result("\u{104}", vec![0xA1], "]Q1")).is_some());
+        assert!(observe(&port_result("abc", vec![0xA1], "]Q2")).is_some());
+    }
+
+    /// Cell 825 of the rescue-stress grid: a v6-M symbol of a 120-byte filler
+    /// under a gray square over 10 % of its area, below and left of the
+    /// top-right finder. rxing's port cannot read it; its `ZXing`-lineage
+    /// reader can.
+    fn lineage_only() -> (LumaImage, String) {
+        const ALPHABET: &[u8] = b"QRCODEAI0123456789abcdefghijklmnopqrstuvwxyz-./:";
+        let truth: String = (0..120)
+            .map(|i| char::from(ALPHABET[i % ALPHABET.len()]))
+            .collect();
+        let code = qrcode::QrCode::with_version(
+            truth.as_bytes(),
+            qrcode::Version::Normal(6),
+            qrcode::EcLevel::M,
+        )
+        .unwrap();
+        let symbol = code
+            .render::<image::Luma<u8>>()
+            .quiet_zone(false)
+            .module_dimensions(8, 8)
+            .build();
+        let side = symbol.width() as f32;
+        let quiet = 48;
+        let canvas_side = symbol.width() + 2 * quiet;
+        let mut canvas = image::GrayImage::from_pixel(canvas_side, canvas_side, image::Luma([255]));
+        image::imageops::replace(&mut canvas, &symbol, i64::from(quiet), i64::from(quiet));
+        let (cx, cy) = (quiet as f32 + 0.78 * side, quiet as f32 + 0.30 * side);
+        let half = (0.10 * side * side).sqrt() / 2.0;
+        let span = |lo: f32, hi: f32| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "pixel bounds inside the canvas"
+            )]
+            let bounds = (lo.floor() as u32, hi.ceil() as u32);
+            bounds.0..bounds.1
+        };
+        for y in span(cy - half, cy + half) {
+            for x in span(cx - half, cx + half) {
+                canvas.put_pixel(x, y, image::Luma([120]));
+            }
+        }
+        let (w, h) = (canvas.width(), canvas.height());
+        (LumaImage::new(canvas.into_raw(), w, h), truth)
+    }
+
+    #[test]
+    fn qr_family_reads_never_depend_on_the_format_set_order() {
+        // rxing walks the QR-family format set in std HashSet order, and every
+        // pass builds a set with fresh random keys: each format calls the same
+        // stateless port reader with the same hints, and only QR_CODE then
+        // tries the lineage reader, so every order reads the same
+        let port = render(b"https://qrc-ai.com/order", qrcode::EcLevel::M);
+        let (lineage, truth) = lineage_only();
+        let reads = |luma: &LumaImage| format!("{:?}", decode(luma, FormatFilter::QrFamily));
+        for (name, luma) in [("port", &port), ("lineage", &lineage)] {
+            let first = reads(luma);
+            for _ in 1..16 {
+                assert_eq!(reads(luma), first, "{name}");
+            }
+        }
+        let found = decode(&lineage, FormatFilter::QrFamily);
+        let d = qr(&found);
+        assert!(d.parsed, "the lineage reader's codewords");
+        assert_eq!(d.raw, truth.as_bytes());
     }
 
     #[test]
