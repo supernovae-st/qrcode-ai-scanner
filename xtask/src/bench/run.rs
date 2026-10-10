@@ -507,7 +507,7 @@ pub(crate) fn dispositions_sha256() -> String {
 /// The pins of the frozen inputs: the external manifest, the vendored
 /// manifest, and each set's images.
 pub(crate) const MANIFEST_PIN: &str =
-    "0f5dc2d45d868d3bcab48935629d435622429a46b95705bb24e25b4cb469f9dc";
+    "2110af5e3c1043f965f4a9ecd7d4c9d3f7595d4f7a4655986f80ee354f1fff3d";
 pub(crate) const VENDORED_PIN: &str =
     "d7924fdc81bf128e6920fe637493c07090ca581e239ef797c6c9e4de27c21b12";
 pub(crate) const FROZEN_IMAGES: [(Set, usize); 3] =
