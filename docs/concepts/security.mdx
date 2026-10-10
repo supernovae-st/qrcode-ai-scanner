@@ -57,12 +57,15 @@ caveats:
 
 300+ Rust tests · property tests (proptest) on the RS math and parsers ·
 four fuzz targets (encoded images · full-profile ladder · adversarial
-rescue bitstreams · decoded text) running weekly · mutation testing at a
-**zero-missed baseline** — every surviving mutant in the crate is either
-killed by a named test or individually proven equivalent in the committed
-policy, enforced weekly across sharded CI · a 2,304-scan deterministic
-occlusion bench gating the rescue path's zero-miscorrection guarantee ·
-a 522-file external corpus pinned by sha256 with a bidirectional drift
-gate (regressions AND silent capability gains both fail) · golden spec
+rescue bitstreams · decoded text) running weekly · weekly mutation testing
+across sharded CI, gated against a committed dispositions file: a
+surviving mutant must be listed there — argued equivalent, a timeout that
+only a hang can show, or test debt still to kill — or the weekly job
+fails; the file records survivors, it does not claim there are none · a
+deterministic 2,304-cell occlusion sweep of the rescue path, gated on zero
+wrong outputs in each of its passes — a measured result, not a guarantee:
+the rescue still accepts a wrong correction in a block about once in
+65 536 · a 522-file external corpus pinned by sha256 with a bidirectional
+drift gate (regressions AND silent capability gains both fail) · golden spec
 examples validated in CI against both the serde types and the published
 JSON Schema.

@@ -180,12 +180,12 @@ decode status for every file, generated from a real run, never hand-typed
 
 | corpus | result | note |
 |---|---|---|
-| zxing blackbox qrcode-1…6 (179 images, ground truth) | **170/179 exact-text match @ 0°** | beats the zxing reference pass thresholds (153) on **all six suites** |
+| zxing blackbox qrcode-1…6 (179 images, ground truth) | **169/179 exact-text match @ 0°** (9 blind · 1 wrong) | per suite 20 · 34 · 42 · 39 · 19 · 15 against ZXing's own 0° pass thresholds 17 · 32 · 38 · 36 · 19 · 15 (`QRCodeBlackBox1…6TestCase`, 157 in all): above on the first four suites, equal on the last two, whose thresholds are every image |
 | qrcode-ai.com production templates (15 single-symbol styles) | **15/15 decoded** | includes the blob-pixel style no contrast/threshold transform recovers |
 | qrcode-ai.com artistic gallery (full pinned set) | **56/161 decoded** | the blind family is multi-QR collages, extreme 3D perspective and busy marketing scenes · six are vendored as `expect = "fail"` frontier fixtures; `corpus-report --external` re-measures this exact number |
 | center-logo occlusion (v5-H, gray disk) | engines die at >20% radius · **rescue decodes through 30%** | errors-and-erasures RS · `engines: ["rescue"]` in the report |
 
-One of the 9 zxing misses is rqrr returning a Reed-Solomon
+One of the 10 zxing misses is rqrr returning a Reed-Solomon
 **miscorrection** ("photography" vs ground-truth "photograph") · which the
 synthetic UEC flags at margin 0 and surfaces as the
 `low_correction_margin` hint. The decode-rate number above counts it as a

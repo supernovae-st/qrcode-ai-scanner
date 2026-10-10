@@ -786,8 +786,7 @@ v3, GS1 awareness, ISO-informed grading, hardened bindings. Supersedes the
 
 ### Measured accuracy (reproduce: `scripts/zxing-blackbox.py` · `scripts/batch-scan.py`)
 
-- zxing blackbox qrcode-1…6: 170/179 exact-text match @ 0° — beats the zxing
-  reference thresholds on all six suites.
+- zxing blackbox qrcode-1…6: 170/179 exact-text match @ 0°.
 - qrcode-ai.com production templates: 15/15 decoded.
 
 ## 0.2.2 — 2026-06-10

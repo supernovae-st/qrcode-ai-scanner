@@ -42,7 +42,7 @@ wasm decoder) inside a hand-tuned retry loop. Field by field:
 | Determinism | not guaranteed (CNN) | bit-for-bit reproducible (no RNG) |
 | Feedback to the generator | none | machine-actionable hints (`fix_finder_pattern`, `raise_error_correction`, …) |
 | Import an existing code | impossible | drop / browse / **paste** → decode locally → editor prefilled with the detected type |
-| Verifiable claims | — | measured: zxing ground-truth **170/179** (beats the reference thresholds on all 6 suites) · production templates **15/15** |
+| Verifiable claims | — | measured: zxing ground-truth **169/179** (at or above ZXing's own pass thresholds on all 6 suites, above on 4) · production templates **15/15** |
 
 Bundle honesty: ~778 KB gz all-symbologies (the incumbent was ~1 MB;
 a QR-only build drops ~180 KB — documented escape hatch).
