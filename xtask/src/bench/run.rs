@@ -509,7 +509,7 @@ pub(crate) fn dispositions_sha256() -> String {
 pub(crate) const MANIFEST_PIN: &str =
     "0f5dc2d45d868d3bcab48935629d435622429a46b95705bb24e25b4cb469f9dc";
 pub(crate) const VENDORED_PIN: &str =
-    "d5bc684ff31e69f8e75df1b31ecda6fdcb0751e2c4ee68123f3aebdc2f562db7";
+    "d7924fdc81bf128e6920fe637493c07090ca581e239ef797c6c9e4de27c21b12";
 pub(crate) const FROZEN_IMAGES: [(Set, usize); 3] =
     [(Set::Zxing, 179), (Set::Gallery, 161), (Set::Vendored, 41)];
 

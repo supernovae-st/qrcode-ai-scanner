@@ -7,16 +7,28 @@
 //! prove detection only. This instrument gives each image one strict
 //! [`Outcome`] instead.
 //!
-//! The unit is (symbology, text). A zxing row expects `{(qr_code, .txt)}`:
-//! the exact file bytes (UTF-8, ISO-8859-1 fallback), never trimmed.
-//! `corpus.toml` truth is text only, so its unit accepts any symbology —
-//! but, like every unit, it is satisfied by ONE observed group: the same
-//! text under a second symbology is extra output. An entry without
-//! `expected` is a negative sample unless it is a frontier pin
-//! (`expect = "fail"`). Gallery and frontier rows have no truth: they are
-//! `unlabelled_*` and never enter a rate denominator. Every report must
-//! also meet the grouping contract of `spec/01-report.md`: at most 16
-//! groups, QR family first, no duplicate (symbology, text).
+//! A truth is a set of units, each met by at most ONE detection. A unit
+//! whose bytes are known independently of the scanner under test is
+//! structural (`corpus.toml` `raw_hex`, with `eci` and `fnc1` when the
+//! symbol declares them) and is judged by content identity
+//! (`spec/01-report.md` § Comparing contents): a detection with the same
+//! raw, FNC1 position, located ECI list and text meets it `exact`; one with
+//! the same raw and FNC1 position whose declarations were signalled but
+//! not located, or whose charset is `unknown` without contradicting the
+//! declarations, meets it `unread`; nothing else meets it — equal text over
+//! other bytes is another content. A unit that knows only its text (a
+//! zxing `.txt`: the exact file bytes, UTF-8 with an ISO-8859-1 fallback,
+//! never trimmed; a `corpus.toml` entry without `raw_hex`) is met `exact`
+//! by equal text and `unread` by a detection whose charset is `unknown`. A
+//! detection that carries no bytes (an observed decoder that reports text
+//! only) is held to the text rule. `unread` has its own rate and never
+//! blocks. A zxing unit names `qr_code`; `corpus.toml` has no symbology
+//! field, so its units accept any. An entry without `expected` is a
+//! negative sample unless it is a frontier pin (`expect = "fail"`).
+//! Gallery and frontier rows have no truth: they are `unlabelled_*` and
+//! never enter a rate denominator. Every report must also meet the
+//! grouping contract of `spec/01-report.md`: at most 16 detections, QR
+//! family first, no two detections with one identity.
 //!
 //! [`DISPOSITIONS`] holds the judgments a truth file cannot express,
 //! pinned by image AND truth sha256 and by exactly what they excuse: a
@@ -34,31 +46,36 @@
 //! committed input, a relative or absent configured corpus root
 //! (`--corpus-root`, `QRSCAN_EXTERNAL_CORPUS`), an unwritable receipt · 3
 //! skipped — no corpus at the default root: `SKIPPED (not a pass)`.
-//! `missed` and `partial` lower the exact rate without blocking.
+//! `missed`, `partial` and `unread` lower the exact rate without blocking.
 //!
 //! Scans are budget-free with scoring off ([`external::scanner`]), so no
 //! verdict depends on host load. The `--json` receipt names the scanned
-//! tree (git SHA and clean/dirty, read at run time), holds no timing and no
-//! absolute path, and payloads only as text sha256 + byte length +
-//! engines: two runs over the same inputs are byte-identical.
+//! tree (git SHA and clean/dirty, read at run time) and the outcome rule
+//! of each truth kind, holds no timing and no absolute path, and payloads
+//! only as text and raw sha256 + byte length: two runs over the same inputs
+//! are byte-identical.
 //!
 //! `--observed <jsonl> --decoder <name>` judges another decoder's recorded
 //! outputs on the same hash-verified images, with the same judge,
 //! dispositions and tallies. The file holds one metadata line
 //! (`{"decoder", "version", "settings"}`) and one record per image
-//! (`{"path", "sha256", "outputs": [{"symbology", "text"}], "error"}`).
-//! Outputs are grouped by (symbology, text) before judging, the 16-group cap
+//! (`{"path", "sha256", "outputs": [{"symbology", "text"}], "error"}`); an
+//! output that also carries `raw_hex` (with an optional wire `charset`,
+//! `eci` and `fnc1`) is judged by identity, one without it by the text
+//! rule. Identical outputs are grouped before judging, the 16-detection cap
 //! and QR-first order (our wire shape) are recorded as information, and
 //! dispositions apply their outcome rule unchanged — an output that is not
 //! the pinned qrcode-ai-scanner reading marks the entry `differs`
 //! (information) instead of stale. `--emit-observed <jsonl>` writes our own
-//! scans in that shape (decoded text included: keep it local).
+//! scans in that shape (decoded text and bytes included: keep it local).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use qrcode_ai_scanner::{EngineKind, ImageInput, Scanner, Symbology, Versions};
+use qrcode_ai_scanner::{
+    Charset, Detection, EngineKind, Fnc1Position, ImageInput, Scanner, Symbology, Versions,
+};
 use rayon::prelude::*;
 use serde::ser::SerializeMap as _;
 use serde::{Deserialize, Serialize, Serializer};
@@ -69,8 +86,12 @@ use crate::external::{self, CorpusRoot, Row, Status};
 /// change so receipts made under different rules never compare silently.
 /// v1.1: dispositions pin the output they excuse, a text-only unit consumes
 /// one observed group, and one exit-code family (0 · 1 · 2 · 3) with the
-/// scanned tree in every receipt.
-const RULES_ID: &str = "qrscan-oracle/v1.1";
+/// scanned tree in every receipt. v2: a truth that knows the bytes is
+/// judged by content identity, a text truth by text unless the detection's
+/// charset is `unknown`; `unread` is an outcome with its own rate; the
+/// grouping contract forbids two detections of one identity; the receipt
+/// states the rule of each truth kind ([`RULES`]).
+const RULES_ID: &str = "qrscan-oracle/v2";
 /// The vendored manifest, at the repo root.
 const VENDORED: &str = "corpus.toml";
 /// Detection groups per report (`spec/01-report.md`, anti-amplification).
@@ -85,16 +106,20 @@ const USAGE: &str = "usage: xtask oracle [--json <path>] [--corpus-root <absolut
 /// Strict per-image outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Outcome {
-    /// Every expected unit found, nothing else.
+    /// Every expected unit met exactly, nothing else.
     Exact,
-    /// Every expected unit found, plus output nobody expected.
+    /// Every expected unit met, plus output nobody expected.
     Extra,
-    /// Some expected units found, no unexpected output.
+    /// Some expected units met, no unexpected output.
     Partial,
-    /// Some expected units found, plus unexpected output.
+    /// Some expected units met, plus unexpected output.
     Mixed,
-    /// Output, none of it expected.
+    /// Output, none of it meeting a unit.
     Wrong,
+    /// Every expected unit met, at least one by a detection without a
+    /// verified text reading (`unknown`, or declarations signalled and not
+    /// located), nothing else — its own rate, never blocking.
+    Unread,
     /// Expected units, no output.
     Missed,
     /// A must-not-decode sample stayed blind.
@@ -113,12 +138,13 @@ pub(crate) enum Outcome {
 
 impl Outcome {
     /// Declaration order — the column order of every table and receipt.
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::Exact,
         Self::Extra,
         Self::Partial,
         Self::Mixed,
         Self::Wrong,
+        Self::Unread,
         Self::Missed,
         Self::NegativeHeld,
         Self::FalsePositive,
@@ -135,6 +161,7 @@ impl Outcome {
             Self::Partial => "partial",
             Self::Mixed => "mixed",
             Self::Wrong => "wrong",
+            Self::Unread => "unread",
             Self::Missed => "missed",
             Self::NegativeHeld => "negative_held",
             Self::FalsePositive => "false_positive",
@@ -160,82 +187,340 @@ impl Serialize for Outcome {
     }
 }
 
-/// One expected content unit.
+/// One located ECI designator, as the report lists it (`spec/01-report.md`
+/// § `eci`): the assignment number and the byte offset into `raw` where it
+/// takes effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Eci {
+    pub(crate) designator: u32,
+    pub(crate) start: u32,
+}
+
+/// What a structural truth knows about the symbol, independently of the
+/// scanner under test: its bytes and its declarations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Identity {
+    pub(crate) raw: Vec<u8>,
+    /// The designators the symbol declares, located; `None` = none.
+    pub(crate) eci: Option<Vec<Eci>>,
+    pub(crate) fnc1: Option<Fnc1Position>,
+}
+
+/// One expected content unit as every truth names it: symbology and text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Unit {
-    /// `None` accepts any symbology (`corpus.toml` truth is text only).
+    /// `None` accepts any symbology (`corpus.toml` has no symbology field).
     pub(crate) symbology: Option<Symbology>,
     /// Exact expected text — never trimmed or normalised.
     pub(crate) text: String,
 }
 
+/// One expected unit as the judge holds it: the unit, and its identity
+/// when the symbol's bytes are known — a structural unit, judged by content
+/// identity; without one, a text unit, judged by its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Expected {
+    pub(crate) unit: Unit,
+    pub(crate) identity: Option<Identity>,
+}
+
+impl From<Unit> for Expected {
+    fn from(unit: Unit) -> Self {
+        Self {
+            unit,
+            identity: None,
+        }
+    }
+}
+
+/// What a detection states beyond its text (`spec/01-report.md`
+/// § Content). Our scanner always states it; an observed decoder that
+/// reports text only does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Content {
+    pub(crate) raw: Vec<u8>,
+    /// `None`: an observed decoder that names no label, read as a complete
+    /// reading.
+    pub(crate) charset: Option<Charset>,
+    /// `None`: no designator observed · `Some([])`: signalled, not located.
+    pub(crate) eci: Option<Vec<Eci>>,
+    pub(crate) fnc1: Option<Fnc1Position>,
+}
+
+impl Content {
+    /// `charset` `unknown`: `text` is not a complete decoding.
+    fn is_lossy(&self) -> bool {
+        self.charset.is_some_and(Charset::is_lossy)
+    }
+}
+
+/// One detection as observed. Its text and bytes stay in memory: receipts
+/// carry their sha256 and length only, stdout previews them for public
+/// sets only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Seen {
+    pub(crate) symbology: Symbology,
+    pub(crate) text: String,
+    pub(crate) content: Option<Content>,
+    pub(crate) engines: Vec<EngineKind>,
+}
+
+/// Our scanner's detections as the judge sees them, in report order.
+pub(crate) fn observations(detections: &[Detection]) -> Vec<Seen> {
+    detections
+        .iter()
+        .map(|d| Seen {
+            symbology: d.symbology,
+            text: d.content.text.clone(),
+            content: Some(Content {
+                raw: d.content.raw.clone(),
+                charset: Some(d.content.charset),
+                eci: d.content.eci.as_ref().map(|list| {
+                    list.iter()
+                        .map(|s| Eci {
+                            designator: s.designator,
+                            start: s.start,
+                        })
+                        .collect()
+                }),
+                fnc1: d.content.fnc1,
+            }),
+            engines: d.engines.clone(),
+        })
+        .collect()
+}
+
+/// A detection whose bytes are its text's UTF-8, read `utf8` with nothing
+/// declared — the shape of every plain payload.
+#[cfg(test)]
+pub(crate) fn plain(symbology: Symbology, text: &str) -> Seen {
+    Seen {
+        symbology,
+        text: text.to_owned(),
+        content: Some(Content {
+            raw: text.as_bytes().to_vec(),
+            charset: Some(Charset::Utf8),
+            eci: None,
+            fnc1: None,
+        }),
+        engines: vec![EngineKind::Rqrr],
+    }
+}
+
+/// How one detection meets one expected unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Meet {
+    /// Not this unit: another content, or a reading the truth contradicts.
+    No,
+    /// This unit's content, read as the truth reads it.
+    Exact,
+    /// This unit's content, without a text reading the scanner verified.
+    Unread,
+}
+
+impl Meet {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::No => "no",
+            Self::Exact => "exact",
+            Self::Unread => "unread",
+        }
+    }
+}
+
+/// The rule of one (unit, detection) pair. A structural unit and a
+/// detection with bytes compare by identity (`spec/01-report.md`
+/// § Comparing contents): the raw and FNC1 position must match; equal
+/// declarations then judge the reading; an unlocated signal (`[]`), or an
+/// `unknown` reading where no designator was observed, is unread; any
+/// other declaration contradicts the truth. Everything else — a text unit,
+/// a detection without bytes — follows the text rule.
+fn meet(expected: &Expected, seen: &Seen) -> Meet {
+    let unit = &expected.unit;
+    if unit.symbology.is_some_and(|s| s != seen.symbology) {
+        return Meet::No;
+    }
+    let lossy = seen.content.as_ref().is_some_and(Content::is_lossy);
+    let reading = || match (lossy, seen.text == unit.text) {
+        (true, _) => Meet::Unread,
+        (false, true) => Meet::Exact,
+        (false, false) => Meet::No,
+    };
+    let (Some(truth), Some(content)) = (&expected.identity, &seen.content) else {
+        return reading();
+    };
+    if content.raw != truth.raw || content.fnc1 != truth.fnc1 {
+        return Meet::No;
+    }
+    match (&truth.eci, &content.eci) {
+        (declared, observed) if declared == observed => reading(),
+        (Some(_), Some(observed)) if observed.is_empty() => Meet::Unread,
+        (Some(_), None) if lossy => Meet::Unread,
+        _ => Meet::No,
+    }
+}
+
+/// One unit's place in the best matching: the detection that meets it and
+/// how, or `None`.
+type Met = Option<(usize, Meet)>;
+
+/// The one-to-one matching of units to detections with the most exact
+/// meets, then the most meets. `relation[u][d]` is how detection `d` meets
+/// unit `u`. Kuhn–Munkres (shortest augmenting paths with potentials) on
+/// the costs exact 0 · unread `w − 1` · none `w`, with `w` = units + 1 so
+/// that one more exact meet outweighs any number of unread ones; every unit
+/// also owns an unmet column at cost `w`, so each assignment is complete.
+fn best_matching(relation: &[Vec<Meet>], detections: usize) -> Vec<Met> {
+    let units = relation.len();
+    let none = i64::try_from(units).map_or(i64::MAX / 4, |n| n + 1);
+    let columns = detections + units;
+    let cost = |unit: usize, column: usize| match relation[unit].get(column) {
+        Some(Meet::Exact) => 0,
+        Some(Meet::Unread) => none - 1,
+        _ => none,
+    };
+    // 1-based: unit and column 0 are the sentinels; `owner[c]` is the unit
+    // holding column c (0 = free), `via[c]` the column it was reached from.
+    let mut unit_potential = vec![0i64; units + 1];
+    let mut column_potential = vec![0i64; columns + 1];
+    let mut owner = vec![0usize; columns + 1];
+    let mut via = vec![0usize; columns + 1];
+    for unit in 1..=units {
+        owner[0] = unit;
+        let mut column = 0;
+        let mut slack = vec![i64::MAX; columns + 1];
+        let mut visited = vec![false; columns + 1];
+        while owner[column] != 0 {
+            visited[column] = true;
+            let holder = owner[column];
+            let (mut delta, mut next) = (i64::MAX, 0);
+            for c in 1..=columns {
+                if visited[c] {
+                    continue;
+                }
+                let reduced =
+                    cost(holder - 1, c - 1) - unit_potential[holder] - column_potential[c];
+                if reduced < slack[c] {
+                    slack[c] = reduced;
+                    via[c] = column;
+                }
+                if slack[c] < delta {
+                    delta = slack[c];
+                    next = c;
+                }
+            }
+            for c in 0..=columns {
+                if visited[c] {
+                    unit_potential[owner[c]] += delta;
+                    column_potential[c] -= delta;
+                } else {
+                    slack[c] -= delta;
+                }
+            }
+            column = next;
+        }
+        while column != 0 {
+            let previous = via[column];
+            owner[column] = owner[previous];
+            column = previous;
+        }
+    }
+    let mut met = vec![None; units];
+    for (column, &holder) in owner.iter().enumerate().take(detections + 1).skip(1) {
+        if holder > 0 && relation[holder - 1][column - 1] != Meet::No {
+            met[holder - 1] = Some((column - 1, relation[holder - 1][column - 1]));
+        }
+    }
+    met
+}
+
 /// The strict verdict for one image. `observed` is the report's complete
-/// (symbology, text) list: an image is `exact` only when every expected
-/// unit is found AND nothing else came back. Matching is one-to-one: a
-/// unit consumes at most one observed group, so a text-only unit met by
-/// the same text under two symbologies leaves one group over — `extra`.
+/// detection list: an image is `exact` only when every expected unit is
+/// met exactly AND nothing else came back. Matching is one-to-one: a unit
+/// consumes at most one detection, so a text unit met by the same text
+/// under two symbologies leaves one detection over — `extra`.
+pub(crate) fn judge_detections(expected: &[Expected], observed: &[Seen]) -> Outcome {
+    judgment(expected, observed).0
+}
+
+/// [`judge_detections`] for a caller that holds (symbology, text) pairs
+/// only: every unit is a text unit and no detection carries bytes, so the
+/// text rule decides.
 pub(crate) fn judge(expected: &[Unit], observed: &[(Symbology, &str)]) -> Outcome {
-    let hit =
-        |e: &Unit, o: &(Symbology, &str)| e.text == o.1 && e.symbology.is_none_or(|s| s == o.0);
+    let expected: Vec<Expected> = expected.iter().cloned().map(Expected::from).collect();
+    let observed: Vec<Seen> = observed
+        .iter()
+        .map(|(symbology, text)| Seen {
+            symbology: *symbology,
+            text: (*text).to_owned(),
+            content: None,
+            engines: Vec::new(),
+        })
+        .collect();
+    judge_detections(&expected, &observed)
+}
+
+/// [`judge_detections`] with, per expected unit, the detection that met
+/// it.
+fn judgment(expected: &[Expected], observed: &[Seen]) -> (Outcome, Vec<Met>) {
     if expected.is_empty() {
-        return if observed.is_empty() {
+        let outcome = if observed.is_empty() {
             Outcome::NegativeHeld
         } else {
             Outcome::FalsePositive
         };
+        return (outcome, Vec::new());
     }
     if observed.is_empty() {
-        return Outcome::Missed;
+        return (Outcome::Missed, vec![None; expected.len()]);
     }
-    // Symbology-pinned units choose first: a text-only unit can take any
-    // group a pinned one leaves, so this greedy order finds a maximum
-    // matching (units only compete within one text).
-    let pinned_first = expected
+    let relation: Vec<Vec<Meet>> = expected
         .iter()
-        .filter(|e| e.symbology.is_some())
-        .chain(expected.iter().filter(|e| e.symbology.is_none()));
-    let mut consumed = vec![false; observed.len()];
-    let mut found = 0;
-    for unit in pinned_first {
-        let free = (0..observed.len()).find(|&i| !consumed[i] && hit(unit, &observed[i]));
-        if let Some(i) = free {
-            consumed[i] = true;
-            found += 1;
-        }
-    }
-    let extra = consumed.contains(&false);
-    match (found, found == expected.len(), extra) {
+        .map(|unit| observed.iter().map(|seen| meet(unit, seen)).collect())
+        .collect();
+    let met = best_matching(&relation, observed.len());
+    let found = met.iter().flatten().count();
+    let unread = met
+        .iter()
+        .flatten()
+        .filter(|(_, how)| *how == Meet::Unread)
+        .count();
+    let extra = found < observed.len();
+    let outcome = match (found, found == expected.len(), extra) {
         (0, _, _) => Outcome::Wrong,
-        (_, true, false) => Outcome::Exact,
+        (_, true, false) if unread == 0 => Outcome::Exact,
+        (_, true, false) => Outcome::Unread,
         (_, true, true) => Outcome::Extra,
         (_, false, false) => Outcome::Partial,
         (_, false, true) => Outcome::Mixed,
-    }
+    };
+    (outcome, met)
 }
 
 /// Grouping-contract violations of one report (`spec/01-report.md`).
-/// Messages name detection indices only — payload text never leaves here.
-pub(crate) fn contract_violations(observed: &[(Symbology, &str)]) -> Vec<String> {
+/// Messages name detection indices only — payload never leaves here.
+pub(crate) fn contract_violations(observed: &[Seen]) -> Vec<String> {
     let mut found = wire_shape_violations(observed);
-    found.extend(duplicate_groups(observed));
+    found.extend(shared_identities(observed));
     found
 }
 
-/// The two rules that shape OUR wire report: at most 16 groups, QR family
-/// first. A comparator never promised them, so in observed mode they are
-/// recorded as information instead of judged.
-fn wire_shape_violations(observed: &[(Symbology, &str)]) -> Vec<String> {
+/// The two rules that shape OUR wire report: at most 16 detections, QR
+/// family first. A comparator never promised them, so in observed mode
+/// they are recorded as information instead of judged.
+fn wire_shape_violations(observed: &[Seen]) -> Vec<String> {
     let mut found = Vec::new();
     if observed.len() > MAX_GROUPS {
         found.push(format!(
-            "{} detection groups exceed the cap of {MAX_GROUPS}",
+            "{} detections exceed the cap of {MAX_GROUPS}",
             observed.len()
         ));
     }
-    if let Some(first_other) = observed.iter().position(|(s, _)| !s.is_qr_family())
+    if let Some(first_other) = observed.iter().position(|d| !d.symbology.is_qr_family())
         && let Some(late) = observed[first_other..]
             .iter()
-            .position(|(s, _)| s.is_qr_family())
+            .position(|d| d.symbology.is_qr_family())
     {
         found.push(format!(
             "QR-family detection #{} follows non-QR detection #{first_other}",
@@ -245,18 +530,45 @@ fn wire_shape_violations(observed: &[(Symbology, &str)]) -> Vec<String> {
     found
 }
 
-/// The grouping rule every decoder is held to: one group per
-/// (symbology, text) content unit.
-fn duplicate_groups(observed: &[(Symbology, &str)]) -> Vec<String> {
+/// The grouping rule every decoder is held to: no two detections of one
+/// report share an identity — equal text over different bytes is two
+/// contents.
+fn shared_identities(observed: &[Seen]) -> Vec<String> {
     let mut found = Vec::new();
-    for (index, group) in observed.iter().enumerate() {
-        if let Some(first) = observed[..index].iter().position(|g| g == group) {
+    for (index, seen) in observed.iter().enumerate() {
+        if let Some(first) = observed[..index]
+            .iter()
+            .position(|other| same_content(other, seen))
+        {
             found.push(format!(
-                "detection #{index} repeats group #{first} (same symbology and text)"
+                "detection #{index} shares the identity of detection #{first}"
             ));
         }
     }
     found
+}
+
+/// Whether two detections denote the same content: equal symbology, raw
+/// and FNC1 position and compatible ECI (both absent, or one unlocated, or
+/// equal lists). Without bytes on both sides, (symbology, text) is the
+/// only identity there is.
+fn same_content(one: &Seen, other: &Seen) -> bool {
+    if one.symbology != other.symbology {
+        return false;
+    }
+    match (&one.content, &other.content) {
+        (Some(left), Some(right)) => {
+            let compatible = match (&left.eci, &right.eci) {
+                (None, None) => true,
+                (Some(left_eci), Some(right_eci)) => {
+                    left_eci.is_empty() || right_eci.is_empty() || left_eci == right_eci
+                }
+                _ => false,
+            };
+            left.raw == right.raw && left.fnc1 == right.fnc1 && compatible
+        }
+        _ => one.text == other.text,
+    }
 }
 
 // ----------------------------------------------------------- dispositions
@@ -378,15 +690,16 @@ struct DispositionCheck {
 }
 
 /// sha256 over the ordered `symbology<TAB>text_sha256` lines of a report —
-/// the output a `known_wrong` disposition pins.
-fn observed_signature(observed: &[(Symbology, &str)]) -> String {
+/// the output a `known_wrong` disposition pins. The pins name zxing rows,
+/// whose truths are text, so the signature is the text.
+fn observed_signature(observed: &[Seen]) -> String {
     let mut lines = String::new();
-    for (symbology, text) in observed {
+    for seen in observed {
         writeln!(
             lines,
             "{}\t{}",
-            wire(symbology),
-            external::sha256_bytes(text.as_bytes())
+            wire(&seen.symbology),
+            external::sha256_bytes(seen.text.as_bytes())
         )
         .expect("write to string");
     }
@@ -394,26 +707,26 @@ fn observed_signature(observed: &[(Symbology, &str)]) -> String {
 }
 
 /// A truth-incomplete row judged against its truth plus the excused unit,
-/// which may stand in for one observed group. Truth and excused units
-/// only → `ambiguous`; nothing at all → `missed`; any other output keeps
-/// its strict verdict (`extra`, `mixed`, `wrong`).
+/// which may stand in for one detection. Truth and excused units only →
+/// `ambiguous` (whether the truth is met exactly or unread); nothing at
+/// all → `missed`; any other output keeps its strict verdict (`extra`,
+/// `mixed`, `wrong`).
 fn excused_outcome(
-    expected: &[Unit],
-    observed: &[(Symbology, &str)],
+    expected: &[Expected],
+    observed: &[Seen],
     (symbology, text_sha256): (Symbology, &str),
 ) -> Outcome {
     if observed.is_empty() {
         return Outcome::Missed;
     }
     let mut rest = observed.to_vec();
-    if let Some(at) = rest
-        .iter()
-        .position(|(s, t)| *s == symbology && external::sha256_bytes(t.as_bytes()) == text_sha256)
-    {
+    if let Some(at) = rest.iter().position(|seen| {
+        seen.symbology == symbology && external::sha256_bytes(seen.text.as_bytes()) == text_sha256
+    }) {
         rest.remove(at);
     }
-    match judge(expected, &rest) {
-        Outcome::Exact | Outcome::Missed => Outcome::Ambiguous,
+    match judge_detections(expected, &rest) {
+        Outcome::Exact | Outcome::Unread | Outcome::Missed => Outcome::Ambiguous,
         other => other,
     }
 }
@@ -433,16 +746,16 @@ fn settle(
     if disposition.image_sha256 != row.image_sha256 || disposition.truth_sha256 != truth_sha256 {
         return (verdict, DispositionState::Void);
     }
-    let observed = units_of(&row.scan);
+    let observed = detections_of(&row.scan);
     let pinned_verdict = verdict == disposition.verdict;
     let (outcome, holds) = match disposition.kind {
         DispositionKind::KnownWrong { signature } => (
             verdict,
-            pinned_verdict && observed_signature(&observed) == signature,
+            pinned_verdict && observed_signature(observed) == signature,
         ),
         DispositionKind::TruthIncomplete { excused } => {
             let expected = row.expected.as_deref().unwrap_or_default();
-            let outcome = excused_outcome(expected, &observed, excused);
+            let outcome = excused_outcome(expected, observed, excused);
             (outcome, pinned_verdict && outcome == Outcome::Ambiguous)
         }
     };
@@ -525,15 +838,6 @@ impl Set {
     }
 }
 
-/// One detection as observed. The text stays in memory: receipts carry
-/// its sha256 and length only, stdout previews it for public sets only.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Seen {
-    symbology: Symbology,
-    text: String,
-    engines: Vec<EngineKind>,
-}
-
 /// What one scan produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Scan {
@@ -554,15 +858,7 @@ fn scan_bytes(scanner: &Scanner, bytes: &[u8]) -> Scan {
     match caught {
         Ok(Ok(report)) => Scan::Report {
             engine_panics: report.trace.engine_panics,
-            detections: report
-                .detections
-                .into_iter()
-                .map(|d| Seen {
-                    symbology: d.symbology,
-                    text: d.content.text,
-                    engines: d.engines,
-                })
-                .collect(),
+            detections: observations(&report.detections),
         },
         Ok(Err(e)) => Scan::Failed {
             code: e.code(),
@@ -588,7 +884,7 @@ struct Judged {
     /// External manifest pin (the any-based status), for contrast.
     pin: Option<Status>,
     /// `None` unlabelled · empty = negative sample · else the truth.
-    expected: Option<Vec<Unit>>,
+    expected: Option<Vec<Expected>>,
     /// sha256 of the truth's source bytes (`.txt` file or manifest string).
     truth_sha256: Option<String>,
     /// Raw judge verdict (labelled rows), before any disposition.
@@ -616,22 +912,18 @@ struct Verdict {
     wire_info: Vec<String>,
 }
 
-/// The (symbology, text) groups of a scan, in report order — none for a
-/// failed scan.
-fn units_of(scan: &Scan) -> Vec<(Symbology, &str)> {
+/// The detections of a scan, in report order — none for a failed scan.
+fn detections_of(scan: &Scan) -> &[Seen] {
     match scan {
-        Scan::Report { detections, .. } => detections
-            .iter()
-            .map(|d| (d.symbology, d.text.as_str()))
-            .collect(),
-        Scan::Failed { .. } => Vec::new(),
+        Scan::Report { detections, .. } => detections,
+        Scan::Failed { .. } => &[],
     }
 }
 
 /// Judge one scan. `wire_binds` is our own scanner, which owes the whole
 /// grouping contract; an observed decoder owes the grouping rule but not
 /// our wire shape (cap, order), which then lands in `wire_info`.
-fn verdict_of(expected: Option<&[Unit]>, scan: &Scan, wire_binds: bool) -> Verdict {
+fn verdict_of(expected: Option<&[Expected]>, scan: &Scan, wire_binds: bool) -> Verdict {
     if matches!(scan, Scan::Failed { .. }) {
         return Verdict {
             raw: None,
@@ -640,18 +932,15 @@ fn verdict_of(expected: Option<&[Unit]>, scan: &Scan, wire_binds: bool) -> Verdi
             wire_info: Vec::new(),
         };
     }
-    let observed = units_of(scan);
+    let observed = detections_of(scan);
     let (contract, wire_info) = if wire_binds {
-        (contract_violations(&observed), Vec::new())
+        (contract_violations(observed), Vec::new())
     } else {
-        (
-            duplicate_groups(&observed),
-            wire_shape_violations(&observed),
-        )
+        (shared_identities(observed), wire_shape_violations(observed))
     };
     let (raw, outcome) = match expected {
         Some(units) => {
-            let verdict = judge(units, &observed);
+            let verdict = judge_detections(units, observed);
             (Some(verdict), verdict)
         }
         None if observed.is_empty() => (None, Outcome::UnlabelledBlind),
@@ -680,8 +969,7 @@ struct DecoderMeta {
 }
 
 /// One image record of an `--observed` file. Unknown fields are ignored —
-/// `raw_b64` and runner flags ride along for the record; the judge's unit
-/// is (symbology, text).
+/// `raw_b64` and runner flags ride along for the record.
 #[derive(Debug, Deserialize)]
 struct ObservedLine {
     path: String,
@@ -691,10 +979,46 @@ struct ObservedLine {
     error: Option<String>,
 }
 
+/// One decoder output: its text, and, when the decoder reports them, the
+/// payload bytes (`raw_hex`, lowercase) with the wire `charset`, `eci` and
+/// `fnc1` — an output with bytes is judged by identity.
 #[derive(Debug, Deserialize)]
 struct ObservedOutput {
     symbology: Symbology,
     text: String,
+    #[serde(default)]
+    raw_hex: Option<String>,
+    #[serde(default)]
+    charset: Option<Charset>,
+    #[serde(default)]
+    eci: Option<Vec<Eci>>,
+    #[serde(default)]
+    fnc1: Option<Fnc1Position>,
+}
+
+impl ObservedOutput {
+    /// The output as the judge sees it; declarations without bytes are
+    /// refused rather than dropped.
+    fn seen(self) -> Result<Seen, String> {
+        let content = match self.raw_hex {
+            Some(hex) => Some(Content {
+                raw: parse_hex(&hex)?,
+                charset: self.charset,
+                eci: self.eci,
+                fnc1: self.fnc1,
+            }),
+            None if self.charset.is_some() || self.eci.is_some() || self.fnc1.is_some() => {
+                return Err("charset, eci or fnc1 without raw_hex".to_owned());
+            }
+            None => None,
+        };
+        Ok(Seen {
+            symbology: self.symbology,
+            text: self.text,
+            content,
+            engines: Vec::new(),
+        })
+    }
 }
 
 /// One observed image, grouped.
@@ -702,7 +1026,7 @@ struct ObservedOutput {
 struct ObservedImage {
     sha256: String,
     scan: Scan,
-    /// Outputs folded into an earlier identical (symbology, text) group.
+    /// Outputs folded into an earlier identical output.
     merged: usize,
 }
 
@@ -713,26 +1037,49 @@ struct Observed {
     records: BTreeMap<String, ObservedImage>,
 }
 
-/// Group outputs by (symbology, text), first occurrence first: comparator
-/// outputs are content units, so a payload reported twice is one unit.
-fn group_outputs(outputs: Vec<ObservedOutput>) -> (Vec<Seen>, usize) {
+/// Fold identical outputs, first occurrence first: a payload reported twice
+/// is one content. Outputs that differ in any field stay apart (equal text
+/// over other bytes is another content).
+fn group_outputs(outputs: Vec<ObservedOutput>) -> Result<(Vec<Seen>, usize), String> {
     let mut groups: Vec<Seen> = Vec::with_capacity(outputs.len());
     let mut merged = 0;
     for output in outputs {
-        if groups
-            .iter()
-            .any(|g| g.symbology == output.symbology && g.text == output.text)
-        {
+        let seen = output.seen()?;
+        if groups.contains(&seen) {
             merged += 1;
         } else {
-            groups.push(Seen {
-                symbology: output.symbology,
-                text: output.text,
-                engines: Vec::new(),
-            });
+            groups.push(seen);
         }
     }
-    (groups, merged)
+    Ok((groups, merged))
+}
+
+/// Lowercase hex, two digits per byte.
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(out, "{b:02x}").expect("write to string");
+    }
+    out
+}
+
+/// The bytes of a lowercase hex string, two digits per byte.
+fn parse_hex(text: &str) -> Result<Vec<u8>, String> {
+    let digit = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    };
+    let pairs = text.as_bytes().chunks(2);
+    pairs
+        .map(|pair| match pair {
+            [high, low] => digit(*high)
+                .zip(digit(*low))
+                .map(|(high, low)| (high << 4) | low),
+            _ => None,
+        })
+        .collect::<Option<Vec<u8>>>()
+        .ok_or_else(|| "raw_hex must be lowercase hex, two digits per byte".to_owned())
 }
 
 /// Parse an `--observed` JSONL file written by `decoder`: exactly one
@@ -758,7 +1105,8 @@ fn parse_observed(text: &str, decoder: &str) -> Result<Observed, String> {
                 };
                 (failed, 0)
             } else {
-                let (detections, merged) = group_outputs(record.outputs);
+                let (detections, merged) =
+                    group_outputs(record.outputs).map_err(|e| format!("line {n}: {e}"))?;
                 let scan = Scan::Report {
                     detections,
                     engine_panics: 0,
@@ -992,7 +1340,11 @@ fn external_row(
             symbology: Some(symbology),
             text: text.clone(),
         };
-        (Set::Zxing, Some(vec![unit]), Some((*sha256).to_owned()))
+        (
+            Set::Zxing,
+            Some(vec![Expected::from(unit)]),
+            Some((*sha256).to_owned()),
+        )
     } else if row.path.starts_with("qrcode-ai/") {
         (Set::Gallery, None, None)
     } else {
@@ -1021,21 +1373,82 @@ fn external_row(
     })
 }
 
-/// `corpus.toml` → expected set: `expected` is text-only truth; no
+/// `corpus.toml` → expected set: `expected` is the truth's text, and
+/// `raw_hex` (with `eci` and `fnc1`) its bytes and declarations when they
+/// are known — a structural unit; without `raw_hex` a text unit. No
 /// `expected` is a negative sample, unless the entry is a frontier pin
-/// (`expect = "fail"`), which has no truth at all.
-pub(crate) fn vendored_expectation(
-    expected: Option<&str>,
-    expect: Option<&str>,
-) -> Option<Vec<Unit>> {
-    match (expected, expect) {
-        (Some(text), _) => Some(vec![Unit {
-            symbology: None,
-            text: text.to_owned(),
+/// (`expect = "fail"`), which has no truth at all. A byte truth that cannot
+/// stand is refused, never read as a text truth: bytes without a text,
+/// declarations without bytes, hex other than lowercase pairs, an `eci`
+/// list that is empty (a scanner state, never a truth), out of order,
+/// past the bytes or beyond 999999, an `fnc1` other than first or second.
+pub(crate) fn vendored_expectation(entry: &crate::Entry) -> Result<Option<Vec<Expected>>, String> {
+    let identity = match (&entry.raw_hex, entry.expected.is_some()) {
+        (None, _) if entry.eci.is_some() || entry.fnc1.is_some() => {
+            return Err("eci or fnc1 without raw_hex".to_owned());
+        }
+        (None, _) => None,
+        (Some(_), false) => return Err("raw_hex without an expected text".to_owned()),
+        (Some(hex), true) => Some(identity_of(hex, entry.eci.as_deref(), entry.fnc1)?),
+    };
+    Ok(match (entry.expected.as_deref(), entry.expect.as_deref()) {
+        (Some(text), _) => Some(vec![Expected {
+            unit: Unit {
+                symbology: None,
+                text: text.to_owned(),
+            },
+            identity,
         }]),
         (None, Some("fail")) => None,
         (None, _) => Some(Vec::new()),
+    })
+}
+
+/// A byte truth's identity, checked as `spec/01-report.md` § `eci`
+/// states the located list.
+fn identity_of(
+    raw_hex: &str,
+    eci: Option<&[Eci]>,
+    fnc1: Option<Fnc1Position>,
+) -> Result<Identity, String> {
+    let raw = parse_hex(raw_hex)?;
+    if let Some(list) = eci {
+        if list.is_empty() {
+            return Err(
+                "eci = [] is a scanner state (signalled, not located), never a truth".into(),
+            );
+        }
+        let in_order = list.windows(2).all(|pair| pair[0].start <= pair[1].start);
+        let within = list
+            .iter()
+            .all(|e| usize::try_from(e.start).is_ok_and(|start| start <= raw.len()));
+        if !in_order || !within || list.iter().any(|e| e.designator > 999_999) {
+            return Err(
+                "eci entries must be designators 0-999999 with non-decreasing starts within raw"
+                    .into(),
+            );
+        }
     }
+    if fnc1.is_some_and(|f| !matches!(f, Fnc1Position::First | Fnc1Position::Second)) {
+        return Err("fnc1 must be \"first\" or \"second\"".into());
+    }
+    Ok(Identity {
+        raw,
+        eci: eci.map(<[Eci]>::to_vec),
+        fnc1,
+    })
+}
+
+/// Every entry's expected set, in manifest order, or the first broken
+/// truth (named by its path).
+pub(crate) fn vendored_truths(
+    corpus: &crate::Corpus,
+) -> Result<Vec<Option<Vec<Expected>>>, String> {
+    corpus
+        .entry
+        .iter()
+        .map(|entry| vendored_expectation(entry).map_err(|e| format!("{}: {e}", entry.path)))
+        .collect()
 }
 
 /// A vendored fixture read once.
@@ -1050,17 +1463,20 @@ enum VendoredProbe {
     },
 }
 
-/// Judge every `corpus.toml` entry (vendored, always present) from `source`.
+/// Judge every `corpus.toml` entry (vendored, always present) from
+/// `source`, against its expected set from [`vendored_truths`].
 fn evaluate_vendored(
     root: &Path,
     corpus: &crate::Corpus,
+    truths: &[Option<Vec<Expected>>],
     source: Source<'_>,
     integrity: &mut Integrity,
 ) -> Vec<Judged> {
-    let probes: Vec<(&crate::Entry, VendoredProbe)> = corpus
+    let probes: Vec<(&crate::Entry, &Option<Vec<Expected>>, VendoredProbe)> = corpus
         .entry
         .par_iter()
-        .map(|entry| {
+        .zip(truths.par_iter())
+        .map(|(entry, expected)| {
             let probe = match std::fs::read(root.join(&entry.path)) {
                 Err(e) => VendoredProbe::Unreadable(e.to_string()),
                 Ok(bytes) => {
@@ -1075,11 +1491,11 @@ fn evaluate_vendored(
                     }
                 }
             };
-            (entry, probe)
+            (entry, expected, probe)
         })
         .collect();
     let mut rows = Vec::with_capacity(probes.len());
-    for (entry, probe) in probes {
+    for (entry, expected, probe) in probes {
         let (image_sha256, scan, merged) = match probe {
             VendoredProbe::Image {
                 sha256,
@@ -1099,7 +1515,7 @@ fn evaluate_vendored(
             }
         };
         integrity.vendored_read += 1;
-        let expected = vendored_expectation(entry.expected.as_deref(), entry.expect.as_deref());
+        let expected = expected.clone();
         let verdict = verdict_of(expected.as_deref(), &scan, source.is_gate());
         rows.push(Judged {
             set: Set::Vendored,
@@ -1199,7 +1615,7 @@ fn blockers(integrity: &Integrity, rows: &[Judged], checks: &[DispositionCheck])
 
 /// Outcome counts in [`Outcome::ALL`] order.
 #[derive(Debug, Clone, Copy, Default)]
-struct Counts([u32; 12]);
+struct Counts([u32; 13]);
 
 impl Counts {
     fn add(&mut self, outcome: Outcome) {
@@ -1225,7 +1641,7 @@ impl Serialize for Counts {
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 struct Tally {
     images: u32,
-    /// Rows with expected units — the exact-rate denominator.
+    /// Rows with expected units — the exact- and unread-rate denominator.
     truth: u32,
     negatives: u32,
     unlabelled: u32,
@@ -1245,6 +1661,10 @@ impl Tally {
 
     fn exact(&self) -> u32 {
         self.outcomes.get(Outcome::Exact)
+    }
+
+    fn unread(&self) -> u32 {
+        self.outcomes.get(Outcome::Unread)
     }
 }
 
@@ -1311,6 +1731,39 @@ struct Inputs {
     dispositions_sha256: String,
 }
 
+/// The outcome rule of each truth kind, as every receipt states it.
+#[derive(Serialize)]
+struct Rules {
+    /// A unit that knows the symbol's bytes.
+    structural: &'static str,
+    /// A unit that knows only its text.
+    text: &'static str,
+    /// One image, from the best one-to-one matching of units to detections.
+    image: &'static str,
+    /// One report.
+    contract: &'static str,
+}
+
+const RULES: Rules = Rules {
+    structural: "judged by content identity: met exact by a detection with the truth's raw, \
+                 FNC1 position, located ECI list and text, its charset not unknown; met unread by \
+                 one with the truth's raw and FNC1 position whose ECI use was signalled but not \
+                 located (eci []), or whose charset is unknown with the truth's declarations or \
+                 none observed; any other detection does not meet it (equal text over other bytes \
+                 is another content). A detection that carries no bytes is held to the text rule",
+    text: "judged by text: met exact by a detection with the truth's text, its charset not \
+           unknown; met unread by a detection whose charset is unknown; any other detection does \
+           not meet it",
+    image: "one detection per unit, most exact meets first: exact = every unit met exact and \
+            nothing else; unread = every unit met, one or more unread, nothing else (its own \
+            rate, never blocking); extra = every unit met plus other output; partial = some units \
+            met, nothing else; mixed = some met plus other output; wrong = output, no unit met; \
+            missed = no output",
+    contract: "at most 16 detections, QR family first, and no two detections denote the same \
+               content: same symbology, raw and FNC1 position and compatible ECI (both absent, \
+               or one [] or equal lists); detections without bytes compare by (symbology, text)",
+};
+
 #[derive(Serialize)]
 struct SetReceipt {
     set: &'static str,
@@ -1318,6 +1771,8 @@ struct SetReceipt {
     tally: Tally,
     /// Wilson 95% interval of exact / truth.
     exact_wilson95: Option<[String; 2]>,
+    /// Wilson 95% interval of unread / truth.
+    unread_wilson95: Option<[String; 2]>,
 }
 
 #[derive(Serialize)]
@@ -1340,8 +1795,27 @@ struct DispositionReceipt {
 #[derive(Serialize)]
 struct UnitReceipt {
     symbology: Option<Symbology>,
+    /// `structural` (bytes known: judged by identity) · `text`.
+    kind: &'static str,
     text_sha256: String,
     text_len: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_len: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eci: Option<Vec<Eci>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fnc1: Option<String>,
+    /// The detection that met this unit under the raw verdict, and how;
+    /// `null` = not met.
+    met: Option<MetReceipt>,
+}
+
+#[derive(Serialize)]
+struct MetReceipt {
+    detection: usize,
+    how: &'static str,
 }
 
 #[derive(Serialize)]
@@ -1349,6 +1823,16 @@ struct DetectionReceipt {
     symbology: Symbology,
     text_sha256: String,
     text_len: usize,
+    /// `null` for a decoder that reports text only.
+    raw_sha256: Option<String>,
+    raw_len: Option<usize>,
+    charset: Option<String>,
+    /// As the report states it: absent = no designator observed, `[]` =
+    /// signalled, not located.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eci: Option<Vec<Eci>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fnc1: Option<String>,
     engines: Vec<EngineKind>,
 }
 
@@ -1429,6 +1913,8 @@ fn source_identity(repo: &Path) -> SourceEcho {
 #[derive(Serialize)]
 struct Receipt {
     oracle: &'static str,
+    /// The outcome rule per truth kind under [`RULES_ID`].
+    rules: Rules,
     status: &'static str,
     exit_code: i32,
     reason: Option<&'static str>,
@@ -1455,39 +1941,64 @@ fn text_hash(text: &str) -> (String, usize) {
     (external::sha256_bytes(text.as_bytes()), text.len())
 }
 
+fn detection_receipt(seen: &Seen) -> DetectionReceipt {
+    let (text_sha256, text_len) = text_hash(&seen.text);
+    let content = seen.content.as_ref();
+    DetectionReceipt {
+        symbology: seen.symbology,
+        text_sha256,
+        text_len,
+        raw_sha256: content.map(|c| external::sha256_bytes(&c.raw)),
+        raw_len: content.map(|c| c.raw.len()),
+        charset: content.and_then(|c| c.charset).map(|c| wire(&c)),
+        eci: content.and_then(|c| c.eci.clone()),
+        fnc1: content.and_then(|c| c.fnc1).map(|f| wire(&f)),
+        engines: seen.engines.clone(),
+    }
+}
+
+fn unit_receipt(expected: &Expected, met: Met) -> UnitReceipt {
+    let (text_sha256, text_len) = text_hash(&expected.unit.text);
+    let identity = expected.identity.as_ref();
+    UnitReceipt {
+        symbology: expected.unit.symbology,
+        kind: if identity.is_some() {
+            "structural"
+        } else {
+            "text"
+        },
+        text_sha256,
+        text_len,
+        raw_sha256: identity.map(|i| external::sha256_bytes(&i.raw)),
+        raw_len: identity.map(|i| i.raw.len()),
+        eci: identity.and_then(|i| i.eci.clone()),
+        fnc1: identity.and_then(|i| i.fnc1).map(|f| wire(&f)),
+        met: met.map(|(detection, how)| MetReceipt {
+            detection,
+            how: how.as_str(),
+        }),
+    }
+}
+
 fn row_receipt(row: &Judged) -> RowReceipt {
     let (detections, engine_panics, error) = match &row.scan {
         Scan::Report {
             detections,
             engine_panics,
-        } => {
-            let detections = detections
-                .iter()
-                .map(|d| {
-                    let (text_sha256, text_len) = text_hash(&d.text);
-                    DetectionReceipt {
-                        symbology: d.symbology,
-                        text_sha256,
-                        text_len,
-                        engines: d.engines.clone(),
-                    }
-                })
-                .collect();
-            (detections, *engine_panics, None)
-        }
+        } => (
+            detections.iter().map(detection_receipt).collect(),
+            *engine_panics,
+            None,
+        ),
         Scan::Failed { code, .. } => (Vec::new(), 0, Some(*code)),
     };
     let expected = row.expected.as_ref().map(|units| {
+        // one entry per unit (none for a negative sample)
+        let (_, met) = judgment(units, detections_of(&row.scan));
         units
             .iter()
-            .map(|unit| {
-                let (text_sha256, text_len) = text_hash(&unit.text);
-                UnitReceipt {
-                    symbology: unit.symbology,
-                    text_sha256,
-                    text_len,
-                }
-            })
+            .zip(met)
+            .map(|(unit, met)| unit_receipt(unit, met))
             .collect()
     });
     RowReceipt {
@@ -1535,6 +2046,28 @@ struct EmittedMeta {
 struct EmittedOutput<'a> {
     symbology: Symbology,
     text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_hex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    charset: Option<Charset>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eci: Option<&'a [Eci]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fnc1: Option<Fnc1Position>,
+}
+
+impl<'a> EmittedOutput<'a> {
+    fn of(seen: &'a Seen) -> Self {
+        let content = seen.content.as_ref();
+        Self {
+            symbology: seen.symbology,
+            text: &seen.text,
+            raw_hex: content.map(|c| hex(&c.raw)),
+            charset: content.and_then(|c| c.charset),
+            eci: content.and_then(|c| c.eci.as_deref()),
+            fnc1: content.and_then(|c| c.fnc1),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -1547,8 +2080,8 @@ struct EmittedRecord<'a> {
 }
 
 /// Our own judged scans in the `--observed` JSONL shape, so they can be
-/// re-judged through the comparator path. The file holds decoded TEXT —
-/// private gallery payloads included — and must stay local.
+/// re-judged through the comparator path. The file holds decoded TEXT and
+/// bytes — private gallery payloads included — and must stay local.
 fn observed_jsonl(rows: &[Judged]) -> Result<String, String> {
     let versions = Versions::current();
     let meta = EmittedMeta {
@@ -1561,14 +2094,7 @@ fn observed_jsonl(rows: &[Judged]) -> Result<String, String> {
     for row in rows {
         let (outputs, error) = match &row.scan {
             Scan::Report { detections, .. } => {
-                let outputs = detections
-                    .iter()
-                    .map(|d| EmittedOutput {
-                        symbology: d.symbology,
-                        text: &d.text,
-                    })
-                    .collect();
-                (outputs, None)
+                (detections.iter().map(EmittedOutput::of).collect(), None)
             }
             Scan::Failed { code, detail } => (Vec::new(), Some(format!("{code}: {detail}"))),
         };
@@ -1633,9 +2159,11 @@ fn print_sets(sets: &BTreeMap<Set, Tally>, integrity: &Integrity) {
         let name = set.as_str();
         let mut line = format!("{name:<9} {} images", tally.images);
         if tally.truth > 0 {
-            write!(line, " · exact {}/{}", tally.exact(), tally.truth).expect("write to string");
-            if let Some([low, high]) = wilson95(tally.exact(), tally.truth) {
-                write!(line, " (Wilson 95% {low}–{high})").expect("write to string");
+            for (label, k) in [("exact", tally.exact()), ("unread", tally.unread())] {
+                write!(line, " · {label} {k}/{}", tally.truth).expect("write to string");
+                if let Some([low, high]) = wilson95(k, tally.truth) {
+                    write!(line, " (Wilson 95% {low}–{high})").expect("write to string");
+                }
             }
         }
         if tally.negatives > 0 {
@@ -1644,7 +2172,11 @@ fn print_sets(sets: &BTreeMap<Set, Tally>, integrity: &Integrity) {
         }
         for outcome in Outcome::ALL {
             let n = tally.outcomes.get(outcome);
-            if n > 0 && !matches!(outcome, Outcome::Exact | Outcome::NegativeHeld) {
+            let rated = matches!(
+                outcome,
+                Outcome::Exact | Outcome::Unread | Outcome::NegativeHeld
+            );
+            if n > 0 && !rated {
                 write!(line, " · {} {n}", outcome.as_str()).expect("write to string");
             }
         }
@@ -1682,6 +2214,37 @@ fn print_dispositions(checks: &[DispositionCheck]) {
     }
 }
 
+/// ` raw a1 (1 B) · eci · eci [4@0] · fnc1 first` — the bytes (hex, the
+/// first 24), charset and declarations of a PUBLIC unit or detection.
+fn content_note(
+    raw: &[u8],
+    charset: Option<Charset>,
+    eci: Option<&[Eci]>,
+    fnc1: Option<Fnc1Position>,
+) -> String {
+    const MAX_BYTES: usize = 24;
+    let cut = if raw.len() > MAX_BYTES { "…" } else { "" };
+    let mut note = format!(
+        " raw {}{cut} ({} B)",
+        hex(&raw[..raw.len().min(MAX_BYTES)]),
+        raw.len()
+    );
+    if let Some(charset) = charset {
+        write!(note, " · {}", wire(&charset)).expect("write to string");
+    }
+    if let Some(eci) = eci {
+        let list: Vec<String> = eci
+            .iter()
+            .map(|e| format!("{}@{}", e.designator, e.start))
+            .collect();
+        write!(note, " · eci [{}]", list.join(", ")).expect("write to string");
+    }
+    if let Some(fnc1) = fnc1 {
+        write!(note, " · fnc1 {}", wire(&fnc1)).expect("write to string");
+    }
+    note
+}
+
 /// Labelled rows that are not `exact`/`negative_held`, with escaped
 /// previews — public sets only, never the gallery.
 fn print_labelled_misses(rows: &[Judged]) {
@@ -1705,16 +2268,27 @@ fn print_labelled_misses(rows: &[Judged]) {
         match &row.scan {
             Scan::Failed { code, detail } => println!("{:17}{code}: {detail}", ""),
             Scan::Report { detections, .. } if !detections.is_empty() => {
-                for unit in row.expected.iter().flatten() {
-                    let symbology = unit
+                for expected in row.expected.iter().flatten() {
+                    let symbology = expected
+                        .unit
                         .symbology
                         .map_or_else(|| "any".to_owned(), |s| wire(&s));
-                    println!("{:17}expected {symbology} {}", "", preview(&unit.text));
+                    let bytes = expected.identity.as_ref().map_or_else(String::new, |i| {
+                        content_note(&i.raw, None, i.eci.as_deref(), i.fnc1)
+                    });
+                    println!(
+                        "{:17}expected {symbology} {}{bytes}",
+                        "",
+                        preview(&expected.unit.text)
+                    );
                 }
                 for d in detections {
                     let engines: Vec<String> = d.engines.iter().map(wire).collect();
+                    let bytes = d.content.as_ref().map_or_else(String::new, |c| {
+                        content_note(&c.raw, c.charset, c.eci.as_deref(), c.fnc1)
+                    });
                     println!(
-                        "{:17}observed {} {} ({})",
+                        "{:17}observed {} {}{bytes} ({})",
                         "",
                         wire(&d.symbology),
                         preview(&d.text),
@@ -1818,6 +2392,7 @@ fn new_receipt(
 ) -> Receipt {
     Receipt {
         oracle: RULES_ID,
+        rules: RULES,
         status: "skipped",
         exit_code: 3,
         reason: Some("no external corpus at the default root"),
@@ -1889,6 +2464,7 @@ fn fill_receipt(
             set: set.as_str(),
             tally,
             exact_wilson95: wilson95(tally.exact(), tally.truth),
+            unread_wilson95: wilson95(tally.unread(), tally.truth),
         })
         .collect();
     receipt.groups = groups
@@ -1969,6 +2545,10 @@ pub(crate) fn run(args: Vec<String>) {
         eprintln!("oracle: {VENDORED}: {e}");
         std::process::exit(2);
     });
+    let truths = vendored_truths(&corpus).unwrap_or_else(|e| {
+        eprintln!("oracle: {VENDORED}: {e}");
+        std::process::exit(2);
+    });
     let observed = args
         .observed
         .as_deref()
@@ -2011,7 +2591,13 @@ pub(crate) fn run(args: Vec<String>) {
         .map_or(Source::Scan(&scanner), Source::Observed);
     let mut rows = evaluate_external(&dir, &pinned, source, &mut integrity);
     let checks = apply_dispositions(&mut rows, source.is_gate());
-    rows.extend(evaluate_vendored(&root, &corpus, source, &mut integrity));
+    rows.extend(evaluate_vendored(
+        &root,
+        &corpus,
+        &truths,
+        source,
+        &mut integrity,
+    ));
     if let Some(observed) = &observed {
         let unknown = unknown_observed_paths(observed, &pinned, &corpus);
         integrity.problems.extend(unknown);
@@ -2030,7 +2616,10 @@ pub(crate) fn run(args: Vec<String>) {
             eprintln!("oracle: cannot write the observed file: {e}");
             std::process::exit(2);
         }
-        println!("observed (decoded text — keep local): {}", path.display());
+        println!(
+            "observed (decoded text and bytes — keep local): {}",
+            path.display()
+        );
     }
     let (groups, sets) = tallies(&rows);
     print_groups(&groups);
@@ -2060,18 +2649,50 @@ mod tests {
         }
     }
 
+    /// A report of plain QR detections (UTF-8 bytes, nothing declared).
     fn report(observed: &[&str]) -> Scan {
         Scan::Report {
-            detections: observed
-                .iter()
-                .map(|text| Seen {
-                    symbology: QrCode,
-                    text: (*text).to_owned(),
-                    engines: vec![EngineKind::Rqrr],
-                })
-                .collect(),
+            detections: observed.iter().map(|text| plain(QrCode, text)).collect(),
             engine_panics: 0,
         }
+    }
+
+    fn eci(list: &[(u32, u32)]) -> Vec<Eci> {
+        list.iter()
+            .map(|&(designator, start)| Eci { designator, start })
+            .collect()
+    }
+
+    /// A QR detection with explicit bytes, label and declarations.
+    fn read(text: &str, raw: &[u8], charset: Charset, declared: Option<&[(u32, u32)]>) -> Seen {
+        Seen {
+            symbology: QrCode,
+            text: text.to_owned(),
+            content: Some(Content {
+                raw: raw.to_vec(),
+                charset: Some(charset),
+                eci: declared.map(eci),
+                fnc1: None,
+            }),
+            engines: vec![EngineKind::Rqrr],
+        }
+    }
+
+    /// A structural QR unit: text, bytes and located declarations.
+    fn structural(text: &str, raw: &[u8], declared: Option<&[(u32, u32)]>) -> Expected {
+        Expected {
+            unit: qr(text),
+            identity: Some(Identity {
+                raw: raw.to_vec(),
+                eci: declared.map(eci),
+                fnc1: None,
+            }),
+        }
+    }
+
+    /// A text QR unit.
+    fn text_unit(text: &str) -> Expected {
+        Expected::from(qr(text))
     }
 
     /// Public payloads of the two disposition rows (zxing blackbox suite
@@ -2089,7 +2710,7 @@ mod tests {
     /// A zxing-shaped row for `disposition`'s path and pinned hashes, judged
     /// as our own scan.
     fn zxing_row(disposition: &Disposition, truth: &str, observed: &[&str]) -> Judged {
-        let expected = vec![qr(truth)];
+        let expected = vec![text_unit(truth)];
         let scan = report(observed);
         let verdict = verdict_of(Some(expected.as_slice()), &scan, true);
         Judged {
@@ -2208,6 +2829,8 @@ mod tests {
         assert_eq!(judge(&[], &[(QrCode, "W")]), Outcome::FalsePositive);
     }
 
+    /// `unread` joins the vocabulary beside `wrong` and `missed`, outside
+    /// the blocking class: its own rate.
     #[test]
     fn outcome_vocabulary_and_blocking_class_are_pinned() {
         let names: Vec<&str> = Outcome::ALL.into_iter().map(Outcome::as_str).collect();
@@ -2219,6 +2842,7 @@ mod tests {
                 "partial",
                 "mixed",
                 "wrong",
+                "unread",
                 "missed",
                 "negative_held",
                 "false_positive",
@@ -2242,9 +2866,9 @@ mod tests {
         assert_eq!(blocking, ["extra", "mixed", "wrong", "false_positive"]);
     }
 
-    /// Every receipt names the rules it was judged under; v1 receipts
-    /// (before pinned excuses and one-to-one text-only units) must never
-    /// read as comparable to v1.1 ones.
+    /// Every receipt names the rules it was judged under — v1.1 receipts
+    /// (text units only, no `unread`) must never read as comparable to v2
+    /// ones — and states the outcome rule of each truth kind.
     #[test]
     fn receipts_carry_the_rules_id() {
         let source = SourceEcho {
@@ -2253,32 +2877,57 @@ mod tests {
         };
         let receipt = new_receipt(source, "manifest", "vendored", Integrity::default());
         let json = serde_json::to_value(&receipt).expect("receipt serialises");
-        assert_eq!(json["oracle"], "qrscan-oracle/v1.1");
+        assert_eq!(json["oracle"], "qrscan-oracle/v2");
+        let rules = json["rules"].as_object().expect("a rules object");
+        let mut kinds: Vec<&str> = rules.keys().map(String::as_str).collect();
+        kinds.sort_unstable();
+        assert_eq!(kinds, ["contract", "image", "structural", "text"]);
+        assert!(
+            rules
+                .values()
+                .all(|rule| rule.as_str().is_some_and(|r| r.len() > 40)),
+            "{rules:?}"
+        );
     }
 
+    /// Plain QR detections (UTF-8 bytes, nothing declared).
+    fn plains(observed: &[(Symbology, &str)]) -> Vec<Seen> {
+        observed
+            .iter()
+            .map(|(symbology, text)| plain(*symbology, text))
+            .collect()
+    }
+
+    /// Kept from v1.1 with the identity rule in place of (symbology, text):
+    /// two identical detections still share an identity.
     #[test]
     fn contract_checks_flag_cap_order_and_duplicates() {
         let texts: Vec<String> = (0..17).map(|i| format!("payload-{i}")).collect();
-        let seventeen: Vec<(Symbology, &str)> =
-            texts.iter().map(|text| (QrCode, text.as_str())).collect();
+        let seventeen: Vec<Seen> = texts.iter().map(|text| plain(QrCode, text)).collect();
         let found = contract_violations(&seventeen);
         assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0].contains("17 detection groups"), "{found:?}");
+        assert!(found[0].contains("17 detections"), "{found:?}");
         assert!(
             contract_violations(&seventeen[..16]).is_empty(),
             "16 is the cap, not a violation"
         );
 
-        let found = contract_violations(&[(Ean13, "1"), (QrCode, "2")]);
+        let found = contract_violations(&plains(&[(Ean13, "1"), (QrCode, "2")]));
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(found[0].contains("QR-family detection #1"), "{found:?}");
-        assert!(contract_violations(&[(QrCode, "2"), (MicroQrCode, "3"), (Ean13, "1")]).is_empty());
+        assert!(
+            contract_violations(&plains(&[(QrCode, "2"), (MicroQrCode, "3"), (Ean13, "1")]))
+                .is_empty()
+        );
 
-        let found = contract_violations(&[(QrCode, "A"), (QrCode, "A")]);
+        let found = contract_violations(&plains(&[(QrCode, "A"), (QrCode, "A")]));
         assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0].contains("repeats group #0"), "{found:?}");
-        // an EAN-13 and a QR carrying the same digits are two groups
-        assert!(contract_violations(&[(QrCode, "1"), (Ean13, "1")]).is_empty());
+        assert!(
+            found[0].contains("shares the identity of detection #0"),
+            "{found:?}"
+        );
+        // an EAN-13 and a QR carrying the same digits are two contents
+        assert!(contract_violations(&plains(&[(QrCode, "1"), (Ean13, "1")])).is_empty());
         // messages carry indices, never payload text
         assert!(found.iter().all(|m| !m.contains("\"A\"")));
     }
@@ -2326,7 +2975,7 @@ mod tests {
         let DispositionKind::KnownWrong { signature } = known_wrong.kind else {
             panic!("13 is known_wrong");
         };
-        assert_eq!(observed_signature(&[(QrCode, MISREAD_13)]), signature);
+        assert_eq!(observed_signature(&[plain(QrCode, MISREAD_13)]), signature);
         let DispositionKind::TruthIncomplete { excused } = double_qr.kind else {
             panic!("16 is truth_incomplete");
         };
@@ -2868,13 +3517,23 @@ mod tests {
             .expect("receipt rows serialise");
         assert!(!json.contains(PAYLOAD), "payload text leaked: {json}");
         assert!(!json.contains("second"), "payload text leaked: {json}");
+        // the bytes travel as sha256 + length too, never as hex
+        assert!(
+            !json.contains(&hex(PAYLOAD.as_bytes())),
+            "payload bytes leaked"
+        );
         let (sha256, len) = text_hash(PAYLOAD);
         assert!(json.contains(&sha256) && json.contains(&format!("\"text_len\":{len}")));
+        assert!(json.contains(&format!("\"raw_len\":{len}")), "{json}");
         let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
         let mut keys = Vec::new();
         collect_keys(&value, &mut keys);
-        assert!(!keys.iter().any(|key| key == "text"), "{keys:?}");
-        assert!(keys.iter().any(|key| key == "text_sha256"), "{keys:?}");
+        for leak in ["text", "raw", "raw_hex"] {
+            assert!(!keys.iter().any(|key| key == leak), "{keys:?}");
+        }
+        for hashed in ["text_sha256", "raw_sha256"] {
+            assert!(keys.iter().any(|key| key == hashed), "{keys:?}");
+        }
     }
 
     #[test]
@@ -2886,24 +3545,101 @@ mod tests {
         assert_eq!(wilson95(0, 0), None);
     }
 
+    fn entry(expected: Option<&str>, expect: Option<&str>) -> crate::Entry {
+        crate::Entry {
+            path: String::from("fixtures/x.png"),
+            category: String::from("clean"),
+            expected: expected.map(str::to_owned),
+            expect: expect.map(str::to_owned),
+            raw_hex: None,
+            eci: None,
+            fnc1: None,
+        }
+    }
+
+    /// Kept from v1.1 (text, negative, frontier) on the entry itself.
     #[test]
     fn vendored_entries_map_to_expected_sets() {
         let text = |t: &str| {
-            Some(vec![Unit {
+            Ok(Some(vec![Expected::from(Unit {
                 symbology: None,
                 text: t.to_owned(),
-            }])
+            })]))
         };
-        assert_eq!(vendored_expectation(Some("T"), None), text("T"));
+        assert_eq!(vendored_expectation(&entry(Some("T"), None)), text("T"));
         assert_eq!(
-            vendored_expectation(None, None),
-            Some(Vec::new()),
+            vendored_expectation(&entry(None, None)),
+            Ok(Some(Vec::new())),
             "negative"
         );
-        assert_eq!(vendored_expectation(None, Some("pass")), Some(Vec::new()));
-        assert_eq!(vendored_expectation(None, Some("fail")), None, "frontier");
+        assert_eq!(
+            vendored_expectation(&entry(None, Some("pass"))),
+            Ok(Some(Vec::new()))
+        );
+        assert_eq!(
+            vendored_expectation(&entry(None, Some("fail"))),
+            Ok(None),
+            "frontier"
+        );
         // a frontier pin WITH truth is judged against it
-        assert_eq!(vendored_expectation(Some("T"), Some("fail")), text("T"));
+        assert_eq!(
+            vendored_expectation(&entry(Some("T"), Some("fail"))),
+            text("T")
+        );
+    }
+
+    /// `raw_hex` (with `eci`, `fnc1`) makes the unit structural; a broken
+    /// byte truth is refused, never read as a text truth.
+    #[test]
+    fn vendored_byte_truths_are_structural_or_refused() {
+        let mut declared = entry(Some("\u{104}"), None);
+        declared.raw_hex = Some(String::from("a1"));
+        declared.eci = Some(eci(&[(4, 0)]));
+        declared.fnc1 = Some(Fnc1Position::First);
+        assert_eq!(
+            vendored_expectation(&declared),
+            Ok(Some(vec![Expected {
+                unit: Unit {
+                    symbology: None,
+                    text: String::from("\u{104}"),
+                },
+                identity: Some(Identity {
+                    raw: vec![0xA1],
+                    eci: Some(eci(&[(4, 0)])),
+                    fnc1: Some(Fnc1Position::First),
+                }),
+            }]))
+        );
+        let broken = [
+            ("A1", None, None, Some("A")),                // uppercase hex
+            ("a", None, None, Some("A")),                 // odd length
+            ("4g", None, None, Some("A")),                // not hex
+            ("41", Some(&[][..]), None, Some("A")),       // eci [] is a scanner state
+            ("41", Some(&[(4, 2)][..]), None, Some("A")), // start past the bytes
+            ("4142", Some(&[(4, 1), (26, 0)][..]), None, Some("AB")), // starts decrease
+            ("41", Some(&[(1_000_000, 0)][..]), None, Some("A")), // beyond 999999
+            ("41", None, Some(Fnc1Position::Unrecognized), Some("A")), // fnc1 typo
+            ("41", None, None, None),                     // bytes without a text
+        ];
+        for (raw_hex, declared, fnc1, expected) in broken {
+            let mut bad = entry(expected, None);
+            bad.raw_hex = Some(raw_hex.to_owned());
+            bad.eci = declared.map(eci);
+            bad.fnc1 = fnc1;
+            assert!(
+                vendored_expectation(&bad).is_err(),
+                "{raw_hex} {declared:?} {fnc1:?}"
+            );
+        }
+        // declarations without bytes
+        let mut orphan = entry(Some("A"), None);
+        orphan.fnc1 = Some(Fnc1Position::Second);
+        assert!(vendored_expectation(&orphan).is_err());
+        let corpus = crate::Corpus {
+            entry: vec![entry(Some("A"), None), orphan],
+        };
+        let refused = vendored_truths(&corpus).expect_err("a broken truth");
+        assert!(refused.starts_with("fixtures/x.png: "), "{refused}");
     }
 
     #[test]
@@ -3039,17 +3775,66 @@ mod tests {
             .map(|d| (d.symbology, d.text.as_str()))
             .collect();
         assert_eq!(units, [(QrCode, "B"), (MicroQrCode, "B")]);
+        assert!(detections.iter().all(|d| d.content.is_none()), "text only");
         assert!(matches!(
             &observed.records["fixtures/clean/c.png"].scan,
             Scan::Failed { code: "decoder_error", detail } if detail == "boom"
         ));
     }
 
+    /// An output with `raw_hex` carries its bytes and declarations; equal
+    /// text over other bytes is another content, an identical output folds.
+    #[test]
+    fn observed_outputs_with_bytes_group_by_identity() {
+        let output = |raw_hex: &str| {
+            serde_json::json!({"symbology": "qr_code", "text": "\u{FFFD}", "raw_hex": raw_hex,
+                               "charset": "unknown", "eci": [], "fnc1": "second"})
+        };
+        let line = serde_json::json!({"path": "a.png", "sha256": "aa",
+                                      "outputs": [output("a1"), output("c3a9"), output("a1")]});
+        let text = observed_file("probe", &[line.to_string()]);
+        let observed = parse_observed(&text, "probe").expect("parses");
+        let image = &observed.records["a.png"];
+        assert_eq!(image.merged, 1);
+        let detections = detections_of(&image.scan);
+        assert_eq!(detections.len(), 2, "{detections:?}");
+        assert_eq!(
+            detections[0].content,
+            Some(Content {
+                raw: vec![0xA1],
+                charset: Some(Charset::Unknown),
+                eci: Some(Vec::new()),
+                fnc1: Some(Fnc1Position::Second),
+            })
+        );
+        assert_eq!(
+            detections[1].content.as_ref().map(|c| c.raw.clone()),
+            Some(vec![0xC3, 0xA9])
+        );
+    }
+
     #[test]
     fn malformed_observed_files_are_refused() {
         let ok = record("a.png", "aa", &[]);
         let bad_symbology = record("a.png", "aa", &[("qr_kode", "A")]);
+        let output = |extra: serde_json::Value| {
+            let mut output = serde_json::json!({"symbology": "qr_code", "text": "A"});
+            if let (Some(map), serde_json::Value::Object(extra)) = (output.as_object_mut(), extra) {
+                map.extend(extra);
+            }
+            serde_json::json!({"path": "a.png", "sha256": "aa", "outputs": [output]}).to_string()
+        };
+        let bad_hex = output(serde_json::json!({"raw_hex": "4"}));
+        let orphan = output(serde_json::json!({"eci": [{"designator": 26, "start": 0}]}));
         for (text, why) in [
+            (
+                observed_file("zxing-cpp", &[bad_hex]),
+                "raw_hex not hex pairs",
+            ),
+            (
+                observed_file("zxing-cpp", &[orphan]),
+                "declarations without raw_hex",
+            ),
             (format!("{ok}\n"), "no metadata line"),
             (
                 observed_file("zbar", std::slice::from_ref(&ok)),
@@ -3118,24 +3903,16 @@ mod tests {
     #[test]
     fn wire_shape_is_information_for_observed_decoders() {
         let texts: Vec<String> = (0..17).map(|i| format!("p{i}")).collect();
-        let mut detections: Vec<Seen> = texts
-            .iter()
-            .map(|text| Seen {
-                symbology: QrCode,
-                text: text.clone(),
-                engines: Vec::new(),
-            })
-            .collect();
-        detections.insert(
-            0,
-            Seen {
-                symbology: Ean13,
-                text: String::from("1"),
-                engines: Vec::new(),
-            },
-        );
+        let text_only = |symbology: Symbology, text: &str| Seen {
+            symbology,
+            text: text.to_owned(),
+            content: None,
+            engines: Vec::new(),
+        };
+        let mut detections: Vec<Seen> = texts.iter().map(|text| text_only(QrCode, text)).collect();
+        detections.insert(0, text_only(Ean13, "1"));
         let scan = Scan::Report {
-            detections,
+            detections: detections.clone(),
             engine_panics: 0,
         };
         let observed = verdict_of(None, &scan, false);
@@ -3143,12 +3920,9 @@ mod tests {
         assert_eq!(observed.wire_info.len(), 2, "{:?}", observed.wire_info);
         let ours = verdict_of(None, &scan, true);
         assert!(ours.wire_info.is_empty());
-        let units: Vec<(Symbology, &str)> = std::iter::once((Ean13, "1"))
-            .chain(texts.iter().map(|t| (QrCode, t.as_str())))
-            .collect();
         assert_eq!(
             ours.contract,
-            contract_violations(&units),
+            contract_violations(&detections),
             "our scan keeps the full contract, in the usual order"
         );
         let duplicated = report(&["x", "x"]);
@@ -3156,8 +3930,9 @@ mod tests {
     }
 
     /// Our own judged scans, emitted and parsed back, give the same
-    /// content units and verdicts — the self-consistency the comparator
-    /// path rests on. The emitted receipt fields stay hash-only.
+    /// detections (text, bytes, declarations) and verdicts — the
+    /// self-consistency the comparator path rests on. The emitted receipt
+    /// fields stay hash-only.
     #[test]
     fn emitted_observations_rejudge_identically() {
         let [known_wrong, double_qr] = DISPOSITIONS;
@@ -3167,28 +3942,45 @@ mod tests {
             code: "QRS-001",
             detail: String::from("corrupt"),
         };
+        let mut declared = zxing_row(&known_wrong, "\u{104}", &[]);
+        declared.path = String::from("fixtures/clean/declared.png");
+        declared.expected = Some(vec![structural("\u{104}", &[0xA1], Some(&[(4, 0)]))]);
+        let mut signalled = read("\u{FFFD}", &[0xA1], Charset::Unknown, Some(&[]));
+        if let Some(content) = signalled.content.as_mut() {
+            content.fnc1 = Some(Fnc1Position::First);
+        }
+        declared.scan = Scan::Report {
+            detections: vec![
+                read("\u{104}", &[0xA1], Charset::Eci, Some(&[(4, 0)])),
+                signalled,
+            ],
+            engine_panics: 0,
+        };
+        let verdict = verdict_of(declared.expected.as_deref(), &declared.scan, true);
+        declared.verdict = verdict.raw;
         let rows = vec![
             zxing_row(&known_wrong, "photograph", &["photography"]),
             zxing_row(&double_qr, "outer", &["inner", "outer"]),
+            declared,
             errored,
         ];
         let text = observed_jsonl(&rows).expect("emits");
         assert_eq!(text.lines().count(), 1 + rows.len());
         let observed = parse_observed(&text, OUR_DECODER).expect("parses back");
-        for row in &rows[..2] {
+        for row in &rows[..3] {
             let image = &observed.records[&row.path];
             assert_eq!(image.sha256, row.image_sha256);
             let again = verdict_of(row.expected.as_deref(), &image.scan, false);
             assert_eq!(again.raw, row.verdict, "{}", row.path);
-            let (Scan::Report { detections: a, .. }, Scan::Report { detections: b, .. }) =
-                (&image.scan, &row.scan)
-            else {
-                panic!("reports");
+            let units = |d: &[Seen]| -> Vec<(Symbology, String, Option<Content>)> {
+                d.iter()
+                    .map(|s| (s.symbology, s.text.clone(), s.content.clone()))
+                    .collect()
             };
-            let units = |d: &[Seen]| -> Vec<(Symbology, String)> {
-                d.iter().map(|s| (s.symbology, s.text.clone())).collect()
-            };
-            assert_eq!(units(a), units(b));
+            assert_eq!(
+                units(detections_of(&image.scan)),
+                units(detections_of(&row.scan))
+            );
         }
         assert!(matches!(
             &observed.records["fixtures/clean/broken.png"].scan,
@@ -3201,5 +3993,337 @@ mod tests {
             .expect("serialises");
         assert_eq!(json.matches("merged_duplicates").count(), 1, "{json}");
         assert!(!json.contains("photography"), "{json}");
+    }
+
+    // ------------------------------------------------- identity and unread
+
+    /// The ECI 4 'Ą' truth (raw A1, eci [4@0]): read located [4@0] it is
+    /// exact; signalled (eci []), unread; with no designator observed and
+    /// read '¡' as latin1, wrong; 'Ą' over its UTF-8 bytes C4 84 meets
+    /// nothing — equal text is not an identity; located as ECI 3 ('¡',
+    /// latin1), wrong.
+    #[test]
+    fn an_eci4_truth_is_judged_by_identity() {
+        let truth = [structural("\u{104}", &[0xA1], Some(&[(4, 0)]))];
+        let verdict = |seen: Seen| judge_detections(&truth, &[seen]);
+        let located = read("\u{104}", &[0xA1], Charset::Eci, Some(&[(4, 0)]));
+        assert_eq!(verdict(located), Outcome::Exact);
+        let signalled = read("\u{FFFD}", &[0xA1], Charset::Unknown, Some(&[]));
+        assert_eq!(verdict(signalled), Outcome::Unread);
+        let absent = read("\u{A1}", &[0xA1], Charset::Latin1, None);
+        assert_eq!(verdict(absent), Outcome::Wrong);
+        let utf8 = read("\u{104}", &[0xC4, 0x84], Charset::Utf8, None);
+        assert_eq!(meet(&truth[0], &utf8), Meet::No, "equal text, other bytes");
+        assert_eq!(verdict(utf8), Outcome::Wrong);
+        let eci3 = read("\u{A1}", &[0xA1], Charset::Latin1, Some(&[(3, 0)]));
+        assert_eq!(verdict(eci3), Outcome::Wrong);
+    }
+
+    /// The Kanji truth 山田 (8E 52 93 63, read `shift_jis`): the right bytes
+    /// read 'ŽR“c' as latin1 are a wrong reading of the right content.
+    #[test]
+    fn a_kanji_truth_judges_the_reading_too() {
+        let raw = [0x8E, 0x52, 0x93, 0x63];
+        let truth = [structural("\u{5C71}\u{7530}", &raw, None)];
+        let shift_jis = read("\u{5C71}\u{7530}", &raw, Charset::ShiftJis, None);
+        assert_eq!(judge_detections(&truth, &[shift_jis]), Outcome::Exact);
+        let latin1 = read("\u{17D}R\u{201C}c", &raw, Charset::Latin1, None);
+        assert_eq!(judge_detections(&truth, &[latin1]), Outcome::Wrong);
+    }
+
+    /// A text truth is judged by text unless the detection's charset is
+    /// `unknown`: 'Ą' read signalled over A1, and 茅 read signalled over
+    /// C3 A9 (its GB 2312 bytes), are unread; the same C3 A9 read 'é' as
+    /// utf8 is a wrong text.
+    #[test]
+    fn a_text_truth_is_unread_on_an_unknown_reading() {
+        let signalled = read("\u{FFFD}", &[0xA1], Charset::Unknown, Some(&[]));
+        assert_eq!(
+            judge_detections(&[text_unit("\u{104}")], &[signalled]),
+            Outcome::Unread
+        );
+        let signalled = read(
+            "\u{FFFD}\u{FFFD}",
+            &[0xC3, 0xA9],
+            Charset::Unknown,
+            Some(&[]),
+        );
+        assert_eq!(
+            judge_detections(&[text_unit("\u{8305}")], &[signalled]),
+            Outcome::Unread
+        );
+        let utf8 = read("\u{E9}", &[0xC3, 0xA9], Charset::Utf8, None);
+        assert_eq!(
+            judge_detections(&[text_unit("\u{8305}")], &[utf8]),
+            Outcome::Wrong
+        );
+        // an unknown reading is never exact, even over the truth's text
+        let lossy_equal = read("\u{104}", &[0xA1], Charset::Unknown, None);
+        assert_eq!(meet(&text_unit("\u{104}"), &lossy_equal), Meet::Unread);
+    }
+
+    /// Declarations the truth contradicts never meet it, even unread: a
+    /// signal or a located list where the symbol declares none, another
+    /// FNC1 position, another located list. An `unknown` reading with no
+    /// designator observed over the truth's bytes is unread.
+    #[test]
+    fn contradicting_declarations_do_not_meet() {
+        let undeclared = [structural("A", b"A", None)];
+        let signalled = read("\u{FFFD}", b"A", Charset::Unknown, Some(&[]));
+        assert_eq!(judge_detections(&undeclared, &[signalled]), Outcome::Wrong);
+        let located = read("A", b"A", Charset::Utf8, Some(&[(26, 0)]));
+        assert_eq!(judge_detections(&undeclared, &[located]), Outcome::Wrong);
+        let mut gs1 = plain(QrCode, "A");
+        if let Some(content) = gs1.content.as_mut() {
+            content.fnc1 = Some(Fnc1Position::First);
+        }
+        assert_eq!(judge_detections(&undeclared, &[gs1]), Outcome::Wrong);
+
+        let declared = [structural("\u{104}", &[0xA1], Some(&[(4, 0)]))];
+        let unobserved = read("\u{FFFD}", &[0xA1], Charset::Unknown, None);
+        assert_eq!(judge_detections(&declared, &[unobserved]), Outcome::Unread);
+        let other_list = read("\u{FFFD}", &[0xA1], Charset::Unknown, Some(&[(170, 0)]));
+        assert_eq!(judge_detections(&declared, &[other_list]), Outcome::Wrong);
+    }
+
+    /// The grouping contract is content identity: equal text over other
+    /// bytes is two contents; two identical detections, or a signalled
+    /// declaration beside its located list, are one; an unobserved
+    /// declaration or another FNC1 position is another content.
+    #[test]
+    fn the_contract_check_is_content_identity() {
+        let declared = read("\u{104}", &[0xA1], Charset::Eci, Some(&[(4, 0)]));
+        let utf8 = read("\u{104}", &[0xC4, 0x84], Charset::Utf8, None);
+        assert!(
+            contract_violations(&[declared.clone(), utf8]).is_empty(),
+            "equal text, different raw"
+        );
+        assert_eq!(
+            contract_violations(&[declared.clone(), declared.clone()]),
+            ["detection #1 shares the identity of detection #0"]
+        );
+        let signalled = read("\u{FFFD}", &[0xA1], Charset::Unknown, Some(&[]));
+        assert_eq!(
+            contract_violations(&[declared.clone(), signalled.clone()]).len(),
+            1,
+            "[] is the content of the located list"
+        );
+        let unobserved = read("\u{A1}", &[0xA1], Charset::Latin1, None);
+        assert!(contract_violations(&[declared.clone(), unobserved.clone()]).is_empty());
+        assert!(contract_violations(&[signalled, unobserved]).is_empty());
+        let mut second = declared.clone();
+        if let Some(content) = second.content.as_mut() {
+            content.fnc1 = Some(Fnc1Position::Second);
+        }
+        assert!(contract_violations(&[declared, second]).is_empty());
+    }
+
+    /// The matching keeps the most exact meets, then the most meets: here a
+    /// unit-order greedy pass gives the shared exact read to the text unit
+    /// and leaves the structural unit unmet (`mixed`); the best matching
+    /// meets both (`unread`).
+    #[test]
+    fn the_matching_keeps_the_most_exact_then_the_most_meets() {
+        let units = [text_unit("A"), structural("A", b"A", None)];
+        let exact_for_both = plain(QrCode, "A");
+        let unread_for_text = read("\u{FFFD}", &[0xFF], Charset::Unknown, None);
+        let observed = [exact_for_both, unread_for_text];
+        let (outcome, met) = judgment(&units, &observed);
+        assert_eq!(outcome, Outcome::Unread);
+        assert_eq!(met, [Some((1, Meet::Unread)), Some((0, Meet::Exact))]);
+        // an unknown read beside the exact one is extra output, not unread
+        let lone = [text_unit("A")];
+        assert_eq!(judge_detections(&lone, &observed), Outcome::Extra);
+        assert_eq!(
+            best_matching(&[vec![Meet::Unread, Meet::Exact]], 2),
+            [Some((1, Meet::Exact))]
+        );
+        assert_eq!(best_matching(&[vec![Meet::No]], 1), [None]);
+    }
+
+    /// `unread` is counted beside `exact` (its own rate), never blocks, and
+    /// reaches the receipt with its Wilson interval and the unit's meet.
+    #[test]
+    fn unread_has_its_own_rate_and_never_blocks() {
+        let [known_wrong, _] = DISPOSITIONS;
+        let mut row = zxing_row(&known_wrong, "\u{104}", &[]);
+        row.scan = Scan::Report {
+            detections: vec![read("\u{FFFD}", &[0xA1], Charset::Unknown, Some(&[]))],
+            engine_panics: 0,
+        };
+        let verdict = verdict_of(row.expected.as_deref(), &row.scan, true);
+        (row.verdict, row.outcome) = (verdict.raw, verdict.outcome);
+        assert_eq!(row.outcome, Outcome::Unread);
+        let rows = [row];
+        assert!(blockers(&Integrity::default(), &rows, &[]).is_empty());
+        let (groups, sets) = tallies(&rows);
+        let tally = sets[&Set::Zxing];
+        assert_eq!((tally.truth, tally.exact(), tally.unread()), (1, 0, 1));
+        let source = SourceEcho {
+            git_sha: String::from("unknown"),
+            tree: String::from("unknown"),
+        };
+        let mut receipt = new_receipt(source, "manifest", "vendored", Integrity::default());
+        fill_receipt(&mut receipt, &rows, (groups, sets), &[], Vec::new());
+        let json = serde_json::to_value(&receipt).expect("receipt serialises");
+        assert_eq!(json["status"], "pass");
+        assert_eq!(json["sets"][0]["outcomes"]["unread"], 1);
+        assert_eq!(
+            json["sets"][0]["unread_wilson95"],
+            serde_json::json!(["0.207", "1.000"])
+        );
+        let unit = &json["rows"][0]["expected"][0];
+        assert_eq!(unit["kind"], "text");
+        assert_eq!(
+            unit["met"],
+            serde_json::json!({"detection": 0, "how": "unread"})
+        );
+        let detection = &json["rows"][0]["detections"][0];
+        assert_eq!(
+            (
+                &detection["charset"],
+                &detection["eci"],
+                detection["raw_len"].as_u64()
+            ),
+            (
+                &serde_json::json!("unknown"),
+                &serde_json::json!([]),
+                Some(1)
+            )
+        );
+    }
+
+    /// An observed decoder that reports text only meets a structural unit
+    /// by the text rule — identity needs bytes on both sides.
+    #[test]
+    fn a_detection_without_bytes_is_held_to_the_text_rule() {
+        let truth = [structural("\u{104}", &[0xA1], Some(&[(4, 0)]))];
+        let text_only = Seen {
+            symbology: QrCode,
+            text: String::from("\u{104}"),
+            content: None,
+            engines: Vec::new(),
+        };
+        assert_eq!(
+            judge_detections(&truth, std::slice::from_ref(&text_only)),
+            Outcome::Exact
+        );
+        let other = Seen {
+            text: String::from("\u{A1}"),
+            ..text_only
+        };
+        assert_eq!(judge_detections(&truth, &[other]), Outcome::Wrong);
+    }
+
+    /// Hex in both directions, lowercase only.
+    #[test]
+    fn hex_round_trips() {
+        assert_eq!(hex(&[0x00, 0xA1, 0xFF]), "00a1ff");
+        assert_eq!(parse_hex("00a1ff"), Ok(vec![0x00, 0xA1, 0xFF]));
+        assert_eq!(parse_hex(""), Ok(Vec::new()));
+        for bad in ["0", "A1", "0g", "a 1"] {
+            assert!(parse_hex(bad).is_err(), "{bad}");
+        }
+    }
+
+    // ------------------------------------------------------- corpus.toml
+
+    /// sha256 over one line per entry, in file order: path, category,
+    /// expected, expect, source, NUL-separated, each `=value` or `!` when
+    /// absent.
+    fn entry_list_sha256(text: &str) -> String {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Keys {
+            entry: Vec<EntryKeys>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct EntryKeys {
+            path: String,
+            category: String,
+            expected: Option<String>,
+            expect: Option<String>,
+            source: Option<String>,
+            #[serde(rename = "raw_hex")]
+            _raw_hex: Option<String>,
+            #[serde(rename = "eci")]
+            _eci: Option<Vec<Eci>>,
+            #[serde(rename = "fnc1")]
+            _fnc1: Option<String>,
+        }
+        let field = |value: Option<&str>| value.map_or_else(|| "!".to_owned(), |v| format!("={v}"));
+        let keys: Keys = toml::from_str(text).expect("corpus.toml parses with known keys only");
+        let mut canon = String::new();
+        for e in &keys.entry {
+            let fields = [
+                e.path.clone(),
+                e.category.clone(),
+                field(e.expected.as_deref()),
+                field(e.expect.as_deref()),
+                field(e.source.as_deref()),
+            ];
+            canon.push_str(&fields.join("\0"));
+            canon.push('\n');
+        }
+        external::sha256_bytes(canon.as_bytes())
+    }
+
+    fn committed_corpus() -> String {
+        let path = crate::repo_root().join(VENDORED);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// Byte truths are additive: without `raw_hex`, `eci` and `fnc1`, the
+    /// manifest is the entry list they were added to — the same 41
+    /// entries in order, with their paths, categories, texts, frontier pins
+    /// and sources — and it holds no other key.
+    #[test]
+    fn byte_truths_leave_the_entry_list_unchanged() {
+        const BASE_ENTRY_LIST_SHA256: &str =
+            "fbed2b6b0707d8409cc61994ba5a297bff8fcec5dcc13dcb7e688d7b8339b1fc";
+        let text = committed_corpus();
+        assert_eq!(entry_list_sha256(&text), BASE_ENTRY_LIST_SHA256);
+        let corpus: crate::Corpus = toml::from_str(&text).expect("corpus.toml parses");
+        assert_eq!(corpus.entry.len(), 41);
+    }
+
+    /// The committed byte truths: every one is the UTF-8 encoding of its
+    /// text (ASCII payloads, one GS-led element string) and declares no
+    /// ECI and no FNC1 — none of these symbols does. The entries with a
+    /// text and no bytes are exactly the three no independent reader
+    /// decodes.
+    #[test]
+    fn byte_truths_are_the_bytes_of_their_texts() {
+        let corpus: crate::Corpus = toml::from_str(&committed_corpus()).expect("parses");
+        let truths = vendored_truths(&corpus).expect("every truth is well formed");
+        let mut structural = 0;
+        let mut text_only = Vec::new();
+        for (entry, expected) in corpus.entry.iter().zip(&truths) {
+            for unit in expected.iter().flatten() {
+                match &unit.identity {
+                    Some(identity) => {
+                        structural += 1;
+                        assert_eq!(identity.raw, unit.unit.text.as_bytes(), "{}", entry.path);
+                        assert_eq!(
+                            (&identity.eci, identity.fnc1),
+                            (&None, None),
+                            "{}",
+                            entry.path
+                        );
+                    }
+                    None => text_only.push(entry.path.as_str()),
+                }
+            }
+        }
+        assert_eq!(structural, 31);
+        assert_eq!(
+            text_only,
+            [
+                "fixtures/artistic/OK_1069ms_85_8b6a54b3.png",
+                "fixtures/artistic/blob-style-monkey-logo.webp",
+                "fixtures/degraded/logo-occluded-rescue.png",
+            ]
+        );
     }
 }

@@ -3,6 +3,13 @@
 # Categories: clean · artistic · degraded.
 # Derived numbers (success rates) are NEVER hand-typed: `cargo run -p xtask --
 # corpus-report --write` regenerates the README managed block from this file.
+# `raw_hex` = the payload bytes (lowercase hex) when they are known
+# independently of the scanner under test: the fixture generator's payload, or
+# the bytes an independent reader returns. `eci` (the located designators,
+# `[{ designator = 4, start = 0 }]`) and `fnc1` (`"first"` · `"second"`) join it
+# when the symbol declares them; no symbol here does. An entry with `raw_hex` is
+# judged by content identity (spec/01-report.md § Comparing contents), one
+# without it by its text.
 
 # ---- legacy v0.2 images (the original reference trio) ----
 
@@ -10,12 +17,15 @@
 path = "fixtures/clean/OK_68ms_100_4e875a2c.png"
 category = "clean"
 expected = "https://qrc-ai.com/76xMa"
+# bytes: zxing-cpp 3.1.1 (AIM ]Q1: no ECI, no FNC1), zbar 0.23.93, OpenCV 4.13
+raw_hex = "68747470733a2f2f7172632d61692e636f6d2f3736784d61"
 source = "v0.2 reference image"
 
 [[entry]]
 path = "fixtures/artistic/OK_1069ms_85_8b6a54b3.png"
 category = "artistic"
 expected = "https://qrc-ai.com/K1Ng2"
+# no independent reader decodes this render: a text truth
 source = "v0.2 reference image — AI-generated artistic QR"
 
 [[entry]]
@@ -24,97 +34,115 @@ category = "degraded"
 source = "v0.2 reference image — failed in v0.2 too (negative sample)"
 
 # ---- generated clean matrix (xtask gen-fixtures · deterministic) ----
+# bytes: the generator's payload (`content.as_bytes()`, no ECI, no FNC1);
+# zxing-cpp 3.1.1 reads the same bytes from every cell (AIM ]Q1).
 
 [[entry]]
 path = "fixtures/clean/gen_v2_l.png"
 category = "clean"
 expected = "qrc.ai/v2l"
+raw_hex = "7172632e61692f76326c"
 source = "xtask gen-fixtures"
 
 [[entry]]
 path = "fixtures/clean/gen_v2_m.png"
 category = "clean"
 expected = "qrc.ai/v2m"
+raw_hex = "7172632e61692f76326d"
 source = "xtask gen-fixtures"
 
 [[entry]]
 path = "fixtures/clean/gen_v2_q.png"
 category = "clean"
 expected = "qrc.ai/v2q"
+raw_hex = "7172632e61692f763271"
 source = "xtask gen-fixtures"
 
 [[entry]]
 path = "fixtures/clean/gen_v2_h.png"
 category = "clean"
 expected = "qrc.ai/v2h"
+raw_hex = "7172632e61692f763268"
 source = "xtask gen-fixtures"
 
 [[entry]]
 path = "fixtures/clean/gen_v5_l.png"
 category = "clean"
 expected = "https://qrcode-ai.com/c/v5l"
+raw_hex = "68747470733a2f2f7172636f64652d61692e636f6d2f632f76356c"
 source = "xtask gen-fixtures"
 
 [[entry]]
 path = "fixtures/clean/gen_v5_m.png"
 category = "clean"
 expected = "https://qrcode-ai.com/c/v5m"
+raw_hex = "68747470733a2f2f7172636f64652d61692e636f6d2f632f76356d"
 source = "xtask gen-fixtures"
 
 [[entry]]
 path = "fixtures/clean/gen_v5_q.png"
 category = "clean"
 expected = "https://qrcode-ai.com/c/v5q"
+raw_hex = "68747470733a2f2f7172636f64652d61692e636f6d2f632f763571"
 source = "xtask gen-fixtures"
 
 [[entry]]
 path = "fixtures/clean/gen_v5_h.png"
 category = "clean"
 expected = "https://qrcode-ai.com/c/v5h"
+raw_hex = "68747470733a2f2f7172636f64652d61692e636f6d2f632f763568"
 source = "xtask gen-fixtures"
 
 [[entry]]
 path = "fixtures/clean/gen_v10_l.png"
 category = "clean"
 expected = "https://qrcode-ai.com/c/v10l"
+raw_hex = "68747470733a2f2f7172636f64652d61692e636f6d2f632f7631306c"
 source = "xtask gen-fixtures"
 
 [[entry]]
 path = "fixtures/clean/gen_v10_m.png"
 category = "clean"
 expected = "https://qrcode-ai.com/c/v10m"
+raw_hex = "68747470733a2f2f7172636f64652d61692e636f6d2f632f7631306d"
 source = "xtask gen-fixtures"
 
 [[entry]]
 path = "fixtures/clean/gen_v10_q.png"
 category = "clean"
 expected = "https://qrcode-ai.com/c/v10q"
+raw_hex = "68747470733a2f2f7172636f64652d61692e636f6d2f632f76313071"
 source = "xtask gen-fixtures"
 
 [[entry]]
 path = "fixtures/clean/gen_v10_h.png"
 category = "clean"
 expected = "https://qrcode-ai.com/c/v10h"
+raw_hex = "68747470733a2f2f7172636f64652d61692e636f6d2f632f76313068"
 source = "xtask gen-fixtures"
 
 # ---- generated degraded variants (deterministic transforms of v5-q) ----
+# bytes: the v5-q payload; zxing-cpp 3.1.1 reads them from all three (]Q1).
 
 [[entry]]
 path = "fixtures/degraded/gen_v5_q_blur2.png"
 category = "degraded"
 expected = "https://qrcode-ai.com/c/v5q"
+raw_hex = "68747470733a2f2f7172636f64652d61692e636f6d2f632f763571"
 source = "xtask gen-fixtures — gaussian blur σ=2"
 
 [[entry]]
 path = "fixtures/degraded/gen_v5_q_tiny.png"
 category = "degraded"
 expected = "https://qrcode-ai.com/c/v5q"
+raw_hex = "68747470733a2f2f7172636f64652d61692e636f6d2f632f763571"
 source = "xtask gen-fixtures — 6x downscale (~1.3px/module)"
 
 [[entry]]
 path = "fixtures/degraded/gen_v5_q_lowcontrast.png"
 category = "degraded"
 expected = "https://qrcode-ai.com/c/v5q"
+raw_hex = "68747470733a2f2f7172636f64652d61692e636f6d2f632f763571"
 source = "xtask gen-fixtures — contrast crushed to 25%"
 
 # ---- qrcode-ai.com production templates (R3 real-world blitz · 2026-06-11) ----
@@ -123,92 +151,115 @@ source = "xtask gen-fixtures — contrast crushed to 25%"
 path = "fixtures/artistic/blob-style-monkey-logo.webp"
 category = "artistic"
 expected = "https://qrc-ai.com/Uo54C"
+# zbar 0.23.93 reads its bytes, but no independent reader reports its
+# declarations (ECI, FNC1): a text truth
 source = "qrcode-ai.com custom template funny-monkey-blue — blob pixel style + center logo (morph-close rung)"
 
 [[entry]]
 path = "fixtures/degraded/logo-occluded-rescue.png"
 category = "degraded"
 expected = "https://qrcode-ai.com/rescue-pin"
+# no independent reader decodes it (the engines fail by design): a text truth
 source = "R9 — v5-H + 22% gray logo disk: engines fail (t > t_max), S5 erasure rescue decodes"
 
 # ---- multi-symbology fixtures (R12 · rxing writers, decoder≠encoder) ----
+# bytes: the generator's payload (xtask gen-symbology-fixtures: rxing writers
+# without ECI or FNC1; datamatrix-gs1 leads with a literal GS, not FNC1);
+# zxing-cpp 3.1.1 reads the same bytes (Data Matrix ]d1, Code 128 ]C0; UPC-A
+# as EAN-13 with its leading 0).
 
 [[entry]]
 path = "fixtures/symbology/datamatrix.png"
 category = "symbology"
 expected = "https://qrcode-ai.com/dm"
+raw_hex = "68747470733a2f2f7172636f64652d61692e636f6d2f646d"
 source = "R12 — Data Matrix ECC 200"
 
 [[entry]]
 path = "fixtures/symbology/aztec.png"
 category = "symbology"
 expected = "https://qrcode-ai.com/aztec"
+raw_hex = "68747470733a2f2f7172636f64652d61692e636f6d2f617a746563"
 source = "R12 — Aztec"
 
 [[entry]]
 path = "fixtures/symbology/pdf417.png"
 category = "symbology"
 expected = "https://qrcode-ai.com/pdf417"
+raw_hex = "68747470733a2f2f7172636f64652d61692e636f6d2f706466343137"
 source = "R12 — PDF417"
 
 [[entry]]
 path = "fixtures/symbology/ean13.png"
 category = "symbology"
 expected = "9506000134352"
+raw_hex = "39353036303030313334333532"
 source = "R12 — EAN-13 (retail GTIN payload)"
 
 [[entry]]
 path = "fixtures/symbology/ean8.png"
 category = "symbology"
 expected = "96385074"
+raw_hex = "3936333835303734"
 source = "R12 — EAN-8"
 
 [[entry]]
 path = "fixtures/symbology/upca.png"
 category = "symbology"
 expected = "036000291452"
+raw_hex = "303336303030323931343532"
 source = "R12 — UPC-A"
 
 [[entry]]
 path = "fixtures/symbology/code128.png"
 category = "symbology"
 expected = "QRCAI-0042"
+raw_hex = "51524341492d30303432"
 source = "R12 — Code 128"
 
 [[entry]]
 path = "fixtures/symbology/code39.png"
 category = "symbology"
 expected = "SCANNER-39"
+raw_hex = "5343414e4e45522d3339"
 source = "R12 — Code 39"
 
 [[entry]]
 path = "fixtures/symbology/itf14.png"
 category = "symbology"
 expected = "15400141288763"
+raw_hex = "3135343030313431323838373633"
 source = "R12 — ITF-14"
 
 [[entry]]
 path = "fixtures/symbology/datamatrix-gs1.png"
 category = "symbology"
 expected = "\u001D010950600013435210AB12"
+raw_hex = "1d30313039353036303030313334333532313041423132"
 source = "R12 — Data Matrix carrying GS1 element-string data (literal GS lead)"
 
 [[entry]]
 path = "fixtures/symbology/microqr.png"
 category = "symbology"
 expected = "HELLO42"
+# bytes: zxing-cpp 3.1.1 (AIM ]Q1)
+raw_hex = "48454c4c4f3432"
 source = "R16 — Micro QR M3 (rxing decodes; rqrr is QR-only so no geometry)"
 
 [[entry]]
 path = "fixtures/degraded/exif6-rotated-qr.jpg"
 category = "degraded"
 expected = "https://qrcode-ai.com/exif-pin"
+# bytes: zxing-cpp 3.1.1 (AIM ]Q1), zbar 0.23.93, OpenCV 4.13
+raw_hex = "68747470733a2f2f7172636f64652d61692e636f6d2f657869662d70696e"
 source = "R16 — JPEG stored 90deg-rotated with EXIF orientation 6 (phone-photo class)"
 
 [[entry]]
 path = "fixtures/symbology/exif6-rotated-ean.jpg"
 category = "symbology"
 expected = "9506000134352"
+# bytes: zxing-cpp 3.1.1 (EAN-13, AIM ]E0)
+raw_hex = "39353036303030313334333532"
 source = "R16 — EAN-13 stored sideways w/ EXIF 6 (TryHarder rotation pin)"
 
 # ---- frontier fixtures (expect="fail" · vendored qrcode-ai product output) ----
@@ -258,10 +309,14 @@ source = "qrcode-ai product output — QR over a busy photographic scene with ic
 path = "fixtures/degraded/quiet-ring-phase-1015.png"
 category = "degraded"
 expected = "https://qrcode-ai.com"
+# bytes: zxing-cpp 3.1.1 (AIM ]Q1), zbar 0.23.93, OpenCV 4.13
+raw_hex = "68747470733a2f2f7172636f64652d61692e636f6d"
 source = "styled square render (gradient ink, 35px modules) — the bare 1015px frame; twin of quiet-ring-phase-1023"
 
 [[entry]]
 path = "fixtures/degraded/quiet-ring-phase-1023.png"
 category = "degraded"
 expected = "https://qrcode-ai.com"
+# bytes: zxing-cpp 3.1.1 (AIM ]Q1), zbar 0.23.93, OpenCV 4.13
+raw_hex = "68747470733a2f2f7172636f64652d61692e636f6d"
 source = "the SAME symbol pixels + a 4px white ring — the perspective 26° cell flips near the resolution knee (score contract sensitivity, scan_integration.rs)"

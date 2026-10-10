@@ -79,7 +79,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use qrcode_ai_scanner::{ImageInput, Symbology};
+use qrcode_ai_scanner::ImageInput;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -98,6 +98,17 @@ struct Entry {
     /// RED ("capability gained — flip expect to pass"). Absent / `"pass"` = the
     /// normal contract (decode must match `expected`).
     expect: Option<String>,
+    /// The payload bytes (lowercase hex) when they are known independently
+    /// of the scanner under test: the generator's payload or an independent
+    /// reader's bytes. Present = a structural truth, judged by content
+    /// identity (`spec/01-report.md` § Comparing contents).
+    raw_hex: Option<String>,
+    /// The ECI designators the symbol declares, located as the report lists
+    /// them. Requires `raw_hex`.
+    eci: Option<Vec<oracle::Eci>>,
+    /// The symbol's FNC1 position (`"first"` · `"second"`). Requires
+    /// `raw_hex`.
+    fnc1: Option<qrcode_ai_scanner::Fnc1Position>,
 }
 
 fn repo_root() -> PathBuf {
@@ -308,12 +319,13 @@ struct CorpusRun {
     gained: Vec<String>,
 }
 
-/// `[qr_code "…", ean13 "…"]` — observed groups for a report line, every
-/// text `{:?}`-escaped (decoded text is attacker-controlled, even here).
-fn described(observed: &[(Symbology, &str)]) -> String {
+/// `[qr_code "…", ean13 "…"]` — observed detections for a report line,
+/// every text `{:?}`-escaped (decoded text is attacker-controlled, even
+/// here).
+fn described(observed: &[oracle::Seen]) -> String {
     let groups: Vec<String> = observed
         .iter()
-        .map(|(symbology, text)| format!("{} {text:?}", oracle::wire(symbology)))
+        .map(|seen| format!("{} {:?}", oracle::wire(&seen.symbology), seen.text))
         .collect();
     format!("[{}]", groups.join(", "))
 }
@@ -343,11 +355,7 @@ fn run_corpus() -> CorpusRun {
             }
         };
         stat.total_ms += report.trace.total_ms;
-        let observed: Vec<(Symbology, &str)> = report
-            .detections
-            .iter()
-            .map(|d| (d.symbology, d.content.text.as_str()))
-            .collect();
+        let observed = oracle::observations(&report.detections);
         match entry_state(entry, &observed) {
             (EntryState::Held, _) => stat.frontier_held += 1,
             (EntryState::Gained, _) => {
@@ -384,18 +392,17 @@ enum EntryState {
 }
 
 /// The strict verdict of one entry: its COMPLETE detection list judged by
-/// `oracle::judge` against the `corpus.toml` truth (text only, any
-/// symbology), so a wrong or extra symbol next to the expected one is a
-/// miss. Also returns the oracle outcome for the report line (`None` for
-/// an unlabelled frontier pin).
-fn entry_state(
-    entry: &Entry,
-    observed: &[(Symbology, &str)],
-) -> (EntryState, Option<oracle::Outcome>) {
-    let expected = oracle::vendored_expectation(entry.expected.as_deref(), entry.expect.as_deref());
+/// `oracle::judge` against the `corpus.toml` truth (any symbology; by
+/// content identity when the entry carries `raw_hex`, else by text), so a
+/// wrong or extra symbol next to the expected one is a miss, and so is an
+/// `unread` one. Also returns the oracle outcome for the report line
+/// (`None` for an unlabelled frontier pin).
+fn entry_state(entry: &Entry, observed: &[oracle::Seen]) -> (EntryState, Option<oracle::Outcome>) {
+    let expected = oracle::vendored_expectation(entry)
+        .unwrap_or_else(|e| panic!("corpus.toml: {}: {e}", entry.path));
     let outcome = expected
         .as_deref()
-        .map(|units| oracle::judge(units, observed));
+        .map(|units| oracle::judge_detections(units, observed));
     let state = match (entry.expect.as_deref() == Some("fail"), outcome) {
         // Frontier pin: refusing (no decode) is the expected GREEN. With a
         // known ground truth, "gained" means we finally reached it exactly;
@@ -501,7 +508,8 @@ fn baseline(bin: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qrcode_ai_scanner::Symbology::{Ean13, QrCode};
+    use qrcode_ai_scanner::Charset;
+    use qrcode_ai_scanner::Symbology::{self, Ean13, QrCode};
 
     fn entry(expected: Option<&str>, expect: Option<&str>) -> Entry {
         Entry {
@@ -509,7 +517,19 @@ mod tests {
             category: String::from("clean"),
             expected: expected.map(str::to_owned),
             expect: expect.map(str::to_owned),
+            raw_hex: None,
+            eci: None,
+            fnc1: None,
         }
+    }
+
+    /// Plain detections: each text's UTF-8 bytes, read `utf8`, nothing
+    /// declared.
+    fn seen(observed: &[(Symbology, &str)]) -> Vec<oracle::Seen> {
+        observed
+            .iter()
+            .map(|(symbology, text)| oracle::plain(*symbology, text))
+            .collect()
     }
 
     /// The complete list is judged: `[E, W]` passed first-detection judging
@@ -517,7 +537,7 @@ mod tests {
     #[test]
     fn truth_rows_pass_only_on_the_exact_set() {
         let truth = entry(Some("E"), None);
-        let state = |observed: &[(Symbology, &str)]| entry_state(&truth, observed).0;
+        let state = |observed: &[(Symbology, &str)]| entry_state(&truth, &seen(observed)).0;
         assert_eq!(state(&[(QrCode, "E")]), EntryState::Pass);
         assert_eq!(
             state(&[(Ean13, "E")]),
@@ -528,7 +548,7 @@ mod tests {
         assert_eq!(state(&[(QrCode, "W")]), EntryState::Miss);
         assert_eq!(state(&[]), EntryState::Miss);
         assert_eq!(
-            entry_state(&truth, &[(QrCode, "E"), (QrCode, "W")]).1,
+            entry_state(&truth, &seen(&[(QrCode, "E"), (QrCode, "W")])).1,
             Some(oracle::Outcome::Extra)
         );
     }
@@ -540,12 +560,41 @@ mod tests {
         use qrcode_ai_scanner::Symbology::MicroQrCode;
         let truth = entry(Some("E"), None);
         assert_eq!(
-            entry_state(&truth, &[(QrCode, "E"), (MicroQrCode, "E")]),
+            entry_state(&truth, &seen(&[(QrCode, "E"), (MicroQrCode, "E")])),
             (EntryState::Miss, Some(oracle::Outcome::Extra))
         );
         assert_eq!(
-            entry_state(&truth, &[(MicroQrCode, "E")]).0,
+            entry_state(&truth, &seen(&[(MicroQrCode, "E")])).0,
             EntryState::Pass
+        );
+    }
+
+    /// An entry with `raw_hex` passes only on the identity it names: equal
+    /// text over other bytes is a miss (`wrong`), and so is a read whose
+    /// charset is `unknown` (`unread`, not exact).
+    #[test]
+    fn a_byte_truth_passes_only_on_its_identity() {
+        let mut truth = entry(Some("A"), None);
+        truth.raw_hex = Some(String::from("41"));
+        assert_eq!(
+            entry_state(&truth, &seen(&[(QrCode, "A")])),
+            (EntryState::Pass, Some(oracle::Outcome::Exact))
+        );
+        let mut other_bytes = oracle::plain(QrCode, "A");
+        if let Some(content) = other_bytes.content.as_mut() {
+            content.raw = vec![0xEF, 0xBB, 0xBF, 0x41];
+        }
+        assert_eq!(
+            entry_state(&truth, &[other_bytes]),
+            (EntryState::Miss, Some(oracle::Outcome::Wrong))
+        );
+        let mut unread = oracle::plain(QrCode, "\u{FFFD}");
+        if let Some(content) = unread.content.as_mut() {
+            (content.raw, content.charset) = (vec![0x41], Some(Charset::Unknown));
+        }
+        assert_eq!(
+            entry_state(&truth, &[unread]),
+            (EntryState::Miss, Some(oracle::Outcome::Unread))
         );
     }
 
@@ -554,7 +603,7 @@ mod tests {
         let negative = entry(None, None);
         assert_eq!(entry_state(&negative, &[]).0, EntryState::Pass);
         assert_eq!(
-            entry_state(&negative, &[(QrCode, "W")]),
+            entry_state(&negative, &seen(&[(QrCode, "W")])),
             (EntryState::Miss, Some(oracle::Outcome::FalsePositive))
         );
     }
@@ -566,22 +615,25 @@ mod tests {
         let unlabelled = entry(None, Some("fail"));
         assert_eq!(entry_state(&unlabelled, &[]), (EntryState::Held, None));
         assert_eq!(
-            entry_state(&unlabelled, &[(QrCode, "X")]),
+            entry_state(&unlabelled, &seen(&[(QrCode, "X")])),
             (EntryState::Gained, None)
         );
         let labelled = entry(Some("E"), Some("fail"));
         assert_eq!(entry_state(&labelled, &[]).0, EntryState::Held);
         assert_eq!(
-            entry_state(&labelled, &[(QrCode, "E")]).0,
+            entry_state(&labelled, &seen(&[(QrCode, "E")])).0,
             EntryState::Gained
         );
-        assert_eq!(entry_state(&labelled, &[(QrCode, "W")]).0, EntryState::Miss);
+        assert_eq!(
+            entry_state(&labelled, &seen(&[(QrCode, "W")])).0,
+            EntryState::Miss
+        );
     }
 
     #[test]
     fn report_lines_escape_decoded_text() {
         assert_eq!(
-            described(&[(QrCode, "a\u{1b}[31m")]),
+            described(&seen(&[(QrCode, "a\u{1b}[31m")])),
             "[qr_code \"a\\u{1b}[31m\"]"
         );
     }
