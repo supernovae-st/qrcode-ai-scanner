@@ -85,6 +85,29 @@ fn protection(version: u8, ec: EcLevel) -> usize {
     }
 }
 
+/// What error correction spent on one RS block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BlockCount {
+    /// Errors located.
+    pub(crate) errors: usize,
+    /// Erasures the correction used (none when the block was clean).
+    pub(crate) erasures: usize,
+    /// The block's parity codewords.
+    pub(crate) npar: usize,
+}
+
+/// Parity codewords a block corrected with erasures keeps unspent. With `f`
+/// erasures only `npar − f` checks are left to tell a correction from a
+/// guess, and a block beyond capacity passes them by chance about once in
+/// `256^r` for `r` unspent: two bound the worst block to 2^-16.
+const ERASURE_SPARE: usize = 2;
+
+/// Erasures the rescue may mark in one block: the most that leave
+/// [`ERASURE_SPARE`] parity codewords unspent past the reserve `p`.
+fn erasure_budget(npar: usize, p: usize) -> usize {
+    npar.saturating_sub(p).saturating_sub(ERASURE_SPARE)
+}
+
 /// Per-interleaved-codeword confidence: the worst |sample − threshold|
 /// margin over the codeword's 8 modules, sampled at module CENTERS through
 /// the same homography the structural checks use. Returns one margin per
@@ -159,7 +182,7 @@ pub(crate) fn attempt(luma: &LumaImage, candidate: &RescueCandidate) -> Option<R
     let margins = codeword_margins(sample_luma, candidate, codewords.len())?;
 
     let p = Acceptance::Scanner.reserve(candidate.version, candidate.ec);
-    let data = corrected_data(&codewords, candidate.version, candidate.ec, p, |block| {
+    let (data, _) = corrected_data(&codewords, candidate.version, candidate.ec, p, |block| {
         let len = block.bytes.len();
         // rank this block's codewords by confidence, worst first
         let mut ranked: Vec<(usize, f32)> = block
@@ -170,13 +193,12 @@ pub(crate) fn attempt(luma: &LumaImage, candidate: &RescueCandidate) -> Option<R
             .collect();
         ranked.sort_by(|a, b| a.1.total_cmp(&b.1));
 
-        // erasure budget: e ≤ npar − p − 1 (leave ≥1 slot of slack so a
-        // stray unmarked error can still be located); flag only genuinely
+        // erasure budget: the most erasures a block can use and still keep
+        // the unspent parity the acceptance requires; flag only genuinely
         // weak codewords (margin under 30% of half-span)
-        let budget = block.npar.saturating_sub(p).saturating_sub(1);
         ranked
             .iter()
-            .take(budget)
+            .take(erasure_budget(block.npar, p))
             .filter(|(_, margin)| *margin < 0.30)
             .map(|(pos, _)| len - 1 - pos) // byte index → power position
             .collect()
@@ -199,30 +221,39 @@ pub(crate) fn attempt(luma: &LumaImage, candidate: &RescueCandidate) -> Option<R
 }
 
 /// RS-correct every block and concatenate its data codewords — the data
-/// stream of ISO 18004 §8.6. `erasures_for` marks each block's erasure
-/// power positions; `reserved` is the Annex B misdecode-protection count
-/// the acceptance keeps out of the correction budget. `None` when a block
-/// is beyond capacity or past that budget (`2t + e + reserved ≤ npar`).
+/// stream of ISO 18004 §8.6 — with what each block's correction spent.
+/// `erasures_for` marks each block's erasure power positions; `reserved` is
+/// the Annex B misdecode-protection count the acceptance keeps out of the
+/// correction budget. `None` when a block is beyond capacity or past that
+/// budget (`2t + e + reserved ≤ npar`), or was corrected with erasures and
+/// left fewer than [`ERASURE_SPARE`] parity codewords unspent.
 fn corrected_data(
     codewords: &[u8],
     version: u8,
     ec: EcLevel,
     reserved: usize,
     mut erasures_for: impl FnMut(&Block) -> Vec<usize>,
-) -> Option<Vec<u8>> {
+) -> Option<(Vec<u8>, Vec<BlockCount>)> {
     let mut data = Vec::new();
+    let mut counts = Vec::new();
     for block in deinterleave(codewords, usize::from(version), format_bits_index(ec)) {
         let erasures = erasures_for(&block);
         let npar = block.npar;
         let mut bytes = block.bytes;
         let (errors, used) = ee::correct(&mut bytes, npar, &erasures)?;
-        if 2 * errors + used + reserved > npar {
-            return None; // Annex B guard
+        let spare = if used > 0 { ERASURE_SPARE } else { 0 };
+        if 2 * errors + used + reserved + spare > npar {
+            return None; // Annex B guard, and the erasures' unspent parity
         }
         bytes.truncate(bytes.len().saturating_sub(npar));
         data.extend_from_slice(&bytes);
+        counts.push(BlockCount {
+            errors,
+            erasures: used,
+            npar,
+        });
     }
-    Some(data)
+    Some((data, counts))
 }
 
 /// Who accepts a re-derived stream — it sets the RS budget.
@@ -295,7 +326,7 @@ pub(crate) fn rederive(
         return Rederived::Unverified;
     };
     let reserved = acceptance.reserve(version, ec);
-    let Some(data) = corrected_data(&codewords, version, ec, reserved, |_| Vec::new()) else {
+    let Some((data, _)) = corrected_data(&codewords, version, ec, reserved, |_| Vec::new()) else {
         return Rederived::Unverified;
     };
     match bitstream::parse(&data, version) {
@@ -750,6 +781,62 @@ pub(crate) mod test_symbols {
         (canvas.into_colors(), width)
     }
 
+    /// The 44 interleaved codewords (28 data, 16 EC: v2 has one block) of a
+    /// byte-mode `payload` at v2-M.
+    pub(crate) fn v2m_codewords(payload: &[u8]) -> Vec<u8> {
+        let version = qrcode::Version::Normal(2);
+        let mut bits = qrcode::bits::Bits::new(version);
+        bits.push_byte_data(payload).unwrap();
+        bits.push_terminator(qrcode::EcLevel::M).unwrap();
+        let (data, ec) =
+            qrcode::ec::construct_codewords(&bits.into_bytes(), version, qrcode::EcLevel::M)
+                .unwrap();
+        [data, ec].concat()
+    }
+
+    /// A v2-M symbol drawn from its 44 interleaved `codewords` as given,
+    /// mask 2 (a dark module where its column is a multiple of 3), at 10 px
+    /// per module with a 4-module quiet zone; the modules of the codeword
+    /// indices in `gray` painted at luma 128 — low confidence, which the
+    /// rescue marks as erasures and the engines read as arbitrary bits.
+    pub(crate) fn smudged_v2m(codewords: &[u8], gray: &[usize]) -> LumaImage {
+        const SCALE: usize = 10;
+        const QUIET: usize = 4;
+        const WIDTH: usize = 25;
+        let mut canvas =
+            qrcode::canvas::Canvas::new(qrcode::Version::Normal(2), qrcode::EcLevel::M);
+        canvas.draw_all_functional_patterns();
+        canvas.draw_data(&codewords[..28], &codewords[28..]);
+        canvas.apply_mask(qrcode::canvas::MaskPattern::VerticalLines);
+        let colors = canvas.into_colors();
+        let positions = crate::matrix::zigzag::zigzag_positions(2);
+        let smudged: Vec<(usize, usize)> = gray
+            .iter()
+            .flat_map(|&i| positions[8 * i..8 * i + 8].iter().copied())
+            .collect();
+        let side = (WIDTH + 2 * QUIET) * SCALE;
+        let mut data = vec![255u8; side * side];
+        for row in 0..WIDTH {
+            for column in 0..WIDTH {
+                let luma = if smudged.contains(&(row, column)) {
+                    128
+                } else if colors[row * WIDTH + column] == qrcode::Color::Dark {
+                    0
+                } else {
+                    255
+                };
+                for dy in 0..SCALE {
+                    for dx in 0..SCALE {
+                        data[((row + QUIET) * SCALE + dy) * side + (column + QUIET) * SCALE + dx] =
+                            luma;
+                    }
+                }
+            }
+        }
+        let side = u32::try_from(side).unwrap();
+        LumaImage::new(data, side, side)
+    }
+
     /// Symbols of equal width side by side on one canvas (6 px modules,
     /// 4-module quiet zones around and between them).
     pub(crate) fn row(symbols: &[(Vec<qrcode::Color>, usize)]) -> LumaImage {
@@ -1173,6 +1260,68 @@ mod pins {
         }
     }
 
+    // ── corrected_data() · the erasures' unspent parity ──
+
+    #[test]
+    fn a_block_corrected_with_erasures_keeps_two_parity_codewords_unspent() {
+        // v2-M: one block of 28 data and 16 EC codewords, p = 0
+        let clean = test_symbols::v2m_codewords(b"https://bank.example/t?a=9");
+        let erased: Vec<usize> = (28..42).collect();
+        let marks = |block: &Block| -> Vec<usize> {
+            erased.iter().map(|&i| block.bytes.len() - 1 - i).collect()
+        };
+        let mut word = clean.clone();
+        for &i in &erased {
+            word[i] ^= 0x5A;
+        }
+        // 14 erasures, no error: r = 16 − 14 = 2
+        let (data, counts) = corrected_data(&word, 2, EcLevel::M, 0, marks).expect("r = 2");
+        assert_eq!(data, clean[..28]);
+        assert_eq!(
+            counts,
+            [BlockCount {
+                errors: 0,
+                erasures: 14,
+                npar: 16
+            }]
+        );
+        // the counts are the corrector's own
+        let mut block = word.clone();
+        let positions: Vec<usize> = erased.iter().map(|&i| 43 - i).collect();
+        assert_eq!(ee::correct(&mut block, 16, &positions), Some((0, 14)));
+        // one more error: within the code's capacity (2·1 + 14 = 16), but no
+        // parity left to check the guess — refused
+        word[5] ^= 0x01;
+        let mut block = word.clone();
+        assert_eq!(ee::correct(&mut block, 16, &positions), Some((1, 14)));
+        assert!(corrected_data(&word, 2, EcLevel::M, 0, marks).is_none());
+        // without erasures the Annex B guard alone: eight errors spend every
+        // parity codeword (r = 0) and correct
+        let mut word = clean.clone();
+        for i in [0, 3, 6, 9, 12, 15, 18, 21] {
+            word[i] ^= 0xFF;
+        }
+        let (data, counts) =
+            corrected_data(&word, 2, EcLevel::M, 0, |_| Vec::new()).expect("2·8 = 16");
+        assert_eq!(data, clean[..28]);
+        assert_eq!(
+            counts,
+            [BlockCount {
+                errors: 8,
+                erasures: 0,
+                npar: 16
+            }]
+        );
+    }
+
+    #[test]
+    fn the_erasure_budget_leaves_two_parity_codewords_past_the_reserve() {
+        // npar − p − 2, never below zero
+        for (npar, p, budget) in [(16, 0, 14), (26, 0, 24), (10, 2, 6), (7, 3, 2), (2, 1, 0)] {
+            assert_eq!(erasure_budget(npar, p), budget, "npar {npar}, p {p}");
+        }
+    }
+
     // ── codeword_margins() · percentile threshold + capacity/flat guards ──
 
     const V1_MODULES: u32 = 21; // version 1 · 21×21
@@ -1287,5 +1436,68 @@ mod pins {
         }
         let (luma, cand) = v1_luma(&sampled);
         assert!(codeword_margins(&luma, &cand, 26).is_some());
+    }
+}
+
+#[cfg(test)]
+mod acceptance {
+    //! Constructed symbols the acceptance rules must refuse: whole walks,
+    //! through the ladder, must publish nothing.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::test_symbols::{smudged_v2m, v2m_codewords};
+    use crate::input::{ImageInput, Limits, LumaImage};
+    use crate::ladder::{CancelToken, ScanConfig, run};
+    use crate::report::EngineKind;
+    use crate::transform::normalize;
+
+    /// What a whole walk publishes (no wall clock): bytes and engines.
+    fn published(luma: &LumaImage) -> Vec<(Vec<u8>, Vec<EngineKind>)> {
+        let planes = normalize(
+            &ImageInput::luma8(luma.data(), luma.width(), luma.height()),
+            &Limits::default(),
+        )
+        .unwrap();
+        let mut config = ScanConfig::full();
+        config.budget_ms = None;
+        run(&planes, &config, &CancelToken::new(), None)
+            .unwrap()
+            .merged
+            .into_iter()
+            .map(|d| (d.raw, d.engines))
+            .collect()
+    }
+
+    /// A v2-M symbol of `https://bank.example/t?a=9` with its first 14 EC
+    /// codewords grayed and two codewords confidently changed: the engines
+    /// see 16 wrong codewords (past their 8), the rescue marks the 14 gray
+    /// ones as erasures and its errors-and-erasures decoder lands on another
+    /// valid codeword with one more error — no parity left (2·1 + 14 = 16).
+    #[test]
+    fn erasure_rescues_with_no_parity_left_publish_nothing() {
+        let truth = v2m_codewords(b"https://bank.example/t?a=9");
+        let near = v2m_codewords(b"https://bank.example/t?a=1");
+        let gray: Vec<usize> = (28..42).collect();
+        // the last data and the last EC codeword carry the near payload's
+        // values: the rescue corrects onto it
+        let mut solved = truth.clone();
+        solved[27] = near[27];
+        solved[43] = near[43];
+        // two content codewords at other values: the rescue corrects onto a
+        // garbled payload
+        let mut random = truth.clone();
+        random[7] = 32;
+        random[21] = 130;
+        for (name, codewords) in [("onto the near payload", solved), ("onto garbage", random)] {
+            assert_eq!(
+                published(&smudged_v2m(&codewords, &gray)),
+                Vec::new(),
+                "{name}"
+            );
+        }
+        // control: the undamaged symbol reads, by both engines
+        let clean = published(&smudged_v2m(&truth, &[]));
+        assert_eq!(clean.len(), 1);
+        assert_eq!(clean[0].0, b"https://bank.example/t?a=9");
     }
 }

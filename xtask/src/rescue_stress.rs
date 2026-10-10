@@ -649,10 +649,10 @@ fn build_dual_grid(cells: &[Cell]) -> Vec<Cell> {
 // --------------------------------------------------- constructed S5 cells
 
 /// The truth payload of the constructed S5 cell — a neutral synthetic text.
-/// The damage drives the rescue toward [`S5_NEAR`]: with today's erasure
-/// budget of `npar − p − 1` codewords, the S5 rescue corrects the block onto
-/// it at margin 0 and publishes a wrong payload. An erasure floor keeping two
-/// spare parity codewords per block refuses it.
+/// The damage drives the rescue toward [`S5_NEAR`]: its errors-and-erasures
+/// correction lands there at margin 0 (14 erasures and one error spend all 16
+/// parity codewords), which the rescue refuses: a block corrected with
+/// erasures keeps two parity codewords unspent.
 const S5_TRUTH: &str = "QRSCAN-FIXTURE-CASE-000009";
 
 /// The near payload the construction overwrites two codewords with. It and
@@ -726,11 +726,11 @@ fn render_damaged_v2m(data: &[u8], ec: &[u8], mask: MaskPattern, gray: &[usize])
 /// codeword and last EC codeword carry [`S5_NEAR`]'s values and whose first 14
 /// EC codewords are grayed. An errors-only engine sees 16 wrong codewords
 /// (over the t=8 budget) and refuses; the S5 rescue marks the 14 gray
-/// codewords as erasures, within today's erasure budget `npar − p − 1`, finds
-/// the one unmarked error left against [`S5_NEAR`] (`2·1 + 14 = npar`, margin
-/// 0) and corrects onto that different valid payload. Returns no cell if the
-/// encoder's codewords no longer place the difference where the construction
-/// needs it (its ledger row then goes stale).
+/// codewords as erasures (its budget `npar − p − 2` allows 14) and finds the
+/// one unmarked error left against [`S5_NEAR`] (`2·1 + 14 = npar`, margin 0):
+/// a correction onto that different valid payload with no parity left to
+/// check it, which the rescue refuses. Returns no cell if the encoder's
+/// codewords no longer place the difference where the construction needs it.
 fn build_s5_constructed() -> Vec<Cell> {
     const NDATA: usize = 28;
     const NPAR: usize = 16;

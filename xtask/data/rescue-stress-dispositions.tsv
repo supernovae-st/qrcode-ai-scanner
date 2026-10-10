@@ -23,9 +23,9 @@
 # rescue-path row: the uncapped and capped passes fail on any rescue-path
 # wrong output. text_sha256 and text_len (UTF-8 bytes) identify the published
 # text.
-floor	uncapped	636
-floor	capped	642
-floor	dual	361
+floor	uncapped	632
+floor	capped	638
+floor	dual	348
 engine_panics	uncapped	0
 engine_panics	capped	0
 engine_panics	dual	0
@@ -79,4 +79,3 @@ dual	2162	2162_v10-h-p100-disc-gray-on_finder-o15-blot_c48_r20	non_qr	engine	dat
 dual	2164	2164_v10-h-p100-disc-gray-on_finder-o25-blot_c37_r43	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
 dual	2165	2165_v10-h-p100-disc-gray-on_finder-o30-blot_c48_r54	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
 dual	2167	2167_v10-h-p100-disc-gray-on_finder-o40-blot_c54_r21	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
-dual	9000	9000_s5-v2m-solved	rescue_qr	rescue	qr_code	6dc004ac0f046ef2c3612dce1f4d06759e2bf5213115b1a27ea0b2ae9268273b	26	rescue	S5 erasure rescue corrected a margin-0 block onto a different payload (a constructed case: 14 grayed EC codewords plus two confident errors)
