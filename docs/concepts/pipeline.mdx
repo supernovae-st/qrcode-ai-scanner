@@ -72,10 +72,13 @@ read once (other symbologies carry their decoding engine's reading):
 **Acceptance.** Every read is weighed over the whole walk before it may
 settle a stage, stop S5 or be published:
 
-- **Correction margin.** A QR content whose every measured margin is
+- **Correction margin.** A QR Code content whose every measured margin is
   negative — corrected past the ISO/IEC 18004 Annex B reserve, which only
   happens on versions 1 and 2 at low EC levels — is refused; one read
-  with a margin of zero or more admits it.
+  with a margin of zero or more admits it. A content with no measured
+  margin — every Micro QR and rMQR read, a QR Code read no parse
+  measured — is published as read, and a margin of zero or more does not
+  prove the correction right.
 - **Independent confirmation.** UPC-E, DataBar, DataBar Expanded and
   PDF417 at EC level 0, 1 or none — the symbologies a reader can invent
   from noise — wait for a second read of the same symbology and bytes
@@ -83,7 +86,9 @@ settle a stage, stop S5 or be published:
   read the scanner decodes that symbology once on the plane at three
   quarters of its size (not yet for DataBar, until the core crate
   requires rxing 0.9.3). A read still waiting when the walk ends is
-  refused.
+  refused. S4 and S5 read the QR family only, so in every profile a
+  DataBar in an image whose longest side is under 640 px is read at one
+  size and refused.
 - **Read checks.** A DataBar text is exactly fourteen digits; a plain port
   read whose bytes are not its text is refused.
 
@@ -110,15 +115,17 @@ sampled bitstream is recoverable:
   <Step title="Erasure marking">
     Low-confidence codewords become **erasures** — known-position losses
     that cost HALF an unknown error in the capacity law `e + 2t ≤ d − p`.
-    A block corrected with erasures must keep two parity codewords unspent
-    beyond the Annex B reserve, so a wrong correction passes about once in
-    65 536.
+    On top of the misdecode-protection codewords `p` of ISO/IEC 18004
+    Table 9 (non-zero only on versions 1 to 3 at low EC levels), a block
+    corrected with erasures must keep two parity codewords unspent — this
+    scanner's own guard, not a value taken from the standard.
   </Step>
   <Step title="Errors-and-erasures Reed-Solomon">
     Forney 1965: erasure locator, modified syndromes, Berlekamp-Massey,
     Chien search, Forney magnitudes — then a hard syndrome re-check and a
-    structural bitstream parse. Refusal-biased: no guess ever reaches the
-    report.
+    structural bitstream parse. Refusal-biased, not infallible: a block
+    damaged past what it can correct still passes these checks about once
+    in 65 536.
   </Step>
 </Steps>
 

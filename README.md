@@ -100,11 +100,14 @@ Seven things no other pure-Rust library ships together:
    declarations read once; other symbologies carry their decoding
    engine's reading re-encoded (ISO/IEC 8859-1 when every character fits,
    else UTF-8) and report no ECI. `charset: "unknown"` is the only lossy
-   reading. Detections are the
-   distinct contents the scanner can tell apart, never keyed on text, and a
-   read it cannot stand behind (a malformed stream, a correction past the
-   standard's misdecode reserve, an unconfirmed barcode a reader could
-   invent from noise) is refused: absent, never wrong.
+   reading. Detections are the distinct contents the scanner can tell
+   apart, never keyed on text. A read the evidence contradicts is refused:
+   a malformed stream, a QR Code content whose every measured correction
+   went past the standard's misdecode reserve, an unconfirmed barcode a
+   reader could invent from noise. Reads the scanner cannot measure (Micro
+   QR, rMQR, QR Code reads no parse measured) are published as read, and a
+   correction inside the reserve can still be wrong: when the score
+   measures the stream, a fully spent block raises `low_correction_margin`.
 
 Plus machine-actionable **hints** (`raise_error_correction`,
 `fix_finder_pattern`, `low_correction_margin`, …) · the feedback loop for

@@ -56,10 +56,13 @@ workflows, CI bots) consuming the scanner.
    judged, re-scan), or a contained fault. A present score is always a
    complete judgment.
 8. `meta`/`corners` are measured or `null` — never fabricated.
-9. Reads the scanner cannot stand behind are not published — a QR stream
-   corrected past ISO/IEC 18004's misdecode reserve, or a UPC-E, DataBar
-   or low-EC PDF417 read no independent read confirmed: absent, never
-   wrong.
+9. Some reads are refused rather than published: a malformed QR stream, a
+   QR Code content whose every measured correction went past ISO/IEC
+   18004's misdecode reserve, and a UPC-E, DataBar or low-EC PDF417 read
+   no independent read confirmed. This narrows wrong reads without ruling
+   them out: reads with no measured margin (Micro QR, rMQR, QR Code reads
+   no parse measured) are published as read, and a correction inside the
+   reserve can still be wrong — treat `low_correction_margin` as failure.
 
 ## The regenerate loop
 

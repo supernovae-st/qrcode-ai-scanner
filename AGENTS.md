@@ -87,11 +87,15 @@ manifest only and reports the gate as NOT VERIFIED, never as a pass.
   reads become detections by content identity (symbology, `raw`, FNC1
   position, compatible `eci`), never by `text` (spec/01 § Content,
   07-pipeline property 6). `tests/exact_content.rs` pins the rows.
-- **Publish nothing the evidence cannot stand behind**: a malformed stream
-  is refused whichever decoder reads it; a QR content corrected past the
-  Annex B reserve, and an invention-prone read no independent read
-  confirmed, are not published (07-pipeline § Acceptance). Absent, never
-  wrong — a recall trade-off is named in the CHANGELOG, not hidden.
+- **Refuse what the evidence contradicts**: a malformed stream is refused
+  whichever decoder reads it; a QR Code content whose every measured
+  correction margin is negative (past the Annex B reserve), and an
+  invention-prone read no independent read confirmed, are not published
+  (07-pipeline § Acceptance). The margin rule covers measured reads only:
+  Micro QR, rMQR and QR Code reads no parse measured are published as
+  read, and a correction inside the reserve can still be wrong — never
+  document the rule as infallible. Prefer absent to wrong; a recall
+  trade-off is named in the CHANGELOG, not hidden.
 - **Additive wire evolution only**: never rename/remove a JSON field or
   enum value. New variants are fine — consumers parse leniently.
 - **Every contract change cascades** through ALL of: the Rust types →

@@ -191,16 +191,20 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   rescues that spent the last parity codewords are refused too (the
   rescue-stress sweep loses 4 correct reads of 2304 in each of its
   uncapped and capped passes, 13 in its dual pass).
-- **A QR content corrected past the Annex B reserve is not published** —
-  the scanner now measures each read's correction margin on its own
-  received word (the worst block's ⌊(npar − p − f)/2⌋ − e). A content
+- **A QR Code content whose every measured correction went past the
+  Annex B reserve is not published** — the scanner now measures a read's
+  correction margin on its own received word wherever it error-corrects
+  that word itself (the worst block's ⌊(npar − p − f)/2⌋ − e). A content
   whose every measured margin is negative — errors alone took each word
   past the reserve, which only happens on versions 1 and 2 at low EC
   levels — is refused, with its reads of unknown margin: both engines
   sample the same damaged modules, so two engines agreeing on such a
   word are no independent evidence. One read keeping a margin of zero or
   more confirms the content. Port reads at EC level L or M are re-read
-  on versions 1 and 2 to measure their margin. Trade-off: a v1/v2 symbol
+  on versions 1 and 2 to measure their margin. Reads with no measured
+  margin — every Micro QR and rMQR read, and QR Code reads no parse
+  measured — are published as before, and a margin of zero or more does
+  not prove a correction right. Trade-off: a v1/v2 symbol
   so damaged that every read of it corrects past the reserve now reads
   as no detection (it was published, with a misdecode risk the
   standard's reserve exists to bound). On the ZXing blackbox QR sets this
@@ -220,9 +224,11 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   Code 39, Code 93, Codabar, ITF and Telepen keep settling on their first
   read. In the rescue-stress sweep the 46 UPC-E and DataBar outputs rxing
   read out of QR modules are gone (wrong outputs 0 in every pass).
-  Trade-off: a lone DataBar read at one size only — under the frame
-  profile, an image under 640 px on its longest side — is no longer
-  published, until the core crate requires rxing 0.9.3 or later and its
+  Trade-off: a DataBar the walk reads at one size only is no longer
+  published. Only the first three stages read symbologies outside the QR
+  family, at the 512 px pyramid and at full size, so in every profile a
+  DataBar in an image whose longest side is under 640 px is refused,
+  until the core crate requires rxing 0.9.3 or later and its
   confirmation decode can run.
 
 ### Upgrade notes

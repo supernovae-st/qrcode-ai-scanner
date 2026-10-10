@@ -99,11 +99,12 @@ Normative properties:
 
    Error correction accepts any correctable block (2t ≤ the parity
    codewords) on every source except S5 rescue, which keeps the Annex B
-   reserve because no engine decoded that stream. In each attempt: the
-   engines run (`rxing`, then `rqrr`); detected grids are re-derived; the
-   refusals they prove are recorded; the re-read runs for the reads no
-   parse of the attempt carries and no recorded refusal withholds, and
-   records its own refusals; the reads are collected.
+   reserve (and, in a block it corrects with erasures, two more parity
+   codewords — § S5) because no engine decoded that stream. In each
+   attempt: the engines run (`rxing`, then `rqrr`); detected grids are
+   re-derived; the refusals they prove are recorded; the re-read runs for
+   the reads no parse of the attempt carries and no recorded refusal
+   withholds, and records its own refusals; the reads are collected.
 
    **ECI evidence.** *located*: a parse above found the designators.
    *no-ECI*: a parse found no designator; modifier `]Q0`/`]Q1`/`]Q3`/`]Q5`;
@@ -238,13 +239,19 @@ protects reads it agrees with and keeps re-derivation running.
    word, when the scanner error-corrected that word itself (the `rqrr`
    grid, the re-read, S5): the least, over its blocks, of
    ⌊(npar − p − f)/2⌋ − e, with p from ISO/IEC 18004 Table 9, f erasures
-   and e errors. A QR content — the reads of its symbology whose accounts
+   and e errors. A content — the reads of its symbology whose accounts
    agree — is refused when at least one of its reads has a known margin
    and every known margin is negative; its reads of unknown margin share
    the refusal. One read with a margin of zero or more admits the content.
-   Errors alone reach a negative margin only on v1-L (more than 2 errors),
-   v1-M and v2-L (more than 4). The grid of an `rqrr` read with a negative
-   margin is offered to S5 like an undecoded grid.
+   Only QR Code (Model 2) reads ever have a known margin, so this rule
+   never refuses a content without one: every Micro QR, rMQR and non-QR
+   content, and a QR Code content no parse measured. Errors alone reach a
+   negative margin only on v1-L (more than 2 errors), v1-M and v2-L (more
+   than 4). A margin of zero or more does not prove the correction right:
+   a word miscorrected within the reserve is admitted (when the score
+   measures that stream, a block that spent its whole correction capacity
+   raises `low_correction_margin`, 06-hints.md). The grid of an `rqrr`
+   read with a negative margin is offered to S5 like an undecoded grid.
 2. **Independent confirmation.** A read of UPC-E, DataBar, DataBar
    Expanded, or PDF417 at error-correction level 0, 1 or none waits until
    a read of the same symbology and bytes was made on a plane whose
@@ -258,7 +265,12 @@ protects reads it agrees with and keeps re-derivation running.
    its time counted in the stage, its reads in no `detections_found`.
    While the core crate admits rxing below 0.9.3 no DataBar (RSS-14)
    decode of that kind runs, and a DataBar is confirmed only by a read the
-   walk makes anyway. A read still waiting when the walk ends is refused.
+   walk makes anyway. Only S1–S3 read symbologies outside the QR family
+   (S1 at the 512 px pyramid side, when the plane is larger; S2 and S3 at
+   the engine-capped size), so in every profile a DataBar in an image
+   whose longest side is under 640 px is never read on two planes 1.25×
+   apart, and is refused. A read still waiting when the walk ends is
+   refused.
 
 ## S5 — the erasure rescue (what `engines: ["rescue"]` means)
 
@@ -275,19 +287,22 @@ Per candidate:
    codeword's 8 modules, sampled at module centers through the detection
    homography (center-submodule idea: Halftone QR, Chu et al. 2013).
 3. **Erasure marking**: lowest-margin codewords (< 0.30 of half-span)
-   become erasures, budget ≤ npar − p − 2 per block.
+   become erasures, at most npar − p − 2 per block (p in step 5).
 4. **Errors-and-erasures RS** (Forney 1965): erasure locator Γ, modified
    syndromes Ξ = S·Γ (Berlekamp-Massey on the e-shifted Ξ), combined
-   locator Ψ = Λ·Γ, Chien roots, b=0 Forney magnitudes. Capacity law
-   `e + 2t ≤ d − p` (ISO 18004 Annex B `p` protection respected).
+   locator Ψ = Λ·Γ, Chien roots, b=0 Forney magnitudes.
 5. **Hard verification**: corrected blocks must re-check to ZERO syndromes
    AND the bitstream must parse as a structurally valid mode-segment stream
-   under 01-report § Content (§ Refused streams), and every block must
-   error-correct within the Annex B reserve — refusal-biased: no surviving
-   guess ever reaches the report. A block corrected with erasures must
-   leave at least two parity codewords unspent beyond the reserve
-   (npar − p − f − 2e ≥ 2); a block corrected without erasures keeps the
-   Annex B guard.
+   under 01-report § Content (§ Refused streams). Per block, with t errors
+   located, f erasures used and npar parity codewords, the scanner's guard
+   is 2t + f + p ≤ npar, where p is the misdecode-protection count of
+   ISO/IEC 18004:2015 Table 9 (3 on v1-L, 2 on v1-M and v2-L, 1 on v1-Q,
+   v1-H and v3-L, 0 elsewhere); a block corrected with erasures must also
+   leave two more parity codewords unspent: 2t + f + p + 2 ≤ npar. These
+   two spare codewords are this scanner's choice, not a value taken from
+   ISO/IEC 18004. A block damaged past what it can correct still passes
+   them about once in 65 536 (2⁻¹⁶ per block): the rescue is
+   refusal-biased, not infallible.
 
 Measured yield (v5-H, centered gray disk): engines die past 20% radius;
 rescue decodes through 30% (≈2.2× the occlusion area) — the

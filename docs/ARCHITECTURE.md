@@ -49,11 +49,15 @@ skips them by design — see the root `Cargo.toml` comment):
    and reconciled once at the end — identical reads fold; reads of one
    content join by their account and where they lie (spec/07 property 6).
    Text is never an identity.
-7. **Nothing the evidence cannot stand behind**: a malformed stream is
-   refused whichever engine reads it; a QR content corrected past the
-   Annex B reserve and an invention-prone barcode read no independent
-   read confirmed are not published (spec/07 § Acceptance) — absent,
-   never wrong.
+7. **Refuse what the evidence contradicts**: a malformed stream is
+   refused whichever engine reads it; a QR Code content whose every
+   measured correction margin is negative (past the Annex B reserve) and
+   an invention-prone barcode read no independent read confirmed are not
+   published (spec/07 § Acceptance). Reads with no measured margin — every
+   Micro QR and rMQR read, a QR Code read no parse measured — are
+   published as read, and a correction inside the reserve can still be
+   wrong (`low_correction_margin` flags a fully spent block the score
+   measured).
 
 ## Decode pipeline
 

@@ -56,9 +56,12 @@ artifacts off one Rust core.
    symbologies carry their decoding engine's reading re-encoded (ISO/IEC
    8859-1 when every character fits, else UTF-8). `charset: "unknown"` is
    the only lossy reading. Detections are the distinct contents the scanner
-   can tell apart, never keyed on text, and a read it cannot stand behind (a
-   malformed stream, a correction past the standard's misdecode reserve) is
-   refused: absent, never wrong.
+   can tell apart, never keyed on text. A malformed stream is refused, and
+   so is a QR Code content whose every measured correction went past the
+   standard's misdecode reserve. Reads the scanner cannot measure (Micro
+   QR, rMQR, QR Code reads no parse measured) are published as read, and a
+   correction inside the reserve can still be wrong: when the score
+   measures the stream, a fully spent block raises `low_correction_margin`.
 
 And it reads **every mainstream symbology**, not just QR: Micro QR · rMQR
 · Data Matrix · Aztec · PDF417 · MaxiCode · EAN-13/8 · UPC-A/E ·
