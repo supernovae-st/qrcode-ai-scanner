@@ -48,6 +48,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # flutter_rust_bridge_codegen formats the file it generates with rustfmt,
+      # and the pinned toolchain installs with the minimal profile: without the
+      # component the drift check below compares unformatted output and fails
+      # on layout alone (the runner's preinstalled stable carried it).
+      - run: rustup component add rustfmt --toolchain "$RUST_TOOLCHAIN"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bindings/flutter/rust
