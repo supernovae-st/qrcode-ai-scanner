@@ -78,8 +78,20 @@ manifest only and reports the gate as NOT VERIFIED, never as a pass.
   `true` exactly when the deadline prevented a planned unit (spec/02 §
   Budget semantics); a judgment it interrupts is `score: null`. Bounded
   checks with no budget (grid re-derivations, the re-read, the end-of-walk
-  pass) never set it. A test that asserts a score runs unbounded, or
-  asserts "absent with the flag set, or the unbounded value".
+  pass, the confirmation decodes) never set it. A test that asserts a score
+  runs unbounded, or asserts "absent with the flag set, or the unbounded
+  value".
+- **Exact content, keyed by identity**: a QR-family `content.raw` is the
+  original payload (the scanner's own parse decides it wherever it can
+  error-correct the grid); `unknown` is the only lossy `charset`, forever;
+  reads become detections by content identity (symbology, `raw`, FNC1
+  position, compatible `eci`), never by `text` (spec/01 § Content,
+  07-pipeline property 6). `tests/exact_content.rs` pins the rows.
+- **Publish nothing the evidence cannot stand behind**: a malformed stream
+  is refused whichever decoder reads it; a QR content corrected past the
+  Annex B reserve, and an invention-prone read no independent read
+  confirmed, are not published (07-pipeline § Acceptance). Absent, never
+  wrong — a recall trade-off is named in the CHANGELOG, not hidden.
 - **Additive wire evolution only**: never rename/remove a JSON field or
   enum value. New variants are fine — consumers parse leniently.
 - **Every contract change cascades** through ALL of: the Rust types →
@@ -111,7 +123,13 @@ manifest only and reports the gate as NOT VERIFIED, never as a pass.
 - The score probes decode ONLY the scored symbology
   (`engine::FormatFilter::Only`) — calling `decode_all` in a stress cell
   reintroduces a ~5× cost regression AND false cross-symbology survivals.
-- rqrr rejects FNC1 symbols (mode 0x5/0x9) — rxing is the GS1 engine.
+- rqrr rejects FNC1 symbols (mode 0x5/0x9) — rxing is the GS1 engine; the
+  scanner re-derives the grid rqrr detected to read its declarations.
+- The goldens (`spec/examples/`) carry this build's `versions`, and
+  `spec_golden` pins them: a marker or version bump regenerates the whole
+  set from its committed fixtures (`qrscan <fixture> --profile full
+  --budget-ms 0`, the table in `spec/README.md` § Examples); review every
+  diff.
 - `cargo test --workspace --lib` style commands: prefer
   `cargo nextest run`; doc tests via `cargo test --doc`.
 

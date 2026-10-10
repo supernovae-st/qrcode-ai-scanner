@@ -33,6 +33,13 @@ twin of the mobile.yml version gate, which stays the CI enforcement.
 (left at v0.6.0 through two releases, 2026-07-08 — greppable:
 `grep -rn "qrcode-ai-scanner:v0" README.md bindings/`).
 
+**So do the goldens.** `spec_golden` pins every `spec/examples/*.json` to
+the build's `versions` (the crate version included): rebuild the CLI after
+the bump and regenerate the whole set from its committed fixtures, one
+command per row of `spec/README.md` § Examples (`qrscan <fixture>
+--profile full --budget-ms 0`), then review the diff — it must be the
+version line and timings only, unless the release changes behavior.
+
 ## 2 · Cut the changelog
 
 `## Unreleased` → `## X.Y.Z — YYYY-MM-DD`. The tag-time gates REQUIRE a
