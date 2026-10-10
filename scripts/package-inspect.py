@@ -134,7 +134,6 @@ NAPI_CARRIED = ("description", "keywords", "author", "authors", "homepage", "lic
 # (Credentials.json leaks as surely as credentials.json). Defence in depth:
 # each archive is also held to an exact set or to the files git tracks.
 STRAY = tuple((re.compile(pattern, re.IGNORECASE), why) for pattern, why in (
-    (r"(^|/)\.qrscan-lane(/|$)", "local scratch directory"),
     (r"(^|/)plans/", "planning docs"),
     (r"(^|/)\.env($|\.)|\.env$|(^|/)\.envrc$", "environment file"),
     (r"\.(pem|key|p12|pfx|p8|jks|keystore|gpg|pgp|ppk|kdbx)$", "key material or keystore"),
@@ -1699,6 +1698,14 @@ def self_test() -> int:
         judge("sdist + an untracked core file",
               [sdist("sdist-extra", _clean_sdist(version) | {"qrcode-ai-scanner/src/extra.rs": b""})],
               FAIL, "qrcode-ai-scanner/src/extra.rs")
+        # A local scratch directory no stray rule names: the git allowlist and
+        # the exact npm file set catch it all the same.
+        judge("crate + an untracked scratch directory",
+              [crate("scratch-dir", _clean_crate(version) | {".scratch/notes.md": b""})],
+              FAIL, ".scratch/notes.md")
+        judge("platform package + a scratch directory",
+              [npm("platform-scratch", _npm_platform(version, "linux-x64-gnu") | {".scratch/notes.md": b""})],
+              FAIL, ".scratch/notes.md")
 
         # A tar member that is neither a regular file nor a directory never
         # reaches the file-set checks: it fails by itself, whatever its name.
