@@ -187,8 +187,9 @@ length of `raw`. A designator whose span is empty governs no byte.
 ### Refused streams
 
 A read is refused, and produces no detection, when the scanner
-error-corrects the grid it was read from and its parse finds a structure
-ISO/IEC 18004 (with GB/T 18284 for Hanzi) does not define:
+error-corrects the grid it was read from and its parse finds one of these
+structures, none of which ISO/IEC 18004 (with GB/T 18284 for Hanzi)
+defines:
 
 - an ECI designator whose first codeword is `111xxxxx`, whose value exceeds
   999999, or that is cut short;
@@ -199,6 +200,10 @@ ISO/IEC 18004 (with GB/T 18284 for Hanzi) does not define:
   ≥ 10), an alphanumeric pair value ≥ 2025 or a final single value ≥ 45;
 - a Hanzi subset other than GB 2312, an unassigned mode indicator, or a
   character count longer than the data.
+
+This list is what the parser checks, not every irregular stream: FNC1 in
+first position after data or given twice, and an ECI designator after an
+FNC1 indicator, are accepted and read as transmitted.
 
 A refusal also withholds the other QR reads of the same scan that report
 what a more tolerant decoder reports for the refused stream (same bytes,
@@ -442,17 +447,23 @@ counter, to know what was found.
 
 ```jsonc
 {
-  "value":      0..100,
-  "grade":      "excellent"|"good"|"acceptable"|"fair"|"poor",
-  "axes":       [{ "axis": StressAxis, "passed": n, "total": n }],
-  "structural": { "finder_integrity": [f,f,f], "quiet_zone_ok": bool } | null,
-  "uec":        { "margin": f, "grade": "a".."f",
-                  "worst_block_errors": n, "worst_block_capacity": n } | null,
-  "iso15415":   Iso15415Report | null
+  "value":       0..100,
+  "weights_run": 0..100,     // Σ contract weights of the axes that ran (100 = all six)
+  "grade":       "excellent"|"good"|"acceptable"|"fair"|"poor",
+  "axes":        [{ "axis": StressAxis, "passed": n, "total": n,
+                    "failed_at": string | null,  // label of the first failed cell
+                    "refined_failed_at": string  // OPTIONAL KEY: the bisected knee
+                 }],
+  "structural":  { "finder_integrity": [f,f,f], "quiet_zone_ok": bool } | null,
+  "uec":         { "margin": f, "grade": "a".."f",
+                   "worst_block_errors": n, "worst_block_capacity": n } | null,
+  "iso15415":    Iso15415Report | null
 }
 ```
 
-`score` evaluates the PRIMARY detection (the first-discovered symbol).
+`score` evaluates the PRIMARY detection, `detections[0]`: QR family
+first, then the detection whose earliest read came first (07-pipeline.md
+property 6) — not detector iteration order.
 
 ## `score: null`
 

@@ -64,7 +64,7 @@ Both GS1 kinds carry the same verdict shape:
 
 | Situation | `kind` | `conformant` | Machine discriminator | Meaning |
 |---|---|---|---|---|
-| Proper GS1 QR (FNC1 header) with valid data | `gs1` | `true` | `content.fnc1` = `first` | retail/B2B-ready element string |
+| FNC1 in first position (QR, Data Matrix, GS1-128), every element valid | `gs1` | `true` | `content.fnc1` = `first` | an element string whose every element passed the syntax checks above; `fnc1: first` says the symbol signals GS1 mode, not where its indicator stands |
 | GS1 Digital Link URI, valid | `gs1_digital_link` | `true` | — | the Sunrise-2027 retail form; also a working URL |
 | GS1 SYNTAX in a plain QR (no FNC1) | `gs1` | `false` + FNC1 issue | QR family and `content.fnc1` absent | the classic generator mistake: flag "regenerate with GS1 mode". Other symbologies may leave `fnc1` absent because they do not report it: never advise regenerating them from this row alone. |
 | GS1 mode, no verified text reading | `gs1` | `false`, `elements` `[]`, the not-parsed issue | `content.fnc1` = `first` and `content.charset` = `unknown` | the symbol IS in GS1 mode but its data could not be read as text (unsupported or unlocated ECI, undecodable bytes). Never advise "regenerate with GS1 mode"; use `content.raw`. |

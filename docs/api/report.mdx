@@ -25,7 +25,8 @@ Machine-readable mirrors — load these directly in tools and agents:
 </ResponseField>
 
 <ResponseField name="score" type="Score | null" required>
-  Scannability of the PRIMARY (first) detection. `null` exactly when no
+  Scannability of the PRIMARY detection, `detections[0]` (QR family
+  first, then the earliest read). `null` exactly when no
   judgment was published: nothing decoded · a configuration that computes
   no score (the `frame` profile, every axis skipped) · a judgment the
   budget interrupted (`trace.budget_exhausted: true` — not judged, re-scan
