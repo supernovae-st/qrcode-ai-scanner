@@ -9,9 +9,8 @@ Swift bindings (one serde wire contract).
 
 ## Install
 
-```yaml
-dependencies:
-  qrcode_ai_scanner: ^0.4.0
+```bash
+flutter pub add qrcode_ai_scanner
 ```
 
 > **Toolchain prerequisite.** This package compiles the Rust core at *your* app's

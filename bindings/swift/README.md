@@ -21,9 +21,9 @@ closed-source and therefore needs the **commercial** license. Contact
 ## Install (SwiftPM, on a tagged release)
 
 ```swift
-// Package.swift
+// Package.swift — X.Y.Z: the latest release tag
 dependencies: [
-    .package(url: "https://github.com/supernovae-st/qrcode-ai-scanner", from: "0.4.0"),
+    .package(url: "https://github.com/supernovae-st/qrcode-ai-scanner", from: "X.Y.Z"),
 ],
 // target deps:
 .product(name: "QrcodeAiScanner", package: "qrcode-ai-scanner"),
@@ -94,7 +94,7 @@ one place that produces a matching pair — it builds the xcframework, computes 
 checksum, and pins `Package.swift` from a single local build. Run it on a mac:
 
 ```bash
-bindings/swift/release.sh v0.4.0
+bindings/swift/release.sh vX.Y.Z   # the tag being released
 ```
 
 It mutates only the working tree (rewrites `Package.swift`, fills `build/`) and

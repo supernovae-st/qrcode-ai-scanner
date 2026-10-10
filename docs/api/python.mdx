@@ -30,7 +30,7 @@ report = q.scan(
 # raw RGBA camera frame (width * height * 4 bytes), no format roundtrip
 frame = q.scan_frame(rgba_bytes, width, height, "frame")
 
-q.version()  # "0.4.0"
+q.__version__  # the installed package version, a string
 ```
 
 `scan` / `scan_frame` return the [`ScanReport`](/api/report) as a plain dict

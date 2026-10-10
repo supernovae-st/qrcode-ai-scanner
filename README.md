@@ -236,13 +236,15 @@ as exploratory reporters.
 
 ## Workspace
 
-| Crate / package | Status |
+Every surface shares the workspace version (`Cargo.toml`).
+
+| Crate / package | Published to |
 |---|---|
-| [`qrcode-ai-scanner`](crates/qrcode-ai-scanner) (core lib) | v0.3 · release-ready |
-| [`qrcode-ai-scanner-cli`](crates/qrcode-ai-scanner-cli) (`qrscan`) | v0.3 · release-ready |
-| [`qrcode-ai-scanner-node`](crates/qrcode-ai-scanner-node) (`@supernovae-st/qrcode-ai-scanner`, napi async) | v0.3 · release-ready |
-| [`qrcode-ai-scanner-wasm`](crates/qrcode-ai-scanner-wasm) (`@supernovae-st/qrcode-ai-scanner-wasm`, SIMD128) | v0.3 · release-ready |
-| [`qrcode-ai-scanner-py`](crates/qrcode-ai-scanner-py) (`qrcode-ai-scanner` on PyPI, PyO3 abi3) | v0.3 · release-ready |
+| [`qrcode-ai-scanner`](crates/qrcode-ai-scanner) (core lib) | crates.io |
+| [`qrcode-ai-scanner-cli`](crates/qrcode-ai-scanner-cli) (`qrscan`) | crates.io |
+| [`qrcode-ai-scanner-node`](crates/qrcode-ai-scanner-node) (`@supernovae-st/qrcode-ai-scanner`, napi async) | npm |
+| [`qrcode-ai-scanner-wasm`](crates/qrcode-ai-scanner-wasm) (`@supernovae-st/qrcode-ai-scanner-wasm`, SIMD128) | npm |
+| [`qrcode-ai-scanner-py`](crates/qrcode-ai-scanner-py) (`qrcode-ai-scanner` on PyPI, PyO3 abi3) | PyPI |
 
 ## Contributing & security
 
