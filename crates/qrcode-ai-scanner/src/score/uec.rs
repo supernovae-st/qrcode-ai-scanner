@@ -203,13 +203,14 @@ mod tests {
 
     /// A lone LATE syndrome spike — every round quiet until the last — drives
     /// the flip-branch update fold at maximum `shift` (= round + 1): the
-    /// window `len + 1 - shift` narrows to exactly ONE write. The harvest
-    /// survivor `len + 1 → len - 1` (:52:30) turns that window negative and
+    /// window `len + 1 - shift` narrows to exactly ONE write. The mutant
+    /// `len + 1 → len - 1` of that bound turns the window negative and
     /// PANICS on usize underflow (len − 1 − shift, shift = len). Degree pin:
     /// a lone spike at the final round flips degree to round + 1 = len
     /// (off-exactness regime — pinned behavior, not an ISO guarantee).
-    /// The three sibling survivors at :52/:61 (`+→*`, and `+→-`/`+→*` in the
-    /// else-branch) are census-proven equivalents — see .cargo/mutants.toml.
+    /// Its `+→*` sibling and the else-branch bound's `+→*` are census-proven
+    /// equivalents (see .cargo/mutants.toml); the else-branch `+→-` drops a
+    /// locator write the Chien check reads (`only_a_correctable_block_counts_its_errors`).
     #[test]
     fn late_spike_syndrome_runs_the_fold_at_maximum_shift() {
         assert_eq!(error_count(&[0, 1]), 2, "npar=2 lone late spike");
@@ -491,6 +492,37 @@ mod tests {
             );
         }
         assert_eq!(corrected_errors(&[0, 1], 4, 2), None);
+        // two parity codewords, one error: the locator is whole only after
+        // the last round's else-branch fold — without it, the first round's
+        // locator names no position of the block for this error value
+        let mut short = vec![0u8; 4];
+        short[1] = gf_pow(100);
+        assert_eq!(
+            corrected_errors(&syndromes(&short, 2), short.len(), 2),
+            Some(1)
+        );
+    }
+
+    /// More errors than half the parity is no correction, even when the
+    /// locator names as many positions as its length: five syndromes whose
+    /// locator of length 3 has three distinct roots in a 255-codeword block
+    /// (2 · 3 > 5).
+    #[test]
+    fn a_locator_longer_than_half_the_parity_is_no_correction() {
+        let (r1, r2) = (gf_inv(gf_pow(2)), gf_inv(gf_pow(9)));
+        let r3 = r1 ^ r2;
+        // Λ(x) = s·(x + r1)(x + r2)(x + r3) = 1 + c1·x + s·x³: r3 = r1 + r2
+        // leaves no x² term
+        let s = gf_inv(gf_mul(gf_mul(r1, r2), r3));
+        let c1 = gf_mul(s, gf_mul(r1, r2) ^ gf_mul(r1, r3) ^ gf_mul(r2, r3));
+        let synd = [0, 0, s, gf_mul(c1, s), gf_mul(c1, gf_mul(c1, s))];
+        let (locator, length) = berlekamp_massey(&synd);
+        assert_eq!((length, &locator[..4]), (3, &[1, c1, 0, s][..]));
+        let named = (0..255)
+            .filter(|&j| poly_at(&locator, gf_inv(gf_pow(j))) == 0)
+            .count();
+        assert_eq!(named, 3, "precondition: three distinct roots in the block");
+        assert_eq!(corrected_errors(&synd, 255, 5), None);
     }
 
     #[test]
