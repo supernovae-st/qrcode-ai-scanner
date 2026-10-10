@@ -8,7 +8,71 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
 
 ### Changed
 
-- **A melting RS margin now caps the composite** (`score_contract` +1) —
+- **Exact QR content** (`versions.pipeline` 2 → 3) — a QR-family
+  `content.raw` is now the original payload on every decode path: where
+  the scanner can error-correct the grid a decoder read, its own parse
+  decides the bytes. Declared ECIs decide `content.text`; unmarked Kanji
+  and Hanzi segments read Shift_JIS or GB 18030 when that set also reads
+  the surrounding bytes, UTF-8 when the whole payload is UTF-8, and
+  `unknown` otherwise; Micro QR and rMQR Kanji read Shift_JIS when the
+  decoder's own reading is exactly that decoding. Detections are the
+  distinct contents the scanner can tell apart: every read is reconciled
+  at the end of the walk by its bytes, FNC1 position, ECI declarations
+  and where it lies — never by `text`. The ladder keeps going while every
+  QR code found only signals an ECI it could not locate (also beside a
+  retail barcode).
+- **`versions.score_contract` 4 → 5** (one bump, with the margin cap
+  below) — the UEC cap is measured even when `uec` is skipped, and on the
+  orientation the decoder read (a clean mirrored code scores like an
+  upright one), never from a stream that does not error-correct;
+  `score_skip_checks` never moves `score.value` or the ISO overall. A
+  judgment the wall-clock budget interrupted is absent (`score: null`,
+  with `trace.budget_exhausted: true`) where 0.9 published a partial
+  composite. Stress cells and alpha probes match content identity, so ECI
+  and non-UTF-8 symbols score their cells. The alpha placement envelope's
+  calibration honours the scan deadline: an envelope the budget cut is
+  absent with `trace.budget_exhausted: true`, no longer conflated with a
+  design no background decodes (0.9 ran that calibration unbounded).
+- **CLI** — `--score-only` exits 3 with empty stdout when the budget
+  interrupted the judgment of a decoded QR (0.9 printed a deflated value,
+  exit 0); every-axis-skipped and internal-fault cases name their cause
+  (exit 2). `--pretty` says why a score is missing and when the budget
+  cut the scan, prints `charset` and `fnc1` lines, and shows controls and
+  spoofing characters as `\u{…}`, a backslash as `\\` and a U+FFFD that
+  is part of the text as `\u{fffd}`.
+- **`trace.stages[].detections_found` still counts raw decoder hits** —
+  hits the scanner later refuses or holds for confirmation included; a
+  decode refused inside the decoder step (its own grid parses malformed)
+  is not a hit.
+- **QR content without ECI** — unmarked 0x80–0x9F and binary payloads
+  become one windows-1252 detection; reads only rxing made publish their
+  original bytes (Micro QR `[e9]`: `[c3 a9]` utf8 → `[e9]` `é` latin1;
+  Micro QR and rMQR 山田: `[e5 b1 b1 e7 94 b0]` utf8 → `[8e 52 93 63]`
+  `山田` shift_jis); no byte-order-mark sniffing; Kanji with ASCII trail
+  bytes (山田, テスト) read shift_jis, Hanzi gb18030, UTF-8 runs beside
+  such segments `unknown`; the Kanji values 5949–5951 keep `9f fd`–`9f
+  ff`, read `unknown`, one detection. FNC1, Hanzi and structured-append
+  symbols one decoder cannot read gain geometry and score sections
+  (`engines: ["rxing"]`); FNC1 symbols gain `content.fnc1` (GS1 Data
+  Matrix including `]d5`, GS1-128); Data Matrix `]d3` / `]d6` and Code 128
+  `]C2` data is AIM application data; same-text symbols with different
+  bytes, declarations or FNC1 stay separate; a QR read whose declarations
+  could not be observed (rare) shows non-ASCII bytes as U+FFFD
+  (`unknown`). Short unmarked Latin-1 payloads (for example `© 2026`,
+  `¡Hola!`), read as two detections in 0.9 through rxing's charset guess,
+  are now one detection.
+- **Other symbologies carry the bytes of their decoding engine's
+  reading** — Data Matrix, PDF417 and Aztec `content.raw` is that
+  reading's ISO/IEC 8859-1 encoding when every character fits, else its
+  UTF-8: UTF-8 text such as `Café crème brûlée` or
+  `https://…/日本語テスト` reads correctly and whole, mixed encodations
+  keep all their data, and distinct Data Matrix symbols no longer merge.
+- **ECI symbols** — one detection with the declared reading; unsupported,
+  binary or undecodable declarations and unlocatable ECIs (`eci: []`)
+  read `unknown`; mirrored and damaged-but-correctable symbols are
+  located.
+- **A melting RS margin now caps the composite** (part of
+  `score_contract` 4 → 5) —
   the occlusion cliff (door-admin probe 2026-08-05): a growing center
   logo ate the correction budget while every stress axis kept passing,
   so the score sat flat (88 at `logo_scale` 12 AND 18) then decode died
@@ -35,12 +99,27 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   its inspected archive byte for byte. Publishing jobs run only actions
   pinned by commit. A run from any other ref builds and inspects every
   archive and stops, and the npm main package goes up only once every
-  platform package it pins is live. A live version on crates.io or npm
-  must match the inspected archive, a tarball npm would read differently
-  fails, and manifests and Python sources are bound to the checkout.
+  platform package it pins is live. A live version on crates.io or npm,
+  and every file PyPI already serves at the version, must match the
+  inspected archive (PyPI may serve no other file there), every npm
+  upload first checks that its operand is the very tarball inspected in
+  the job, a tarball npm would read differently fails, and manifests and
+  Python sources are bound to the checkout.
 - **Source builds of the Python package need maturin 1.9.3 or newer** —
   the build requirement is now `maturin>=1.9.3,<2.0`, the first maturin
   that puts PEP 639 license files into source distributions.
+
+### Added
+
+- `content.charset` values `gb18030`, `eci` and `unknown` (`unknown` is
+  the only lossy value, now and later); the optional `content.eci`
+  (`[{designator, start}]`: located designators, `[]` when signalled but
+  not located) and `content.fnc1` (`"first"` | `"second"`); Rust
+  `EciSegment`, `Fnc1Position`, `Charset::is_lossy`, reader-only
+  `Unrecognized` variants and `ScanConfig::computes_score`; Dart
+  `Charset.gb18030` / `eci` / `unrecognized`, `isLossy`, `EciSegment`,
+  `Fnc1Position`; `trace.budget_exhausted` (`false`: the report is final;
+  absent on older reports: unknown).
 
 ### Fixed
 
@@ -80,6 +159,84 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   into a caught panic counted in `trace.engine_panics` instead of a
   runaway allocation. Each of those build roots now restates it.
   `cargo install qrcode-ai-scanner-cli` still builds without it.
+- **Malformed streams are refused, whichever decoder reads them** —
+  designators above 999999 or written `111xxxxx` (mirrored symbols
+  included), FNC1 in both positions, out-of-range numeric or
+  alphanumeric groups; a tolerant reading of the same symbol is withheld.
+  The rescue reads FNC1 `%%` as `%`; the FNC1-second indicator is kept
+  and never read as GS1; no more split ECI or 0x80–0x9F detections; no
+  guessed charset for an unsupported ECI. The Python stub types `score`
+  as `dict | None` (`NotRequired` from `typing_extensions`), and the docs
+  say that reproducible scans need `budget_ms=0` / `--budget-ms 0`.
+- **A plain port read whose bytes are not its text is refused** — rxing's
+  zxing-cpp port reader could report a QR Code read under identifier
+  `]Q1` with ASCII text whose raw bytes were another reader's shape
+  (codewords, not the text). Such a read is now refused unless its bytes
+  are its text, or decode to it behind a byte-order mark the way rxing
+  decodes them. An empty text claims nothing of the bytes (it is how
+  rxing renders a segment its decoder rejects, such as a Kanji pair
+  5949–5951) and keeps the read.
+- **A DataBar text is exactly fourteen digits** — a DataBar (RSS-14) read
+  whose text is anything else is refused.
+- **The misdecode-protection reserve of v2-L is two codewords** —
+  ISO/IEC 18004:2015 Table 9 reserves two on version 2 at level L; the
+  scanner reserved one.
+- **The S5 rescue keeps two parity codewords unspent in every block it
+  erases** — with f erasures a block keeps only npar − f checks, and a
+  correction that spent them all could land on another valid codeword: a
+  constructed v2-M symbol was rescued onto a different payload. A block
+  corrected with erasures must now keep two parity codewords beyond the
+  reserve (a wrong correction passes about once in 65 536), and the
+  rescue marks at most npar − p − 2 erasures per block. Trade-off:
+  rescues that spent the last parity codewords are refused too (the
+  rescue-stress sweep loses 4 correct reads of 2304 in each of its
+  uncapped and capped passes, 13 in its dual pass).
+- **A QR content corrected past the Annex B reserve is not published** —
+  the scanner now measures each read's correction margin on its own
+  received word (the worst block's ⌊(npar − p − f)/2⌋ − e). A content
+  whose every measured margin is negative — errors alone took each word
+  past the reserve, which only happens on versions 1 and 2 at low EC
+  levels — is refused, with its reads of unknown margin: both engines
+  sample the same damaged modules, so two engines agreeing on such a
+  word are no independent evidence. One read keeping a margin of zero or
+  more confirms the content. Port reads at EC level L or M are re-read
+  on versions 1 and 2 to measure their margin. Trade-off: a v1/v2 symbol
+  so damaged that every read of it corrects past the reserve now reads
+  as no detection (it was published, with a misdecode risk the
+  standard's reserve exists to bound). On the ZXing blackbox QR sets this
+  costs one exact read of 179: `qrcode-4/41.png`, a v2-L symbol rxing
+  read with five corrections (margin −1); its `corpus-external.tsv`
+  expectation moves from `match` to `blind`.
+- **Barcodes the readers invent from noise need a second, independent
+  read** — UPC-E, DataBar, DataBar Expanded and PDF417 at EC level 0, 1
+  or none are published only once a read of the same symbology and bytes
+  comes from a plane whose longest side differs by a factor of 1.25 or
+  more. Right after the attempt that first reads one, the scanner
+  decodes that symbology alone on the attempt's plane at three quarters
+  of its size (at most one decode per content and four per scan walk).
+  While the core crate admits rxing below 0.9.3, whose RSS-14 reader can
+  underflow, no DataBar decode of that kind runs: a DataBar is confirmed
+  only by a read the walk makes anyway. EAN-13, EAN-8, UPC-A, Code 128,
+  Code 39, Code 93, Codabar, ITF and Telepen keep settling on their first
+  read. In the rescue-stress sweep the 46 UPC-E and DataBar outputs rxing
+  read out of QR modules are gone (wrong outputs 0 in every pass).
+  Trade-off: a lone DataBar read at one size only — under the frame
+  profile, an image under 640 px on its longest side — is no longer
+  published, until the core crate requires rxing 0.9.3 or later and its
+  confirmation decode can run.
+
+### Upgrade notes
+
+- TypeScript: exhaustive `Charset` switches gain three values. Dart: the
+  new values shift `Charset.index` (`unknown` 3 → 5), and implementers
+  need the new getters; the Flutter `scan` / `scanFrame` facade still
+  runs at the profile's default budget in 0.10.0, so read
+  `trace.budget_exhausted` there. Python: test `charset == 'unknown'`.
+  Rust 0.9.x cannot read reports that carry the new values. Validate a
+  report with the schema of the release tag its `versions.scanner`
+  names. Pin `qrcode-ai-scanner~=0.10.0` and `cargo install
+  qrcode-ai-scanner-cli --locked --version 0.10.0`. Downstream judges
+  re-measure their floors before moving their pins.
 
 ### CI
 
@@ -89,6 +246,29 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   musl targets. The flag is now a per-row matrix field (Linux-gnu rows
   only), musl rides zig (`-x` + setup-zig + cargo-zigbuild, the official
   napi-rs template recipe), and `@napi-rs/cli` pins `3.7.3` exact.
+- **The strict oracle judges contents, not texts** (`qrscan-oracle/v2`) —
+  a `corpus.toml` entry may now carry its bytes and declarations
+  (`raw_hex`, `eci`, `fnc1`; 31 entries do, each checked against an
+  independent reader). Such a truth is met by content identity: equal
+  text over other bytes is another content, and a detection whose
+  charset is `unknown`, or whose ECI was signalled but not located, meets
+  it as `unread` — a rate of its own, never exact and never blocking.
+  Units meet detections through a best matching, and the report states
+  the rule of each truth kind.
+- **The benchmark harness reads fairly and fails closed**
+  (`qrscan-bench/v4`) — work is each side's share of its own reference
+  walk; an erroring reference walk counts as an error; a gated pair whose
+  sides are not the declared base and candidate is refused; stopping or
+  suspending the harness stops its workers, and a call that spans a stop
+  is repeated instead of counted as a wall failure; the host gate fails
+  closed on its probes, its lock and its run directory. Its records name
+  every run-time input it read (driver scripts, the priming fixture,
+  every vendored image), alpha images, the budget flag and pairs cut at
+  the same point, and a dry run pre-screens the A/B disagreement share.
+- **The weekly mutation suite runs in 85 shards** — the suite grew past
+  what 16 shards finish within the job's time limit; the shard count
+  comes from measured per-mutant costs, and the exclusions and
+  dispositions are anchored on this tree.
 
 ## 0.9.0 — 2026-07-20
 
