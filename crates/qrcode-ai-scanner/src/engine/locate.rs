@@ -13,10 +13,18 @@
 //! else leaves the engine's evidence. The re-read never changes a read's
 //! bytes and keeps its geometry internal.
 //!
+//! The re-read also measures the correction margin of the word it reads
+//! there (07-pipeline § Acceptance). A port read with nothing to locate is
+//! re-read for that margin alone, at EC level L or M and on versions 1 and 2
+//! only ([`MARGIN_VERSIONS`]), and nothing else of it changes.
+//!
 //! Bounded and deterministic: versions 1-40 (an rqrr read: its measured
-//! version) × {as read, transposed} × three sampler passes — at most
-//! [`MAX_PROBES`] format probes and as many error-correction attempts per
-//! call; no clock, no RNG, no budget. Score cells and probes never run it.
+//! version; a margin re-read: versions 1 and 2) × {as read, transposed} ×
+//! three sampler passes — at most [`MAX_PROBES`] format probes and as many
+//! error-correction attempts per call (12 for a margin re-read); no clock,
+//! no RNG, no budget. Score cells and probes never run it.
+
+use std::ops::RangeInclusive;
 
 use crate::engine::content::{DoubleByteSpan, EciMark, Fnc1};
 use crate::input::LumaImage;
@@ -29,6 +37,11 @@ use crate::rescue::{Acceptance, Rederived};
 /// Format probes — and error-correction attempts — one call may spend:
 /// 40 versions × 2 orientations × 3 sampler passes.
 pub(crate) const MAX_PROBES: usize = 240;
+
+/// The versions a margin re-read tries ([`LocateHint::for_margin`]): errors
+/// alone pass the ISO/IEC 18004 Annex B reserve only on version 1 at EC
+/// levels L and M and on version 2 at L.
+pub(crate) const MARGIN_VERSIONS: RangeInclusive<u8> = 1..=2;
 
 /// How a read's corner points frame the module grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,11 +66,30 @@ pub(crate) struct LocateHint {
     pub(crate) inverted: bool,
     /// The error-correction level the engine read.
     pub(crate) ec: EcLevel,
-    /// The version the engine measured (rqrr); `None`: try every version.
-    pub(crate) version: Option<u8>,
+    /// The versions to try: the one rqrr measured, every version for a port
+    /// read's declarations, [`MARGIN_VERSIONS`] for its margin alone.
+    pub(crate) versions: RangeInclusive<u8>,
     /// The AIM modifier digit (`]Qn`) the engine stated; `None` for rqrr,
     /// which decodes neither FNC1 mode and states nothing of ECI.
     pub(crate) modifier: Option<u8>,
+    /// The re-read locates the read's declarations and segments; otherwise
+    /// it measures its word's margin and changes nothing else of the read.
+    pub(crate) declarations: bool,
+}
+
+impl LocateHint {
+    /// The re-read that measures a port read's word margin and nothing
+    /// else: at EC level L or M, on [`MARGIN_VERSIONS`]. `None` at Q and H,
+    /// whose reserve errors alone never pass, and for rqrr's reads, which
+    /// carry their own word's margin.
+    pub(crate) fn for_margin(&self) -> Option<Self> {
+        let measurable = matches!(self.ec, EcLevel::L | EcLevel::M);
+        (self.frame == Frame::OuterCorners && measurable).then(|| Self {
+            versions: MARGIN_VERSIONS,
+            declarations: false,
+            ..self.clone()
+        })
+    }
 }
 
 /// What the re-read established.
@@ -78,6 +110,9 @@ pub(crate) enum Located {
         mask: u8,
         /// The grid verified transposed (a mirrored symbol).
         mirrored: bool,
+        /// The worst block's correction margin of the word read there
+        /// (`rescue::margin`).
+        margin: i32,
     },
     /// A port read's own grid is a stream ISO/IEC 18004 does not define, and
     /// a parse with the port's tolerances reproduces its payload: what that
@@ -113,11 +148,11 @@ pub(crate) fn locate_spending(
 ) -> (Located, Spent) {
     let mut spent = Spent::default();
     let black = Binarized::of(img);
-    let versions: Vec<u8> = match hint.version {
-        Some(version) if (1..=40).contains(&version) => vec![version],
-        Some(_) => Vec::new(),
-        None => (1..=40).collect(),
-    };
+    let versions: Vec<u8> = hint
+        .versions
+        .clone()
+        .filter(|version| (1..=40).contains(version))
+        .collect();
     let passes = [
         Pass::Binarized {
             dark_is_black: !hint.inverted,
@@ -148,7 +183,7 @@ pub(crate) fn locate_spending(
                 spent.rs_attempts += 1;
                 let stream = grid.masked_stream();
                 match crate::rescue::rederive(&stream, version, hint.ec, mask, Acceptance::Engine) {
-                    Rederived::Parsed { parsed, .. }
+                    Rederived::Parsed { parsed, margin }
                         if parsed.bytes == payload
                             && agrees(!parsed.eci.is_empty(), parsed.fnc1, hint.modifier) =>
                     {
@@ -159,6 +194,7 @@ pub(crate) fn locate_spending(
                             version,
                             mask,
                             mirrored,
+                            margin,
                         };
                         return (located, spent);
                     }
@@ -597,8 +633,9 @@ mod tests {
             frame: Frame::OuterCorners,
             inverted: false,
             ec,
-            version: None,
+            versions: 1..=40,
             modifier: Some(modifier),
+            declarations: true,
         }
     }
 
@@ -662,6 +699,12 @@ mod tests {
                         let modifier = if list.is_empty() { 1 } else { 2 };
                         let (found, spent) =
                             locate_spending(&img, &hint(points, level(ec), modifier), payload);
+                        let case = format!("v{version} {ec:?} {list:?} mask {mask} T{transposed}");
+                        // a clean word: no error spent, whatever its blocks keep
+                        let margin = match found {
+                            Located::Parsed { margin, .. } if margin >= 0 => margin,
+                            _ => panic!("{case}: {found:?}"),
+                        };
                         let expected = Located::Parsed {
                             eci: marks(list),
                             fnc1: Fnc1::None,
@@ -669,8 +712,8 @@ mod tests {
                             version: u8::try_from(version).unwrap(),
                             mask: u8::try_from(mask).unwrap(),
                             mirrored: transposed,
+                            margin,
                         };
-                        let case = format!("v{version} {ec:?} {list:?} mask {mask} T{transposed}");
                         assert_eq!(found, expected, "{case}");
                         assert!(spent.format_probes <= MAX_PROBES, "{case}: {spent:?}");
                         located += 1;
@@ -767,7 +810,7 @@ mod tests {
         assert!(spent.rs_attempts <= spent.format_probes, "{spent:?}");
         // an rqrr hint (its measured version) probes that version only
         let rqrr = LocateHint {
-            version: Some(3),
+            versions: 3..=3,
             modifier: None,
             frame: Frame::GridBounds,
             ..hint(points, EcLevel::M, 2)
@@ -802,6 +845,64 @@ mod tests {
             }
         }
         assert_eq!(bch_remainder(0b101, 0), 0b101, "no generator, no division");
+    }
+
+    #[test]
+    fn a_margin_re_read_measures_versions_1_and_2_only() {
+        // a port read at L or M of a v2 symbol: located on its own word, with
+        // that word's margin (v2-L: ⌊(10 − 2)/2⌋ − 0 = 4); twelve probes at
+        // most, the same every time
+        let plain: Push = |b| b.push_byte_data(b"https://qrc-ai.com/v2l");
+        let (img, points) = render(2, qrcode::EcLevel::L, 1, false, plain).unwrap();
+        let margin_hint = hint(points, EcLevel::L, 1)
+            .for_margin()
+            .expect("L: a margin to measure");
+        assert_eq!(margin_hint.versions, MARGIN_VERSIONS);
+        assert!(!margin_hint.declarations);
+        let (found, spent) = locate_spending(&img, &margin_hint, b"https://qrc-ai.com/v2l");
+        let Located::Parsed {
+            margin, version, ..
+        } = found
+        else {
+            panic!("{found:?}");
+        };
+        assert_eq!((version, margin), (2, 4));
+        assert!(
+            spent.format_probes <= 12 && spent.rs_attempts <= 12,
+            "{spent:?}"
+        );
+        assert_eq!(
+            locate_spending(&img, &margin_hint, b"https://qrc-ai.com/v2l"),
+            (found, spent)
+        );
+        // a v5 symbol is no version the margin re-read tries: unverified
+        let (img, points) = render(5, qrcode::EcLevel::M, 2, false, plain).unwrap();
+        let margin_hint = hint(points, EcLevel::M, 1).for_margin().unwrap();
+        let (found, spent) = locate_spending(&img, &margin_hint, b"https://qrc-ai.com/v2l");
+        assert_eq!(found, Located::Unverified);
+        assert!(spent.format_probes <= 12, "{spent:?}");
+        // Q and H reads: errors alone never pass their reserve
+        for ec in [EcLevel::Q, EcLevel::H] {
+            assert!(hint(points, ec, 1).for_margin().is_none(), "{ec:?}");
+        }
+        // rqrr's reads carry their own word's margin: never re-read for it
+        let rqrr = LocateHint {
+            frame: Frame::GridBounds,
+            ..hint(points, EcLevel::L, 1)
+        };
+        assert!(rqrr.for_margin().is_none());
+    }
+
+    #[test]
+    fn a_located_re_read_reports_its_words_margin() {
+        // the declarations re-read too: ECI 4 at v3-M, no error, 26 parity
+        // codewords — a margin of 13
+        let (img, points) = render(3, qrcode::EcLevel::M, 5, false, CASES[1].2).unwrap();
+        let found = locate(&img, &hint(points, EcLevel::M, 2), &[0xA1]);
+        assert!(
+            matches!(found, Located::Parsed { margin: 13, .. }),
+            "{found:?}"
+        );
     }
 
     #[test]

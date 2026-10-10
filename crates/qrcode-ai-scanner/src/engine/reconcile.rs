@@ -507,6 +507,17 @@ impl ReadStore {
         self.standing(read).is_none()
     }
 
+    /// Whether a standing read of the read's content (its symbology, an
+    /// agreeing account) measured a margin of zero or more on its own word:
+    /// a margin re-read of it would measure nothing the acceptance needs.
+    pub(crate) fn has_margin(&self, read: &Read) -> bool {
+        self.live().iter().any(|own| {
+            own.symbology == read.symbology
+                && own.key.agrees(&read.key)
+                && own.margin.within_reserve()
+        })
+    }
+
     /// The reads that stand.
     fn live(&self) -> Vec<Read> {
         self.reads

@@ -672,6 +672,8 @@ struct Run<'a> {
     attempts: u32,
     /// Re-reads the scan spent.
     rereads: usize,
+    /// The contents a margin re-read measured (once each).
+    margin_rereads: Vec<(Symbology, ContentKey)>,
     panics: u8,
     /// The deadline prevented a planned unit of the walk.
     cut: bool,
@@ -713,6 +715,7 @@ impl<'a> Run<'a> {
             rescue_candidates: Vec::new(),
             attempts: 0,
             rereads,
+            margin_rereads: Vec::new(),
             panics: 0,
             cut: false,
         }
@@ -837,11 +840,13 @@ impl Run<'_> {
 
     /// The re-read (07-pipeline property 6): each read with a hint is
     /// sampled at its engine's corners in the attempt image, while the scan
-    /// has re-reads left — unless a parsed read or candidate parse of the
-    /// attempt carries it where it lies, or a recorded refusal withholds it
-    /// (it is withheld anyway). A located parse upgrades it (declarations,
-    /// segments — never its bytes, engines or geometry); a refused one
-    /// removes it and records the refusal at its place.
+    /// has re-reads left — unless a recorded refusal withholds it (it is
+    /// withheld anyway) or [`Run::needs_reread`] finds nothing to learn. A
+    /// located parse records its word's margin and, for a declarations
+    /// re-read, upgrades the read (declarations, segments — never its bytes,
+    /// engines or geometry); a declarations re-read that refuses removes it
+    /// and records the refusal at its place. A margin re-read changes
+    /// nothing else.
     fn reread(
         &mut self,
         img: &LumaImage,
@@ -850,36 +855,38 @@ impl Run<'_> {
     ) {
         let mut i = 0;
         while let Some((read, hint)) = reads.get(i) {
-            let carried = reads.iter().any(|(other, _)| {
-                other.parsed
-                    && other.symbology == read.symbology
-                    && other.key.agrees(&read.key)
-                    && inside(read.location, other.location)
-            });
-            let Some(hint) = hint
-                .clone()
-                .filter(|_| !carried && self.rereads < MAX_REREADS && !self.store.withheld(read))
-            else {
+            let Some(hint) = hint.clone().filter(|hint| {
+                self.rereads < MAX_REREADS
+                    && !self.store.withheld(read)
+                    && self.needs_reread(read, hint, reads)
+            }) else {
                 i += 1;
                 continue;
             };
             self.rereads += 1;
+            if !hint.declarations {
+                self.margin_rereads.push((read.symbology, read.key.clone()));
+            }
             match engine::reread(img, &hint, &read.key.raw) {
                 Located::Parsed {
                     eci,
                     fnc1,
                     segments,
+                    margin,
                     ..
                 } => {
                     if let Some((read, _)) = reads.get_mut(i) {
-                        read.key.eci = EciEvidence::from_marks(eci);
-                        read.key.fnc1 = fnc1;
-                        read.segments = Segments::Observed(segments);
-                        read.parsed = true;
+                        read.margin = read.margin.best(Margin::Known(margin));
+                        if hint.declarations {
+                            read.key.eci = EciEvidence::from_marks(eci);
+                            read.key.fnc1 = fnc1;
+                            read.segments = Segments::Observed(segments);
+                            read.parsed = true;
+                        }
                     }
                     i += 1;
                 }
-                Located::Refused { port } => {
+                Located::Refused { port } if hint.declarations => {
                     let (read, _) = reads.remove(i);
                     refusals.push(Refusal {
                         port: Some(engine::port_key(port)),
@@ -887,9 +894,37 @@ impl Run<'_> {
                         place: read.location,
                     });
                 }
-                Located::Unverified => i += 1,
+                Located::Refused { .. } | Located::Unverified => i += 1,
             }
         }
+    }
+
+    /// Whether a read's re-read can still learn something: a declarations
+    /// re-read unless a parsed read or candidate parse of the attempt
+    /// carries the read where it lies; a margin re-read once per content,
+    /// while no read of that content — the attempt's or the walk's — has a
+    /// known margin of zero or more.
+    fn needs_reread(
+        &self,
+        read: &Read,
+        hint: &LocateHint,
+        reads: &[(Read, Option<LocateHint>)],
+    ) -> bool {
+        let content =
+            |other: &Read| other.symbology == read.symbology && other.key.agrees(&read.key);
+        if hint.declarations {
+            return !reads.iter().any(|(other, _)| {
+                other.parsed && content(other) && inside(read.location, other.location)
+            });
+        }
+        !self
+            .margin_rereads
+            .iter()
+            .any(|(symbology, key)| *symbology == read.symbology && key.agrees(&read.key))
+            && !reads
+                .iter()
+                .any(|(other, _)| content(other) && other.margin.within_reserve())
+            && !self.store.has_margin(read)
     }
 
     /// S5 — try the collected rescue candidates when the walk published
@@ -2275,6 +2310,57 @@ mod ladder_mutant_kills {
         run.reread(&luma, &mut reads, &mut refusals);
         assert_eq!(run.rereads, 1);
         assert_eq!(refusals.len(), 1, "{refusals:?}");
+    }
+
+    #[test]
+    fn a_low_version_port_read_is_re_read_once_for_its_margin() {
+        // v2-L, no ECI: rxing's port read has nothing to locate, but its
+        // word's margin is unknown. One re-read at its corners measures it,
+        // ⌊(10 − 2)/2⌋ − 0 = 4, and changes nothing else of the read
+        let luma = crate::rescue::test_symbols::from_segments(
+            qrcode::Version::Normal(2),
+            qrcode::EcLevel::L,
+            |b| b.push_byte_data(b"https://qrc-ai.com/v2l"),
+        );
+        let dims = (luma.width(), luma.height());
+        let outcome = engine::decode_filtered(&luma, engine::FormatFilter::All);
+        let port: Vec<RawDetection> = outcome
+            .detections
+            .iter()
+            .filter(|d| d.engine == EngineKind::Rxing)
+            .cloned()
+            .collect();
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, dims);
+        let mut reads = reads_of(&run, port.clone(), 0, dims);
+        let before = reads[0].0.clone();
+        let mut refusals = Vec::new();
+        run.reread(&luma, &mut reads, &mut refusals);
+        assert_eq!(run.rereads, 1);
+        assert!(refusals.is_empty());
+        let (read, _) = &reads[0];
+        assert_eq!(read.margin, Margin::Known(4));
+        assert_eq!(
+            (&read.key, read.parsed, &read.segments),
+            (&before.key, before.parsed, &before.segments)
+        );
+        // once per content: the next attempt's read of it is not re-read
+        let mut again = reads_of(&run, port.clone(), 1, dims);
+        run.reread(&luma, &mut again, &mut refusals);
+        assert_eq!((run.rereads, again[0].0.margin), (1, Margin::Unknown));
+        // rqrr's read of the same attempt measured its own word: none spent
+        let mut run = fresh_run(&cancel, dims);
+        let mut reads = reads_of(&run, outcome.detections, 0, dims);
+        run.reread(&luma, &mut reads, &mut refusals);
+        assert_eq!(run.rereads, 0);
+        // nor when the walk holds a read of the content with a known margin
+        let mut run = fresh_run(&cancel, dims);
+        let mut measured = before;
+        measured.margin = Margin::Known(0);
+        run.store.collect(measured);
+        let mut reads = reads_of(&run, port, 1, dims);
+        run.reread(&luma, &mut reads, &mut refusals);
+        assert_eq!(run.rereads, 0);
     }
 
     #[test]

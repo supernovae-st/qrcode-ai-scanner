@@ -358,10 +358,13 @@ fn location(points: &[rxing::Point]) -> Option<[Point; 4]> {
     }
 }
 
-/// What the re-read needs for a port read of a QR Code symbol whose
-/// modifier leaves its declarations or segments unverified: an ECI or FNC1
-/// indicator (`]Q2`-`]Q6`), or no indicator over a payload that is not
-/// UTF-8 (Kanji segments to find). Micro QR and rMQR are never re-read.
+/// What the re-read needs for a port read of a QR Code symbol: on every
+/// version, its declarations or segments when its modifier leaves them
+/// unverified — an ECI or FNC1 indicator (`]Q2`-`]Q6`), or no indicator
+/// over a payload that is not UTF-8 (Kanji segments to find); otherwise, at
+/// EC level L or M, its word's margin on the versions where errors alone
+/// pass the Annex B reserve ([`LocateHint::for_margin`]). Micro QR and rMQR
+/// are never re-read.
 fn locate_hint(
     detection: &RawDetection,
     result: &rxing::RXingResult,
@@ -373,21 +376,27 @@ fn locate_hint(
         0 | 1 => std::str::from_utf8(&detection.raw).is_err(),
         _ => false,
     };
-    if detection.symbology != Symbology::QrCode || !unverified || result.getPoints().len() != 4 {
+    if detection.symbology != Symbology::QrCode || result.getPoints().len() != 4 {
         return None;
     }
     let inverted = matches!(
         result.getRXingResultMetadata().get(&MetaKey::IS_INVERTED),
         Some(MetaValue::IsInverted(true))
     );
-    Some(LocateHint {
+    let hint = LocateHint {
         points: detection.location?,
         frame: Frame::OuterCorners,
         inverted,
         ec: detection.ec?,
-        version: None,
+        versions: 1..=40,
         modifier: Some(modifier),
-    })
+        declarations: true,
+    };
+    if unverified {
+        Some(hint)
+    } else {
+        hint.for_margin()
+    }
 }
 
 #[cfg(test)]
@@ -937,16 +946,22 @@ mod tests {
     }
 
     #[test]
-    fn only_unverified_port_reads_get_a_re_read() {
-        // ]Q1 ASCII and ]Q1 UTF-8 need none; ]Q2 does (at the port's
-        // corners, in the polarity it read); Micro QR never
+    fn port_reads_get_the_re_read_their_modifier_and_shape_need() {
+        // ]Q2 needs its declarations located (every version, at the port's
+        // corners, in the polarity it read); ]Q1 ASCII and UTF-8 need none —
+        // but at EC level L or M a margin to measure, on versions 1 and 2;
+        // Q and H need nothing; Micro QR is never re-read
         let plain = decode(&render(b"plain", qrcode::EcLevel::M), FormatFilter::All);
-        assert!(qr(&plain).locate.is_none());
+        let hint = qr(&plain).locate.clone().expect("M: a margin to measure");
+        assert!(!hint.declarations);
+        assert_eq!(hint.versions, crate::engine::locate::MARGIN_VERSIONS);
         let utf8 = decode(
-            &render("café".as_bytes(), qrcode::EcLevel::M),
+            &render("café".as_bytes(), qrcode::EcLevel::Q),
             FormatFilter::All,
         );
         assert!(qr(&utf8).locate.is_none());
+        let high = decode(&render(b"plain", qrcode::EcLevel::H), FormatFilter::All);
+        assert!(qr(&high).locate.is_none());
         let luma =
             test_symbols::from_segments(qrcode::Version::Normal(3), qrcode::EcLevel::M, |b| {
                 b.push_eci_designator(4)?;
@@ -957,6 +972,8 @@ mod tests {
             .locate
             .clone()
             .expect("]Q2: declarations to locate");
+        assert!(hint.declarations);
+        assert_eq!(hint.versions, 1..=40);
         assert_eq!(hint.modifier, Some(2));
         assert_eq!(hint.ec, EcLevel::M);
         assert!(!hint.inverted);

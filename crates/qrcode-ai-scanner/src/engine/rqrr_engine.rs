@@ -102,8 +102,9 @@ pub(super) fn decode(luma: &LumaImage, orient_candidates: bool) -> Pass {
                 frame: Frame::GridBounds,
                 inverted: false,
                 ec,
-                version: u8::try_from(meta.version.0).ok(),
+                versions: u8::try_from(meta.version.0).map_or(1..=40, |version| version..=version),
                 modifier: None,
+                declarations: true,
             }),
             _ => None,
         };

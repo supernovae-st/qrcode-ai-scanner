@@ -148,6 +148,12 @@ impl Margin {
             (Self::Unknown, Self::Unknown) => Self::Unknown,
         }
     }
+
+    /// A known margin of zero or more: errors alone kept the word inside
+    /// the Annex B reserve.
+    pub(crate) fn within_reserve(self) -> bool {
+        matches!(self, Self::Known(m) if m >= 0)
+    }
 }
 
 /// Per-interleaved-codeword confidence: the worst |sample − threshold|
