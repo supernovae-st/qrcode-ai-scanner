@@ -3023,8 +3023,9 @@ mod tests {
         );
     }
 
-    /// The review finding on 13: a DIFFERENT wrong text is not the misread
-    /// the entry excuses — stale, even though the verdict class is the same.
+    /// A known-wrong pin excuses one misread: a DIFFERENT wrong text on 13 is
+    /// not the misread the entry pins — stale, even though the verdict class
+    /// is the same.
     #[test]
     fn known_wrong_holds_only_for_the_pinned_misread() {
         let [known_wrong, _] = DISPOSITIONS;
@@ -3101,8 +3102,9 @@ mod tests {
         assert!(found.is_empty(), "differs is information: {found:?}");
     }
 
-    /// The review finding on 16: a wrong extra output next to the outer
-    /// truth must not hide behind `truth_incomplete` — never `ambiguous`.
+    /// An incomplete truth excuses one named symbol: a wrong extra output next
+    /// to 16's outer truth must not hide behind `truth_incomplete` — never
+    /// `ambiguous`.
     #[test]
     fn truth_incomplete_excuses_only_its_pinned_symbol() {
         let [_, double_qr] = DISPOSITIONS;
