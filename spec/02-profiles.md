@@ -63,14 +63,18 @@ reading "NO" on valid product output is the documented trap.
   (§ Cancellation), never an absent judgment. Every attempt, cell and
   probe checks cancellation before the deadline.
 - The scanner's bounded checks have no budget and never make a report
-  partial: re-deriving the grids `rqrr` decoded (at most 2 orientations
-  each) or detected without decoding (at most 4 per attempt, and once more
-  at the end of the walk), and the re-read (at most 16 per scan) —
-  07-pipeline.md property 6. The end-of-walk pass may run after the
-  deadline (at most 4 error corrections, no sampling) so that a refusal
-  stays a refusal; cancellation is checked before it. A judgment whose
-  every planned cell ran also completes its structural, UEC and ISO
-  measurements (no decode) without waiting on the deadline.
+  partial (they never set `trace.budget_exhausted`): re-deriving the grids
+  `rqrr` decoded (at most 2 orientations each) or detected without
+  decoding (at most 4 per attempt, and once more at the end of the walk),
+  the re-read (at most 16 per scan, the margin re-read among them: versions
+  1 and 2 only, at most 12 format probes) — 07-pipeline.md property 6 —
+  and the confirmation decode of a read the acceptance holds for
+  confirmation (at most one per content and four per walk, 07-pipeline.md
+  § Acceptance). The end-of-walk pass may run after the deadline (at most
+  4 error corrections, no sampling) so that a refusal stays a refusal;
+  cancellation is checked before it and before every confirmation decode.
+  A judgment whose every planned cell ran also completes its structural,
+  UEC and ISO measurements (no decode) without waiting on the deadline.
 
 ## Anti-DoS limits (validated BEFORE decode)
 
