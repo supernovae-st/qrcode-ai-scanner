@@ -198,7 +198,8 @@ fn run_scan(
 /// `score_skip_checks` (`["uec","iso15415","alpha_envelope"]`) withholds
 /// report SECTIONS the host does not display: wire carries null, and the
 /// section-driven hints never fire. The UEC margin is still measured and
-/// caps the value, so the composite never moves. `alpha_background` (`auto` | `white` | `black` | `none` |
+/// caps the value, so the composite never moves.
+/// `alpha_background` (`auto` | `white` | `black` | `none` |
 /// `#rrggbb`) picks the background flattened under transparent pixels —
 /// `auto` (default) reads the design's own content and retries the
 /// opposite on a zero-detection scan; opaque inputs are untouched.

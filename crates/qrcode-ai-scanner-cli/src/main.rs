@@ -672,7 +672,8 @@ mod tests {
     /// A report as the wire carries it: one QR detection or none, a score
     /// or null, the budget flag.
     fn report(detected: bool, scored: bool, cut: bool) -> ScanReport {
-        let detection = r#"{"symbology":"qr_code","content":{"text":"hi","raw":"aGk=","charset":"utf8"},
+        let detection = r#"{"symbology":"qr_code",
+            "content":{"text":"hi","raw":"aGk=","charset":"utf8"},
             "payload":{"kind":"text"},"corners":null,
             "meta":{"version":null,"ec_level":null,"mask":null,"modules":null,"inverted":null},
             "engines":["rxing"]}"#;
