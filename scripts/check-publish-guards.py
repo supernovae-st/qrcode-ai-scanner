@@ -68,9 +68,12 @@ tokens). Every privileged job must:
                --locked and an exact --version, cargo binstall, pub get/add/
                upgrade without --enforce-lockfile, pub global, dart run,
                gem/go install, a download piped into a shell
-  publish      `cargo publish` with --locked --no-verify; `npm publish` of a
-               tarball (`*.tgz`, or a variable named *tgz) with
-               --ignore-scripts; never pnpm, yarn or bun publish
+  publish      `cargo publish` with --locked --no-verify; `npm publish` whose
+               operand (its first non-option word) is a tarball (`*.tgz`, or a
+               variable named *tgz) and which carries --ignore-scripts as an
+               option; never pnpm, yarn or bun publish. A trailing shell
+               comment is stripped from every code line first, so the required
+               words cannot hide in one
   concurrency  join publish-${{ github.workflow }}-${{ github.ref }}, never
                cancelling, so a re-run on the tag waits instead of racing
 
@@ -194,6 +197,10 @@ NPM_FETCH = frozenset({"install", "i", "in", "ins", "inst", "insta", "instal", "
                        "isntall", "add", "update", "up", "upgrade", "udpate", "exec", "x", "init", "create",
                        "innit", "install-test", "it"})
 TGZ_ARG = re.compile(r"\S*\.tgz|\$\{?\w*tgz\}?")
+# npm publish options that take the next word as their value: that word is not
+# the package operand (`npm publish --access public <tgz>`).
+NPM_VALUE_OPTS = frozenset({"--access", "--tag", "--otp", "--registry", "-w", "--workspace", "--userconfig",
+                            "--//registry.npmjs.org/:_authToken"})
 
 # Toolchain names a leg may use instead of a literal: the variables.
 NAMED_INPUTS = {"${{env.RUST_TOOLCHAIN}}", "${{env.FUZZ_TOOLCHAIN}}", "${{inputs.toolchain||env.RUST_TOOLCHAIN}}"}
@@ -463,13 +470,31 @@ def _text(node) -> str:
     return "" if node is None else str(node)
 
 
+def _strip_comment(line: str) -> str:
+    """LINE without its trailing shell comment. bash starts a comment at a `#`
+    that begins a word — the start of the line or after whitespace — and treats
+    one inside '…' or "…" as a literal; a `#` that follows a non-space (a
+    parameter expansion like ${#x}, a fragment like a#b) is not a comment."""
+    quote = None
+    for i, ch in enumerate(line):
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and (i == 0 or line[i - 1] in " \t"):
+            return line[:i].rstrip()
+    return line
+
+
 def _code_lines(script) -> list:
-    """The command lines of a run script: backslash continuations joined into
-    one line, blank lines and comment lines dropped."""
+    """The command lines of a run script: each line's trailing shell comment
+    removed first (a `#` ends the line for bash, continuation backslash
+    included), backslash continuations then joined, blank lines dropped."""
     lines, pending = [], ""
     for raw in str(script or "").splitlines():
-        line = raw.strip()
-        if not pending and (not line or line.startswith("#")):
+        line = _strip_comment(raw.strip())
+        if not pending and not line:
             continue
         if line.endswith("\\"):
             pending += line[:-1] + " "
@@ -479,6 +504,28 @@ def _code_lines(script) -> list:
     if pending.strip():
         lines.append(pending.strip())
     return lines
+
+
+def _npm_publish_operand(line: str):
+    """(operand, option words) of a line running npm's publish subcommand, or
+    None. The operand is the first word after the subcommand that is neither an
+    option nor an option's value — npm's package spec, what it actually uploads."""
+    raw = line.split()
+    for i, token in enumerate(raw):
+        if re.search(r"(?:^|[=(`'\"/])npm$", token.rstrip("\"'`;)")):
+            rest = _words(" ".join(raw[i + 1:]))
+            for j, word in enumerate(rest):
+                if word in NPM_UPLOAD:
+                    after = rest[j + 1:]
+                    opts = [w for w in after if w.startswith("-")]
+                    k = 0
+                    while k < len(after):
+                        if after[k].startswith("-"):
+                            k += 2 if after[k] in NPM_VALUE_OPTS else 1
+                        else:
+                            return after[k], opts
+                    return None, opts
+    return None
 
 
 def _words(text: str) -> list:
@@ -812,11 +859,12 @@ def check_job(workflow: str, job_id: str, job: dict, wf: dict) -> list:
                 flag("cargo-publish", f"`{line}` needs --locked --no-verify (the package job verified this commit)",
                      i)
             if _invokes(line, "npm", NPM_UPLOAD):
-                words = _words(line)
-                if not {"--ignore-scripts", "--ignore-scripts=true"} & set(words) or \
-                        not any(TGZ_ARG.fullmatch(word) for word in words):
+                parsed = _npm_publish_operand(line)
+                operand, opts = parsed if parsed else (None, [])
+                if operand is None or not TGZ_ARG.fullmatch(operand) or \
+                        not {"--ignore-scripts", "--ignore-scripts=true"} & set(opts):
                     flag("npm-publish", f"`{line}`: npm publish takes the inspected tarball (`*.tgz`, or a variable "
-                                        "named *tgz) and --ignore-scripts", i)
+                                        "named *tgz) as its operand and --ignore-scripts as an option", i)
             for tool in ("pnpm", "yarn", "bun"):
                 if _invokes(line, tool, {"publish"}):
                     flag("npm-publish", f"`{line}`: {tool} publish packs a directory and runs its scripts; upload "
@@ -1405,6 +1453,29 @@ MUTATIONS = (
         " --ignore-scripts", ""))], {}, 1, "npm-publish.yml › publish-native [npm-publish]"),
     ("pnpm publish in a publish job", P, [("npm-publish.yml", NATIVE_PUBLISH, NATIVE_PUBLISH.replace(
         "npm publish", "pnpm publish"))], {}, 1, "npm-publish.yml › publish-native [npm-publish]"),
+    # -- the required words hidden in a trailing shell comment (a run: | block,
+    #    where YAML keeps the `#`); the stripper must drop the comment first
+    ("npm directory publish, the tarball + flag in a trailing comment", P, [("npm-publish.yml", WASM_PUBLISH,
+        WASM_PUBLISH.replace('if out=$(npm publish "$tgz" --access public --ignore-scripts 2>&1); then',
+                             'if out=$(npm publish ./wasm-pkg --access public 2>&1); then # "$tgz" --ignore-scripts'))],
+     {}, 1, "npm-publish.yml › publish-wasm [npm-publish]"),
+    ("npm publish whose operand is a directory, tarball named later", P, [("npm-publish.yml", NATIVE_PUBLISH,
+        NATIVE_PUBLISH.replace('npm publish "$tgz" --access public --ignore-scripts',
+                               'npm publish crates/qrcode-ai-scanner-node --access public x.tgz --ignore-scripts'))],
+     {}, 1, "npm-publish.yml › publish-native [npm-publish]"),
+    ("cargo publish with --locked --no-verify in a trailing comment", P, [("crates-publish.yml",
+        'cargo publish -p "$crate" --locked --no-verify', 'cargo publish -p "$crate" # --locked --no-verify')], {}, 1,
+     "crates-publish.yml › publish [cargo-publish]"),
+    ("cargo install in a run block, --locked --version in a trailing comment", P, [("crates-publish.yml",
+        "          cargo --version\n",
+        "          cargo --version\n          cargo install cargo-release # --locked --version 0.25.0\n")], {}, 1,
+     "crates-publish.yml › publish [unlocked-install]"),
+    ("pip install in a run block, --require-hashes in a trailing comment", P, [("python.yml", PYPI,
+        "      - run: |\n          pip install twine # --require-hashes\n" + PYPI)], {}, 1,
+     "python.yml › release [unlocked-install]"),
+    ("pnpm install in a run block, --frozen-lockfile in a trailing comment", P, [("npm-publish.yml", REINSPECT,
+        "      - run: |\n          pnpm install # --frozen-lockfile\n" + REINSPECT)], {}, 1,
+     "npm-publish.yml › publish-native [unlocked-install]"),
     # -- the named exception: three exact steps, nothing else
     ("the Flutter waiver claimed by another job", P, [("python.yml", PYPI, "      - run: flutter pub get\n" + PYPI)],
      {}, 1, "FAIL    python.yml › release [unlocked-pub-get]"),
