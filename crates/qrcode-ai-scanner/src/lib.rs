@@ -131,8 +131,7 @@ impl Scanner {
         // decodable design into a false "no detection". Both walks stay in
         // the trace; `fallback_used` marks a RESCUE, not an attempt. A
         // stream the first walk refused stays refused in the second: it
-        // starts from the first walk's refusals and parsed contents
-        // (`fold_fallback` checks them once more).
+        // starts from the first walk's refusals and parsed contents.
         let mut fallback_used = false;
         if outcome.merged.is_empty()
             && let Some(context) = &mut alpha_context

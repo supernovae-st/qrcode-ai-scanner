@@ -97,12 +97,15 @@ pub(crate) fn port_key(read: PortRead) -> ContentKey {
     }
 }
 
-/// One refused QR stream (ISO 18004 defines no symbol for it) and the names
-/// it withholds by — one record per stream (07-pipeline property 6
+/// One refused QR stream (ISO 18004 defines no symbol for it), the names it
+/// withholds by and where it was refused (07-pipeline property 6
 /// § Refusal). A refusal is a content, never bytes alone: a well-formed
 /// symbol with equal bytes is another content and keeps its reads; and it
-/// is a place: only reads lying inside the refused symbol are withheld.
-#[derive(Debug, Clone, PartialEq)]
+/// is a place: only reads lying inside the refused symbol are withheld. The
+/// walk keeps one record per stream and names, wherever it is refused
+/// (`reconcile::ReadStore::refuse`) — never compared whole: the place is a
+/// rescaled measurement.
+#[derive(Debug, Clone)]
 pub(crate) struct Refusal {
     /// What rxing's port reports for the stream ([`port_key`]): withholds
     /// the unparsed QR Code reads whose account matches.

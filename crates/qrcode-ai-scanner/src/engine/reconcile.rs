@@ -3,7 +3,8 @@
 //! A walk collects reads: every engine hit of every attempt, upgraded by the
 //! scanner's own parses (the re-read), the candidate parses of grids rqrr
 //! detected but did not decode (no engine), and the S5 rescue. Identical
-//! reads fold into one. Refusals are records of refused streams; what they
+//! reads fold into one. Refusals are records of refused streams — one per
+//! stream and names, wherever and however often it was refused; what they
 //! withhold, and what protects a read from them, is evaluated over the
 //! whole walk — so retroactively — whenever the walk asks what stands.
 //! [`ReadStore::reconcile`] turns what stands into the distinct contents
@@ -33,13 +34,22 @@ pub(crate) const MAX_DISTINCT_READS: usize = 64;
 /// CPU/report amplifier, not a use case.
 pub(crate) const MAX_DETECTIONS: usize = 16;
 
-/// Refused streams a walk remembers (one record per stream, both its
-/// names). A refusal past capacity still withholds what was collected up to
-/// its attempt, then lapses; the opposite-background walk receives it.
+/// Refused streams a walk remembers for the whole scan: one record per
+/// stream and pair of names (rqrr's decode names both; the re-read and a
+/// re-derived grid name the port's reading only), wherever and however
+/// often the stream was refused.
 pub(crate) const MAX_REFUSALS: usize = 16;
 
-/// Distinct places a folded read remembers: a refusal withholds a read only
-/// when every place it was read at lies inside the refused symbol.
+/// Records past [`MAX_REFUSALS`]: each withholds what was collected up to
+/// the latest attempt that refused its stream, then lapses; past them the
+/// walk fails closed. The opposite-background walk receives them all.
+const MAX_OVERFLOW: usize = MAX_REFUSALS;
+
+/// Distinct places a folded read or a refusal record remembers — distinct
+/// symbols: a place whose centre lies inside a recorded one is the same
+/// symbol ([`recorded`]). A refusal withholds a read only when every place
+/// it was read at lies inside the refused symbol; a record refused at more
+/// places withholds wherever its names match.
 const MAX_PLACES: usize = 8;
 
 /// Where a read sits in the walk: its attempt, its source within the
@@ -99,7 +109,7 @@ pub(crate) struct Read {
     pub(crate) last_attempt: u32,
     /// The corner points of the symbol it was first read at (internal).
     pub(crate) location: Option<[Point; 4]>,
-    /// Every distinct place it was read at (at most [`MAX_PLACES`]).
+    /// Every distinct symbol it was read at (at most [`MAX_PLACES`]).
     pub(crate) places: Vec<[Point; 4]>,
     /// What it measured.
     pub(crate) geometry: Geometry,
@@ -165,8 +175,8 @@ impl Read {
     }
 
     /// Fold an identical read in: engines united (earliest rank each), the
-    /// earliest rank, every place; the location and each geometry part
-    /// from the earliest read that carries it.
+    /// earliest rank, every symbol it was read at; the location and each
+    /// geometry part from the earliest read that carries it.
     fn fold(&mut self, other: Self) {
         for (engine, rank) in other.engines {
             match self.engines.iter_mut().find(|(own, _)| *own == engine) {
@@ -176,8 +186,10 @@ impl Read {
         }
         self.rank = self.rank.min(other.rank);
         self.last_attempt = self.last_attempt.max(other.last_attempt);
+        // one symbol read at every attempt scale is one place: the slots
+        // stay for other symbols (a twin elsewhere)
         for place in other.places {
-            if self.places.len() < MAX_PLACES && !self.places.contains(&place) {
+            if self.places.len() < MAX_PLACES && !recorded(&self.places, place) {
                 self.places.push(place);
             }
         }
@@ -241,28 +253,103 @@ enum Cover {
     Whole,
 }
 
-/// What a refusal's names withhold of a read: an unparsed QR Code read
-/// lying inside the refused symbol — every place it was read at — whose
-/// account the port name matches (all of it), or of rqrr's bytes (rqrr's
-/// part). A read or a refusal without a place never fails the place test.
-fn cover(refusal: &Refusal, read: &Read) -> Cover {
+/// Whether `place` is a recorded symbol: its centre lies inside the box of
+/// one of `places`.
+fn recorded(places: &[[Point; 4]], place: [Point; 4]) -> bool {
+    places.iter().any(|&own| inside(Some(place), Some(own)))
+}
+
+/// A refused stream as the walk remembers it: its names, the symbols it was
+/// refused at, and the latest attempt that refused it.
+#[derive(Debug, Clone)]
+struct Refused {
+    /// What rxing's port reports for the stream.
+    port: Option<ContentKey>,
+    /// The bytes rqrr decoded from it.
+    rqrr: Option<Vec<u8>>,
+    /// The distinct symbols it was refused at (at most [`MAX_PLACES`]);
+    /// `None`: anywhere — refused without a place, or at more symbols.
+    places: Option<Vec<[Point; 4]>>,
+    /// The latest attempt that refused it.
+    attempt: u32,
+}
+
+impl Refused {
+    fn new(refusal: Refusal, attempt: u32) -> Self {
+        Self {
+            port: refusal.port,
+            rqrr: refusal.rqrr,
+            places: refusal.place.map(|place| vec![place]),
+            attempt,
+        }
+    }
+
+    /// The same names: the same refused stream, wherever it was refused.
+    fn names(&self, refusal: &Refusal) -> bool {
+        self.port == refusal.port && self.rqrr == refusal.rqrr
+    }
+
+    /// The stream refused again, at `place` in `attempt`.
+    fn again(&mut self, place: Option<[Point; 4]>, attempt: u32) {
+        self.attempt = self.attempt.max(attempt);
+        let Some(place) = place else {
+            self.places = None;
+            return;
+        };
+        if let Some(places) = &mut self.places {
+            if recorded(places, place) {
+                return;
+            }
+            if places.len() < MAX_PLACES {
+                places.push(place);
+                return;
+            }
+        }
+        // refused at more symbols than it remembers: anywhere (fail closed)
+        self.places = None;
+    }
+
+    /// Whether a read made at `place` lies inside the refused symbol.
+    fn holds(&self, place: [Point; 4]) -> bool {
+        self.places
+            .as_ref()
+            .is_none_or(|places| recorded(places, place))
+    }
+
+    /// The refusals that record it again: one per place, or one without a
+    /// place when it withholds anywhere.
+    fn refusals(&self) -> Vec<Refusal> {
+        let refusal = |place| Refusal {
+            port: self.port.clone(),
+            rqrr: self.rqrr.clone(),
+            place,
+        };
+        match &self.places {
+            Some(places) => places.iter().map(|&place| refusal(Some(place))).collect(),
+            None => vec![refusal(None)],
+        }
+    }
+}
+
+/// What a refusal record withholds of a read: an unparsed QR Code read
+/// lying inside the refused symbol — every place it was read at inside one
+/// of the record's — whose account the port name matches (all of it), or
+/// of rqrr's bytes (rqrr's part). A read or a record without a place never
+/// fails the place test.
+fn cover(refused: &Refused, read: &Read) -> Cover {
     if read.symbology != Symbology::QrCode || read.parsed {
         return Cover::Nothing;
     }
-    let there = read
-        .places
-        .iter()
-        .all(|&place| inside(Some(place), refusal.place));
-    if !there {
+    if !read.places.iter().all(|&place| refused.holds(place)) {
         return Cover::Nothing;
     }
-    if refusal
+    if refused
         .port
         .as_ref()
         .is_some_and(|port| port.agrees(&read.key))
     {
         Cover::Whole
-    } else if refusal
+    } else if refused
         .rqrr
         .as_ref()
         .is_some_and(|bytes| *bytes == read.key.raw)
@@ -274,13 +361,17 @@ fn cover(refusal: &Refusal, read: &Read) -> Cover {
     }
 }
 
-/// What a walk hands the opposite-background walk: every refusal it
-/// recorded (those past capacity included), the parsed contents that
-/// protect reads, and the re-reads the scan already spent.
+/// What a walk hands the opposite-background walk: its refusal records
+/// (those past capacity included) as refusals, whether it failed closed,
+/// the parsed contents that protect reads, and the re-reads the scan
+/// already spent.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Seed {
-    /// Every refusal of the walk.
+    /// Every refusal record of the walk, one refusal per place (one
+    /// without a place when the record withholds anywhere).
     pub(crate) refusals: Vec<Refusal>,
+    /// The walk failed closed: refused streams past every record.
+    pub(crate) closed: bool,
     /// Contents a parse of the walk read: no refusal withholds a read they
     /// agree with.
     pub(crate) protection: Vec<(Symbology, ContentKey)>,
@@ -294,26 +385,30 @@ pub(crate) struct ReadStore {
     reads: Vec<Read>,
     /// Distinct reads past [`MAX_DISTINCT_READS`]: counted, not reconciled.
     pub(crate) dropped: u32,
-    /// Refusals within capacity: they withhold across the whole walk.
-    refusals: Vec<Refusal>,
-    /// Refusals past capacity, with the attempt that found each: they
-    /// withhold what was read up to that attempt.
-    overflow: Vec<(Refusal, u32)>,
+    /// Refused streams within capacity: they withhold across the whole walk.
+    refusals: Vec<Refused>,
+    /// Refused streams past capacity: each withholds what was read up to the
+    /// latest attempt that refused it.
+    overflow: Vec<Refused>,
+    /// Refused streams past every record: the walk fails closed — every
+    /// unparsed QR Code read collected up to this attempt is withheld.
+    closed: Option<u32>,
     /// Another walk's parsed contents.
     protection: Vec<(Symbology, ContentKey)>,
 }
 
 impl ReadStore {
-    /// A store that starts from another walk's refusals and protection.
+    /// A store that starts from another walk's refusals — recorded by the
+    /// rule of [`ReadStore::refuse`], each withholding for this whole walk —
+    /// its failing closed (for this whole walk too) and its protection.
     pub(crate) fn seeded(seed: Seed) -> Self {
         let mut store = Self {
             protection: seed.protection,
+            closed: seed.closed.then_some(u32::MAX),
             ..Self::default()
         };
         for refusal in seed.refusals {
-            if !store.refusals.contains(&refusal) {
-                store.refusals.push(refusal);
-            }
+            store.refuse(refusal, u32::MAX);
         }
         store
     }
@@ -330,15 +425,24 @@ impl ReadStore {
         }
     }
 
-    /// Record a refused stream found in `attempt` (once per record).
+    /// Record a refused stream found in `attempt`: the record of its names
+    /// takes the place and the attempt; new names take a record while
+    /// capacity lasts; past every record the walk fails closed up to
+    /// `attempt`.
     pub(crate) fn refuse(&mut self, refusal: Refusal, attempt: u32) {
-        if self.refusals.contains(&refusal) || self.overflow.iter().any(|(r, _)| *r == refusal) {
-            return;
-        }
-        if self.refusals.len() < MAX_REFUSALS {
-            self.refusals.push(refusal);
+        if let Some(own) = self
+            .refusals
+            .iter_mut()
+            .chain(self.overflow.iter_mut())
+            .find(|own| own.names(&refusal))
+        {
+            own.again(refusal.place, attempt);
+        } else if self.refusals.len() < MAX_REFUSALS {
+            self.refusals.push(Refused::new(refusal, attempt));
+        } else if self.overflow.len() < MAX_OVERFLOW {
+            self.overflow.push(Refused::new(refusal, attempt));
         } else {
-            self.overflow.push((refusal, attempt));
+            self.closed = Some(self.closed.map_or(attempt, |closed| closed.max(attempt)));
         }
     }
 
@@ -360,12 +464,19 @@ impl ReadStore {
         if self.protected(read) {
             return Some(read.clone());
         }
-        let refusals =
-            self.refusals
+        if self
+            .closed
+            .is_some_and(|closed| read.last_attempt <= closed)
+            && read.symbology == Symbology::QrCode
+            && !read.parsed
+        {
+            return None;
+        }
+        let refusals = self.refusals.iter().chain(
+            self.overflow
                 .iter()
-                .chain(self.overflow.iter().filter_map(|(refusal, attempt)| {
-                    (read.last_attempt <= *attempt).then_some(refusal)
-                }));
+                .filter(|refused| read.last_attempt <= refused.attempt),
+        );
         let mut rqrr_withheld = false;
         for refusal in refusals {
             match cover(refusal, read) {
@@ -382,6 +493,12 @@ impl ReadStore {
             .retain(|(engine, _)| *engine != EngineKind::Rqrr);
         read.rank = read.engines.iter().map(|(_, rank)| *rank).min()?;
         Some(read)
+    }
+
+    /// Whether the recorded refusals withhold this read whole (what the
+    /// re-read skips: it would be withheld anyway).
+    pub(crate) fn withheld(&self, read: &Read) -> bool {
+        self.standing(read).is_none()
     }
 
     /// The reads that stand.
@@ -429,9 +546,10 @@ impl ReadStore {
             refusals: self
                 .refusals
                 .iter()
-                .cloned()
-                .chain(self.overflow.iter().map(|(refusal, _)| refusal.clone()))
+                .chain(&self.overflow)
+                .flat_map(Refused::refusals)
                 .collect(),
+            closed: self.closed.is_some(),
             protection: self
                 .reads
                 .iter()
@@ -441,45 +559,6 @@ impl ReadStore {
                 .collect(),
             rereads,
         }
-    }
-
-    /// Whether this walk's refusals withhold a detection of the
-    /// opposite-background walk — the second guard over it: a QR Code
-    /// detection only unparsed reads made, at a place a refused symbol
-    /// covers, unless `protection` agrees with it.
-    pub(crate) fn withholds(
-        &self,
-        detection: &Reconciled,
-        protection: &[(Symbology, ContentKey)],
-    ) -> bool {
-        let read = Read {
-            engines: detection
-                .engines
-                .iter()
-                .map(|&engine| (engine, detection.rank))
-                .collect(),
-            parsed: detection.parsed,
-            ..Read::new(
-                detection.symbology,
-                detection.key.clone(),
-                None,
-                detection.rank,
-            )
-            .at(detection.location)
-        };
-        let protected = protection
-            .iter()
-            .any(|(symbology, key)| *symbology == read.symbology && key.agrees(&read.key));
-        !protected
-            && self
-                .refusals
-                .iter()
-                .chain(self.overflow.iter().map(|(refusal, _)| refusal))
-                .any(|refusal| match cover(refusal, &read) {
-                    Cover::Whole => true,
-                    Cover::Rqrr => read.engines.iter().all(|(e, _)| *e == EngineKind::Rqrr),
-                    Cover::Nothing => false,
-                })
     }
 
     /// The distinct contents of the walk (module doc).
@@ -514,10 +593,6 @@ pub(crate) struct Reconciled {
     pub(crate) engines: Vec<EngineKind>,
     /// Geometry from its earliest reads that carry it.
     pub(crate) geometry: Geometry,
-    /// The corner points of the read that formed it (internal).
-    pub(crate) location: Option<[Point; 4]>,
-    /// A parse of the scanner read it.
-    pub(crate) parsed: bool,
     /// Its earliest read.
     pub(crate) rank: Rank,
 }
@@ -733,10 +808,7 @@ fn join_or_form(formed: &mut Vec<Forming>, reads: Vec<Read>) {
 /// engine reading, engines by earliest read, the earliest geometry.
 fn published(forming: Forming) -> Reconciled {
     let Forming {
-        eci,
-        fnc1,
-        place,
-        members,
+        eci, fnc1, members, ..
     } = forming;
     let mut engines: Vec<(EngineKind, Rank)> = Vec::new();
     for &(engine, rank) in members.iter().flat_map(|m| m.engines.iter()) {
@@ -746,11 +818,25 @@ fn published(forming: Forming) -> Reconciled {
         }
     }
     engines.sort_by_key(|&(_, rank)| rank);
-    // members are in rank order: the first that carries a part gives it
+    // members join in step order, not rank order: each part comes from the
+    // member whose read that carries it is the earliest (ranks are distinct
+    // within a walk)
     let geometry = Geometry {
-        corners: members.iter().find_map(|m| m.geometry.corners),
-        stream: members.iter().find_map(|m| m.geometry.stream.clone()),
-        ec: members.iter().find_map(|m| m.geometry.ec),
+        corners: members
+            .iter()
+            .filter(|m| m.geometry.corners.is_some())
+            .min_by_key(|m| m.sources.corners)
+            .and_then(|m| m.geometry.corners),
+        stream: members
+            .iter()
+            .filter(|m| m.geometry.stream.is_some())
+            .min_by_key(|m| m.sources.stream)
+            .and_then(|m| m.geometry.stream.clone()),
+        ec: members
+            .iter()
+            .filter(|m| m.geometry.ec.is_some())
+            .min_by_key(|m| m.sources.ec)
+            .and_then(|m| m.geometry.ec),
     };
     let rank = members.iter().map(|m| m.rank).min().unwrap_or_default();
     let (symbology, raw) = members
@@ -765,8 +851,6 @@ fn published(forming: Forming) -> Reconciled {
         engine_reading: joined_engine_reading(&members),
         engines: engines.into_iter().map(|(engine, _)| engine).collect(),
         geometry,
-        location: place,
-        parsed: members.iter().any(|m| m.parsed),
         rank,
     }
 }
@@ -948,12 +1032,11 @@ mod tests {
             .iter()
             .map(|d| {
                 format!(
-                    "{:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+                    "{:?} {:?} {:?} {:?} {:?} {:?}",
                     d.key,
                     d.engines,
                     d.rank,
                     d.geometry.corners.map(|(corners, _)| corners[0].x),
-                    d.location.map(|corners| corners[0].x),
                     d.segments,
                     reading(d),
                 )
@@ -1518,7 +1601,7 @@ mod tests {
         let mut seeded = ReadStore::seeded(Seed {
             refusals: vec![port(b"abc", None)],
             protection: vec![(Symbology::QrCode, key(b"abc", eci4(), Fnc1::None))],
-            rereads: 0,
+            ..Seed::default()
         });
         seeded.collect(read(0, b"abc", Signalled, X, NOWHERE));
         assert_eq!(published(&seeded).len(), 1);

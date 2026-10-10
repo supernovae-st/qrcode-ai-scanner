@@ -15,9 +15,10 @@
 //! could not decode (at most `MAX_RESCUE_CANDIDATES`, while a QR Code read
 //! the scanner has not parsed is in play — rqrr's adapter already decided
 //! the first four grids' orientation: per grid at most one extra raw read
-//! of its own grid and two plain RS passes, no image sampling), re-reads
-//! the reads no parse of the attempt carries (`engine::locate`, at most
-//! `MAX_REREADS` per scan), records the refusals and collects the reads
+//! of its own grid and two plain RS passes, no image sampling), records the
+//! refusals they prove, re-reads the reads no parse of the attempt carries
+//! where they lie and no recorded refusal withholds (`engine::locate`, at
+//! most `MAX_REREADS` per scan) and collects the reads
 //! (`engine::reconcile`). Nothing is decided per attempt: the walk ends
 //! with one more pass over the rescue candidates collected in every
 //! attempt — clean RS, no sampling, past the deadline too (a refusal stays a
@@ -31,7 +32,9 @@ use web_time::Instant;
 
 use crate::engine::content::{self, ContentKey, EciEvidence, Fnc1, Reading, Segments};
 use crate::engine::locate::{LocateHint, Located};
-use crate::engine::reconcile::{Geometry, Rank, Read, ReadStore, Reconciled, Seed, source};
+use crate::engine::reconcile::{
+    Geometry, Rank, Read, ReadStore, Reconciled, Seed, inside, source,
+};
 use crate::engine::{self, RawDetection, Refusal};
 use crate::error::{Result, ScanError};
 use crate::input::LumaImage;
@@ -606,9 +609,6 @@ pub(crate) struct LadderOutcome {
     /// what the wire publishes (`eci`, `fnc1`) and what probes match reads
     /// against (`ContentKey::admits`).
     pub contents: Vec<(ContentKey, Reading)>,
-    /// What reconciliation established, aligned with `merged` — what
-    /// another walk's refusals look at ([`LadderOutcome::fold_fallback`]).
-    reconciled: Vec<Reconciled>,
     /// The walk's reads and refusals.
     store: ReadStore,
     /// Re-reads the scan spent.
@@ -626,10 +626,9 @@ impl LadderOutcome {
 
     /// Fold a second walk (the alpha fallback) in: both walks stay in the
     /// trace, its detections replace these only when it found some. It
-    /// started from this walk's refusals ([`run_seeded`]); as a second
-    /// guard, a detection they still cover is dropped unless a parse of
-    /// either walk protects its content. Returns whether the fallback found
-    /// a detection that stands.
+    /// started from this walk's refusals and protection ([`run_seeded`]) and
+    /// applied them place by place, so whatever it publishes already stands
+    /// against them. Returns whether the fallback found a detection.
     pub(crate) fn fold_fallback(&mut self, fallback: LadderOutcome) -> bool {
         self.trace.stages.extend(fallback.trace.stages);
         self.trace.engine_panics = self
@@ -637,29 +636,13 @@ impl LadderOutcome {
             .engine_panics
             .saturating_add(fallback.trace.engine_panics);
         self.trace.total_ms += fallback.trace.total_ms;
-        let protection = fallback.store.seed(0).protection;
-        let stands: Vec<bool> = fallback
-            .reconciled
-            .iter()
-            .map(|detection| !self.store.withholds(detection, &protection))
-            .collect();
-        let found = stands.contains(&true);
+        let found = !fallback.merged.is_empty();
         if found {
-            self.merged = kept(fallback.merged, &stands);
-            self.contents = kept(fallback.contents, &stands);
-            self.reconciled = kept(fallback.reconciled, &stands);
+            self.merged = fallback.merged;
+            self.contents = fallback.contents;
         }
         found
     }
-}
-
-/// The items `stands` keeps, aligned.
-fn kept<T>(items: Vec<T>, stands: &[bool]) -> Vec<T> {
-    items
-        .into_iter()
-        .zip(stands)
-        .filter_map(|(item, &stands)| stands.then_some(item))
-        .collect()
 }
 
 struct Run<'a> {
@@ -826,12 +809,13 @@ impl Run<'_> {
         (reads, refusals)
     }
 
-    /// The re-read (07-pipeline property 6): each read with a hint that no
-    /// parsed read or candidate parse of the attempt carries is sampled at
-    /// its engine's corners in the attempt image, while the scan has
-    /// re-reads left. A located parse upgrades it (declarations, segments —
-    /// never its bytes, engines or geometry); a refused one removes it and
-    /// records the refusal at its place.
+    /// The re-read (07-pipeline property 6): each read with a hint is
+    /// sampled at its engine's corners in the attempt image, while the scan
+    /// has re-reads left — unless a parsed read or candidate parse of the
+    /// attempt carries it where it lies, or a recorded refusal withholds it
+    /// (it is withheld anyway). A located parse upgrades it (declarations,
+    /// segments — never its bytes, engines or geometry); a refused one
+    /// removes it and records the refusal at its place.
     fn reread(
         &mut self,
         img: &LumaImage,
@@ -841,12 +825,14 @@ impl Run<'_> {
         let mut i = 0;
         while let Some((read, hint)) = reads.get(i) {
             let carried = reads.iter().any(|(other, _)| {
-                other.parsed && other.symbology == read.symbology && other.key.agrees(&read.key)
+                other.parsed
+                    && other.symbology == read.symbology
+                    && other.key.agrees(&read.key)
+                    && inside(read.location, other.location)
             });
-            let Some(hint) = hint
-                .clone()
-                .filter(|_| !carried && self.rereads < MAX_REREADS)
-            else {
+            let Some(hint) = hint.clone().filter(|_| {
+                !carried && self.rereads < MAX_REREADS && !self.store.withheld(read)
+            }) else {
                 i += 1;
                 continue;
             };
@@ -976,10 +962,80 @@ impl Run<'_> {
         }
     }
 
-    /// Run one stage as a fixed sequence of lazily-built attempts: each
-    /// attempt's engines, candidates, re-reads and refusals, then its reads
-    /// are collected. Returns `Ok(true)` when the ladder should stop
-    /// (budget mid-stage).
+    /// One attempt's engine pass, collected: its candidates re-derived while
+    /// an unparsed QR Code read is in play, the refusals they prove
+    /// recorded, the re-reads (which record their own), then the reads.
+    /// Returns the reads the adapters delivered — what the trace counts.
+    fn collect_attempt(
+        &mut self,
+        img: &LumaImage,
+        outcome: engine::EngineOutcome,
+        inverts: bool,
+    ) -> u32 {
+        self.panics = self.panics.saturating_add(outcome.panics);
+        let delivered = u32::try_from(outcome.detections.len()).unwrap_or(u32::MAX);
+        let dims = (img.width(), img.height());
+        let index = self.next_attempt();
+        let mut reads: Vec<(Read, Option<LocateHint>)> = outcome
+            .detections
+            .into_iter()
+            .enumerate()
+            .map(|(i, hit)| {
+                let rank = Rank {
+                    attempt: index,
+                    source: match hit.engine {
+                        EngineKind::Rxing => source::RXING,
+                        EngineKind::Rqrr => source::RQRR,
+                        EngineKind::Rescue => source::RESCUE,
+                    },
+                    index: u32::try_from(i).unwrap_or(u32::MAX),
+                };
+                self.read_of(hit, rank, dims, inverts)
+            })
+            .collect();
+        let mut refusals: Vec<Refusal> = outcome
+            .refused
+            .into_iter()
+            .map(|refusal| Refusal {
+                place: refusal.place.map(|place| rescaled(place, dims, self.orig)),
+                ..refusal
+            })
+            .collect();
+        // the attempt's grids in original space, photometry stamped,
+        // re-derived while an unparsed QR read is in play
+        if reads.iter().any(|(read, _)| unparsed_qr(read)) || self.store.unparsed_qr() {
+            let candidates: Vec<RescueCandidate> = outcome
+                .rescue
+                .iter()
+                .map(|candidate| RescueCandidate {
+                    corners: rescaled(candidate.corners, dims, self.orig),
+                    inverted: inverts,
+                    ..candidate.clone()
+                })
+                .collect();
+            let (parses, refused) = Self::rederive(&candidates, index);
+            reads.extend(parses.into_iter().map(|read| (read, None)));
+            refusals.extend(refused);
+        }
+        // recorded before the re-reads: a read they withhold is not re-read
+        for refusal in refusals {
+            self.store.refuse(refusal, index);
+        }
+        let mut refusals = Vec::new();
+        self.reread(img, &mut reads, &mut refusals);
+        for refusal in refusals {
+            self.store.refuse(refusal, index);
+        }
+        for (read, _) in reads {
+            self.store.collect(read);
+        }
+        self.collect_rescue(outcome.rescue, dims, inverts);
+        delivered
+    }
+
+    /// Run one stage as a fixed sequence of lazily-built attempts, each
+    /// collected ([`Run::collect_attempt`]). Returns `Ok(true)` when the
+    /// ladder should stop (budget mid-stage).
     fn stage(
         &mut self,
         name: &str,
@@ -999,61 +1055,9 @@ impl Run<'_> {
             }
             let img = (attempt.build)();
             let outcome = engine::decode_filtered(&img, filter);
-            self.panics = self.panics.saturating_add(outcome.panics);
             // the trace counts the reads the adapters delivered
-            found_total = found_total
-                .saturating_add(u32::try_from(outcome.detections.len()).unwrap_or(u32::MAX));
-            let dims = (img.width(), img.height());
-            let index = self.next_attempt();
-            let mut reads: Vec<(Read, Option<LocateHint>)> = outcome
-                .detections
-                .into_iter()
-                .enumerate()
-                .map(|(i, hit)| {
-                    let rank = Rank {
-                        attempt: index,
-                        source: match hit.engine {
-                            EngineKind::Rxing => source::RXING,
-                            EngineKind::Rqrr => source::RQRR,
-                            EngineKind::Rescue => source::RESCUE,
-                        },
-                        index: u32::try_from(i).unwrap_or(u32::MAX),
-                    };
-                    self.read_of(hit, rank, dims, attempt.inverts)
-                })
-                .collect();
-            let mut refusals: Vec<Refusal> = outcome
-                .refused
-                .into_iter()
-                .map(|refusal| Refusal {
-                    place: refusal.place.map(|place| rescaled(place, dims, self.orig)),
-                    ..refusal
-                })
-                .collect();
-            // the attempt's grids in original space, photometry stamped,
-            // re-derived while an unparsed QR read is in play
-            if reads.iter().any(|(read, _)| unparsed_qr(read)) || self.store.unparsed_qr() {
-                let candidates: Vec<RescueCandidate> = outcome
-                    .rescue
-                    .iter()
-                    .map(|candidate| RescueCandidate {
-                        corners: rescaled(candidate.corners, dims, self.orig),
-                        inverted: attempt.inverts,
-                        ..candidate.clone()
-                    })
-                    .collect();
-                let (parses, refused) = Self::rederive(&candidates, index);
-                reads.extend(parses.into_iter().map(|read| (read, None)));
-                refusals.extend(refused);
-            }
-            self.reread(&img, &mut reads, &mut refusals);
-            for refusal in refusals {
-                self.store.refuse(refusal, index);
-            }
-            for (read, _) in reads {
-                self.store.collect(read);
-            }
-            self.collect_rescue(outcome.rescue, dims, attempt.inverts);
+            found_total =
+                found_total.saturating_add(self.collect_attempt(&img, outcome, attempt.inverts));
             tried += 1;
         }
         stages.push(StageTrace {
@@ -1310,7 +1314,6 @@ impl Run<'_> {
         Ok(LadderOutcome {
             merged,
             contents,
-            reconciled,
             store: self.store,
             rereads: self.rereads,
             trace: PipelineTrace {
@@ -2592,7 +2595,8 @@ mod ladder_mutant_kills {
         assert_eq!(first.merged.len(), 1);
         assert_eq!(first.merged[0].raw, b"hello");
         assert_eq!(first.contents[0].0.raw, b"hello", "aligned");
-        // a walk-2 parse protecting that content keeps it: second guard too
+        // a walk-2 parse protecting that content keeps it: walk 2's own
+        // seeded protection
         let mut walk1 = fresh_run(&cancel, (100, 100));
         walk1.store.refuse(
             engine::Refusal {
