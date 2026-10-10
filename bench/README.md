@@ -341,7 +341,9 @@ refused, and a run claims its `--out` (creating `artifacts/` itself)
 before it waits for the host lock, so a second run given the same `--out`
 is refused at once and two runs never share one; a run refused before it
 measures removes what it created — holds `receipt.json` (method, caps, environment with the
-harness binary's sha256, inputs with their pin check, artifact hashes with
+harness binary's sha256, inputs with their pin check and the sha256 of
+every run-time input the run read — the Node and WASM driver scripts, the
+priming fixture, each vendored image file — artifact hashes with
 their build manifests, parity, gate log, per-class summaries, resource
 failures, verdicts — a `not_testable` row, with why, for every metric of
 the frozen scope the run did not measure — and the status detail),

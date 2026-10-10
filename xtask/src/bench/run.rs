@@ -426,7 +426,20 @@ pub(crate) struct Image {
     pub(crate) bytes: usize,
 }
 
-/// The committed inputs behind a run: manifest and disposition hashes.
+/// One input file a run read, by its repository path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct InputFile {
+    pub(crate) path: String,
+    pub(crate) sha256: String,
+    pub(crate) bytes: usize,
+}
+
+/// The driver scripts the Node and WASM runtimes run (the WASM driver
+/// imports the Node one's helpers, so either runtime reads both).
+const DRIVERS: [&str; 2] = ["bench-node.mjs", "bench-wasm.mjs"];
+
+/// The committed inputs behind a run: manifest and disposition hashes, and
+/// every run-time input it read.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Inputs {
     pub(crate) manifest_sha256: String,
@@ -441,6 +454,24 @@ pub(crate) struct Inputs {
     /// How the inputs stray from their pins ([`pin_findings`]); a gated
     /// run refuses any.
     pub(crate) pins: Vec<String>,
+    /// sha256 of the Node and WASM driver scripts, when a runtime runs them.
+    pub(crate) drivers: BTreeMap<&'static str, String>,
+    /// The fixture every worker primes with and every cold start scans,
+    /// when a runtime reads it.
+    pub(crate) fixture: Option<InputFile>,
+    /// Every vendored image file the run read — `corpus.toml` pins none, so
+    /// the receipt does.
+    pub(crate) vendored_files: Vec<InputFile>,
+}
+
+/// A repository file as an [`InputFile`].
+fn input_file(root: &Path, path: &str) -> Result<InputFile, String> {
+    let bytes = std::fs::read(root.join(path)).map_err(|e| format!("{path}: {e}"))?;
+    Ok(InputFile {
+        path: path.to_owned(),
+        sha256: external::sha256_bytes(&bytes),
+        bytes: bytes.len(),
+    })
 }
 
 /// The oracle's dispositions-table hash (`oracle.rs`: path, image and
@@ -614,6 +645,26 @@ pub(crate) fn select(options: &Options) -> Result<(Vec<Image>, Inputs), String> 
     for image in &images {
         *selected.entry(image.set.as_str()).or_default() += 1;
     }
+    let runs = |wanted: &[Runtime]| options.runtimes.iter().any(|r| wanted.contains(r));
+    let mut drivers = BTreeMap::new();
+    if runs(&[Runtime::Node, Runtime::Wasm]) {
+        for name in DRIVERS {
+            let file = input_file(&root, &format!("scripts/{name}"))?;
+            drivers.insert(name, file.sha256);
+        }
+    }
+    let fixture = runs(&[Runtime::Lib, Runtime::Node, Runtime::Wasm])
+        .then(|| input_file(&root, FIXTURE))
+        .transpose()?;
+    let vendored_files = images
+        .iter()
+        .filter(|image| image.set == Set::Vendored)
+        .map(|image| InputFile {
+            path: image.path.clone(),
+            sha256: image.sha256.clone(),
+            bytes: image.bytes,
+        })
+        .collect();
     let mut inputs = Inputs {
         manifest_sha256: external::sha256_bytes(manifest_text.as_bytes()),
         vendored_sha256: external::sha256_bytes(vendored_text.as_bytes()),
@@ -623,6 +674,9 @@ pub(crate) fn select(options: &Options) -> Result<(Vec<Image>, Inputs), String> 
         selected,
         per_group: options.per_group,
         pins: Vec::new(),
+        drivers,
+        fixture,
+        vendored_files,
     };
     inputs.pins = pin_findings(&inputs, &options.sets);
     Ok((images, inputs))
@@ -3740,6 +3794,9 @@ mod tests {
             selected: frozen.clone(),
             per_group: None,
             pins: Vec::new(),
+            drivers: BTreeMap::new(),
+            fixture: None,
+            vendored_files: Vec::new(),
         };
         assert!(pin_findings(&pinned, Set::ALL).is_empty());
         let drifted = Inputs {
@@ -3768,6 +3825,74 @@ mod tests {
         assert!(
             pin_findings(&sampled, &[Set::Vendored]).is_empty(),
             "a declared subset is partial, not off the pins"
+        );
+    }
+
+    /// The inputs record every run-time input the run reads besides the
+    /// pinned manifests: both driver scripts when a Node or WASM runtime
+    /// runs, the priming fixture when a worker primes with it, and each
+    /// vendored image file it read, by sha256 — a CLI-only run reads
+    /// neither the drivers nor the fixture.
+    #[test]
+    fn inputs_record_the_drivers_the_fixture_and_every_vendored_file() {
+        let root = crate::repo_root();
+        let sha = |path: &str| external::sha256_bytes(&std::fs::read(root.join(path)).expect(path));
+        let options = opts(&[
+            "--out",
+            "/nonexistent/out",
+            "--sets",
+            "vendored",
+            "--node-base",
+            "/p",
+            "--node-candidate",
+            "/p",
+        ])
+        .expect("options");
+        let (images, inputs) = select(&options).expect("selected");
+        assert_eq!(inputs.vendored_files.len(), images.len());
+        assert!(
+            inputs
+                .vendored_files
+                .iter()
+                .all(|f| f.sha256 == sha(&f.path) && f.bytes > 0),
+            "every vendored file by its own sha256"
+        );
+        assert_eq!(
+            inputs.drivers,
+            BTreeMap::from([
+                ("bench-node.mjs", sha("scripts/bench-node.mjs")),
+                ("bench-wasm.mjs", sha("scripts/bench-wasm.mjs")),
+            ])
+        );
+        let fixture = inputs.fixture.expect("the priming fixture");
+        assert_eq!(
+            (fixture.path.as_str(), fixture.sha256),
+            (FIXTURE, sha(FIXTURE))
+        );
+        let json = serde_json::to_value(select(&options).expect("again").1).expect("json");
+        assert!(
+            json["vendored_files"].is_array() && json["fixture"]["sha256"].is_string(),
+            "{json}"
+        );
+        let cli = opts(&[
+            "--out",
+            "/nonexistent/out",
+            "--sets",
+            "vendored",
+            "--per-group",
+            "1",
+            "--cli-base",
+            "/p",
+        ])
+        .expect("options");
+        let (images, inputs) = select(&cli).expect("selected");
+        assert_eq!(
+            (
+                inputs.drivers.is_empty(),
+                inputs.fixture.is_none(),
+                inputs.vendored_files.len()
+            ),
+            (true, true, images.len())
         );
     }
 

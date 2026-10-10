@@ -1899,8 +1899,33 @@ fn markdown_head(
         m.inputs.vendored_sha256,
         m.inputs.dispositions_sha256,
     );
+    md.push_str(&markdown_inputs(&m.inputs));
     md.push_str(&markdown_artifacts(m));
     md
+}
+
+/// The run-time inputs row: the drivers, the fixture, the vendored files
+/// read (their sha256 in receipt.json).
+fn markdown_inputs(inputs: &super::run::Inputs) -> String {
+    let short = |s: &str| s.get(..12).unwrap_or(s).to_owned();
+    let drivers: Vec<String> = inputs
+        .drivers
+        .iter()
+        .map(|(name, sha)| format!("{name} {}", short(sha)))
+        .collect();
+    format!(
+        "| run-time inputs | drivers {} · fixture {} · vendored files {} (sha256 each in receipt.json) |\n",
+        if drivers.is_empty() {
+            String::from("none")
+        } else {
+            drivers.join(", ")
+        },
+        inputs
+            .fixture
+            .as_ref()
+            .map_or_else(|| String::from("none"), |f| short(&f.sha256)),
+        inputs.vendored_files.len()
+    )
 }
 
 /// The artifacts table (binary, compilers, manifest, profile) and the pair
@@ -2602,6 +2627,9 @@ mod tests {
                 selected: BTreeMap::new(),
                 per_group: options.per_group,
                 pins: Vec::new(),
+                drivers: BTreeMap::new(),
+                fixture: None,
+                vendored_files: Vec::new(),
             },
             options,
             facts: facts(),
