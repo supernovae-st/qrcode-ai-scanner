@@ -66,6 +66,13 @@ const SCRUBBED: [&str; 4] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Exit {
     Code(i32),
+    #[cfg_attr(
+        not(all(
+            any(target_os = "macos", target_os = "linux"),
+            target_pointer_width = "64"
+        )),
+        allow(dead_code, reason = "only where the caps hold is a child reaped")
+    )]
     Signal(i32),
 }
 
@@ -288,8 +295,12 @@ impl Memory {
 }
 
 /// `PF_EXITING`, the task flag the Linux kernel sets as a process starts
-/// to exit (`include/linux/sched.h`).
-#[cfg(any(test, all(target_os = "linux", target_pointer_width = "64")))]
+/// to exit (`include/linux/sched.h`). This and the two parsers below are
+/// built where they run: in the Linux sampler, and in the tests on macOS.
+#[cfg(all(
+    any(target_os = "linux", all(test, target_os = "macos")),
+    target_pointer_width = "64"
+))]
 const PF_EXITING: u64 = 0x4;
 
 /// A Linux process's memory from its `/proc/<pid>/status` text: `VmRSS`
@@ -300,7 +311,10 @@ const PF_EXITING: u64 = 0x4;
 /// with `PF_EXITING` set the process is done, not unreadable, so a quick
 /// child sampled in that window is never killed as one the caps cannot
 /// follow.
-#[cfg(any(test, all(target_os = "linux", target_pointer_width = "64")))]
+#[cfg(all(
+    any(target_os = "linux", all(test, target_os = "macos")),
+    target_pointer_width = "64"
+))]
 fn proc_status_memory(status: &str, flags: impl FnOnce() -> Option<u64>) -> Option<Memory> {
     let kib = |key: &str| -> Option<u64> {
         let value: u64 = status
@@ -336,7 +350,10 @@ fn proc_status_memory(status: &str, flags: impl FnOnce() -> Option<u64>) -> Opti
 /// name in parentheses may hold spaces and parentheses, so the fields are
 /// counted after the last `)`: `state`, `ppid`, `pgrp`, `session`,
 /// `tty_nr`, `tpgid`, `flags`.
-#[cfg(any(test, all(target_os = "linux", target_pointer_width = "64")))]
+#[cfg(all(
+    any(target_os = "linux", all(test, target_os = "macos")),
+    target_pointer_width = "64"
+))]
 fn stat_flags(stat: &str) -> Option<u64> {
     let (_, fields) = stat.rsplit_once(')')?;
     fields.split_whitespace().nth(6)?.parse().ok()
@@ -617,6 +634,7 @@ mod sys {
         Err(String::from(UNSUPPORTED))
     }
 
+    #[allow(dead_code, reason = "only the stop handler kills every group")]
     pub(super) fn kill_group_raw(_pgid: i32) {}
 
     pub(super) fn kill_group(_pid: u32) {}
@@ -682,13 +700,24 @@ mod live {
     }
 
     /// Async-signal-safe: atomic loads and `kill`.
+    #[cfg_attr(
+        not(all(
+            any(target_os = "macos", target_os = "linux"),
+            target_pointer_width = "64"
+        )),
+        allow(dead_code, reason = "only the caps platforms' stop handler calls it")
+    )]
     pub(super) fn kill_all() {
         for slot in &GROUPS {
             super::sys::kill_group_raw(slot.load(Acquire));
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(
+        test,
+        any(target_os = "macos", target_os = "linux"),
+        target_pointer_width = "64"
+    ))]
     pub(super) fn holds(pid: u32) -> bool {
         i32::try_from(pid).is_ok_and(|pid| GROUPS.iter().any(|slot| slot.load(Acquire) == pid))
     }
@@ -1100,7 +1129,11 @@ impl Server {
     }
 
     /// The worker's pid (tests and logs only).
-    #[cfg(test)]
+    #[cfg(all(
+        test,
+        any(target_os = "macos", target_os = "linux"),
+        target_pointer_width = "64"
+    ))]
     pub(crate) fn pid(&self) -> u32 {
         self.child.pid()
     }

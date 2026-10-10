@@ -298,6 +298,7 @@ mod lock {
 /// The host-wide bench lock, held for a whole run (released when dropped,
 /// or by the kernel when the process dies — never stale).
 pub(crate) struct HostLock {
+    #[cfg_attr(not(unix), allow(dead_code, reason = "held open; only unix reads it"))]
     file: std::fs::File,
 }
 
