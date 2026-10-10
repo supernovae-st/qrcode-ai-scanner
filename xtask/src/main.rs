@@ -16,6 +16,8 @@
 //!   (see `rotation_sweep.rs`). Non-gating dashboard.
 //! - `baseline` — run the corpus through a v0.2 CLI binary (`--bin <path>`)
 //!   and write `docs/baseline-v02.json` (the Phase A exit-gate comparator).
+//! - `bench` — latency, memory, allocations, throughput and WASM cost,
+//!   base versus candidate, under the host gate (see `bench.rs`).
 
 #![allow(
     clippy::unwrap_used,
@@ -24,6 +26,7 @@
     clippy::cast_sign_loss
 )] // automation tool: fail loud, bounded pixel math
 
+mod bench;
 mod external;
 mod oracle;
 mod rescue_stress;
@@ -108,6 +111,7 @@ fn main() {
         Some("gen-symbology-fixtures") => gen_symbology_fixtures(),
         Some("gen-external-manifest") => external::generate(),
         Some("oracle") => oracle::run(args.collect()),
+        Some("bench") => bench::run(args.collect()),
         Some("rescue-stress") => rescue_stress::run(),
         Some("rotation-sweep") => rotation_sweep::run(),
         Some("sync-version") => {
@@ -143,7 +147,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: xtask <gen-fixtures | gen-symbology-fixtures | gen-external-manifest | corpus-report [--write | --external] | oracle [--json <path>] [--corpus-root <abs path>] | rescue-stress | rotation-sweep | sync-version [--check] | baseline --bin <p>>"
+                "usage: xtask <gen-fixtures | gen-symbology-fixtures | gen-external-manifest | corpus-report [--write | --external] | oracle [--json <path>] [--corpus-root <abs path>] | bench <prepare | prepare-base | stamp | inspect | gate | run> | rescue-stress | rotation-sweep | sync-version [--check] | baseline --bin <p>>"
             );
             std::process::exit(2);
         }
