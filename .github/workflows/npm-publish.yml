@@ -22,8 +22,9 @@ name: npm-publish
 # that its operand is a tarball the in-job re-inspection recorded. Every
 # action they use is pinned by commit; setup-node's Node 24 line is the one
 # relaxation (RELEASING.md § Publishing). The build jobs whose outputs ship
-# pin their third-party actions by commit and restore no build cache on a
-# tag.
+# pin their third-party actions by commit and restore no cache on a tag: no
+# rust-cache, no package-manager cache, and Zig comes from ziglang.org,
+# checked against its published sha256, with an empty global cache.
 
 on:
   push:
@@ -71,16 +72,29 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
+          package-manager-cache: false
       # No cache on a tag: the binaries that ship build from the tag alone,
       # never from a cache a branch run wrote.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-      # The one action here still declaring node20 (no node24 release yet):
-      # since the runner dropped Node 20 it runs on Node 24 regardless.
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      # Zig for the musl row, on every ref, from ziglang.org and checked
+      # against the sha256 its download index publishes (as binaryen below).
+      # No action restores it: setup-zig restored its tarball from the Actions
+      # cache under a fixed key, on a tag too, and a hit skipped the signature
+      # check. Its global cache, where `zig cc` builds the target's libc,
+      # starts empty under RUNNER_TEMP.
+      - name: Zig 0.14.1, sha256-verified
         if: ${{ contains(matrix.settings.target, 'musl') }}
-        with:
-          version: 0.14.1
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/zig-x86_64-linux-0.14.1.tar.xz"
+          curl -sSfL -o "$archive" https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
+          echo "24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c  $archive" | sha256sum -c -
+          tar xJf "$archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-x86_64-linux-0.14.1" >> "$GITHUB_PATH"
+          mkdir "$RUNNER_TEMP/zig-global-cache"
+          echo "ZIG_GLOBAL_CACHE_DIR=$RUNNER_TEMP/zig-global-cache" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/zig-x86_64-linux-0.14.1/zig" version
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         if: ${{ contains(matrix.settings.target, 'musl') }}
@@ -118,6 +132,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
+          package-manager-cache: false
       - run: pnpm install --frozen-lockfile=false
       # The native binaries only: build-wasm uploads its package in this run too.
       - uses: actions/download-artifact@v8
@@ -300,6 +315,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
+          package-manager-cache: false
       # wasm-pack pinned exact, SHA-verified by install-action: the archived
       # rustwasm installer script it replaces silently served v0.13.1.
       - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27

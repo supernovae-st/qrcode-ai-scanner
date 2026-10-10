@@ -95,6 +95,17 @@ tokens). Every privileged job must:
   concurrency  join publish-${{ github.workflow }}-${{ github.ref }}, never
                cancelling, so a re-run on the tag waits instead of racing
 
+Every job whose outputs a privileged job publishes (the jobs whose artifacts
+it downloads, then theirs, looked for among the jobs it needs) restores no
+cache on a tag (tag-cache). A step that can restore one — actions/cache,
+Swatinem/rust-cache, sccache-action, mlugg/setup-zig whatever its inputs (its
+Zig tarball comes back from the Actions cache under a fixed key, and a hit
+skips the signature check), a setup action asked to cache (setup-node unless
+package-manager-cache is false, its default being true; setup-go unless cache
+is false) — carries an `if:` whose top-level conjunct is
+!startsWith(github.ref, 'refs/tags/'); maturin-action's sccache is false or
+that very expression.
+
 `napi pre-publish` with both --skip-optional-publish and --no-gh-release (or
 --dry-run) uploads nothing (@napi-rs/cli 3.7.3, cli/src/api/pre-publish.ts):
 it only writes optionalDependencies, so it does not make a job privileged.
@@ -130,6 +141,7 @@ inside a flow collection. Exit 0 compliant · 1 a violation · 2 cannot judge
 import argparse
 import contextlib
 import dataclasses
+import fnmatch
 import io
 import os
 import pathlib
@@ -179,6 +191,17 @@ NPM_OPERAND_CHECK = (
     "exit 1",
     "}",
 )
+
+# Steps that can restore a cache into a job whose outputs are published: these
+# actions whatever their inputs (mlugg/setup-zig restores its Zig tarball under
+# a fixed key even with use-cache false, and a hit skips the signature check),
+# a setup action asked to cache (CACHE_INPUTS: input, default), maturin-action
+# with sccache. On a tag they must not run (NOT_ON_TAG) or not cache.
+CACHE_ACTIONS = ("actions/cache", "Swatinem/rust-cache", "mlugg/setup-zig", "mozilla-actions/sccache-action")
+CACHE_INPUTS = {"actions/setup-node": ("package-manager-cache", "true"), "actions/setup-go": ("cache", "true"),
+                "actions/setup-python": ("cache", ""), "actions/setup-java": ("cache", ""),
+                "pnpm/action-setup": ("cache", "false"), "subosito/flutter-action": ("cache", "false")}
+NOT_ON_TAG = {"!startsWith(github.ref, 'refs/tags/')", "!startsWith(github.ref, 'refs/tags/v')"}
 
 # The job each publishing job must need: the one that inspects (for the iOS
 # zip, builds) what it uploads. A publishing job missing here fails.
@@ -716,6 +739,17 @@ def _unwrap(expr: str) -> str:
 
 def guarded(condition) -> str:
     """'' when the raw `if:` value CONDITION runs on a release tag only, else why not."""
+    return _conjunct(condition, {GUARD})
+
+
+def _never_on_tag(step) -> bool:
+    """STEP's raw `if:` keeps it off every release tag run: a NOT_ON_TAG conjunct."""
+    return not _conjunct(step.get("if"), NOT_ON_TAG)
+
+
+def _conjunct(condition, wanted) -> str:
+    """'' when the raw `if:` value CONDITION has one of WANTED as a top-level
+    conjunct (never under ||, beside no status function), else why not."""
     if condition is None:
         return "no `if:`: the job runs on every ref"
     raw = str(condition)
@@ -733,9 +767,70 @@ def guarded(condition) -> str:
     expr = _unwrap(expr)
     if len(_top_level(expr, "||")) > 1:
         return f"`if: {raw!r}` puts the tag guard under ||"
-    if GUARD not in (_unwrap(part) for part in _top_level(expr, "&&")):
-        return f"`if: {raw!r}` has no top-level {GUARD}"
+    if not set(wanted) & {_unwrap(part) for part in _top_level(expr, "&&")}:
+        return f"`if: {raw!r}` has no top-level {' or '.join(sorted(wanted))}"
     return ""
+
+
+def _cache(step) -> str:
+    """What cache STEP can restore whatever the ref, or '' (its `if:` aside)."""
+    action, _ = _uses(step)
+    inputs = step.get("with") if isinstance(step.get("with"), dict) else {}
+    if any(action == a or action.startswith(a + "/") for a in CACHE_ACTIONS):
+        return f"{action} restores a cache"
+    if action in CACHE_INPUTS:
+        key, default = CACHE_INPUTS[action]
+        asked = {name: str(inputs.get(name, default if name == key else "")).strip() for name in {key, "cache"}}
+        if any(value not in ("", "false") for value in asked.values()):
+            return f"{action} caches ({', '.join(f'{name}: {value!r}' for name, value in sorted(asked.items()))})"
+    if action == "PyO3/maturin-action":
+        sccache = re.sub(r"\s+", "", str(inputs.get("sccache", "false")))
+        if sccache != "false" and sccache not in {"${{" + cond.replace(" ", "") + "}}" for cond in NOT_ON_TAG}:
+            return f"{action} with sccache {inputs.get('sccache')!r}"
+    return ""
+
+
+def _needs(job) -> list:
+    needs = job.get("needs") if isinstance(job, dict) else None
+    return [needs] if isinstance(needs, str) else [str(n) for n in needs or []]
+
+
+def _artifact_lineage(wf: dict, job_id: str) -> list:
+    """The jobs whose outputs JOB_ID publishes: those whose uploaded artifacts it
+    downloads, then theirs, and so on, each looked for among the jobs its
+    consumer needs (directly or not). An artifact name built from an
+    expression matches whatever the expression could be."""
+    jobs = {k: v if isinstance(v, dict) else {} for k, v in wf["jobs"].items()}
+
+    def ancestors(start: str) -> set:
+        seen, todo = set(), list(_needs(jobs.get(start, {})))
+        while todo:
+            job = todo.pop()
+            if job in jobs and job not in seen:
+                seen.add(job)
+                todo += _needs(jobs[job])
+        return seen
+
+    def transfers(job: str, action: str) -> list:
+        return [step.get("with") if isinstance(step.get("with"), dict) else {} for step in _steps(jobs[job])
+                if _uses(step)[0] == action]
+
+    def fetches(given: dict, name: str) -> bool:
+        if "name" in given:
+            return bool(re.fullmatch(".*".join(map(re.escape, re.split(r"\$\{\{.*?\}\}", name))), str(given["name"])))
+        pattern = str(given.get("pattern", "*"))
+        return fnmatch.fnmatchcase(re.sub(r"\$\{\{.*?\}\}", "x", name), pattern)
+
+    lineage, todo = [], [job_id]
+    while todo:
+        consumer = todo.pop()
+        wanted = transfers(consumer, "actions/download-artifact")
+        for producer in sorted(ancestors(consumer)):
+            names = [str(given.get("name", "artifact")) for given in transfers(producer, "actions/upload-artifact")]
+            if producer not in lineage and any(fetches(given, name) for given in wanted for name in names):
+                lineage.append(producer)
+                todo.append(producer)
+    return lineage
 
 
 def publishing_steps(steps) -> list:
@@ -1017,6 +1112,7 @@ def check(workflows: pathlib.Path) -> tuple:
                                     f"top-level permissions must be read-only, got {top!r}"))
         if _mentions_secrets({key: value for key, value in wf.items() if key != "jobs"}):
             findings.append(Finding(name, "(workflow)", "secrets", "references the secrets context"))
+        privileged, cached = [], set()
         for job_id, job in wf["jobs"].items():
             job = job if isinstance(job, dict) else {}
             if _mentions_secrets(job):
@@ -1028,6 +1124,7 @@ def check(workflows: pathlib.Path) -> tuple:
                                         f"`uses: {uses}`: only a local workflow of this directory, which is read"))
             if publishing_steps(_steps(job)) or _write_permissions(job.get("permissions")):
                 judged.append(f"{name} › {job_id}")
+                privileged.append(job_id)
             found = check_job(name, job_id, job, wf)
             steps = _steps(job)
             visited.add((name, job_id))
@@ -1039,6 +1136,14 @@ def check(workflows: pathlib.Path) -> tuple:
                 else:
                     stale.append(f"{name} › {job_id}: {code} on {step}")
             findings += found
+        for job_id in privileged:
+            for producer in _artifact_lineage(wf, job_id):
+                for i, step in enumerate(_steps(wf["jobs"][producer])):
+                    if (what := _cache(step)) and not _never_on_tag(step) and (producer, i) not in cached:
+                        cached.add((producer, i))
+                        findings.append(Finding(name, producer, "tag-cache", f"{what} on a tag run, and {job_id} "
+                                                "publishes what this job builds: keep it off every tag (a top-level "
+                                                f"`{sorted(NOT_ON_TAG)[0]}` in its `if:`) or drop it", i))
     stale += [f"{wf} › {job}: no such job" for wf, job in EXCEPTIONS if (wf, job) not in visited]
     return findings, judged, stale
 
@@ -1236,6 +1341,13 @@ NATIVE_REINSPECT = ("      - name: re-inspect the release set about to be upload
                     " --quiet\n" + RECORDED)
 WASM_REINSPECT = ("      - name: re-inspect the wasm tarball about to be uploaded\n        run: >\n"
                   "          python3 scripts/package-inspect.py archive npm-wasm/*.tgz --strict --quiet\n" + RECORDED)
+ZIG_STEP = "      - name: Zig 0.14.1, sha256-verified\n"
+SETUP_ZIG = ("      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1\n"
+             "        if: ${{ contains(matrix.settings.target, 'musl') }}\n        with:\n          version: 0.14.1\n")
+RUST_CACHE = ("      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n"
+              "        if: ${{ !startsWith(github.ref, 'refs/tags/') }}\n")
+PACK_NODE = ("          node-version: 22\n          package-manager-cache: false\n      - run: pnpm install "
+             "--frozen-lockfile=false\n      # The native binaries only")
 PYPI = "      - uses: pypa/gh-action-pypi-publish"
 PY_REINSPECT = ("      - name: re-inspect the exact set about to be uploaded\n"
                 "        run: python3 scripts/package-inspect.py archive dist/* --release-set --strict --quiet\n")
@@ -1658,6 +1770,32 @@ MUTATIONS = (
     ("the record written where the operand check does not read", P, [
         ("npm-publish.yml", RECORDED, RECORDED.replace("npm-inspected", "other"))], {}, 1,
      "npm-publish.yml › publish-native [npm-operand]"),
+    # -- no cache on a tag in a job whose outputs are published
+    ("setup-zig back in build-native", P, [("npm-publish.yml", ZIG_STEP, SETUP_ZIG + ZIG_STEP)], {}, 1,
+     "npm-publish.yml › build-native [tag-cache]"),
+    ("setup-zig kept off every tag", P, [("npm-publish.yml", ZIG_STEP, SETUP_ZIG.replace(
+        "${{ contains(matrix.settings.target, 'musl') }}",
+        "${{ contains(matrix.settings.target, 'musl') && !startsWith(github.ref, 'refs/tags/') }}") + ZIG_STEP)],
+     {}, 0, "0 violation(s)"),
+    ("rust-cache in build-native without its tag guard", P, [
+        ("npm-publish.yml", RUST_CACHE, RUST_CACHE.split("\n", 1)[0] + "\n")], {}, 1,
+     "npm-publish.yml › build-native [tag-cache] (step 5) Swatinem/rust-cache"),
+    ("rust-cache in build-native, its tag guard under ||", P, [
+        ("npm-publish.yml", RUST_CACHE, RUST_CACHE.replace("'refs/tags/') }}",
+                                                           "'refs/tags/') || github.event_name == 'push' }}"))],
+     {}, 1, "npm-publish.yml › build-native [tag-cache]"),
+    ("setup-node caching in pack-native", P, [
+        ("npm-publish.yml", PACK_NODE, PACK_NODE.replace("          package-manager-cache: false\n", ""))], {}, 1,
+     "npm-publish.yml › pack-native [tag-cache]"),
+    ("actions/cache in build-wasm", P, [
+        ("npm-publish.yml", "      - name: binaryen version_130, sha256-verified\n",
+         "      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0\n        with:\n"
+         "          path: ~/.cargo\n          key: wasm\n      - name: binaryen version_130, sha256-verified\n")],
+     {}, 1, "npm-publish.yml › build-wasm [tag-cache]"),
+    ("sccache on a tag in the wheels", P, [("python.yml", "sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}",
+                                            'sccache: "true"')], {}, 1, "python.yml › wheels [tag-cache]"),
+    ("rust-cache in the iOS build without its tag guard", P, [
+        ("mobile.yml", RUST_CACHE, RUST_CACHE.split("\n", 1)[0] + "\n")], {}, 1, "mobile.yml › ios [tag-cache]"),
     # -- the named exception: three exact steps, nothing else
     ("the Flutter waiver claimed by another job", P, [("python.yml", PYPI, "      - run: flutter pub get\n" + PYPI)],
      {}, 1, "FAIL    python.yml › release [unlocked-pub-get]"),

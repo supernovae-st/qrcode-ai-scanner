@@ -216,9 +216,15 @@ the OIDC token request to every one of its steps, and ios-release holds
 
 The jobs whose outputs the publishing jobs upload (build-native,
 pack-native, build-wasm, wheels, sdist, ios) pin their third-party actions by
-commit and restore no build cache (rust-cache, sccache) on a tag; they are
-not privileged, and the inspections read file sets and texts, not compiled
-binaries.
+commit and restore no cache on a tag: rust-cache and sccache run on other
+refs only, setup-node caches nothing (`package-manager-cache: false`), and
+build-native's musl row installs Zig 0.14.1 from ziglang.org in a run step,
+checked against the sha256 its download index publishes, with an empty global
+cache under `RUNNER_TEMP` (mlugg/setup-zig restored its Zig tarball from the
+Actions cache under a fixed key on every ref, a hit skipping the signature
+check). `scripts/check-publish-guards.py` holds every job whose artifacts a
+publishing job downloads, then theirs, to this. They are not privileged, and
+the inspections read file sets and texts, not compiled binaries.
 
 **Named exceptions** to "every distributed archive carries the AGPL text, and
 only a tag publishes":
@@ -243,8 +249,9 @@ only a tag publishes":
   these installs take `--frozen-lockfile`.
 - The packed binaries (.node, .so, .pyd, .a, .wasm) are built by those
   non-privileged jobs from the tag's checkout; no inspection can tell a
-  tampered binary from a sound one, so their pinned actions and the absence
-  of caches on a tag are what holds there.
+  tampered binary from a sound one, so their pinned actions and tools (Zig
+  and binaryen by sha256) and the absence of caches on a tag are what holds
+  there.
 
 **Owner steps, in this order** (repository and registry settings; no workflow
 performs them):
@@ -372,9 +379,12 @@ build requirement is `maturin>=1.9.3,<2.0` (the first maturin that puts PEP
 exercised in CI. wasm-pack 0.13.1 and cargo-zigbuild 0.23.4
 (taiki-e/install-action, SHA-verified); binaryen version_130, checked against
 the sha256 binaryen publishes with the release (and scripts/build-wasm.sh
-refuses a wasm-opt older than 130); pnpm 10.34.6 through pnpm/action-setup
-pinned by commit (v6.0.10); `@napi-rs/cli` 3.7.3 (package.json). The jobs
-whose outputs are published take every third-party action by commit
-(dtolnay/rust-toolchain, Swatinem/rust-cache, mlugg/setup-zig,
+refuses a wasm-opt older than 130); Zig 0.14.1 for the musl build, downloaded
+from ziglang.org in a run step and checked against the sha256 its download
+index publishes, with ZIG_GLOBAL_CACHE_DIR a fresh directory under
+RUNNER_TEMP (no setup action: § Publishing); pnpm 10.34.6 through
+pnpm/action-setup pinned by commit (v6.0.10); `@napi-rs/cli` 3.7.3
+(package.json). The jobs whose outputs are published take every third-party
+action by commit (dtolnay/rust-toolchain, Swatinem/rust-cache,
 taiki-e/install-action, PyO3/maturin-action), with the release tag (for
 dtolnay/rust-toolchain, the branch and the date) in a comment.
