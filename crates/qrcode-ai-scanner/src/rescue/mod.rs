@@ -414,6 +414,10 @@ pub(crate) fn rederive(
 /// its version; at a fixed EC level the data capacity strictly grows with
 /// the version, so the length identifies it (and with it the character-
 /// count widths the parser needs).
+#[cfg_attr(
+    not(feature = "engine-rxing"),
+    allow(dead_code, reason = "only rxing's codeword reads need their version")
+)]
 pub(crate) fn version_of_data(len: usize, ec: EcLevel) -> Option<u8> {
     let column = format_bits_index(ec);
     let table = data_capacity();
@@ -423,6 +427,10 @@ pub(crate) fn version_of_data(len: usize, ec: EcLevel) -> Option<u8> {
 /// Data codewords per `[version][format-bits EC index]`, from the same
 /// block table the de-interleave uses (built once: the shapes are all it
 /// needs, so a zero symbol of the largest size stands in for codewords).
+#[cfg_attr(
+    not(feature = "engine-rxing"),
+    allow(dead_code, reason = "only rxing's codeword reads need their version")
+)]
 fn data_capacity() -> &'static [[usize; 4]; 41] {
     static TABLE: OnceLock<[[usize; 4]; 41]> = OnceLock::new();
     TABLE.get_or_init(|| {

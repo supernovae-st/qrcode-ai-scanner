@@ -41,10 +41,24 @@ pub(crate) const MAX_PROBES: usize = 240;
 /// The versions a margin re-read tries ([`LocateHint::for_margin`]): errors
 /// alone pass the ISO/IEC 18004 Annex B reserve only on version 1 at EC
 /// levels L and M and on version 2 at L.
+#[cfg_attr(
+    not(feature = "engine-rxing"),
+    allow(
+        dead_code,
+        reason = "only rxing's port reads are re-read for their margin"
+    )
+)]
 pub(crate) const MARGIN_VERSIONS: RangeInclusive<u8> = 1..=2;
 
 /// How a read's corner points frame the module grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(feature = "engine-rxing"),
+    allow(
+        dead_code,
+        reason = "only rxing's reads frame the grid by its outer corners"
+    )
+)]
 pub(crate) enum Frame {
     /// rxing's result points: the symbol's outer corners plus half a pixel,
     /// clockwise from the top-left finder.
@@ -82,6 +96,13 @@ impl LocateHint {
     /// else: at EC level L or M, on [`MARGIN_VERSIONS`]. `None` at Q and H,
     /// whose reserve errors alone never pass, and for rqrr's reads, which
     /// carry their own word's margin.
+    #[cfg_attr(
+        not(feature = "engine-rxing"),
+        allow(
+            dead_code,
+            reason = "only rxing's port reads are re-read for their margin"
+        )
+    )]
     pub(crate) fn for_margin(&self) -> Option<Self> {
         let measurable = matches!(self.ec, EcLevel::L | EcLevel::M);
         (self.frame == Frame::OuterCorners && measurable).then(|| Self {

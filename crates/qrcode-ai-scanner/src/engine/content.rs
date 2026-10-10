@@ -189,6 +189,10 @@ pub(crate) enum Segments {
 /// equals a complete double-byte decoding of all the bytes (rule 1e). It
 /// only chooses between the scanner's decodings; its text is never kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(feature = "engine-rxing"),
+    allow(dead_code, reason = "only rxing's port reads carry an engine reading")
+)]
 pub(crate) enum EngineReading {
     /// Nothing to choose from (or several engine readings disagreed).
     None,
@@ -203,6 +207,10 @@ impl EngineReading {
     /// UTF-8 and the text is exactly their error-free `Shift_JIS` decoding with
     /// at least one character from a byte pair; else gb18030 likewise; else
     /// nothing.
+    #[cfg_attr(
+        not(feature = "engine-rxing"),
+        allow(dead_code, reason = "only rxing's port reads carry an engine reading")
+    )]
     pub(crate) fn of(raw: &[u8], text: &str) -> Self {
         if std::str::from_utf8(raw).is_ok() {
             return Self::None;
