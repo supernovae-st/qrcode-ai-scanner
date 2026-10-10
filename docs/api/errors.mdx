@@ -52,7 +52,7 @@ fresh, never-cancelled token, so it never returns `QRS-005`.
     ```bash
     qrscan in.png -s; case $? in
       0) echo "decoded, its complete score on stdout" ;;
-      1) echo "no QR in the image" ;;
+      1) echo "no symbol in the image" ;;
       2) echo "invalid input or usage, or no score in this configuration" ;;
       3) echo "decoded, not judged within the budget: retry with --budget-ms 0" ;;
     esac
@@ -69,7 +69,7 @@ cancelled scan is `QRS-005`, never an absent judgment.
 
 ## CLI exit codes
 
-`0` = ≥1 QR decoded · `1` = nothing found (all output modes; final only
+`0` = ≥1 symbol decoded, of any symbology · `1` = nothing found (all output modes; final only
 when the scan was not cut) · `2` = invalid input/usage (QRS fault,
 unreadable file, `--score-only` with a configuration that computes no score
 — the `frame` profile or every axis skipped — or after a contained fault) ·

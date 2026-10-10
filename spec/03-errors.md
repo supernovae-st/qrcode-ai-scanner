@@ -28,10 +28,10 @@ code; the cross-surface match contract is the regex `QRS-\d{3}`
 
 | Exit | Meaning |
 |---|---|
-| `0` | At least one QR decoded. With `--score-only`, its score value is on stdout; a printed value is a complete judgment and does not depend on the budget. |
-| `1` | No QR decoded, in ALL output modes including `--score-only`. Final only when the scan was not cut: `trace.budget_exhausted` is `false` in the JSON report. `--score-only` and `--pretty` say when the budget ran out first. |
+| `0` | At least one symbol decoded, of any symbology. With `--score-only`, its score value is on stdout; a printed value is a complete judgment and does not depend on the budget. |
+| `1` | No symbol decoded, in ALL output modes including `--score-only`. Final only when the scan was not cut: `trace.budget_exhausted` is `false` in the JSON report. `--score-only` and `--pretty` say when the budget ran out first. |
 | `2` | Invalid input, usage or fault: a QRS error · an unreadable file · `--score-only` with a configuration that computes no score (the `frame` profile, or every stress axis skipped) · `--score-only` when a contained internal fault left the score absent. |
-| `3` | `--score-only` only: a QR was decoded, but the wall-clock budget ran out before its score was judged (`score: null`, `trace.budget_exhausted: true`). Nothing is printed on stdout. Retry with a larger `--budget-ms`; `0` (unbounded) never yields 3. |
+| `3` | `--score-only` only: a symbol was decoded, but the wall-clock budget ran out before its score was judged (`score: null`, `trace.budget_exhausted: true`). Nothing is printed on stdout. Retry with a larger `--budget-ms`; `0` (unbounded) never yields 3. |
 
 In JSON and `--pretty` modes, a completed scan exits 0 or 1; a missing
 score is read from the report. Branch on the CODE, never on the message

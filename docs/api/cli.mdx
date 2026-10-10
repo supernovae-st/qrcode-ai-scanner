@@ -11,8 +11,10 @@ cargo install qrcode-ai-scanner-cli
 
 ```bash
 qrscan <image> [--profile full|fast|frame] [--budget-ms <ms>]
-               [--score-preset design|capture]
+               [--score-preset design|capture | --score-skip-axes <axis,...>]
+               [--score-skip-checks <check,...>]
                [--alpha-background auto|white|black|none|"#rrggbb"]
+               [--alpha-palette <color,...>]
                [--pretty|-p] [--score-only|-s]
 ```
 
@@ -20,12 +22,23 @@ qrscan <image> [--profile full|fast|frame] [--budget-ms <ms>]
 `fast` 800 · `frame` 80 ms); `--budget-ms 0` is unbounded — the
 reproducible mode, the one for CI gates. A report the budget cut says so:
 `trace.budget_exhausted` is `true`, `--pretty` names what was cut, and
-`--score-only` exits 3 when the budget left a decoded QR unjudged.
+`--score-only` exits 3 when the budget left a decoded symbol unjudged.
+
+`--score-skip-axes` excludes stress axes from scoring (comma-separated:
+`resolution`, `blur`, `contrast`, `perspective`, `rotation`, `lighting`);
+skipped axes never run and the composite renormalizes over the others.
+`--score-preset` is the named form (`design` skips `perspective` and
+`rotation`); pass one or the other. `--score-skip-checks` withholds report
+sections (`uec`, `iso15415`, `alpha_envelope`): the wire carries `null` and
+their hints stay silent, while the value does not move.
 
 `--alpha-background` picks the background flattened under transparent
 pixels (`auto` default — opaque images are untouched); `--pretty` then
 renders the flatten verdict plus the placement-envelope strip
 (`placement LightOnly · safe luma 32-255 · probes ✕0 ✓32 ✓64 …`).
+`--alpha-palette` probes your own colors in the same scan (comma-separated
+`white`, `black` or `#rrggbb`, at most 32): per-color verdicts land in
+`alpha.envelope.palette`.
 
 | Mode | Output |
 |---|---|
@@ -62,7 +75,8 @@ error-correction budget (`uec margin 1.00`) and grades A. On a styled or
 damaged code the weak axes show up line by line, each one the actionable
 truth a plain "decoded" never gives you. A symbol that declares more than
 plain text adds a `charset` line (`charset   eci · ECI 4@0`, or `unknown ·
-no verified text (raw: --json)`) and, for GS1 or AIM data, an `fnc1` line;
+no verified text (raw: in the JSON report, run without --pretty)`) and, for
+GS1 or AIM data, an `fnc1` line;
 controls and spoofing characters print as `\u{…}`. See
 [How it works](/tutorial) for the field-by-field walkthrough and
 [Scoring](/concepts/scoring) for what each axis means.
@@ -71,12 +85,13 @@ controls and spoofing characters print as `\u{…}`. See
 
 | Exit | Meaning |
 |---|---|
-| `0` | ≥1 QR decoded (with `--score-only`: its complete score on stdout) |
-| `1` | no QR found (all modes) — final only when the scan was not cut (`trace.budget_exhausted: false`) |
+| `0` | ≥1 symbol decoded, of any symbology (with `--score-only`: its complete score on stdout) |
+| `1` | no symbol found (all modes) — final only when the scan was not cut (`trace.budget_exhausted: false`) |
 | `2` | invalid input/usage — message on stderr with `[QRS-xxx]` · `--score-only` with a configuration that computes no score (`frame`, every axis skipped) or after a contained fault |
-| `3` | `--score-only` only: a QR decoded, but the budget ran out before its score was judged — nothing on stdout; retry with a larger `--budget-ms` (`0` never yields 3) |
+| `3` | `--score-only` only: a symbol decoded, but the budget ran out before its score was judged — nothing on stdout; retry with a larger `--budget-ms` (`0` never yields 3) |
 
-Branch on the code, never on the message text.
+Branch on the code, never on the message text. An EAN-13 or any other
+symbology exits exactly like a QR code.
 
 ## Recipes
 
