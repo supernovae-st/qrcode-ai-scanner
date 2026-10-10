@@ -13,8 +13,9 @@
 //! from the image's unbudgeted reference walk; latency is judged on the
 //! valid pairs whose median calls are complete on both sides, truncation
 //! and lost judgments by exact one-sided `McNemar` tests over the valid
-//! pairs, work on the pairs where a side was truncated. Memory is judged in
-//! full-unbounded only.
+//! pairs, work — each side's share of its own reference walk — on the
+//! pairs where a side was truncated. Memory is judged in full-unbounded
+//! only.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -31,9 +32,9 @@ use super::run::{
 use super::stats::{self, McNemar, Shift, Verdict};
 
 /// Benchmark-harness identifier, bumped with any method change.
-pub(crate) const BENCH_ID: &str = "qrscan-bench/v3";
+pub(crate) const BENCH_ID: &str = "qrscan-bench/v4";
 /// The protocol version the method implements.
-pub(crate) const PROTOCOL: &str = "qrscan-oracle/v1.4";
+pub(crate) const PROTOCOL: &str = "qrscan-oracle/v1.5";
 /// δ table: fractions, and the size δ in basis points (sizes are exact
 /// integers, so their verdict is too).
 pub(crate) const DELTA_P50: f64 = 0.05;
@@ -97,6 +98,10 @@ struct ImageSide {
     over_envelope: usize,
     /// Median Σ transforms of the timed calls.
     transforms: Option<f64>,
+    /// Budgeted modes: the share of its own reference walk's Σ transforms
+    /// that the median call(s) completed — `None` without a reference walk
+    /// that tried any.
+    work_share: Option<f64>,
     /// Budgeted modes: whether the image's reference walk came back.
     reference: bool,
     /// Timed calls truncated — their walk or judgment differs from the
@@ -160,6 +165,18 @@ fn image_side(
     let truncated = |s: &Sample| reference.is_some_and(|r| s.truncated(r, mode));
     let judged = |s: &Sample| reference.is_some_and(|r| s.judgment_cut(r, mode));
     let middle = median_calls(&ok);
+    // work is read against the side's own reference walk: two walks of
+    // different lengths are never compared by their raw counts
+    let walked: Vec<f64> = middle
+        .iter()
+        .filter_map(|s| s.work.as_ref().map(|w| float(w.transforms)))
+        .collect();
+    let work_share = reference
+        .and_then(|r| r.work.as_ref())
+        .map(|w| float(w.transforms))
+        .filter(|walk| *walk > 0.0)
+        .zip(stats::median(&walked))
+        .map(|(walk, done)| done / walk);
     ImageSide {
         timed: timed(samples).count(),
         ok: ok.len(),
@@ -178,6 +195,7 @@ fn image_side(
         median_rss: stats::median(&rss),
         over_envelope,
         transforms: stats::median(&transforms),
+        work_share,
         reference: reference.is_some(),
         truncated: ok.iter().filter(|s| truncated(s)).count(),
         walk_cut: ok
@@ -467,6 +485,7 @@ fn figures(sides: &[&ImageSide], mode: Mode) -> (Value, Vec<f64>) {
     let retained = pick(&|s| s.retained.map(|r| r as f64));
     let rss = pick(&|s| s.median_rss);
     let transforms = pick(&|s| s.transforms);
+    let shares = pick(&|s| s.work_share);
     let sum = |f: fn(&ImageSide) -> usize| sides.iter().map(|s| f(s)).sum::<usize>();
     let count = |f: fn(&ImageSide) -> bool| sides.iter().filter(|s| f(s)).count();
     let calls = sum(|s| s.ok);
@@ -495,6 +514,7 @@ fn figures(sides: &[&ImageSide], mode: Mode) -> (Value, Vec<f64>) {
         "overruns": overruns,
         "budget": budget,
         "transforms": spread_json(&transforms),
+        "work_share": spread_json(&shares),
         "peak_heap_bytes": spread_json(&heap),
         "alloc_calls": spread_json(&allocs),
         "retained_bytes": spread_json(&retained),
@@ -570,8 +590,9 @@ fn md_mcnemar(test: &McNemar, verdict: &str) -> String {
 /// Base versus candidate on the valid pairs of one class: latency on the
 /// pairs whose median calls are complete on both sides; in budgeted modes
 /// truncation and lost judgments by exact one-sided [`McNemar`] tests over
-/// every valid pair, and work on the pairs where a side was truncated;
-/// memory judged in full-unbounded only.
+/// every valid pair, and work — each side's share of its own reference
+/// walk — on the pairs where a side was truncated; memory judged in
+/// full-unbounded only.
 #[allow(
     clippy::too_many_lines,
     reason = "one class's verdicts read best in one place"
@@ -663,7 +684,8 @@ fn compare(
             json["lost_judgment"] = mcnemar_json(&test, verdict);
             md_mcnemar(&test, verdict)
         });
-        let work = values(&truncated, &|s| s.transforms);
+        // a share of zero, or none, has no ratio: it counts as dropped
+        let work = values(&truncated, &|s| Some(s.work_share.unwrap_or(0.0)));
         let work_shift = shift_of(&work);
         let work_verdict = label(
             stats::work_verdict(work_shift.as_ref(), DELTA_WORK),
@@ -673,7 +695,7 @@ fn compare(
         declared.push(declare(&target, name, "work", work_shift.as_ref(), work_verdict));
         json["work"] = json!({
             "pairs": truncated.len(),
-            "over": "the valid pairs where a side was truncated",
+            "over": "the valid pairs where a side was truncated; per side, the share of its own reference walk's transforms_tried sum that its median call completed",
             "shift": shift_json(work_shift.as_ref()), "verdict": work_verdict,
             "nonpositive_dropped": stats::nonpositive(&work),
         });
@@ -1629,7 +1651,7 @@ fn method_json(m: &Measurement) -> Value {
         "p95": "the same on the tail of those pairs: the k = floor(n/10) with the largest per-image geometric mean of A and B; testable when k >= 6, i.e. n >= 60",
         "budget_bound": "labels the valid pairs whose median call is truncated on a side; it never suppresses the latency verdict of the complete pairs",
         "truncation_test": "per class over the valid pairs (at least 6): exact one-sided McNemar on the median call's truncation status, candidate-only against base-only; p < 0.05 is a truncation regression; the same on judgment-cut status is a lost-judgment regression",
-        "work": "HL of ln(B/A) of the per-image median transforms_tried sum over the valid pairs where a side was truncated; regression when the upper bound is below ln(1 - 0.05)",
+        "work": "HL of the per-image ln(B share / A share) over the valid pairs where a side was truncated, each side's share the part of its own reference walk's transforms_tried sum that its median call completed — raw counts of two different walks are never compared; regression when the upper bound is below ln(1 - 0.05)",
         "overruns": "per image: the per-image median slower than the preset budget (Wilson 95 % over images); call-level counts are clustered and carry no interval",
         "delta": {"p50": DELTA_P50, "p95": DELTA_P95, "peak_memory": DELTA_MEMORY, "wasm_gzip_brotli_bp": DELTA_SIZE_BP, "cold_start_p50": DELTA_COLD_START, "work": DELTA_WORK},
         "cold_start_pairs": super::run::COLD_PAIRS,
@@ -1735,6 +1757,7 @@ fn images_lines(m: &Measurement) -> String {
                     "resource_failures": side.failures, "complete": side.complete(m.options.reps),
                     "peak_heap": side.heap_peak, "alloc_calls": side.alloc_calls, "retained": side.retained,
                     "median_rss": side.median_rss, "transforms": side.transforms,
+                    "work_share": side.work_share,
                     "reference": segment.mode.budgeted().then_some(side.reference),
                     "truncated_calls": side.truncated, "judgment_cut_calls": side.judgment_cut,
                     "median_truncated": side.median_truncated, "median_judgment_cut": side.median_judgment_cut,
@@ -2005,7 +2028,7 @@ pub(crate) fn write(m: &Measurement, out: &Path) -> Result<i32, String> {
         let _ = write!(
             body,
             "\n## Budget (a timed call is truncated when its walk or judgment differs from the image's unbudgeted reference walk; images by their median call, over the valid pairs)\n\n\
-             | target | class | A truncated | B truncated | budget-bound pairs | truncation (one-sided McNemar) | lost judgments | work Δ HL [95 % CI] (truncated pairs) | work verdict |\n\
+             | target | class | A truncated | B truncated | budget-bound pairs | truncation (one-sided McNemar) | lost judgments | work share Δ HL [95 % CI] (truncated pairs) | work verdict |\n\
              |---|---|---|---|---|---|---|---|---|\n{}",
             tables.budget
         );
@@ -3300,7 +3323,9 @@ mod tests {
     /// Work is judged on the pairs where a side was truncated, and only
     /// there. Six complete pairs whose candidate reference walk is half the
     /// base's (a faster algorithm) stay out; six where the candidate
-    /// stopped at 7 of the reference's 10 transforms give exactly −30 %.
+    /// stopped at 7 of the reference's 10 transforms give exactly −30 %:
+    /// both sides walk the same 10-transform reference, so the share ratio
+    /// (0.7 against 1) is the transforms ratio.
     #[test]
     fn work_reads_truncated_pairs_only() {
         let mut images: Vec<[(Vec<Sample>, Sample); 2]> = (0..6)
@@ -3341,6 +3366,68 @@ mod tests {
         );
         let cut = row(&declared, "vendored", "truncation");
         assert_eq!((cut.verdict, cut.discordant), ("regression", Some([6, 0])));
+    }
+
+    /// A faster candidate with a smaller walk: the base's reference walk
+    /// tries 48 transforms and its median call stops at 31 (a share of
+    /// 31/48); the candidate's own walk is 23 transforms and it completes
+    /// them (a share of 1). Work compares the shares — +54.839 %, the
+    /// candidate completed more of its own walk — where raw counts (23
+    /// against 31) would declare a −25.806 % work regression.
+    #[test]
+    fn work_reads_each_side_against_its_own_reference_walk() {
+        let images = (0..6)
+            .map(|i| {
+                let i = f64::from(i);
+                [
+                    (
+                        calls(&[90.0 + i; 5], (3, 31), "x", None),
+                        call(0, 1.0, (4, 48), "x", None),
+                    ),
+                    (
+                        calls(&[40.0 + i; 5], (2, 23), "x", None),
+                        call(0, 1.0, (2, 23), "x", None),
+                    ),
+                ]
+            })
+            .collect();
+        let m = measurement(&complete_scope(), 6, vec![model(Mode::Frame, images)]);
+        let mut declared = Vec::new();
+        let json = segment_json(
+            &m,
+            &m.segments[0],
+            false,
+            &mut declared,
+            &mut Tables::default(),
+        );
+        let work = row(&declared, "vendored", "work");
+        assert_eq!(
+            (work.verdict, work.estimate_pct, work.ci_pct),
+            ("no_regression", Some(54.839), Some([54.839, 54.839]))
+        );
+        let cut = row(&declared, "vendored", "truncation");
+        assert_eq!(
+            (cut.verdict, cut.discordant),
+            ("no_regression", Some([0, 6]))
+        );
+        assert_eq!(
+            row(&declared, "vendored", "latency_p50").verdict,
+            "not_testable",
+            "no pair is complete on both sides"
+        );
+        assert!(declared.iter().all(|d| d.verdict != "regression"));
+        let set = json["classes"]
+            .as_array()
+            .and_then(|c| c.iter().find(|c| c["class"] == "vendored"))
+            .expect("set row");
+        assert_eq!(
+            (
+                &set["base"]["work_share"]["p50"],
+                &set["candidate"]["work_share"]["p50"]
+            ),
+            (&json!(0.646), &json!(1.0)),
+            "31/48 and 23/23"
+        );
     }
 
     /// Memory median shift and tail, δ 10 % each, and the 512 MiB envelope

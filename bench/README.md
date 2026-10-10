@@ -3,7 +3,7 @@
 `xtask bench …` measures what the correctness oracle does not: outer-call
 latency, memory, allocations, throughput and WASM cost of the scanner,
 **base** (the published 0.9.0) versus **candidate** (this tree), by the
-benchmark protocol `qrscan-oracle/v1.4`. Correctness stays with
+benchmark protocol `qrscan-oracle/v1.5`. Correctness stays with
 `xtask oracle`; the bench only records whether outputs agree.
 
 Everything here is deterministic — no RNG, no resampling. Timing depends on
@@ -127,10 +127,13 @@ and candidate are the same file, or whose Node or WASM driver did not load
   McNemar test over the valid pairs compares truncation status, candidate
   only against base only: p < 0.05 (decided in exact integers) is a
   **truncation regression**; the same test on lost judgments is a
-  **lost-judgment regression**. **Work** — the Hodges-Lehmann interval of
-  ln(B/A) of the per-image Σ `transforms_tried` — is judged on the pairs
-  where a side was truncated only, a regression when its upper bound is
-  below −5 %.
+  **lost-judgment regression**. **Work** is judged on the pairs where a
+  side was truncated only: each side's work is the share of its own
+  reference walk's Σ `transforms_tried` that its median call completed,
+  and the Hodges-Lehmann interval of ln(B share / A share) is a regression
+  when its upper bound is below −5 %. Raw counts of two different walks
+  are never compared, so a faster candidate with a smaller walk is no
+  work regression.
 - δ: p50 5 %, p95 10 %, peak memory 10 % (median shift and tail), WASM gzip
   / brotli size 2 %, WASM cold start p50 10 %, work 5 %.
 - **Memory** is judged in `full-unbounded` only, where both sides walk the

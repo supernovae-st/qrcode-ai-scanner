@@ -1,6 +1,6 @@
 //! `xtask bench` — outer-call latency, memory, allocations, throughput and
 //! WASM cost of the scanner, base (the published 0.9.0) versus candidate
-//! (this tree), by the pinned benchmark protocol `qrscan-oracle/v1.4`: the
+//! (this tree), by the pinned benchmark protocol `qrscan-oracle/v1.5`: the
 //! oracle's sets, four runtimes and four modes, the environment, the method
 //! and host gate, and the receipts, as `bench/README.md` states them.
 //! Correctness belongs to `xtask oracle`; the bench only records whether
@@ -33,9 +33,10 @@
 //! estimate of the per-image log-ratios with the exact signed-rank 95 %
 //! interval — a regression only when the lower bound exceeds ln(1 + δ);
 //! truncation and lost judgments get exact one-sided `McNemar` tests, work
-//! the truncated pairs. Every process runs in its own group under an RSS
-//! cap and a wall cap that outlive the harness; a killed call is a resource
-//! failure, never a sample. `--dry-run` records the gate without enforcing
+//! — each side's share of its own reference walk — the truncated pairs.
+//! Every process runs in its own group under an RSS cap and a wall cap
+//! that outlive the harness; a killed call is a resource failure, never a
+//! sample. `--dry-run` records the gate without enforcing
 //! it (the caps and the host floor still apply) and labels every number
 //! exploratory: no verdict.
 //!

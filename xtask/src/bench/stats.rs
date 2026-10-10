@@ -333,9 +333,10 @@ pub(crate) fn verdict(shift: Option<&Shift>, delta: f64) -> Verdict {
     }
 }
 
-/// The work verdict of a budget-bound class: a regression when the interval
-/// of ln(candidate / base) transforms lies wholly below ln(1 − δ) — the
-/// candidate fit significantly less work into the same budget.
+/// The work verdict of the truncated pairs: a regression when the interval
+/// of ln(candidate share / base share) — each side's share of its own
+/// reference walk — lies wholly below ln(1 − δ): the candidate completed
+/// significantly less of its walk within the same budget.
 pub(crate) fn work_verdict(shift: Option<&Shift>, delta: f64) -> Verdict {
     match shift.and_then(|s| s.interval) {
         None => Verdict::NotTestable,
@@ -587,7 +588,9 @@ mod tests {
     /// base attempts of 10–80 ms, a candidate 30 % slower per attempt.
     /// Latency reads +2.8 % — no regression — while the work interval lies
     /// far below −5 %: the slower candidate fits less work into the same
-    /// budget, which the work verdict of truncated pairs catches.
+    /// budget, which the work verdict of truncated pairs catches. Both
+    /// sides share the unbudgeted 40-attempt walk, so the ratio of their
+    /// shares of it is this attempt ratio.
     #[test]
     fn the_budget_model_hides_from_latency_not_from_work() {
         let run = |cost: f64| {
