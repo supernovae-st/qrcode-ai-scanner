@@ -43,7 +43,10 @@ fn symbology_fixtures() -> Vec<String> {
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .filter(|name| {
-            (name.ends_with(".png") || name.ends_with(".jpg")) && !name.starts_with("pdf417")
+            let image = std::path::Path::new(name).extension().is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("png") || ext.eq_ignore_ascii_case("jpg")
+            });
+            image && !name.starts_with("pdf417")
         })
         .collect();
     names.sort();
