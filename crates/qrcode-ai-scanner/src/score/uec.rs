@@ -16,21 +16,47 @@
 //! correction (misdecode-protection codewords on the very low versions)
 //! is not subtracted — margins on v1-v2 read marginally optimistic.
 //!
+//! The stream measured is the one of the orientation the decode verified,
+//! under that orientation's version, EC level and mask. A margin is read
+//! only when EVERY block error-corrects errors-only there (`2t ≤ d` and
+//! every error inside the block): a block that does not has no error count
+//! to read — the locator degree of an uncorrectable word is noise, and a
+//! wrong-orientation stream (a mirrored symbol read unmirrored, whose format
+//! word decodes to another EC level and mask) once read margin 0 and capped
+//! a clean code. The S5 rescue's stream, which needed erasures, keeps its
+//! errors-only count ([`Stream::Rescued`]).
+//!
 //! The matrix substrate this builds on — the zigzag/unmask walk, the RS
 //! de-interleave, the version database, and the GF(256) syndromes — lives in
 //! `crate::matrix` (shared with the rescue stage). Only the error COUNT
-//! (Berlekamp-Massey degree) and the margin arithmetic are UEC-specific.
+//! (Berlekamp-Massey + a Chien search) and the margin arithmetic are
+//! UEC-specific.
 
 use crate::matrix::deinterleave::deinterleave;
-use crate::matrix::gf256::{gf_inv, gf_mul, syndromes};
+use crate::matrix::gf256::{gf_inv, gf_mul, gf_pow, syndromes};
 use crate::matrix::version_db::format_bits_index;
 use crate::matrix::zigzag::unmask_to_codewords;
 use crate::report::{EcLevel, UecGrade, UecReport};
 
-/// Berlekamp-Massey over GF(256): the error-locator degree L = number of
-/// errors, exact whenever `t ≤ npar/2` (guaranteed here — the symbol
-/// decoded upstream).
-fn error_count(synd: &[u8]) -> usize {
+/// Where a measured stream comes from — it decides what its error count
+/// proves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stream {
+    /// The stream of the orientation an engine decoded, or of a grid the
+    /// scanner re-derived: measured only when every block error-corrects
+    /// errors-only under the detection's version, EC level and mask.
+    Decoded,
+    /// The S5 rescue's stream: it needed erasures, so its errors-only count
+    /// stands as read — typically margin 0, the distrust signal its hint
+    /// carries.
+    Rescued,
+}
+
+/// Berlekamp-Massey over GF(256): the error locator Λ(x) (ascending powers)
+/// and the length L of the shortest LFSR generating the syndromes — the
+/// number of errors whenever the block error-corrects errors-only, which
+/// [`corrected_errors`] checks.
+fn berlekamp_massey(synd: &[u8]) -> (Vec<u8>, usize) {
     let len = synd.len();
     let mut locator = vec![0u8; len + 1]; // C(x) — current error locator
     let mut prev = vec![0u8; len + 1]; // B(x) — locator before last length change
@@ -64,20 +90,51 @@ fn error_count(synd: &[u8]) -> usize {
             shift += 1;
         }
     }
-    degree
+    (locator, degree)
+}
+
+/// The locator length alone — the count of errors the block carries when it
+/// error-corrects, and the count a rescued stream keeps as read.
+fn error_count(synd: &[u8]) -> usize {
+    berlekamp_massey(synd).1
+}
+
+/// Value of an ascending-power polynomial at `x` (Horner from the top).
+fn poly_at(poly: &[u8], x: u8) -> u8 {
+    poly.iter().rev().fold(0, |acc, &c| gf_mul(acc, x) ^ c)
+}
+
+/// The errors a block of `len` codewords corrects errors-only, or `None`
+/// when it does not: more errors than half its parity, or a locator whose
+/// roots do not all name positions inside the block (a Chien search over
+/// `block[len − 1 − j]` ↔ `x^j`) — the decoder-failure signature. A locator
+/// of length `t ≤ npar/2` with `t` distinct roots there names exactly one
+/// correction, which yields a codeword.
+fn corrected_errors(synd: &[u8], len: usize, npar: usize) -> Option<usize> {
+    let (locator, errors) = berlekamp_massey(synd);
+    if 2 * errors > npar {
+        return None;
+    }
+    let roots = (0..len)
+        .filter(|&j| poly_at(&locator, gf_inv(gf_pow(j))) == 0)
+        .count();
+    (roots == errors).then_some(errors)
 }
 
 /// Compute the synthetic UEC for a decoded symbol.
 ///
-/// Inputs come from the rqrr path: the still-masked stream as sampled by
-/// the engine + the format metadata. `None` when the version is out of
-/// range or the stream is short (never report a garbage margin).
+/// Inputs come from the rqrr path: the still-masked stream of the
+/// orientation the decode verified + its format metadata. `None` when the
+/// version is out of range, the stream is short, or — for a
+/// [`Stream::Decoded`] stream — a block does not error-correct errors-only
+/// under that format: never a garbage margin.
 pub(crate) fn compute(
     masked: &[u8],
     bit_len: usize,
     version: u8,
     ec: EcLevel,
     mask: u8,
+    stream: Stream,
 ) -> Option<UecReport> {
     let version = usize::from(version);
     if !(1..=40).contains(&version) {
@@ -86,15 +143,20 @@ pub(crate) fn compute(
     let codewords = unmask_to_codewords(masked, bit_len, version, mask)?;
     let blocks = deinterleave(&codewords, version, format_bits_index(ec));
 
-    let (margin, worst_errors, worst_capacity) = worst_block(blocks.iter().map(|block| {
+    let mut counted = Vec::with_capacity(blocks.len());
+    for block in &blocks {
         let synd = syndromes(&block.bytes, block.npar);
         let t = if synd.iter().all(|&s| s == 0) {
             0
         } else {
-            error_count(&synd)
+            match stream {
+                Stream::Decoded => corrected_errors(&synd, block.bytes.len(), block.npar)?,
+                Stream::Rescued => error_count(&synd),
+            }
         };
-        (t, block.npar)
-    }));
+        counted.push((t, block.npar));
+    }
+    let (margin, worst_errors, worst_capacity) = worst_block(counted);
     Some(UecReport {
         margin,
         grade: UecGrade::from_margin(margin),
@@ -161,8 +223,10 @@ mod tests {
         // the doc promise: "None when the stream is short — never a garbage
         // margin". A caller deriving bit_len independently of the buffer
         // (future binding) must not hit index-out-of-bounds.
-        assert!(compute(&[0u8; 4], 32_000, 2, crate::report::EcLevel::Q, 3).is_none());
-        assert!(compute(&[], 8, 1, crate::report::EcLevel::L, 0).is_none());
+        for stream in [Stream::Decoded, Stream::Rescued] {
+            assert!(compute(&[0u8; 4], 32_000, 2, EcLevel::Q, 3, stream).is_none());
+            assert!(compute(&[], 8, 1, EcLevel::L, 0, stream).is_none());
+        }
     }
 
     use crate::input::{ImageInput, Limits};
@@ -199,6 +263,7 @@ mod tests {
             d.version.unwrap(),
             d.ec.unwrap(),
             d.mask.unwrap(),
+            Stream::Decoded,
         )
         .expect("uec computable")
     }
@@ -271,6 +336,7 @@ mod tests {
             dd.version.unwrap(),
             dd.ec.unwrap(),
             dd.mask.unwrap(),
+            Stream::Decoded,
         )
         .unwrap();
 
@@ -329,6 +395,7 @@ mod tests {
             dd.version.unwrap(),
             dd.ec.unwrap(),
             dd.mask.unwrap(),
+            Stream::Decoded,
         )
         .unwrap();
         assert_eq!(report.worst_block_errors, 1, "{report:?}");
@@ -336,10 +403,94 @@ mod tests {
 
     #[test]
     fn short_stream_returns_none_never_garbage() {
-        assert!(compute(&[0u8; 4], 32, 2, EcLevel::Q, 3).is_none());
-        assert!(compute(&[], 0, 1, EcLevel::L, 0).is_none());
-        assert!(compute(&[0u8; 4000], 32_000, 0, EcLevel::L, 0).is_none());
-        assert!(compute(&[0u8; 4000], 32_000, 41, EcLevel::L, 0).is_none());
+        for stream in [Stream::Decoded, Stream::Rescued] {
+            assert!(compute(&[0u8; 4], 32, 2, EcLevel::Q, 3, stream).is_none());
+            assert!(compute(&[], 0, 1, EcLevel::L, 0, stream).is_none());
+            assert!(compute(&[0u8; 4000], 32_000, 0, EcLevel::L, 0, stream).is_none());
+            assert!(compute(&[0u8; 4000], 32_000, 41, EcLevel::L, 0, stream).is_none());
+        }
+    }
+
+    /// The grid rqrr detects in `luma`, read as sampled — unmirrored — with
+    /// the format word it decodes that way: the still-masked stream, its bit
+    /// length, the version, EC level and mask.
+    fn as_sampled(luma: &crate::input::LumaImage) -> (Vec<u8>, usize, u8, EcLevel, u8) {
+        let width = luma.width() as usize;
+        let data = luma.data();
+        let mut prepared =
+            rqrr::PreparedImage::prepare_from_greyscale(width, luma.height() as usize, |x, y| {
+                data[y * width + x]
+            });
+        let grid = prepared.detect_grids().remove(0);
+        let (meta, raw) = grid.get_raw_data().expect("the sampled format decodes");
+        // rqrr's ecc_level is the format word's two-bit field
+        let ec = [EcLevel::M, EcLevel::L, EcLevel::H, EcLevel::Q][usize::from(meta.ecc_level)];
+        (
+            raw.data[..raw.len.div_ceil(8)].to_vec(),
+            raw.len,
+            u8::try_from(meta.version.0).unwrap(),
+            ec,
+            u8::try_from(meta.mask).unwrap(),
+        )
+    }
+
+    /// A mirrored symbol read unmirrored: its format word still decodes (to
+    /// another EC level and mask) while its stream holds the wrong
+    /// orientation's bits, which do not error-correct. As a decoded stream
+    /// it measures nothing, rather than the zero margin its locator noise
+    /// reads; as a rescued one it keeps that errors-only count.
+    #[test]
+    fn a_stream_that_does_not_error_correct_measures_no_margin() {
+        let luma = crate::rescue::test_symbols::from_segments_mirrored(
+            qrcode::Version::Normal(3),
+            qrcode::EcLevel::M,
+            |b| b.push_byte_data(b"https://qrc-ai.com/mirrored"),
+        );
+        let (bits, bit_len, version, ec, mask) = as_sampled(&luma);
+        let stream = crate::engine::MaskedStream {
+            bits: bits.clone(),
+            bit_len,
+        };
+        assert!(
+            matches!(
+                crate::rescue::rederive(
+                    &stream,
+                    version,
+                    ec,
+                    mask,
+                    crate::rescue::Acceptance::Engine
+                ),
+                crate::rescue::Rederived::Unverified
+            ),
+            "precondition: no block of it error-corrects"
+        );
+        assert_eq!(
+            compute(&bits, bit_len, version, ec, mask, Stream::Decoded),
+            None
+        );
+        assert!(compute(&bits, bit_len, version, ec, mask, Stream::Rescued).is_some());
+    }
+
+    /// The Chien check against the decoder's own word: a block that
+    /// error-corrects counts its errors exactly, one past half its parity
+    /// counts nothing, and a lone late syndrome spike (a locator of length
+    /// 2 with a repeated root) is no correction either.
+    #[test]
+    fn only_a_correctable_block_counts_its_errors() {
+        let npar = 10;
+        let mut block = vec![0u8; 26];
+        for (placed, pos) in [3usize, 9, 14, 20, 25, 0].into_iter().enumerate() {
+            block[pos] = u8::try_from(placed + 7).unwrap();
+            let errors = placed + 1;
+            let synd = syndromes(&block, npar);
+            let expected = (2 * errors <= npar).then_some(errors);
+            assert_eq!(
+                corrected_errors(&synd, block.len(), npar),
+                expected,
+                "{errors} errors of {npar} parity"
+            );
+        }
+        assert_eq!(corrected_errors(&[0, 1], 4, 2), None);
     }
 
     #[test]

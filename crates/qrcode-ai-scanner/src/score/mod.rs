@@ -827,9 +827,20 @@ pub(crate) fn judge(
     // skipped `uec` withholds only what it shows — `score.uec`, the two hints
     // it drives (compose) and the ISO block's unused_error_correction
     // parameter, whose grade still counts in the ISO `overall` (the minimum
-    // over every MEASURED parameter). A skipped ISO block never runs.
+    // over every MEASURED parameter). A skipped ISO block never runs. The
+    // stream is the verified orientation's, and it measures a margin only
+    // when it error-corrects errors-only under the detection's format — a
+    // stream the S5 rescue recovered with erasures keeps its own count.
     let publish_uec = !skip_checks.contains(&crate::ladder::ScoreCheck::Uec);
     let skip_iso = skip_checks.contains(&crate::ladder::ScoreCheck::Iso15415);
+    let source = if detection
+        .engines
+        .contains(&crate::report::EngineKind::Rescue)
+    {
+        uec::Stream::Rescued
+    } else {
+        uec::Stream::Decoded
+    };
     let uec_report = match (
         &detection.masked_stream,
         detection.version,
@@ -837,7 +848,7 @@ pub(crate) fn judge(
         detection.mask,
     ) {
         (Some(stream), Some(version), Some(ec), Some(mask)) => {
-            uec::compute(&stream.bits, stream.bit_len, version, ec, mask)
+            uec::compute(&stream.bits, stream.bit_len, version, ec, mask, source)
         }
         _ => None,
     };
@@ -2290,6 +2301,208 @@ mod tests {
                     };
                     assert!(refined_ok, "{name}: quota {quota}: {a:?} vs {r:?}");
                 }
+            }
+        }
+    }
+
+    /// The grid rqrr detects in `luma`, read as sampled — unmirrored — with
+    /// the format word it decodes that way: the still-masked stream, version,
+    /// EC level and mask.
+    fn as_sampled(luma: &LumaImage) -> (crate::engine::MaskedStream, u8, EcLevel, u8) {
+        let width = luma.width() as usize;
+        let data = luma.data();
+        let mut prepared =
+            rqrr::PreparedImage::prepare_from_greyscale(width, luma.height() as usize, |x, y| {
+                data[y * width + x]
+            });
+        let grid = prepared.detect_grids().remove(0);
+        let (meta, raw) = grid.get_raw_data().expect("the sampled format decodes");
+        // rqrr's ecc_level is the format word's two-bit field
+        let ec = [EcLevel::M, EcLevel::L, EcLevel::H, EcLevel::Q][usize::from(meta.ecc_level)];
+        let stream = crate::engine::MaskedStream {
+            bits: raw.data[..raw.len.div_ceil(8)].to_vec(),
+            bit_len: raw.len,
+        };
+        (
+            stream,
+            u8::try_from(meta.version.0).unwrap(),
+            ec,
+            u8::try_from(meta.mask).unwrap(),
+        )
+    }
+
+    /// A stream that does not error-correct errors-only under the format it
+    /// was read with measures no margin: no `uec` section, no cap, no margin
+    /// hint. The case: a mirrored symbol read unmirrored, whose format word
+    /// decodes to another EC level and mask while its stream holds the wrong
+    /// orientation's bits — the zero margin such a stream read once capped a
+    /// clean mirrored code at 40. The S5 rescue's stream, which needed
+    /// erasures, keeps its margin.
+    #[test]
+    fn a_stream_that_does_not_verify_has_no_uec_and_no_cap() {
+        use crate::rescue::{Acceptance, Rederived};
+        let luma = crate::rescue::test_symbols::from_segments_mirrored(
+            qrcode::Version::Normal(3),
+            qrcode::EcLevel::M,
+            |b| b.push_byte_data(b"https://qrc-ai.com/mirrored"),
+        );
+        let planes = normalize(
+            &ImageInput::luma8(luma.data(), luma.width(), luma.height()),
+            &Limits::default(),
+        )
+        .unwrap();
+        let (detection, key) = primary_of(&planes);
+        let (verified, _) = judged(&planes.luma, &detection, &key, ScoreDepth::Full, &[], &[]);
+        let (stream, version, ec, mask) = as_sampled(&planes.luma);
+        assert!(
+            matches!(
+                crate::rescue::rederive(&stream, version, ec, mask, Acceptance::Engine),
+                Rederived::Unverified
+            ),
+            "precondition: the as-sampled stream does not error-correct"
+        );
+        assert_ne!(
+            (Some(ec), Some(mask)),
+            (detection.ec, detection.mask),
+            "precondition: as sampled, the format word reads another EC level and mask"
+        );
+        let misread = MergedDetection {
+            masked_stream: Some(stream),
+            version: Some(version),
+            ec: Some(ec),
+            mask: Some(mask),
+            ..detection.clone()
+        };
+        let (score, hints) = judged(&planes.luma, &misread, &key, ScoreDepth::Full, &[], &[]);
+        assert!(score.uec.is_none(), "no margin from it: {:?}", score.uec);
+        assert!(
+            score
+                .iso15415
+                .is_some_and(|iso| iso.unused_error_correction.is_none()),
+            "{:?}",
+            score.iso15415
+        );
+        assert_eq!(
+            (score.value, score.grade),
+            (verified.value, verified.grade),
+            "no margin, no cap"
+        );
+        assert!(
+            !hints
+                .iter()
+                .any(|h| matches!(h, Hint::LowCorrectionMargin { .. })),
+            "{hints:?}"
+        );
+        // the S5 rescue's stream keeps its errors-only count and its hint
+        let (luma, detection, key) = rescue_example();
+        let (score, hints) = judged(&luma, &detection, &key, ScoreDepth::Full, &[], &[]);
+        let uec = score.uec.expect("the rescued stream keeps its margin");
+        assert_eq!(
+            (uec.margin, uec.worst_block_errors, uec.worst_block_capacity),
+            (0.0, 11, 22)
+        );
+        assert!(hints.contains(&Hint::LowCorrectionMargin {
+            errors: 11,
+            capacity: 22
+        }));
+    }
+
+    /// The unbounded Full scan of an in-memory render.
+    fn scan_luma(luma: &LumaImage) -> crate::report::ScanReport {
+        let mut config = ScanConfig::full();
+        config.budget_ms = None;
+        crate::Scanner::builder()
+            .profile(crate::ScanProfile::Custom(config))
+            .build()
+            .scan(ImageInput::luma8(luma.data(), luma.width(), luma.height()))
+            .unwrap()
+    }
+
+    /// A clean code scores the same mirrored as upright: the score measures
+    /// the stream of the orientation the decode verified, with that
+    /// orientation's EC level and mask — margin 1.0, no margin hint, no
+    /// cap. Twins of a no-ECI URL (a pristine 100) and of an ECI 26 URL; and
+    /// a symbol whose format word is EC L, mask 0, which reads as another
+    /// word when sampled unmirrored: mirrored, it publishes L / 0 and the
+    /// full margin. (Its stress cells may differ from its upright twin's:
+    /// mirrored, the centred glare lands on other data modules, and EC L
+    /// leaves little to spare.)
+    #[test]
+    fn a_mirrored_symbol_scores_like_its_upright_twin() {
+        use crate::report::UecGrade;
+        use crate::rescue::test_symbols::{
+            from_segments, from_segments_mirrored, masked_colors, mirror, render,
+        };
+        let url = |b: &mut qrcode::bits::Bits| b.push_byte_data(b"https://qrc-ai.com/x03");
+        let eci26 = |b: &mut qrcode::bits::Bits| {
+            b.push_eci_designator(26)?;
+            b.push_byte_data(b"https://qrc-ai.com/x02")
+        };
+        let (v3, m) = (qrcode::Version::Normal(3), qrcode::EcLevel::M);
+        let (l0, width) = masked_colors(
+            qrcode::Version::Normal(2),
+            qrcode::EcLevel::L,
+            qrcode::canvas::MaskPattern::Checkerboard,
+            |b| b.push_byte_data(b"https://qrc-ai.com/x5"),
+        );
+        let twins = [
+            (
+                "no-ECI URL",
+                from_segments(v3, m, url),
+                from_segments_mirrored(v3, m, url),
+            ),
+            (
+                "ECI 26 URL",
+                from_segments(v3, m, eci26),
+                from_segments_mirrored(v3, m, eci26),
+            ),
+            (
+                "format word L0",
+                render(&l0, width),
+                render(&mirror(&l0, width), width),
+            ),
+        ];
+        for (name, upright, mirrored) in twins {
+            let (up, down) = (scan_luma(&upright), scan_luma(&mirrored));
+            let whole = up.score.expect("the upright twin is judged");
+            let score = down.score.expect("the mirrored twin is judged");
+            let uec = score.uec.expect("the verified stream measures a margin");
+            assert_eq!((uec.margin, uec.grade), (1.0, UecGrade::A), "{name}");
+            if name == "format word L0" {
+                let meta = &down.detections[0].meta;
+                assert_eq!((meta.ec_level, meta.mask), (Some(EcLevel::L), Some(0)));
+                assert_eq!(score.uec, whole.uec, "{name}");
+                assert!(
+                    !down
+                        .hints
+                        .iter()
+                        .any(|h| matches!(h, Hint::LowCorrectionMargin { .. })),
+                    "{name}: {:?}",
+                    down.hints
+                );
+                continue;
+            }
+            assert_eq!(
+                (score.value, score.grade, &score.axes),
+                (whole.value, whole.grade, &whole.axes),
+                "{name}"
+            );
+            assert_eq!(
+                (score.uec, score.structural, score.iso15415),
+                (whole.uec, whole.structural, whole.iso15415),
+                "{name}"
+            );
+            assert!(
+                !down.hints.iter().any(|h| matches!(
+                    h,
+                    Hint::RaiseErrorCorrection { .. } | Hint::LowCorrectionMargin { .. }
+                )),
+                "{name}: {:?}",
+                down.hints
+            );
+            assert_eq!(down.hints, up.hints, "{name}");
+            if name == "no-ECI URL" {
+                assert_eq!((score.value, score.grade), (100, Grade::Excellent));
             }
         }
     }

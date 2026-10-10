@@ -441,6 +441,10 @@ impl UecGrade {
 
 /// Synthetic Unused Error Correction — the real robustness margin
 /// (`1 − 2t/d`, worst RS block). Validation-grade, not ISO verification.
+/// Measured on the stream of the orientation the decode verified, only
+/// when every block error-corrects errors-only under the detection's
+/// version, EC level and mask; a stream the S5 rescue recovered keeps its
+/// errors-only count.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
@@ -563,7 +567,10 @@ pub struct Score {
     pub axes: Vec<AxisScore>,
     /// Structural checks — `None` when no geometry was measured.
     pub structural: Option<StructuralReport>,
-    /// Synthetic UEC margin — `None` when the raw stream was unavailable.
+    /// Synthetic UEC margin — `None` when no stream error-corrects
+    /// errors-only under the detection's format (then no margin cap and no
+    /// margin hint either), or when the `uec` check is skipped (the measured
+    /// margin still caps `value`).
     pub uec: Option<UecReport>,
     /// ISO 15415-informed grade card — `None` when no geometry was measured.
     pub iso15415: Option<Iso15415Report>,
