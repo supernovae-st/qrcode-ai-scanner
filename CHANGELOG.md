@@ -72,20 +72,18 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   read `unknown`; mirrored and damaged-but-correctable symbols are
   located.
 - **A melting RS margin now caps the composite** (part of
-  `score_contract` 4 → 5) —
-  the occlusion cliff (door-admin probe 2026-08-05): a growing center
-  logo ate the correction budget while every stress axis kept passing,
-  so the score sat flat (88 at `logo_scale` 12 AND 18) then decode died
-  at 24 with zero warning — at EC=H the raise-EC hint can never fire,
-  and `low_correction_margin` only speaks at margin ZERO. The measured
-  UEC margin now caps the value on a continuous slope below the healthy
-  half-budget: 0.5 → 100 (no-op seam) · 0.25 (ISO D) → 70 · 0.0 (ISO F)
-  → 40, the finder-damage floor — a decode at the RS limit is never a
-  pass. Scope honesty: the cap only bites where UEC measures (rqrr-path
-  decodes carrying the raw stream); rxing-path artistic decodes report
-  `uec: null` and keep their prior scores unchanged (the youtube-video
-  bench face re-judged 88, byte-stable) — consumers must read a null
-  margin as UNMEASURED, never as healthy.
+  `score_contract` 4 → 5) — a growing center logo used up the correction
+  budget while every stress axis kept passing, so the score stayed flat
+  until decoding failed without warning: at EC level H the
+  `raise_error_correction` hint can never fire, and
+  `low_correction_margin` only speaks at margin zero. The measured UEC
+  margin now caps the value on a continuous slope below the healthy
+  half-budget: 0.5 → 100 (no cap) · 0.25 (ISO D) → 70 · 0.0 (ISO F) → 40,
+  the finder-damage floor, so a decode at the RS limit scores at most 40.
+  The cap applies only where UEC measures (decodes that carry the raw
+  stream, the rqrr path); rxing-path artistic decodes report `uec: null`
+  and keep their prior scores — read a null margin as unmeasured, never
+  as healthy.
 - **Releases publish from a version tag only, through trusted publishing,
   and upload exactly what they inspected** — crates.io and npm now
   publish through GitHub OIDC trusted publishing (no workflow reads a
@@ -241,40 +239,48 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   Rust 0.9.x cannot read reports that carry the new values. Validate a
   report with the schema of the release tag its `versions.scanner`
   names. Pin `qrcode-ai-scanner~=0.10.0` and `cargo install
-  qrcode-ai-scanner-cli --locked --version 0.10.0`. Downstream judges
-  re-measure their floors before moving their pins.
+  qrcode-ai-scanner-cli --locked --version 0.10.0`. That `--locked`
+  install builds rxing 0.9.1, the version the lockfile pins, without the
+  `overflow-checks` guard: `cargo install` reads no workspace profile
+  (see Fixed). Projects that gate on the score should re-measure their
+  thresholds before upgrading.
 
 ### CI
 
-- **The release tooling pins exact** — the v0.9.0 npm-publish legs died
-  mid-train because the unpinned napi CLI caret (`^3.7.1`) resolved to
-  3.7.3, which hard-errors `--use-napi-cross` on mac/windows hosts and on
-  musl targets. The flag is now a per-row matrix field (Linux-gnu rows
-  only), musl rides zig (`-x` + setup-zig + cargo-zigbuild, the official
-  napi-rs template recipe), and `@napi-rs/cli` pins `3.7.3` exact.
-- **The strict oracle judges contents, not texts** (`qrscan-oracle/v2`) —
-  a `corpus.toml` entry may now carry its bytes and declarations
-  (`raw_hex`, `eci`, `fnc1`; 31 entries do, each checked against an
-  independent reader). Such a truth is met by content identity: equal
-  text over other bytes is another content, and a detection whose
-  charset is `unknown`, or whose ECI was signalled but not located, meets
-  it as `unread` — a rate of its own, never exact and never blocking.
-  Units meet detections through a best matching, and the report states
-  the rule of each truth kind.
-- **The benchmark harness reads fairly and fails closed**
-  (`qrscan-bench/v4`) — work is each side's share of its own reference
-  walk; an erroring reference walk counts as an error; a gated pair whose
-  sides are not the declared base and candidate is refused; stopping or
-  suspending the harness stops its workers, and a call that spans a stop
-  is repeated instead of counted as a wall failure; the host gate fails
-  closed on its probes, its lock and its run directory. Its records name
-  every run-time input it read (driver scripts, the priming fixture,
-  every vendored image), alpha images, the budget flag and pairs cut at
-  the same point, and a dry run pre-screens the A/B disagreement share.
-- **The weekly mutation suite runs in 85 shards** — the suite grew past
-  what 16 shards finish within the job's time limit; the shard count
-  comes from measured per-mutant costs, and the exclusions and
-  dispositions are anchored on this tree.
+- **The release tooling pins its napi CLI exactly** — the v0.9.0 npm
+  publishing jobs failed partway because the unpinned napi CLI range
+  (`^3.7.1`) resolved to 3.7.3, which rejects `--use-napi-cross` on macOS
+  and Windows hosts and on musl targets. The flag is now set per build
+  target (Linux gnu only), musl targets build through zig (`-x` with
+  setup-zig and cargo-zigbuild, the napi-rs template's recipe), and
+  `@napi-rs/cli` is pinned at `3.7.3`.
+- **New: `xtask oracle`, a correctness oracle that judges contents, not
+  texts** (its report says `qrscan-oracle/v2`) — a `corpus.toml` entry
+  may carry its bytes and declarations (`raw_hex`, `eci`, `fnc1`; 31
+  entries do, each checked against an independent reader). Such a truth
+  is met by content identity: equal text over other bytes is another
+  content, and a detection whose charset is `unknown`, or whose ECI was
+  signalled but not located, meets it as `unread` — a rate of its own,
+  never exact and never blocking. Units meet detections through a best
+  matching, and the report states the rule of each truth kind.
+- **New: `xtask bench`, a benchmark harness** (`bench/README.md`; its
+  report says `qrscan-bench/v4`) — it compares the published 0.9.0 with
+  this tree on latency, memory, allocations, throughput and WASM cost.
+  Work is each side's share of its own reference walk, and an erroring
+  reference walk counts as an error; a gated pair whose sides are not the
+  declared base and candidate is refused; stopping or suspending the
+  harness stops its workers, and a call that spans a stop is repeated,
+  never counted; the host gate fails closed on its probes, its lock and
+  its run directory. Its records name every run-time input it read
+  (driver scripts, the priming fixture, every vendored image), alpha
+  images, the budget flag and pairs cut at the same point, and a dry run
+  pre-screens the share of A/B disagreements.
+- **The weekly mutation suite runs in 85 shards, judged against a
+  committed dispositions file** — 16 shards no longer finished within the
+  job's time limit; the shard count comes from measured per-mutant costs.
+  The weekly verdict fails on a baseline failure, an unfinished shard, or
+  a missed or timed-out mutant that `.cargo/mutants-dispositions.toml`
+  does not list as equivalent, as a structural timeout or as test debt.
 
 ## 0.9.0 — 2026-07-20
 
