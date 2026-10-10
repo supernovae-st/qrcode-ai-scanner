@@ -9,7 +9,7 @@ serializer is configured `serialize_missing_as_null` to match serde_json).
 ```jsonc
 {
   "detections": [Detection],   // empty = no QR found (a RESULT, not an error)
-  "score":      Score | null,  // null in the frame profile / no detection
+  "score":      Score | null,  // null when no judgment was published — § score: null
   "hints":      [Hint],        // machine-actionable, stable order (06-hints.md)
   "alpha":      AlphaReport,   // § Alpha — ABSENT (not null) for opaque inputs
   "trace":      PipelineTrace, // why the scan succeeded or came back empty
@@ -413,8 +413,11 @@ so identity there is only as exact as the engine.
                                  // or holds for confirmation; a decode refused inside the
                                  // decoder step (its own grid parses malformed) is not a hit
   }],
-  "engine_panics": number,       // third-party decoder panics caught + isolated
-  "total_ms":      number
+  "engine_panics":    number,    // third-party decoder panics caught + isolated
+  "total_ms":         number,    // wall clock of the ladder walk(s) only
+  "budget_exhausted": boolean    // score_contract ≥ 5: true = the budget prevented planned work,
+                                 // the report is partial; false = final (02-profiles.md § Budget).
+                                 // ABSENT on older reports: unknown, never false
 }
 ```
 
@@ -450,6 +453,29 @@ counter, to know what was found.
 ```
 
 `score` evaluates the PRIMARY detection (the first-discovered symbol).
+
+## `score: null`
+
+`score` judges `detections[0]`. It is `null` exactly when no judgment was
+published:
+
+1. there is no detection;
+2. the configuration computes no score: score depth off (the `frame`
+   profile), or every stress axis skipped;
+3. the wall-clock budget interrupted the judgment, and
+   `trace.budget_exhausted` is `true` (score_contract ≥ 5; released
+   versions with an earlier contract published a partial composite
+   instead);
+4. a contained internal fault occurred in the score computation (native
+   builds; on wasm the call throws).
+
+A judgment is never partial: a present `score` ran its calibration and
+every planned stress cell, so its `value`, `grade`, `weights_run` and
+`axes[].passed` / `total` / `failed_at` do not depend on the budget; only
+`axes[].refined_failed_at` may be missing (and `trace.budget_exhausted`
+then says the budget cut it). Never read `null` as `0`. With detections
+and `trace.budget_exhausted: true`, `null` means "not judged": re-scan
+with a larger budget or none. It says nothing about the symbol.
 
 ## Alpha — transparent-input handling
 

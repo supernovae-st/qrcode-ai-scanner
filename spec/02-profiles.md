@@ -22,7 +22,8 @@ budget for nothing.
 ¹ S5 runs on EVERY profile whenever a rescue candidate was collected, the
 ladder came up empty and budget remains — `fast` collects candidates from
 S1-S3; under `frame`'s 80 ms budget the stage is usually cut before it
-attempts (the budget, not the profile, is the gate).
+attempts (the budget, not the profile, is the gate — and the cut report
+says so, `trace.budget_exhausted: true`).
 
 **Profile choice rule of thumb:** the blob/dot pixel template class (a
 qrcode-ai.com generator OUTPUT) only decodes in S4 — a verify flow for
@@ -39,13 +40,37 @@ reading "NO" on valid product output is the documented trap.
   CLI `--budget-ms` · Node `budgetMs` ·
   WASM `budget_ms` (positional arg #5 of `scan_image`, #5 of `scan_frame`) ·
   Python `budget_ms` kwarg · Kotlin/Swift (UniFFI) `budget_ms`.
-- `0` or negative = **unbounded** (NOT a zero-millisecond budget).
-- With a budget set, WHERE the run cuts is machine-dependent — set
-  `budget_ms: None`/unbounded for strictly reproducible reports. The cut is
-  best-effort and observable after the fact: the per-stage `trace` records
-  how far the ladder got (`transforms_tried` per stage). A future
-  work-counted budget (bounding ATTEMPTS instead of milliseconds, fully
-  deterministic) would be additive; this contract does not foreclose it.
+- `0` or negative = **unbounded** (NOT a zero-millisecond budget). An unset
+  `budget_ms` keeps the profile default (`full` 4000 · `fast` 800 · `frame`
+  80 ms): reproducible reports need `0` (Rust: `budget_ms: None`).
+- A planned unit the deadline prevents does not run: a ladder attempt or
+  stage (including a stage the walk continues to because every QR Code
+  read so far only signals an ECI it could not locate — 07-pipeline.md
+  property 2), the opposite-background walk, a rescue candidate, a score
+  calibration step or stress cell, a knee bisection, an envelope probe.
+  `trace.budget_exhausted` is `true` exactly when one did not run, else
+  `false`; unbounded scans are always `false`.
+  - `false` = **FINAL**: the report equals the unbounded report for the
+    same input, configuration and scanner build on the same platform,
+    apart from `stages[].ms` and `total_ms` (PDF417: 04-score.md
+    § Determinism).
+  - `true` = **PARTIAL**: empty `detections` is not a final "no QR"; a
+    `null` score with detections is an interrupted judgment — never a
+    partial or renormalized composite, and no score hints; knee
+    refinements (`refined_failed_at`) and envelope probes may be missing.
+    WHERE the cut lands is machine-dependent.
+- The deadline makes a judgment ABSENT; a cancelled token is `QRS-005`
+  (§ Cancellation), never an absent judgment. Every attempt, cell and
+  probe checks cancellation before the deadline.
+- The scanner's bounded checks have no budget and never make a report
+  partial: re-deriving the grids `rqrr` decoded (at most 2 orientations
+  each) or detected without decoding (at most 4 per attempt, and once more
+  at the end of the walk), and the re-read (at most 16 per scan) —
+  07-pipeline.md property 6. The end-of-walk pass may run after the
+  deadline (at most 4 error corrections, no sampling) so that a refusal
+  stays a refusal; cancellation is checked before it. A judgment whose
+  every planned cell ran also completes its structural, UEC and ISO
+  measurements (no decode) without waiting on the deadline.
 
 ## Anti-DoS limits (validated BEFORE decode)
 

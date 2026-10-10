@@ -1,13 +1,18 @@
-# 04 · Score contract v3
+# 04 · Score contract v5
 
 The score answers ONE question: **how much margin does this code have
 before it stops scanning in the real world?** It is VALIDATION, never ISO
 verification (no calibrated optics — see the honesty section).
 
+A judgment is whole or absent: a present `score` ran its calibration and
+every planned stress cell, so its value never depends on the wall-clock
+budget (01-report.md § `score: null`, 02-profiles.md § Budget semantics).
+
 ## Composite value (0-100)
 
 Weighted survival across six stress axes; ramps stop at the first failed
-cell (the knee). Weights are contract constants:
+cell (the knee). The structural caps and the UEC margin cap then bound the
+value (§ Caps). Weights are contract constants:
 
 | Axis | Weight | Ramp (Full depth = 5 cells) |
 |---|---|---|
@@ -44,28 +49,35 @@ full six.
 
 The same seam exists for report SECTIONS (`ScanConfig.score_skip_checks` ·
 bindings `score_skip_checks` / `scoreSkipChecks`, section names `uec` |
-`iso15415` | `alpha_envelope`): a skipped section is never computed — no
-UEC bitstream replay, no ISO parameter sweep, no background sweep — and
-the wire carries `null` for it. Absence cascades honestly: without `uec`,
-the two UEC-driven hints (`thin-margin` priority of
-`raise_error_correction`, and `low_correction_margin`) structurally cannot
-fire; a still-present `iso15415` block reports its
-`unused_error_correction` parameter as `null`, never a faked value; and
-without `alpha_envelope` the `alpha_background_dependent` hint cannot fire
-(the flatten itself is untouched — 01-report § Alpha). The composite
-`score.value` is axis-based and **does not move** — skipping checks is
-surface truth, not score surgery. The canonical case: a host that displays
-neither the correction margin nor the ISO parameters (the builder panel)
-skips both; verifier-style surfaces keep them.
+`iso15415` | `alpha_envelope`): a skipped section is withheld and the wire
+carries `null` for it. Skipping checks is surface truth, never score
+surgery: `score.value`, `score.grade` and the ISO `overall` **never move**.
+
+- `uec`: the margin is still MEASURED — it caps the value whether or not
+  the section is published (§ Caps). Withheld are `score.uec`, the ISO
+  `unused_error_correction` parameter (reported `null`, never faked; its
+  grade still counts in the ISO `overall`) and the two margin-driven hints:
+  `low_correction_margin` and the UEC path of `raise_error_correction`.
+  That hint's `value < 70` gate reads the composite BEFORE the margin cap,
+  so a skipped margin never raises it either.
+- `iso15415`: the parameter sweep never runs.
+- `alpha_envelope`: the background sweep never runs and the
+  `alpha_background_dependent` hint cannot fire (the flatten itself is
+  untouched — 01-report § Alpha).
+
+The canonical case: a host that displays neither the correction margin nor
+the ISO parameters (the builder panel) skips both; verifier-style surfaces
+keep them.
 
 ### `weights_run` — the honesty integer
 
 `score.weights_run` = Σ contract weights of the axes that RAN (100 = the
 full six-axis contract · 70 with `perspective`+`rotation` skipped). A
-partial score SAYS how much contract stands behind it: two 85s with
-different `weights_run` are different promises, and panels can render
-"85 — on 70% of the contract" without arithmetic. Absent on pre-0.9
-reports (parse leniently, default 0).
+score on skipped axes SAYS how much contract stands behind it: two 85s
+with different `weights_run` are different promises, and panels can render
+"85 — on 70% of the contract" without arithmetic. Only skipped axes lower
+it — never the budget, which makes a judgment absent instead. Absent on
+pre-0.9 reports (parse leniently, default 0).
 
 ### Presets — the drift-proof postures
 
@@ -84,15 +96,22 @@ a knee at cell 0): the wire carries the tightest TESTED failing
 intensity ("blur 2.25" when the midpoint fails · the knee cell's label
 when it holds). Informational by contract — the composite never reads
 it; the key is ABSENT when no refinement ran (Reduced depth · no knee ·
-lighting's unordered set · budget cut). The generator loop finally sees
-sub-cell progress.
+lighting's unordered set · budget cut). Bisections run after every planned
+cell: a budget cut drops only the label, never the score, and sets
+`trace.budget_exhausted`. The generator loop finally sees sub-cell
+progress.
 
-### Structural caps (applied after the weighted sum)
+### Caps (applied after the weighted sum)
 
 | Condition | Cap |
 |---|---|
 | any finder integrity < 0.5 | value ≤ **40** + `fix_finder_pattern` hint |
 | quiet zone violated | value ≤ **60** + `restore_quiet_zone` hint |
+| measured UEC margin `m` < 0.5 | value ≤ **round(40 + 120·m)** — continuous: 0.5 → 100 · 0.25 → 70 · 0.0 → 40 |
+
+The margin cap reads the measured margin (§ Synthetic UEC), published or
+skipped: a consumed Reed-Solomon budget is invisible to the stress axes,
+and a decode at the RS limit is never a pass.
 
 ### Grade bands
 
@@ -106,6 +125,17 @@ sampled bitstream: zigzag replay → unmask → ISO 18004 §8.6 de-interleave �
 per-block RS syndromes → Berlekamp-Massey degree = EXACT corrected-error
 count `t`. `margin = 1 − 2t/d` over the worst block.
 
+The stream measured is that of the orientation the decode verified — for a
+symbol decoded mirrored, the transposed grid, with that orientation's
+`ec_level` and `mask` (01-report.md § Detection) — so a clean mirrored code
+reads the same margin as its upright twin. A margin is measured only when every block
+of that stream error-corrects errors-only (`2t ≤ d`, every error located
+inside the block) under the detection's version, EC level and mask:
+otherwise there is no `uec` section, no margin cap and no margin hint —
+absent, never a guess. A stream the S5 rescue recovered (`engines:
+["rescue"]`) needed erasures, so it keeps its errors-only count, typically
+margin 0.
+
 Bands (ISO): `a` ≥0.62 · `b` ≥0.50 · `c` ≥0.37 · `d` ≥0.25 · `f` <0.25.
 
 `margin = 0` means the worst block consumed its ENTIRE correction budget —
@@ -116,7 +146,8 @@ hint fires and the content should be treated as unverified.
 
 Present whenever symbol geometry was measured. Per-parameter
 `{value, grade}` in the official ISO bands; `overall` = the LOWEST
-parameter (the ISO rule).
+measured parameter (the ISO rule) — an `unused_error_correction` withheld
+by `score_skip_checks: ["uec"]` still counts, so a skip never moves it.
 
 | Parameter | Measured as | Bands |
 |---|---|---|
@@ -139,10 +170,23 @@ different — it is pure syntax and IS fully software-checkable
 
 ## Determinism
 
-Same input + same depth ⇒ same score, always — modulo two documented
-bounds: a wall-clock budget can cut cells (machine-dependent), and
-cross-platform libm transcendentals may differ in the last ulp (a cell
-sitting exactly on a knee can flip between platforms).
+Same input + same configuration + same scanner build ⇒ same score, as far
+as the decode engines are deterministic. The documented bounds:
+
+1. A wall-clock budget makes a judgment ABSENT, never partial: a judgment
+   it interrupts publishes `score: null` with `trace.budget_exhausted:
+   true`, and a present score is the unbudgeted one (a knee label aside).
+2. Cross-platform libm transcendentals may differ in the last ulp, so a
+   cell sitting exactly on a knee can flip between platforms.
+3. A known engine exception until it is fixed upstream: rxing's PDF417
+   decoder (0.9.1–0.9.3) breaks codeword-confidence ties in randomized
+   `HashMap` order, so a PDF417 symbol with a stress cell near a decode
+   threshold can score differently between runs (observed 62 ↔ 57 on
+   `fixtures/symbology/pdf417.png`), and a marginal PDF417 input can
+   publish a different stage trace. QR-family symbols and every other
+   symbology are unaffected.
+
+Cancellation is not a bound: a cancelled scan is `QRS-005`.
 
 ## Frame sensitivity (characterized, not hidden)
 
@@ -155,9 +199,10 @@ documented consequences:
   poster IS harder to scan from afar.
 - **Quiet-ring phase** — near the resolution knee, the perspective cells
   (which warp the whole frame) can flip with small quiet-ring changes:
-  identical styled symbol pixels measured 100 bare vs 88 with a +4px white
-  ring (perspective 5/5 → 2/5 at the 26° cell · axis weight 20 × 3/5 = 12
-  composite points), while pure-black comfortable-margin symbols do not
+  on identical styled symbol pixels, perspective reads 5/5 bare vs 2/5
+  with a +4px white ring (the 26° cell · axis weight 20 × 3/5 = 12
+  composite points; the published pair reads 85 vs 70, each frame's RS
+  margin capping too), while pure-black comfortable-margin symbols do not
   move. Sentinel: `quiet_ring_shifts_perspective_cells_near_the_knee`
   (`scan_integration.rs`) over the committed
   `fixtures/degraded/quiet-ring-phase-*.png` pair.
