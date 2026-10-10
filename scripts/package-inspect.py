@@ -145,6 +145,17 @@ MATURIN_SDIST_ROOT = frozenset({"PKG-INFO", "pyproject.toml", "README.md"})
 # The sdist packs the binding crate and its path dependency side by side.
 SDIST_CRATES = {"qrcode-ai-scanner-py/": "crates/qrcode-ai-scanner-py",
                 "qrcode-ai-scanner/": "crates/qrcode-ai-scanner"}
+# Besides the PEP 639 license files, what maturin generates or rewrites in the
+# sdist rather than copying from the checkout: the root metadata, and the two
+# Cargo.toml it rewrites (manifest-path/readme added, workspace keys inlined).
+# Every other packed file must be the checkout's, byte for byte.
+MATURIN_SDIST_GENERATED = MATURIN_SDIST_ROOT | {"qrcode-ai-scanner-py/Cargo.toml", "qrcode-ai-scanner/Cargo.toml"}
+# The Python import package, and the __init__.py maturin writes for a pure-pyo3
+# module with no python-source dir (binding_generator/pyo3_binding.rs, verbatim;
+# no trailing newline). The .pyi stub and py.typed it emits are the checkout's.
+PY_MODULE = "qrcode_ai_scanner"
+MATURIN_INIT_PY = (f"from .{PY_MODULE} import *\n\n__doc__ = {PY_MODULE}.__doc__\n"
+                   f'if hasattr({PY_MODULE}, "__all__"):\n    __all__ = {PY_MODULE}.__all__').encode()
 
 # A literal semver in the napi loader's version check: the 0.9.0 loader
 # compared every platform package against '0.8.1'.
@@ -924,6 +935,20 @@ def inspect_wheel(host: Host, path: pathlib.Path, notes=()) -> Artifact:
         check_license(art, files.get(f"{info}/licenses/{value}"), f"{info}/licenses/{value} (License-File {value})")
     for typed in ("qrcode_ai_scanner/__init__.pyi", "qrcode_ai_scanner/py.typed"):
         art.check(f"{typed} present (type stubs)", typed in files)
+    # The type stubs a consumer's type checker reads, and the import shim that
+    # runs on `import qrcode_ai_scanner`, are the checkout's: the stub and the
+    # marker byte for byte after CRLF normalisation (a Windows checkout writes
+    # the stub CRLF), the shim the fixed text maturin generates.
+    def _nl(data):
+        return data.replace(b"\r\n", b"\n") if data is not None else None
+    for stub, source in (("qrcode_ai_scanner/__init__.pyi", PY_DIR / "qrcode_ai_scanner.pyi"),
+                         ("qrcode_ai_scanner/py.typed", PY_DIR / "py.typed")):
+        art.check(f"{stub} is {rel(source)}, byte for byte (CRLF-normalised)",
+                  source.is_file() and _nl(files.get(stub)) == _nl(source.read_bytes()),
+                  f"differs from {rel(source)}" if stub in files else "absent")
+    art.check("qrcode_ai_scanner/__init__.py is the import shim maturin generates",
+              files.get("qrcode_ai_scanner/__init__.py") == MATURIN_INIT_PY,
+              "differs from maturin's generated __init__.py")
     modules = [n for n in files if re.match(r"qrcode_ai_scanner/qrcode_ai_scanner\.[^/]*(so|pyd)$", n)]
     art.check("exactly one compiled extension module", len(modules) == 1, ", ".join(modules))
     # auditwheel's grafts, and nothing else, under qrcode_ai_scanner.libs/: only
@@ -987,6 +1012,20 @@ def inspect_sdist(host: Host, path: pathlib.Path, notes=()) -> Artifact:
     check_license(art, files.get("qrcode-ai-scanner/LICENSE"), "qrcode-ai-scanner/LICENSE (vendored core)")
     check_tracked(art, files, SDIST_CRATES, MATURIN_SDIST_ROOT | licensed | {
         prefix + name for prefix in SDIST_CRATES for name in CARGO_GENERATED})
+    # Every packed file is the checkout's, byte for byte — the source a build
+    # from the sdist compiles where no wheel fits — except what maturin
+    # generates or rewrites (the root metadata and the two Cargo.toml) and the
+    # license files already compared above.
+    mismatched = []
+    for inner, data in files.items():
+        if inner in MATURIN_SDIST_GENERATED or inner in licensed or inner == "LICENSE":
+            continue
+        source = next((ROOT / directory / inner[len(prefix):] for prefix, directory in SDIST_CRATES.items()
+                       if inner.startswith(prefix)), None)
+        if source is not None and (not source.is_file() or source.read_bytes() != data):
+            mismatched.append(inner)
+    art.check("every packed file is the checkout's, byte for byte (bar what maturin rewrites or generates)",
+              not mismatched, f"differ from the checkout: {', '.join(sorted(mismatched))}" if mismatched else "")
     py_manifest = tomllib.loads(files.get("qrcode-ai-scanner-py/Cargo.toml", b"").decode() or "")
     rxing = py_manifest.get("profile", {}).get("release", {}).get("package", {}).get("rxing", {})
     art.check("the shipped binding manifest keeps rxing overflow-checks (an sdist build is its own root)",
@@ -1377,8 +1416,10 @@ def _clean_wheel(version: str, platform: str = "manylinux_2_17_x86_64", python: 
         f"{info}/WHEEL": f"Wheel-Version: 1.0\nRoot-Is-Purelib: false\n{tags}".encode(),
         f"{info}/licenses/LICENSE": LICENSE.read_bytes(),
         f"{info}/sboms/qrcode-ai-scanner-py.cyclonedx.json": b"{}\n",
-        "qrcode_ai_scanner/__init__.py": b"", "qrcode_ai_scanner/__init__.pyi": b"",
-        "qrcode_ai_scanner/py.typed": b"", "qrcode_ai_scanner/qrcode_ai_scanner.abi3.so": b"\x7fELF",
+        "qrcode_ai_scanner/__init__.py": MATURIN_INIT_PY,
+        "qrcode_ai_scanner/__init__.pyi": (PY_DIR / "qrcode_ai_scanner.pyi").read_bytes(),
+        "qrcode_ai_scanner/py.typed": (PY_DIR / "py.typed").read_bytes(),
+        "qrcode_ai_scanner/qrcode_ai_scanner.abi3.so": b"\x7fELF",
     }
     return _with_record(files, version)
 
@@ -1391,14 +1432,19 @@ def _with_record(files: dict, version: str, *unlisted: str) -> dict:
 
 
 def _clean_sdist(version: str) -> dict:
+    # Packed source files carry the checkout's bytes (the sdist content check
+    # compares them); the two Cargo.toml and the root metadata are what maturin
+    # rewrites or generates, so their exact bytes do not matter here.
     py, core = PY_DIR, ROOT / "crates" / "qrcode-ai-scanner"
     return {
         "PKG-INFO": _python_metadata(version), "pyproject.toml": (py / "pyproject.toml").read_bytes(),
         "README.md": (py / "README.md").read_bytes(), "LICENSE": LICENSE.read_bytes(),
         "qrcode-ai-scanner-py/Cargo.toml": (py / "Cargo.toml").read_bytes(),
-        "qrcode-ai-scanner-py/src/lib.rs": b"", "qrcode-ai-scanner-py/LICENSE": LICENSE.read_bytes(),
+        "qrcode-ai-scanner-py/src/lib.rs": (py / "src" / "lib.rs").read_bytes(),
+        "qrcode-ai-scanner-py/LICENSE": LICENSE.read_bytes(),
         "qrcode-ai-scanner/Cargo.toml": (core / "Cargo.toml").read_bytes(),
-        "qrcode-ai-scanner/src/lib.rs": b"", "qrcode-ai-scanner/README.md": (core / "README.md").read_bytes(),
+        "qrcode-ai-scanner/src/lib.rs": (core / "src" / "lib.rs").read_bytes(),
+        "qrcode-ai-scanner/README.md": (core / "README.md").read_bytes(),
         "qrcode-ai-scanner/LICENSE": LICENSE.read_bytes(),
     }
 
@@ -1637,6 +1683,35 @@ def self_test() -> int:
                   FAIL, f"{name}: not <name>-<8 hex>.so[.N]")
         judge("wheel whose WHEEL tags are not its file name's",
               [wheel("tags", _clean_wheel(version, "musllinux_1_2_x86_64"))], FAIL, "WHEEL")
+
+        # The type stubs and the import shim a consumer reads and runs are the
+        # checkout's: a Windows-checkout CRLF stub still matches, an altered
+        # one or a planted __init__.py does not.
+        pyi_crlf = _clean_wheel(version)
+        pyi_crlf["qrcode_ai_scanner/__init__.pyi"] = pyi_crlf["qrcode_ai_scanner/__init__.pyi"].replace(b"\n", b"\r\n")
+        judge("wheel whose __init__.pyi is the checkout stub with CRLF line endings",
+              [wheel("pyi-crlf", _with_record(pyi_crlf, version))], PASS)
+        judge("wheel whose __init__.py runs code at import",
+              [wheel("init-evil", _with_record(_clean_wheel(version) | {
+                  "qrcode_ai_scanner/__init__.py": MATURIN_INIT_PY + b"\nimport os; os.system('id')\n"}, version))],
+              FAIL, "maturin's generated __init__.py")
+        judge("wheel whose __init__.pyi is not the checkout stub",
+              [wheel("pyi-evil", _with_record(_clean_wheel(version) | {
+                  "qrcode_ai_scanner/__init__.pyi": b"# not the committed stub\n"}, version))],
+              FAIL, "qrcode_ai_scanner.pyi")
+        judge("wheel whose py.typed is not the checkout marker",
+              [wheel("typed-evil", _with_record(_clean_wheel(version) | {
+                  "qrcode_ai_scanner/py.typed": b"partial\n"}, version))], FAIL, "py.typed")
+        # The sdist's packed sources are the checkout's: pip compiles them where
+        # no wheel fits.
+        judge("sdist whose core src/lib.rs is not the checkout's",
+              [sdist("sdist-lib", _clean_sdist(version) | {
+                  "qrcode-ai-scanner/src/lib.rs": b"compile_error!(\"not the commit\");\n"})],
+              FAIL, "qrcode-ai-scanner/src/lib.rs")
+        judge("sdist whose binding src/lib.rs is not the checkout's",
+              [sdist("sdist-pylib", _clean_sdist(version) | {
+                  "qrcode-ai-scanner-py/src/lib.rs": b"// not the commit\n"})],
+              FAIL, "qrcode-ai-scanner-py/src/lib.rs")
 
         # PyPI receives exactly one wheel per row of python.yml's matrix and
         # the sdist: an artifact any job of the run added never rides along.
