@@ -123,7 +123,7 @@ NAPI_CARRIED = ("description", "keywords", "author", "authors", "homepage", "lic
 # (Credentials.json leaks as surely as credentials.json). Defence in depth:
 # each archive is also held to an exact set or to the files git tracks.
 STRAY = tuple((re.compile(pattern, re.IGNORECASE), why) for pattern, why in (
-    (r"(^|/)\.qrscan-lane(/|$)", "lane scratch"),
+    (r"(^|/)\.qrscan-lane(/|$)", "local scratch directory"),
     (r"(^|/)plans/", "planning docs"),
     (r"(^|/)\.env($|\.)|\.env$|(^|/)\.envrc$", "environment file"),
     (r"\.(pem|key|p12|pfx|p8|jks|keystore|gpg|pgp|ppk|kdbx)$", "key material or keystore"),
