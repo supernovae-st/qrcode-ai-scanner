@@ -970,7 +970,7 @@ def check_job(workflow: str, job_id: str, job: dict, wf: dict) -> list:
             _records_operands(line) for step in steps[:first_publish] for line in _code_lines(step.get("run"))):
         flag("npm-operand", f"re-inspect with `package-inspect.py archive … --strict --record \"{NPM_RECORD}\"` "
                             "before the first publishing step: the operand check reads that record")
-    pypi =[step for step in steps if re.fullmatch(r"pypa/gh-action-pypi-publish(/.+)?", _uses(step)[0])]
+    pypi = [step for step in steps if re.fullmatch(r"pypa/gh-action-pypi-publish(/.+)?", _uses(step)[0])]
     if pypi:
         inputs = [step.get("with") if isinstance(step.get("with"), dict) else {} for step in pypi]
         dirs = sorted({str(given.get("packages-dir", "dist")).strip().rstrip("/") for given in inputs})
@@ -1640,9 +1640,9 @@ MUTATIONS = (
     ("the operand check run on another word than the operand", P, [
         ("npm-publish.yml", NATIVE_CALL, NATIVE_CALL.replace("$tgz", "$main"))], {}, 1,
      "npm-publish.yml › publish-native [npm-operand]"),
-    ("the operand check failing open", P, [("npm-publish.yml", OPERAND_CHECK, OPERAND_CHECK.replace("exit 1",
-                                                                                                      "return 0"))],
-     {}, 1, "npm-publish.yml › publish-native [npm-operand]"),
+    ("the operand check failing open", P, [
+        ("npm-publish.yml", OPERAND_CHECK, OPERAND_CHECK.replace("exit 1", "return 0"))], {}, 1,
+     "npm-publish.yml › publish-native [npm-operand]"),
     ("the operand check redefined to pass anything", P, [
         ("npm-publish.yml", OPERAND_CHECK + "          tarballs=",
          OPERAND_CHECK + "          inspected() { :; }\n          tarballs=")], {}, 1,
