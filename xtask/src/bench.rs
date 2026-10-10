@@ -1197,6 +1197,10 @@ mod tests {
         assert!(!root.join("bench/not-created").exists(), "nothing created");
     }
 
+    #[cfg(all(
+        any(target_os = "macos", target_os = "linux"),
+        target_pointer_width = "64"
+    ))]
     fn dry_run_options(out: &Path) -> run::Options {
         run::parse_options(
             [
@@ -1216,8 +1220,13 @@ mod tests {
     /// Two runs given one `--out` never share it: the first claims it
     /// before it waits for the host lock, the second is refused at once —
     /// whether the directory was new or there and empty. A released claim
-    /// leaves nothing it created behind.
+    /// leaves nothing it created behind. Only where the caps hold: elsewhere
+    /// the preconditions refuse the run before any claim.
     #[test]
+    #[cfg(all(
+        any(target_os = "macos", target_os = "linux"),
+        target_pointer_width = "64"
+    ))]
     fn two_runs_never_share_an_out_directory() {
         let out = std::env::temp_dir().join(format!("qrscan-bench-claim-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&out);
