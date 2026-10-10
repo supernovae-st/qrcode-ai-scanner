@@ -176,11 +176,27 @@ prepare` generated for that side.
   code generation) — one warm-up then 12 `A B B A`-paired processes per
   variant. Compile and instantiate alone are information.
 
-Known limits of what a report shows: an engine retry that re-flattens an
-alpha image between two walks spends time `total_ms` does not cover (the
-walk comparison still sees a truncated retry), and a lighting set that
-0.9.0 cuts right after a failing cell, with every remaining cell failing,
-keeps its passed count — that one cut is invisible in the judgment.
+Known limits of what a report shows — reported, never judged:
+
+- in `full` mode a deadline that cuts the alpha placement envelope leaves
+  the walk and the judgment as they were, so the truncation test cannot
+  see it: every image whose scan flattened transparency is flagged
+  (`alpha`, per image and as `alpha_images` per class), each call's alpha
+  state is recorded, and the timed calls whose state differs from their
+  reference walk's are counted;
+- the candidate's own `trace.budget_exhausted`, when its build reports
+  one, is recorded per call and counted per side;
+- pairs that both variants cut at the same point — the same share of
+  their own reference walks — carry no speed verdict (latency
+  budget-bound, a work ratio of 1, a concordant `McNemar` pair); their
+  count per class is `budget_bound.same_cut`;
+- a decode the budget costs one side only becomes an A/B-disagreement
+  exclusion, outside the `McNemar` tests; the status line names it;
+- an engine retry that re-flattens an alpha image between two walks
+  spends time `total_ms` does not cover (the walk comparison still sees a
+  truncated retry), and a lighting set that 0.9.0 cuts right after a
+  failing cell, with every remaining cell failing, keeps its passed count
+  — that one cut is invisible in the judgment.
 
 ## Resource caps
 

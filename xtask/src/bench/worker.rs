@@ -15,8 +15,8 @@
 //!   (the generated crate's name, which names its side)
 //! - `scan · profile · budget · memory · path` → `ok · ns · total_ms ·
 //!   engine_panics · peak_heap · allocs · alloc_bytes · retained · stages ·
-//!   transforms · judgment · n · (symbology · text_hex)×n`, or
-//!   `error · ns · code`, or `fail · reason`
+//!   transforms · judgment · alpha · budget_exhausted · n · (symbology ·
+//!   text_hex)×n`, or `error · ns · code`, or `fail · reason`
 //! - `throughput · profile · budget · threads · bound · list` → `ok · jobs ·
 //!   ns · failed`
 //! - `quit` → `bye`
@@ -31,9 +31,13 @@
 //! `stages`, `transforms` (Σ `transforms_tried`) and `judgment` (the
 //! score's [`judgment`] signature, `-` without a score) describe the walk:
 //! the orchestrator compares them with the image's unbudgeted reference
-//! walk to tell a truncated call from a complete one. Decoded text crosses
-//! the pipe as hex and is hashed by the orchestrator on arrival — never
-//! written anywhere.
+//! walk to tell a truncated call from a complete one. `alpha` and
+//! `budget_exhausted` are information the walk does not compare: whether
+//! the scan flattened transparency (`-` · `flattened` · `envelope`, the
+//! last with its placement envelope), and the build's own
+//! `trace.budget_exhausted` (`-` when the build has no such field). Decoded
+//! text crosses the pipe as hex and is hashed by the orchestrator on
+//! arrival — never written anywhere.
 //!
 //! A worker leaves within about [`PARENT_POLL`] once its parent changes
 //! ([`exit_with_parent`]): a harness killed outright cannot leave it
@@ -51,7 +55,7 @@ use std::time::{Duration, Instant};
 use qrcode_ai_scanner::{ImageInput, ScanProfile, ScanReport, Scanner, Versions};
 
 /// The worker protocol this file speaks; `hello` names it.
-pub const PROTOCOL: &str = "qrscan-bench-worker/4";
+pub const PROTOCOL: &str = "qrscan-bench-worker/5";
 
 /// The variable the harness sets on every child: its own pid, the parent
 /// a worker must keep.
@@ -432,8 +436,34 @@ pub fn judgment(report: &ScanReport) -> String {
     )
 }
 
+/// Whether a scan flattened transparency: `-` (no `alpha` section),
+/// `flattened`, or `envelope` when the placement envelope came back too —
+/// a deadline can cut the envelope (`full` only) without changing the
+/// walk.
+pub fn alpha_state(report: &ScanReport) -> &'static str {
+    match &report.alpha {
+        None => "-",
+        Some(alpha) if alpha.envelope.is_some() => "envelope",
+        Some(_) => "flattened",
+    }
+}
+
+/// The build's `trace.budget_exhausted`: `1`, `0`, or `-` when the trace
+/// has no such field. Read from the trace's `Debug` form — the one way a
+/// single source builds against a scanner with the field and one without;
+/// the trace carries stage names and numbers, never decoded text.
+pub fn budget_exhausted(report: &ScanReport) -> &'static str {
+    let trace = format!("{:?}", report.trace);
+    match trace.split("budget_exhausted: ").nth(1) {
+        Some(rest) if rest.starts_with("true") => "1",
+        Some(rest) if rest.starts_with("false") => "0",
+        _ => "-",
+    }
+}
+
 /// The walk of one report: stages run, Σ `transforms_tried`, and the
-/// [`judgment`] signature.
+/// [`judgment`] signature — then the information beside it, the
+/// [`alpha_state`] and the [`budget_exhausted`] flag.
 pub fn work_fields(report: &ScanReport) -> String {
     let transforms: u64 = report
         .trace
@@ -442,9 +472,11 @@ pub fn work_fields(report: &ScanReport) -> String {
         .map(|s| u64::from(s.transforms_tried))
         .sum();
     format!(
-        "{}\t{transforms}\t{}",
+        "{}\t{transforms}\t{}\t{}\t{}",
         report.trace.stages.len(),
-        judgment(report)
+        judgment(report),
+        alpha_state(report),
+        budget_exhausted(report)
     )
 }
 
@@ -772,8 +804,13 @@ mod tests {
                 .is_some_and(|(p, t)| p.parse::<u8>().is_ok() && t.parse::<u8>().is_ok())),
             "{reply}"
         );
+        assert_eq!(fields[11], "-", "an opaque image flattens nothing");
+        assert!(
+            matches!(fields[12], "-" | "0" | "1"),
+            "the build's budget flag, or none: {reply}"
+        );
         let text = hex(b"bench");
-        assert_eq!(fields[11..].to_vec(), vec!["1", "qr_code", text.as_str()]);
+        assert_eq!(fields[13..].to_vec(), vec!["1", "qr_code", text.as_str()]);
 
         let frame = answer(&format!("scan\tframe\tdefault\t1\t{path}")).expect("reply");
         let fields: Vec<&str> = frame.split('\t').collect();
@@ -818,6 +855,53 @@ mod tests {
             (fields[0], fields[1], fields[3]),
             ("ok", "3", "0"),
             "{reply}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A QR whose light modules and quiet zone are fully transparent: the
+    /// scanner flattens it (`auto` picks white behind black content).
+    fn transparent_qr_png(text: &str) -> Vec<u8> {
+        let code = qrcode::QrCode::new(text.as_bytes()).expect("encode");
+        let luma = code
+            .render::<image::Luma<u8>>()
+            .module_dimensions(6, 6)
+            .build();
+        let rgba = image::RgbaImage::from_fn(luma.width(), luma.height(), |x, y| {
+            if luma.get_pixel(x, y)[0] < 128 {
+                image::Rgba([0, 0, 0, 255])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            }
+        });
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(rgba)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .expect("png");
+        out
+    }
+
+    /// A scan that flattened transparency says so — with its placement
+    /// envelope in `full`, without it where the profile computes none —
+    /// and still decodes; an opaque scan says `-`.
+    #[test]
+    fn transparent_scans_name_their_alpha_state() {
+        let dir = std::env::temp_dir().join(format!("qrscan-bench-alpha-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("transparent.png");
+        std::fs::write(&path, transparent_qr_png("bench")).expect("write");
+        let path = path.to_str().expect("utf-8 temp path");
+        let field = |profile: &str, budget: &str, index: usize| {
+            let reply = answer(&format!("scan\t{profile}\t{budget}\t0\t{path}")).expect("reply");
+            reply.split('\t').nth(index).map(str::to_owned)
+        };
+        assert_eq!(field("full", "unbounded", 11).as_deref(), Some("envelope"));
+        assert_eq!(field("fast", "default", 11).as_deref(), Some("flattened"));
+        assert_eq!(field("frame", "default", 11).as_deref(), Some("flattened"));
+        assert_eq!(
+            field("frame", "default", 15).as_deref(),
+            Some(hex(b"bench").as_str()),
+            "decoded through the flatten"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

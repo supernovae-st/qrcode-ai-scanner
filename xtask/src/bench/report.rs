@@ -26,8 +26,8 @@ use serde_json::{Value, json};
 
 use super::proc::Failure;
 use super::run::{
-    COLD_PAIRS, CallFailure, ENVELOPE, Image, Measurement, Mode, Outcome, ProcessEnd, Runtime,
-    Sample, Segment, Set, Throughput, Variant, WasmCost, ms, signature, thread_counts,
+    Alpha, COLD_PAIRS, CallFailure, ENVELOPE, Image, Measurement, Mode, Outcome, ProcessEnd,
+    Runtime, Sample, Segment, Set, Throughput, Variant, WasmCost, ms, signature, thread_counts,
 };
 use super::stats::{self, McNemar, Shift, Verdict};
 
@@ -120,6 +120,15 @@ struct ImageSide {
     /// their judgment.
     median_truncated: bool,
     median_judgment_cut: bool,
+    /// Information the truncation test does not compare: a call (the
+    /// reference walk included) flattened transparency; timed calls whose
+    /// alpha state — the placement envelope, which a deadline can cut in
+    /// `full` — differs from the reference walk's; timed calls whose build
+    /// reports `trace.budget_exhausted`, and those reporting it true.
+    alpha: bool,
+    envelope_cut: usize,
+    budget_reported: usize,
+    budget_exhausted: usize,
 }
 
 /// The call(s) the per-image median latency comes from: the middle one
@@ -214,6 +223,13 @@ fn image_side(
         over_budget_calls: budget.map_or(0, |b| ms_values.iter().filter(|&&v| v > b).count()),
         median_truncated: middle.iter().any(|s| truncated(s)),
         median_judgment_cut: middle.iter().any(|s| judged(s)),
+        alpha: samples.iter().chain(reference).any(|s| s.alpha.is_some()),
+        envelope_cut: reference.map_or(0, |r| ok.iter().filter(|s| s.alpha != r.alpha).count()),
+        budget_reported: ok.iter().filter(|s| s.budget_exhausted.is_some()).count(),
+        budget_exhausted: ok
+            .iter()
+            .filter(|s| s.budget_exhausted == Some(true))
+            .count(),
     }
 }
 
@@ -520,6 +536,11 @@ fn figures(sides: &[&ImageSide], mode: Mode) -> (Value, Vec<f64>) {
         "trace_total_ms": spread_json(&totals),
         "overruns": overruns,
         "budget": budget,
+        "alpha_images": count(|s| s.alpha),
+        "alpha_envelope_cut_calls": sum(|s| s.envelope_cut),
+        "budget_exhausted": json!({"calls_reporting": sum(|s| s.budget_reported),
+                                   "exhausted": sum(|s| s.budget_exhausted),
+                                   "note": "the build's own trace.budget_exhausted: information"}),
         "transforms": spread_json(&transforms),
         "work_share": spread_json(&shares),
         "peak_heap_bytes": spread_json(&heap),
@@ -679,9 +700,21 @@ fn compare(
         let cut = mcnemar(|s| s.median_truncated);
         let cut_verdict = tested(&cut);
         declared.push(declare_test(&target, name, "truncation", &cut, cut_verdict));
+        // both sides cut at the same share of their own walks: latency is
+        // budget-bound, the work ratio 1 and the McNemar pair concordant
+        let same_cut = truncated
+            .iter()
+            .filter(|(_, a, b)| {
+                a.median_truncated
+                    && b.median_truncated
+                    && a.work_share.is_some()
+                    && a.work_share == b.work_share
+            })
+            .count();
         json["budget_bound"] = json!({
-            "pairs": truncated.len(), "of_valid": valid.len(),
+            "pairs": truncated.len(), "of_valid": valid.len(), "same_cut": same_cut,
             "note": "valid pairs whose median call is truncated on a side: their latency is budget-bound, so they are judged on truncation, judgments and work, never on latency",
+            "same_cut_note": "pairs both variants cut at the same share of their own reference walks carry no speed verdict (budget-bound latency, a work ratio of 1, a concordant McNemar pair): counted, information",
         });
         json["truncation"] = mcnemar_json(&cut, cut_verdict);
         let judgments = mode.scores().then(|| {
@@ -708,7 +741,7 @@ fn compare(
         });
         let images = |pick: fn(&Pair<'_>) -> bool| valid.iter().filter(|p| pick(p)).count();
         format!(
-            "{}/{} | {}/{} | {} | {} | {} | {} | {work_verdict}",
+            "{}/{} | {}/{} | {} ({same_cut} same cut) | {} | {} | {} | {work_verdict}",
             images(|(_, a, _)| a.median_truncated),
             valid.len(),
             images(|(_, _, b)| b.median_truncated),
@@ -843,8 +876,19 @@ fn class_row(
 ) -> ClassResult {
     let mode = segment.mode;
     let per_variant = class_sides(segment, class);
-    let mut json =
-        json!({"class": class.name, "level": class.level, "images": class.members.len()});
+    // images whose scan flattened transparency on either side: in full, a
+    // deadline cut of their envelope stays out of the truncation test
+    let alpha_images = class
+        .members
+        .iter()
+        .filter(|i| {
+            per_variant
+                .values()
+                .any(|rows| rows.iter().any(|(j, side)| j == *i && side.alpha))
+        })
+        .count();
+    let mut json = json!({"class": class.name, "level": class.level, "images": class.members.len(),
+                          "alpha_images": alpha_images});
     let failed = class
         .members
         .iter()
@@ -1644,6 +1688,16 @@ fn unmeasured_rows(m: &Measurement, declared: &mut Vec<Declared>) {
     }
 }
 
+/// What a report shows and never judges.
+fn known_limits() -> Value {
+    json!({
+        "alpha_envelope": "full mode: a deadline that cuts the alpha placement envelope leaves the walk and the judgment unchanged, so the truncation test cannot see it; images whose scan flattened transparency are flagged (alpha), and timed calls whose alpha state differs from their reference walk's are counted (information)",
+        "budget_exhausted": "the build's own trace.budget_exhausted, when it reports one, is recorded per call and counted per side (information)",
+        "same_cut": "pairs both variants cut at the same share of their own reference walks carry no speed verdict; budget_bound.same_cut counts them per class",
+        "lost_decodes": "a decode the budget costs one side only is an A/B disagreement exclusion, outside the McNemar tests; the status line names it",
+    })
+}
+
 fn method_json(m: &Measurement) -> Value {
     json!({
         "warmup": super::run::WARMUP,
@@ -1665,6 +1719,7 @@ fn method_json(m: &Measurement) -> Value {
         "cold_start": "per cold Node process: compile + instantiate + the first scan of the fixture (full, unbounded); compile and instantiate alone are information",
         "memory": "lib: counting global allocator on the warm-up call (net peak heap, allocation calls, bytes retained after the report is dropped); cli: wait4 peak RSS per process; median shift and tail (k largest per-image peaks), δ 10 % each, judged in full-unbounded only — information in budgeted modes; node and wasm per-image memory not testable — worker peak RSS and wasm linear memory reported per segment",
         "envelope_bytes": ENVELOPE,
+        "known_limits": known_limits(),
         "caps": {
             "rss_bytes": m.options.rss_cap(),
             "wall": "max(10 × the preset budget, 60 s); 60 s unbounded and for reference walks; a throughput pass: the per-image cap × ceil(images / threads)",
@@ -1709,6 +1764,7 @@ fn sample_line(
         "truncated": cut(&|r| s.truncated(r, segment.mode)),
         "walk_cut": cut(&|r| s.walk_cut(r)),
         "judgment_cut": cut(&|r| s.judgment_cut(r, segment.mode)),
+        "alpha": s.alpha.map(Alpha::as_str), "budget_exhausted": s.budget_exhausted,
     })
 }
 
@@ -1770,9 +1826,14 @@ fn images_lines(m: &Measurement) -> String {
                     "truncated_calls": side.truncated, "judgment_cut_calls": side.judgment_cut,
                     "median_truncated": side.median_truncated, "median_judgment_cut": side.median_judgment_cut,
                     "over_envelope_calls": side.over_envelope,
+                    "alpha": side.alpha, "alpha_envelope_cut_calls": side.envelope_cut,
+                    "budget_exhausted_calls": side.budget_exhausted,
+                    "budget_reported_calls": side.budget_reported,
                 });
                 sides.insert(*variant, side);
             }
+            // the flag of an image whose scan flattened transparency
+            line["alpha"] = json!(sides.values().any(|s| s.alpha));
             if let (Some(a), Some(b)) = (sides.get(&Variant::Base), sides.get(&Variant::Candidate))
             {
                 line["pair"] = json!(match pair_status(a, b, m.options.reps, segment.mode) {
@@ -2061,7 +2122,7 @@ pub(crate) fn write(m: &Measurement, out: &Path) -> Result<i32, String> {
         let _ = write!(
             body,
             "\n## Budget (a timed call is truncated when its walk or judgment differs from the image's unbudgeted reference walk; images by their median call, over the valid pairs)\n\n\
-             | target | class | A truncated | B truncated | budget-bound pairs | truncation (one-sided McNemar) | lost judgments | work share Δ HL [95 % CI] (truncated pairs) | work verdict |\n\
+             | target | class | A truncated | B truncated | budget-bound pairs (same cut) | truncation (one-sided McNemar) | lost judgments | work share Δ HL [95 % CI] (truncated pairs) | work verdict |\n\
              |---|---|---|---|---|---|---|---|---|\n{}",
             tables.budget
         );
@@ -3534,6 +3595,153 @@ mod tests {
             (&json!(0.646), &json!(1.0)),
             "31/48 and 23/23"
         );
+    }
+
+    /// Pairs both variants cut at the same point carry no speed verdict,
+    /// and are counted: six images whose base and candidate both stop at 3
+    /// of the 4 transforms of one reference walk (shares 0.75 and 0.75)
+    /// are same-cut; six where the candidate stops at 2 (0.5) are
+    /// truncated but not — the work share sees them: half the pairs at
+    /// ln 1, half at ln(2/3), HL −18.35 % [−33.333, 0.0], no regression.
+    #[test]
+    fn pairs_cut_at_the_same_point_are_counted() {
+        let mut images: Vec<[(Vec<Sample>, Sample); 2]> = Vec::new();
+        for (i, candidate_walk) in (0..12).map(|i| (i, if i < 6 { (2, 3) } else { (2, 2) })) {
+            let t = 81.0 + f64::from(i);
+            let reference = call(0, 1.0, (2, 4), "x", None);
+            images.push([
+                (calls(&[t; 5], (2, 3), "x", None), reference.clone()),
+                (calls(&[t + 1.0; 5], candidate_walk, "x", None), reference),
+            ]);
+        }
+        let m = measurement(&complete_scope(), 12, vec![model(Mode::Frame, images)]);
+        let mut declared = Vec::new();
+        let mut tables = Tables::default();
+        let json = segment_json(&m, &m.segments[0], false, &mut declared, &mut tables);
+        let set = json["classes"]
+            .as_array()
+            .and_then(|c| c.iter().find(|c| c["class"] == "vendored"))
+            .expect("set row");
+        assert_eq!(
+            (
+                &set["budget_bound"]["pairs"],
+                &set["budget_bound"]["same_cut"]
+            ),
+            (&json!(12), &json!(6))
+        );
+        let work = row(&declared, "vendored", "work");
+        assert_eq!(
+            (work.verdict, work.estimate_pct, work.ci_pct),
+            ("no_regression", Some(-18.35), Some([-33.333, 0.0]))
+        );
+        let cut = row(&declared, "vendored", "truncation");
+        assert_eq!(
+            (cut.verdict, cut.discordant),
+            ("no_regression", Some([0, 0])),
+            "both sides cut on every pair: concordant"
+        );
+        assert!(
+            tables.budget.contains("| 12 (6 same cut) |"),
+            "{}",
+            tables.budget
+        );
+    }
+
+    /// Alpha images, their envelope cuts and the build's budget flag are
+    /// reported and never judged: six `full` images whose every call
+    /// flattened transparency — the base's timed calls without the
+    /// envelope their reference walk had (a deadline cut the walk does not
+    /// compare), the candidate reporting `budget_exhausted` on two calls of
+    /// five — stay complete pairs, with no truncation.
+    #[test]
+    fn alpha_images_and_the_budget_flag_are_reported_never_judged() {
+        let judged = "v80w100,5/5";
+        let with = |s: Sample, alpha: Alpha, exhausted: Option<bool>| Sample {
+            alpha: Some(alpha),
+            budget_exhausted: exhausted,
+            ..s
+        };
+        let images = (0..6)
+            .map(|i| {
+                let t = 900.0 + f64::from(i);
+                let text = format!("qr{i}");
+                let reference = with(
+                    call(0, 1.0, (3, 6), &text, Some(judged)),
+                    Alpha::Envelope,
+                    None,
+                );
+                let base: Vec<Sample> = calls(&[t; 5], (3, 6), &text, Some(judged))
+                    .into_iter()
+                    .map(|s| with(s, Alpha::Flattened, None))
+                    .collect();
+                let candidate: Vec<Sample> = calls(&[t; 5], (3, 6), &text, Some(judged))
+                    .into_iter()
+                    .map(|s| {
+                        let exhausted = Some(s.rep == 2 || s.rep == 4);
+                        with(s, Alpha::Envelope, exhausted)
+                    })
+                    .collect();
+                [(base, reference.clone()), (candidate, reference)]
+            })
+            .collect();
+        let m = measurement(&complete_scope(), 6, vec![model(Mode::Full, images)]);
+        let mut declared = Vec::new();
+        let json = segment_json(
+            &m,
+            &m.segments[0],
+            false,
+            &mut declared,
+            &mut Tables::default(),
+        );
+        let set = json["classes"]
+            .as_array()
+            .and_then(|c| c.iter().find(|c| c["class"] == "vendored"))
+            .expect("set row");
+        assert_eq!(set["alpha_images"], 6);
+        assert_eq!(
+            (
+                &set["base"]["alpha_envelope_cut_calls"],
+                &set["candidate"]["alpha_envelope_cut_calls"]
+            ),
+            (&json!(30), &json!(0))
+        );
+        assert_eq!(
+            (
+                &set["candidate"]["budget_exhausted"]["calls_reporting"],
+                &set["candidate"]["budget_exhausted"]["exhausted"],
+                &set["base"]["budget_exhausted"]["calls_reporting"]
+            ),
+            (&json!(30), &json!(12), &json!(0))
+        );
+        assert_eq!(
+            (&set["pairs"]["valid"], &set["pairs"]["truncated"]),
+            (&json!(6), &json!(0)),
+            "never judged: every pair complete"
+        );
+        assert_eq!(
+            row(&declared, "vendored", "truncation").discordant,
+            Some([0, 0])
+        );
+        let first: Value =
+            serde_json::from_str(images_lines(&m).lines().next().expect("an images line"))
+                .expect("json");
+        assert_eq!(
+            (
+                &first["alpha"],
+                &first["base"]["alpha_envelope_cut_calls"],
+                &first["candidate"]["budget_exhausted_calls"]
+            ),
+            (&json!(true), &json!(5), &json!(2))
+        );
+        let sample: Value = serde_json::from_str(
+            samples_lines(&m)
+                .lines()
+                .find(|l| l.contains("\"timed\"") && l.contains("\"candidate\""))
+                .expect("a timed candidate sample"),
+        )
+        .expect("json");
+        assert_eq!(sample["alpha"], "envelope");
+        assert!(sample["budget_exhausted"].is_boolean());
     }
 
     /// Memory median shift and tail, δ 10 % each, and the 512 MiB envelope

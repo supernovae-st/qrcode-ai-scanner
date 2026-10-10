@@ -1373,6 +1373,27 @@ pub(crate) struct Work {
     pub(crate) judgment: Option<String>,
 }
 
+/// A scan that flattened transparency: with its placement envelope, or
+/// without one — which a deadline can cut in `full` while the walk stays
+/// whole ([`super::worker::alpha_state`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Alpha {
+    Flattened,
+    Envelope,
+}
+named!(Alpha { Flattened => "flattened", Envelope => "envelope" });
+
+/// The alpha state of a JSON report: none without an `alpha` section.
+pub(crate) fn alpha_of(alpha: &Value) -> Option<Alpha> {
+    if alpha.is_null() {
+        None
+    } else if alpha["envelope"].is_null() {
+        Some(Alpha::Flattened)
+    } else {
+        Some(Alpha::Envelope)
+    }
+}
+
 /// One completed call of the public API (an `ok` or an `error` reply).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Sample {
@@ -1394,6 +1415,11 @@ pub(crate) struct Sample {
     pub(crate) rss: Option<u64>,
     pub(crate) cpu_us: Option<u64>,
     pub(crate) work: Option<Work>,
+    /// The scan flattened transparency (information; `None`: opaque).
+    pub(crate) alpha: Option<Alpha>,
+    /// The build's own `trace.budget_exhausted`, when it reports one
+    /// (information).
+    pub(crate) budget_exhausted: Option<bool>,
 }
 
 impl Sample {
@@ -1470,13 +1496,25 @@ pub(crate) fn parse_reply(reply: &str, rep: u32) -> Result<Sample, String> {
                     other => return Err(format!("judgment {other:?}")),
                 },
             };
-            let count = usize::try_from(int(11)?).map_err(|e| e.to_string())?;
-            if fields.len() != 12 + 2 * count {
+            let alpha = match at(11)? {
+                "-" => None,
+                "flattened" => Some(Alpha::Flattened),
+                "envelope" => Some(Alpha::Envelope),
+                other => return Err(format!("alpha {other:?}")),
+            };
+            let budget_exhausted = match at(12)? {
+                "-" => None,
+                "0" => Some(false),
+                "1" => Some(true),
+                other => return Err(format!("budget_exhausted {other:?}")),
+            };
+            let count = usize::try_from(int(13)?).map_err(|e| e.to_string())?;
+            if fields.len() != 14 + 2 * count {
                 return Err(format!("{} fields for {count} detections", fields.len()));
             }
             let mut units = Vec::with_capacity(count);
             for k in 0..count {
-                units.push(Unit::of(at(12 + 2 * k)?, &unhex(at(13 + 2 * k)?)?));
+                units.push(Unit::of(at(14 + 2 * k)?, &unhex(at(15 + 2 * k)?)?));
             }
             Ok(Sample {
                 rep,
@@ -1491,6 +1529,8 @@ pub(crate) fn parse_reply(reply: &str, rep: u32) -> Result<Sample, String> {
                 heap,
                 retained,
                 work: Some(work),
+                alpha,
+                budget_exhausted,
                 ..Sample::default()
             })
         }
@@ -1595,6 +1635,8 @@ fn cli_call(
             sample.total_ms = report["trace"]["total_ms"].as_f64();
             sample.engine_panics = report["trace"]["engine_panics"].as_u64();
             sample.work = Some(report_work(&report).map_err(|e| format!("{}: {e}", image.path))?);
+            sample.alpha = alpha_of(&report["alpha"]);
+            sample.budget_exhausted = report["trace"]["budget_exhausted"].as_bool();
             let units = report["detections"]
                 .as_array()
                 .ok_or_else(|| format!("{}: no detections array", image.path))?
@@ -3044,7 +3086,9 @@ mod tests {
     fn replies_parse_into_hashed_samples() {
         let hex = super::super::worker::hex(b"bench");
         let ok = parse_reply(
-            &format!("ok\t1500000\t1.25\t0\t-\t-\t-\t-\t2\t7\tv80w100,5/5,3/5x\t1\tqr_code\t{hex}"),
+            &format!(
+                "ok\t1500000\t1.25\t0\t-\t-\t-\t-\t2\t7\tv80w100,5/5,3/5x\tenvelope\t1\t1\tqr_code\t{hex}"
+            ),
             2,
         )
         .expect("ok");
@@ -3058,13 +3102,37 @@ mod tests {
                 judgment: Some(String::from("v80w100,5/5,3/5x")),
             })
         );
+        assert_eq!(
+            (ok.alpha, ok.budget_exhausted),
+            (Some(Alpha::Envelope), Some(true)),
+            "information beside the walk"
+        );
         let units = ok.units.expect("units");
         assert_eq!(units, vec![Unit::of("qr_code", b"bench")]);
         assert_eq!(units[0].text_len, 5);
         assert_eq!(units[0].text_sha256, external::sha256_bytes(b"bench"));
 
-        let counted = parse_reply("ok\t9\t0.5\t1\t4096\t12\t8000\t-64\t1\t1\t-\t0", 0).expect("ok");
-        assert_eq!(counted.work.and_then(|w| w.judgment), None, "no score");
+        let counted = parse_reply(
+            "ok\t9\t0.5\t1\t4096\t12\t8000\t-64\t1\t1\t-\tflattened\t0\t0",
+            0,
+        )
+        .expect("ok");
+        assert_eq!(
+            (counted.alpha, counted.budget_exhausted),
+            (Some(Alpha::Flattened), Some(false))
+        );
+        let counted =
+            parse_reply("ok\t9\t0.5\t1\t4096\t12\t8000\t-64\t1\t1\t-\t-\t-\t0", 0).expect("ok");
+        assert_eq!(
+            (counted.alpha, counted.budget_exhausted),
+            (None, None),
+            "opaque, and a build without the flag"
+        );
+        assert_eq!(
+            counted.work.clone().and_then(|w| w.judgment),
+            None,
+            "no score"
+        );
         assert_eq!(
             counted.heap,
             Some(HeapStats {
@@ -3084,12 +3152,28 @@ mod tests {
         assert!(parse_reply("fail\tread: entity not found", 1).is_err());
         assert!(parse_reply("ok\t1\t2", 1).is_err());
         assert!(
-            parse_reply("ok\t1\t1.0\t0\t-\t-\t-\t-\t1\t1\t-\t1\tqr_code\tzz", 1).is_err(),
+            parse_reply(
+                "ok\t1\t1.0\t0\t-\t-\t-\t-\t1\t1\t-\t-\t-\t1\tqr_code\tzz",
+                1
+            )
+            .is_err(),
             "bad hex"
         );
         assert!(
-            parse_reply("ok\t1\t1.0\t0\t-\t-\t-\t-\t1\t1\t-\t2\tqr_code\t41", 1).is_err(),
+            parse_reply(
+                "ok\t1\t1.0\t0\t-\t-\t-\t-\t1\t1\t-\t-\t-\t2\tqr_code\t41",
+                1
+            )
+            .is_err(),
             "fewer detections than announced"
+        );
+        assert!(
+            parse_reply("ok\t1\t1.0\t0\t-\t-\t-\t-\t1\t1\t-\t1\tqr_code\t41", 1).is_err(),
+            "a reply without the alpha state and the budget flag"
+        );
+        assert!(
+            parse_reply("ok\t1\t1.0\t0\t-\t-\t-\t-\t1\t1\t-\topaque\t-\t0", 1).is_err(),
+            "an alpha state of another name"
         );
         assert!(
             parse_reply("ok\t1\t1.0\t0\t-\t-\t-\t-\t1\t1\t1\t0\t0", 1).is_err(),
@@ -3293,6 +3377,19 @@ mod tests {
         );
         let pre_09 = serde_json::json!({"value": 50, "axes": []});
         assert_eq!(json_judgment(&pre_09), Ok(Some(String::from("v50w0"))));
+        assert_eq!(
+            alpha_of(&Value::Null),
+            None,
+            "an opaque report has no section"
+        );
+        assert_eq!(
+            alpha_of(&serde_json::json!({"coverage": 0.4, "envelope": null})),
+            Some(Alpha::Flattened)
+        );
+        assert_eq!(
+            alpha_of(&serde_json::json!({"envelope": {"placement": "any"}})),
+            Some(Alpha::Envelope)
+        );
         assert!(report_work(&serde_json::json!({"trace": {}})).is_err());
         assert!(
             report_work(&serde_json::json!({"trace": {"stages": [{"stage": "direct"}]}})).is_err(),
@@ -3338,8 +3435,9 @@ mod tests {
                  export function scan_image({signature}) {{\n\
                    if (profile === 'frame') return {{}};\n\
                    if (profile === 'fast') throw new Error('too large [QRS-001]');\n\
-                   return {{ trace: {{ total_ms: budget_ms === 0 ? 2.5 : 1.5, engine_panics: 0,\n\
+                   return {{ trace: {{ total_ms: budget_ms === 0 ? 2.5 : 1.5, engine_panics: 0, budget_exhausted: false,\n\
                      stages: [{{ stage: 'direct', transforms_tried: 2 }}, {{ stage: 'enhance', transforms_tried: 3 }}] }},\n\
+                     alpha: {{ coverage: 0.5, envelope: null }},\n\
                      score: {{ value: 70, weights_run: 100, axes: [{{ passed: 2, total: 5, failed_at: null }}, {{ passed: 1, total: 5, failed_at: 'blur 1.0' }}] }},\n\
                      detections: [{{ symbology: 'qr_code', content: {{ text: 'hi' }} }}] }};\n\
                  }}\n"
@@ -3384,6 +3482,11 @@ mod tests {
                 Some(vec![Unit::of("qr_code", b"hi")])
             ),
             "budget 0 reached the binding; the judgment as the worker writes it"
+        );
+        assert_eq!(
+            (ok.alpha, ok.budget_exhausted),
+            (Some(Alpha::Flattened), Some(false)),
+            "the alpha state and the build's flag, as the worker writes them"
         );
         let shape = server
             .request(&line(Mode::Frame, &image), wall)
@@ -3463,7 +3566,7 @@ mod tests {
                  hello) printf 'hello\\t{}\\t0.9.0\\t2\\t4\\trust-worker\\t-\\t-\\n' ;;\n\
                  quit) echo bye; exit 0 ;;\n\
                  scan*bad*) exit 3 ;;\n\
-                 scan*) printf 'ok\\t1000000\\t1.0\\t0\\t-\\t-\\t-\\t-\\t1\\t1\\t-\\t1\\tqr_code\\t78\\n' ;;\n\
+                 scan*) printf 'ok\\t1000000\\t1.0\\t0\\t-\\t-\\t-\\t-\\t1\\t1\\t-\\t-\\t-\\t1\\tqr_code\\t78\\n' ;;\n\
                  *) printf 'fail\\tunknown request\\n' ;;\n\
                esac\n\
              done\n",

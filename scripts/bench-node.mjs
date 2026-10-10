@@ -32,7 +32,7 @@ import { Worker } from "node:worker_threads";
 import { gunzipSync } from "node:zlib";
 
 /** The worker protocol (xtask/src/bench/worker.rs `PROTOCOL`). */
-export const PROTOCOL = "qrscan-bench-worker/4";
+export const PROTOCOL = "qrscan-bench-worker/5";
 
 /** The parent the harness tells its children to keep (worker.rs `PARENT_ENV`). */
 const PARENT_ENV = "QRSCAN_BENCH_PARENT";
@@ -84,11 +84,27 @@ export function judgment(score) {
 }
 
 /**
+ * Whether the scan flattened transparency (worker.rs `alpha_state()`): `-`
+ * without an `alpha` section, `envelope` when its placement envelope came
+ * back, else `flattened`.
+ */
+export function alphaState(alpha) {
+  if (alpha == null) return "-";
+  return alpha.envelope == null ? "flattened" : "envelope";
+}
+
+/** The build's own `trace.budget_exhausted`: `1`, `0`, or `-` without the field. */
+export function budgetFlag(trace) {
+  if (typeof trace?.budget_exhausted !== "boolean") return "-";
+  return trace.budget_exhausted ? "1" : "0";
+}
+
+/**
  * `ok` reply for a ScanReport-shaped object: timing, trace, the walk
  * (stages, Σ transforms_tried, the judgment signature — compared with the
- * image's unbudgeted reference walk by the orchestrator), detections as
- * hex. Heap fields are in-process only. Throws a ProtocolError on any
- * other shape.
+ * image's unbudgeted reference walk by the orchestrator), the alpha state
+ * and the build's budget flag (information), detections as hex. Heap
+ * fields are in-process only. Throws a ProtocolError on any other shape.
  */
 export function okReply(ns, report) {
   const stages = report?.trace?.stages;
@@ -114,6 +130,8 @@ export function okReply(ns, report) {
     stages.length,
     transforms,
     judgment(report.score),
+    alphaState(report.alpha),
+    budgetFlag(report.trace),
     report.detections.length,
   ];
   for (const detection of report.detections) {
