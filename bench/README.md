@@ -37,6 +37,20 @@ requested features, worker sources or binaryen recipes differ, whose base
 and candidate are the same file, or whose Node or WASM driver did not load
 — by its path in the package — the file the receipt hashes.
 
+The base is the base: a gated run also refuses (exit 2) a swapped,
+mislabelled or dirty side. Every base artifact must come from the v0.9.0
+release — the library worker and the CLI link `qrcode-ai-scanner` 0.9.0
+from crates.io (the unit cargo reported, with its package source), the
+CLI is the published crate (its sha256 pinned to the checksum crates.io
+lists), the Node addon and the WASM package are built from the `git
+archive` of the release commit. Every candidate artifact must come from
+the measured tree at the commit the run records, with a clean source — a
+library worker from its generated crate and a scanner unit built from that
+tree. Every source must be unchanged since the harness wrote or extracted
+it, and every worker's `hello` must name its side: the base's scanner
+version 0.9.0 or the tree's, and for a library worker the crate `bench
+prepare` generated for that side.
+
 - **Library workers.** `bench prepare` writes two crates **outside the
   workspace**, each its own `[workspace]` root, with a lockfile seeded from
   the workspace `Cargo.lock` and the workspace release profile mirrored

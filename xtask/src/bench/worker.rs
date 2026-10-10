@@ -11,7 +11,8 @@
 //! `scripts/bench-wasm.mjs`):
 //!
 //! - `hello` → `hello · protocol · scanner · pipeline · score_contract ·
-//!   runtime · worker source sha256 · main source sha256`
+//!   runtime · worker source sha256 · main source sha256 · worker crate`
+//!   (the generated crate's name, which names its side)
 //! - `scan · profile · budget · memory · path` → `ok · ns · total_ms ·
 //!   engine_panics · peak_heap · allocs · alloc_bytes · retained · stages ·
 //!   transforms · judgment · n · (symbology · text_hex)×n`, or
@@ -50,7 +51,7 @@ use std::time::{Duration, Instant};
 use qrcode_ai_scanner::{ImageInput, ScanProfile, ScanReport, Scanner, Versions};
 
 /// The worker protocol this file speaks; `hello` names it.
-pub const PROTOCOL: &str = "qrscan-bench-worker/3";
+pub const PROTOCOL: &str = "qrscan-bench-worker/4";
 
 /// The variable the harness sets on every child: its own pid, the parent
 /// a worker must keep.
@@ -397,13 +398,16 @@ fn fail(reason: &str) -> String {
 
 fn hello() -> String {
     let versions = Versions::current();
+    // the crate this file is compiled into: `bench prepare` names each
+    // worker crate after its side
     format!(
-        "hello\t{PROTOCOL}\t{}\t{}\t{}\trust-worker\t{}\t{}",
+        "hello\t{PROTOCOL}\t{}\t{}\t{}\trust-worker\t{}\t{}\t{}",
         versions.scanner,
         versions.pipeline,
         versions.score_contract,
         source_sha256(),
-        MAIN_SHA256.get().map_or("-", String::as_str)
+        MAIN_SHA256.get().map_or("-", String::as_str),
+        env!("CARGO_PKG_NAME")
     )
 }
 
@@ -799,6 +803,11 @@ mod tests {
         let fields: Vec<&str> = hello.split('\t').collect();
         assert_eq!(fields[..2].to_vec(), vec!["hello", PROTOCOL]);
         assert_eq!(fields[6], source_sha256());
+        assert_eq!(
+            fields[8..].to_vec(),
+            vec![env!("CARGO_PKG_NAME")],
+            "the crate it is compiled into: xtask here, a worker crate in a worker"
+        );
 
         let list = dir.join("list.txt");
         std::fs::write(&list, format!("{path}\n{path}\n{path}\n")).expect("list");

@@ -32,7 +32,7 @@ import { Worker } from "node:worker_threads";
 import { gunzipSync } from "node:zlib";
 
 /** The worker protocol (xtask/src/bench/worker.rs `PROTOCOL`). */
-export const PROTOCOL = "qrscan-bench-worker/3";
+export const PROTOCOL = "qrscan-bench-worker/4";
 
 /** The parent the harness tells its children to keep (worker.rs `PARENT_ENV`). */
 const PARENT_ENV = "QRSCAN_BENCH_PARENT";

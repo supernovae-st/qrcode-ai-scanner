@@ -10,7 +10,8 @@
 //! (`<file>.build.json`, or `build.json` inside a package directory);
 //! `bench run` reads it back, checks that it describes the file it
 //! measures, and refuses a gated pair whose compilers, profiles, builds or
-//! recipes differ.
+//! recipes differ, or whose sides do not come from the sources a base and
+//! a candidate must (`run::identity`).
 //!
 //! A directory a harness step generated or extracted carries a
 //! [`SOURCE_MARK`] with the files it wrote and their hash, so a later stamp
@@ -25,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::external;
 
 /// Manifest format identifier.
-pub(crate) const FORMAT: &str = "qrscan-bench-build/v2";
+pub(crate) const FORMAT: &str = "qrscan-bench-build/v3";
 /// The source mark a harness step leaves in a directory it wrote.
 pub(crate) const SOURCE_MARK: &str = ".bench-source.json";
 /// The manifest of a package directory.
@@ -475,17 +476,40 @@ pub(crate) fn stamp(
 }
 
 /// One compilation unit as cargo reported it for the stamped build (a
-/// `compiler-artifact` message): the profile it was compiled with and the
-/// features it was compiled with.
+/// `compiler-artifact` message): where its package came from, the profile
+/// it was compiled with and the features it was compiled with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Unit {
     pub(crate) package: String,
     pub(crate) version: String,
+    /// The package id's source, without any path or credential
+    /// ([`package_of`]): `crates.io`, or `path`, `git`, `registry`…
+    pub(crate) source: String,
+    /// A path package inside a git work tree: that tree's commit and state
+    /// when the build ran.
+    pub(crate) checkout: Option<Checkout>,
     pub(crate) opt_level: String,
     pub(crate) debuginfo: String,
     pub(crate) debug_assertions: bool,
     pub(crate) overflow_checks: bool,
     pub(crate) features: Vec<String>,
+}
+
+/// A git work tree as a build saw it: its commit and its state (`clean` ·
+/// `dirty`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Checkout {
+    pub(crate) sha: String,
+    pub(crate) tree: String,
+}
+
+/// The checkout of the git work tree `dir` lies in, if any.
+pub(crate) fn checkout_of(dir: &Path) -> Option<Checkout> {
+    let source = super::env::source(dir);
+    (source.git_sha != "unknown").then_some(Checkout {
+        sha: source.git_sha,
+        tree: source.tree,
+    })
 }
 
 /// The roles whose units a build manifest keeps: the unit that produced
@@ -597,23 +621,52 @@ pub(crate) fn build_env(
     .collect()
 }
 
-/// Package name and version of a cargo package id: `registry+…#name@1.0.0`,
-/// `path+file:///…/name#1.0.0` (the name is the last path segment when the
-/// fragment omits it), or the older `name 1.0.0 (source)`.
-pub(crate) fn package_of(id: &str) -> Option<(String, String)> {
+/// The source of a package id's URL, kept without any path or credential:
+/// `crates.io` for the crates.io index (git or sparse protocol), else the
+/// source kind before its `+` (`path`, `git`, `registry`, `sparse`…).
+fn source_kind(url: &str) -> String {
+    const CRATES_IO: [&str; 2] = [
+        "registry+https://github.com/rust-lang/crates.io-index",
+        "sparse+https://index.crates.io/",
+    ];
+    if CRATES_IO.contains(&url) {
+        return String::from("crates.io");
+    }
+    url.split_once('+')
+        .map_or("unknown", |(kind, _)| kind)
+        .to_owned()
+}
+
+/// Package name, version and source ([`source_kind`]) of a cargo package
+/// id: `registry+…#name@1.0.0`, `path+file:///…/name#1.0.0` (the name is
+/// the last path segment when the fragment omits it), or the older
+/// `name 1.0.0 (source)`.
+pub(crate) fn package_of(id: &str) -> Option<(String, String, String)> {
     if let Some((url, fragment)) = id.split_once('#') {
-        return match fragment.split_once('@') {
-            Some((name, version)) => Some((name.to_owned(), version.to_owned())),
-            None => Some((url.rsplit('/').next()?.to_owned(), fragment.to_owned())),
+        let (name, version) = match fragment.split_once('@') {
+            Some((name, version)) => (name.to_owned(), version.to_owned()),
+            None => (url.rsplit('/').next()?.to_owned(), fragment.to_owned()),
         };
+        return Some((name, version, source_kind(url)));
     }
     let mut words = id.split_whitespace();
-    Some((words.next()?.to_owned(), words.next()?.to_owned()))
+    let (name, version) = (words.next()?.to_owned(), words.next()?.to_owned());
+    let source = words.next().map_or_else(
+        || String::from("unknown"),
+        |s| source_kind(s.trim_start_matches('(').trim_end_matches(')')),
+    );
+    Some((name, version, source))
 }
 
 /// The units of [`ROLES`] in a `--message-format=json` stream: the one
 /// whose files include `artifact` (canonical), the scanner's and rxing's.
-pub(crate) fn units_of(stream: &str, artifact: &Path) -> Result<BTreeMap<String, Unit>, String> {
+/// A path unit gets the [`Checkout`] `checkout` finds for its package
+/// directory.
+pub(crate) fn units_of(
+    stream: &str,
+    artifact: &Path,
+    checkout: &dyn Fn(&Path) -> Option<Checkout>,
+) -> Result<BTreeMap<String, Unit>, String> {
     let artifact =
         std::fs::canonicalize(artifact).map_err(|e| format!("the artifact: {}", e.kind()))?;
     let mut units = BTreeMap::new();
@@ -624,13 +677,38 @@ pub(crate) fn units_of(stream: &str, artifact: &Path) -> Result<BTreeMap<String,
         if message["reason"] != "compiler-artifact" {
             continue;
         }
-        let Some((package, version)) = message["package_id"].as_str().and_then(package_of) else {
+        let Some((package, version, source)) = message["package_id"].as_str().and_then(package_of)
+        else {
             continue;
+        };
+        let produced = message["filenames"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .chain(std::iter::once(&message["executable"]))
+            .filter_map(|f| f.as_str())
+            .any(|f| std::fs::canonicalize(f).is_ok_and(|f| f == artifact));
+        let role = if produced {
+            String::from("artifact")
+        } else if ROLES.contains(&package.as_str()) && message["target"]["kind"][0] == "lib" {
+            package.clone()
+        } else {
+            continue;
+        };
+        let checkout = if source == "path" {
+            message["manifest_path"]
+                .as_str()
+                .and_then(|manifest| Path::new(manifest).parent())
+                .and_then(checkout)
+        } else {
+            None
         };
         let profile = &message["profile"];
         let unit = Unit {
-            package: package.clone(),
+            package,
             version,
+            source,
+            checkout,
             opt_level: profile["opt_level"].as_str().unwrap_or("?").to_owned(),
             debuginfo: profile["debuginfo"].to_string(),
             debug_assertions: profile["debug_assertions"].as_bool().unwrap_or(true),
@@ -644,18 +722,7 @@ pub(crate) fn units_of(stream: &str, artifact: &Path) -> Result<BTreeMap<String,
                 })
                 .unwrap_or_default(),
         };
-        let produced = message["filenames"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .chain(std::iter::once(&message["executable"]))
-            .filter_map(|f| f.as_str())
-            .any(|f| std::fs::canonicalize(f).is_ok_and(|f| f == artifact));
-        if produced {
-            units.insert(String::from("artifact"), unit);
-        } else if ROLES.contains(&package.as_str()) && message["target"]["kind"][0] == "lib" {
-            units.insert(package, unit);
-        }
+        units.insert(role, unit);
     }
     if !units.contains_key("artifact") {
         return Err(String::from(
@@ -689,7 +756,11 @@ pub(crate) fn stamp_build(
     if !out.status.success() {
         return Err(format!("the build failed ({})", out.status));
     }
-    let units = units_of(&String::from_utf8_lossy(&out.stdout), artifact)?;
+    let units = units_of(
+        &String::from_utf8_lossy(&out.stdout),
+        artifact,
+        &checkout_of,
+    )?;
     let mut manifest = stamp(
         artifact,
         source,
@@ -815,7 +886,8 @@ pub(crate) fn write(path: &Path, manifest: &Manifest) -> Result<(), String> {
 pub(crate) struct Mismatch {
     /// `identical` · `compiler` · `profile` · `features` · `config` ·
     /// `manifest` · `build` · `binaryen` · `worker_source` · `wasm_recipe` ·
-    /// `loaded`.
+    /// `loaded` · `source` (a side not built from its own source) ·
+    /// `scanner` (a worker whose hello names another side).
     pub(crate) what: &'static str,
     pub(crate) detail: String,
 }
@@ -1269,6 +1341,8 @@ mod tests {
         Unit {
             package: package.to_owned(),
             version: String::from("1.0.0"),
+            source: String::from("crates.io"),
+            checkout: None,
             opt_level: String::from("3"),
             debuginfo: String::from("0"),
             debug_assertions: false,
@@ -1289,29 +1363,47 @@ mod tests {
     }
 
     /// The build command gives the overrides and the features asked for,
-    /// package ids of every format name their package, the environment
-    /// keeps its codegen variables (hashed), and paths never reach the
-    /// record.
+    /// package ids of every format name their package and its source — the
+    /// crates.io index by either protocol, else the source kind, never a
+    /// path — the environment keeps its codegen variables (hashed), and
+    /// paths never reach the record.
     #[test]
     fn build_commands_and_package_ids_are_read() {
+        let id = |name: &str, version: &str, source: &str| {
+            Some((name.to_owned(), version.to_owned(), source.to_owned()))
+        };
         assert_eq!(
             package_of("registry+https://github.com/rust-lang/crates.io-index#rxing@0.9.1"),
-            Some((String::from("rxing"), String::from("0.9.1")))
+            id("rxing", "0.9.1", "crates.io")
+        );
+        assert_eq!(
+            package_of("sparse+https://index.crates.io/#qrcode-ai-scanner@0.9.0"),
+            id("qrcode-ai-scanner", "0.9.0", "crates.io")
         );
         assert_eq!(
             package_of("path+file:///w/crates/qrcode-ai-scanner-cli#0.9.0"),
-            Some((String::from("qrcode-ai-scanner-cli"), String::from("0.9.0")))
+            id("qrcode-ai-scanner-cli", "0.9.0", "path")
         );
         assert_eq!(
             package_of("path+file:///w/x#qrscan-bench-worker-base@0.0.0"),
-            Some((
-                String::from("qrscan-bench-worker-base"),
-                String::from("0.0.0")
-            ))
+            id("qrscan-bench-worker-base", "0.0.0", "path")
+        );
+        assert_eq!(
+            package_of("registry+https://mirror.example/index#qrcode-ai-scanner@0.9.0"),
+            id("qrcode-ai-scanner", "0.9.0", "registry"),
+            "another registry is not crates.io"
+        );
+        assert_eq!(
+            package_of("git+https://example.com/x?rev=1#qrcode-ai-scanner@0.9.0"),
+            id("qrcode-ai-scanner", "0.9.0", "git")
+        );
+        assert_eq!(
+            package_of("serde 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)"),
+            id("serde", "1.0.1", "crates.io")
         );
         assert_eq!(
             package_of("serde 1.0.1 (registry+https://x)"),
-            Some((String::from("serde"), String::from("1.0.1")))
+            id("serde", "1.0.1", "registry")
         );
         let command: Vec<String> = [
             "/a/cargo-wrapper.sh",
@@ -1415,15 +1507,23 @@ mod tests {
             String::from("{\"reason\":\"build-finished\",\"success\":true}"),
         ]
         .join("\n");
-        let units = units_of(&stream, &artifact).expect("units");
+        let none = |_: &Path| -> Option<Checkout> { None };
+        let units = units_of(&stream, &artifact, &none).expect("units");
         assert_eq!(
             units.keys().map(String::as_str).collect::<Vec<_>>(),
             vec!["artifact", "qrcode-ai-scanner", "rxing"]
         );
         assert_eq!(units["artifact"].package, "qrcode-ai-scanner-cli");
         assert!(units["rxing"].overflow_checks && !units["artifact"].overflow_checks);
+        assert_eq!(
+            (
+                units["rxing"].source.as_str(),
+                units["qrcode-ai-scanner"].source.as_str()
+            ),
+            ("registry", "path")
+        );
         assert!(
-            units_of(&stream, &dir).is_err_and(|e| e.contains("no unit")),
+            units_of(&stream, &dir, &none).is_err_and(|e| e.contains("no unit")),
             "a build that produced another file"
         );
 
@@ -1464,6 +1564,76 @@ mod tests {
         let failing: Vec<String> = ["sh", "-c", "exit 1"].map(String::from).to_vec();
         assert!(stamp_build(&artifact, &source, &failing).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The unit record tells the registry 0.9.0 scanner from the one of a
+    /// tree, which the record of a package id's name and version alone
+    /// could not, and a path unit keeps the checkout of its package
+    /// directory — read by the stamp, never as a path.
+    #[test]
+    fn units_keep_their_package_source_and_checkout() {
+        let dir = std::env::temp_dir().join(format!("qrscan-bench-sources-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let artifact = dir.join("worker");
+        std::fs::write(&artifact, b"bin").expect("artifact");
+        let message = |id: &str, kind: &str, file: &str| {
+            serde_json::json!({
+                "reason": "compiler-artifact", "package_id": id,
+                "manifest_path": "/w/crates/qrcode-ai-scanner/Cargo.toml",
+                "target": {"kind": [kind], "name": "x"},
+                "profile": {"opt_level": "3", "debuginfo": 0, "debug_assertions": false, "overflow_checks": false, "test": false},
+                "features": ["default"], "filenames": [file], "executable": null, "fresh": true,
+            })
+            .to_string()
+        };
+        let worker = message(
+            "path+file:///w/worker-base#qrscan-bench-worker-base@0.0.0",
+            "bin",
+            artifact.to_str().expect("utf-8"),
+        );
+        let checkout = |at: &Path| -> Option<Checkout> {
+            (at == Path::new("/w/crates/qrcode-ai-scanner")).then(|| Checkout {
+                sha: String::from("c0ffee"),
+                tree: String::from("clean"),
+            })
+        };
+        let units = |scanner: &str| {
+            units_of(
+                &format!("{}\n{worker}", message(scanner, "lib", "/t/libq.rlib")),
+                &artifact,
+                &checkout,
+            )
+            .expect("units")
+        };
+        let registry =
+            units("registry+https://github.com/rust-lang/crates.io-index#qrcode-ai-scanner@0.9.0");
+        let tree = units("path+file:///w/crates/qrcode-ai-scanner#0.9.0");
+        let _ = std::fs::remove_dir_all(&dir);
+        let scanner = |units: &BTreeMap<String, Unit>| {
+            let unit = &units["qrcode-ai-scanner"];
+            (
+                unit.version.clone(),
+                unit.source.clone(),
+                unit.checkout.clone(),
+            )
+        };
+        assert_eq!(
+            scanner(&registry),
+            (String::from("0.9.0"), String::from("crates.io"), None)
+        );
+        assert_eq!(
+            scanner(&tree),
+            (
+                String::from("0.9.0"),
+                String::from("path"),
+                Some(Checkout {
+                    sha: String::from("c0ffee"),
+                    tree: String::from("clean")
+                })
+            )
+        );
+        assert_ne!(registry["qrcode-ai-scanner"], tree["qrcode-ai-scanner"]);
     }
 
     /// A native pair whose observed builds differ — rxing without its

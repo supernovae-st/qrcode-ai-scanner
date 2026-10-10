@@ -81,6 +81,12 @@ const USAGE: &str = "usage: xtask bench <prepare --work <dir> [--node-addon <lib
 /// The v0.9.0 release commit (tag `v0.9.0`): the source every rebuilt base
 /// artifact comes from.
 const BASE_COMMIT: &str = "170e3fb30008f0dc20793712213f7d4c6f2d233e";
+/// The scanner version of that release: what a base worker's hello names
+/// and the version of the registry crate a base worker and CLI link.
+const BASE_VERSION: &str = "0.9.0";
+/// sha256 of the published `qrcode-ai-scanner-cli-0.9.0.crate` — the
+/// checksum crates.io lists for it: the base CLI's source.
+const CLI_CRATE_SHA256: &str = "f833a97b851ff95e2ec74da76ca0b428918b087c308f29e03b07e5f42d0043af";
 /// The directory `prepare-base` extracts that commit into.
 const BASE_DIR: &str = "qrcode-ai-scanner-0.9.0";
 
@@ -547,6 +553,12 @@ fn prepare_base_in(
 fn extract_crate(work: &Path, file: &Path) -> Result<PathBuf, String> {
     let bytes = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
     let sha = external::sha256_bytes(&bytes);
+    if sha != CLI_CRATE_SHA256 {
+        return Err(format!(
+            "{}: sha256 {sha}, not the published qrcode-ai-scanner-cli {BASE_VERSION} crate",
+            file.display()
+        ));
+    }
     let listing = std::process::Command::new("tar")
         .arg("-tzf")
         .arg(file)
@@ -929,9 +941,10 @@ fn measure(args: Vec<String>) -> i32 {
 }
 
 /// Everything a run checks before it measures, the host lock held: a dry
-/// run reads the host floor; every worker says hello (protocol, worker
-/// source, loaded binary); a gated run refuses an unfit pair, then waits
-/// for the gate.
+/// run reads the host floor; every worker says hello (protocol, scanner,
+/// worker source and crate, loaded binary); a gated run refuses an unfit
+/// pair — builds that differ, or a side not built from its own source —
+/// then waits for the gate.
 fn admit(
     measurement: &mut run::Measurement,
     gate: &gate::Gate,
@@ -971,6 +984,7 @@ fn admit(
         &measurement.artifacts,
         &measurement.hellos,
         &worker::source_sha256(),
+        &measurement.facts.source,
     );
     for row in &measurement.parity {
         for finding in &row.findings {
