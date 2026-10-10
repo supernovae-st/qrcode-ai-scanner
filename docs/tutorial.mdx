@@ -100,6 +100,12 @@ exact styles a generator outputs. For any verify-the-output flow, use `full`
 (bound it with a `budget_ms` in UI contexts).
 </Warning>
 
+A budget makes where the scan stops machine-dependent, and the report says
+when it stopped early: `trace.budget_exhausted` is `true` when planned work
+was cut — then empty `detections` are not a final "no", and a `null` score
+beside a detection means "not judged", never 0. `budget_ms: 0` (CLI
+`--budget-ms 0`) is unbounded and reproducible.
+
 ## A recipe per use-case
 
 <AccordionGroup>
@@ -109,11 +115,13 @@ exact styles a generator outputs. For any verify-the-output flow, use `full`
 
     ```ts
     const report = scan_image(bytes, "full", undefined, undefined, 1500);
-    const score = report.detections.length ? (report.score?.value ?? 0) : -1;
+    const cut = report.trace.budget_exhausted === true;
     const status =
-      score < 0  ? "NO"   :   // nothing decoded — regenerate
-      score >= 80 ? "HIGH" :
-      score >= 60 ? "MEDIUM" : "LOW";
+      !report.detections.length ? (cut ? "NOT_JUDGED" : "NO") : // NO = regenerate
+      report.score === null      ? "NOT_JUDGED" :               // never read null as 0
+      report.score.value >= 80   ? "HIGH" :
+      report.score.value >= 60   ? "MEDIUM" : "LOW";
+    // NOT_JUDGED: the budget ran out first — re-scan on idle with budget 0
     ```
 
     This is exactly the qrcode-ai.com editor flow — see
@@ -158,6 +166,7 @@ exact styles a generator outputs. For any verify-the-output flow, use `full`
 
     ```text
     generate(params) → scan(full) →
+      ├─ trace.budget_exhausted → re-scan unbounded first
       ├─ no detection         → adjust per trace.stages, retry
       ├─ hints present        → apply mapped fix (raise EC, clear finder, …)
       └─ score ≥ gate & no hints → accept

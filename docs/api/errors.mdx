@@ -51,18 +51,29 @@ fresh, never-cancelled token, so it never returns `QRS-005`.
   <Tab title="CLI (scripts)">
     ```bash
     qrscan in.png -s; case $? in
-      0) echo "decoded, score on stdout" ;;
+      0) echo "decoded, its complete score on stdout" ;;
       1) echo "no QR in the image" ;;
-      2) echo "invalid input or usage" ;;
+      2) echo "invalid input or usage, or no score in this configuration" ;;
+      3) echo "decoded, not judged within the budget: retry with --budget-ms 0" ;;
     esac
     ```
   </Tab>
 </Tabs>
 
+<Note>
+The wall-clock budget is not an error either: a scan it cuts is a normal
+report with `trace.budget_exhausted: true` — partial, not final. A judgment
+it interrupts is absent (`score: null`), never a deflated value; a
+cancelled scan is `QRS-005`, never an absent judgment.
+</Note>
+
 ## CLI exit codes
 
-`0` = ≥1 QR decoded · `1` = scan clean, nothing found (all output modes)
-· `2` = invalid input/usage (QRS fault, unreadable file, `--score-only`
-with the no-scoring `frame` profile).
+`0` = ≥1 QR decoded · `1` = nothing found (all output modes; final only
+when the scan was not cut) · `2` = invalid input/usage (QRS fault,
+unreadable file, `--score-only` with a configuration that computes no score
+— the `frame` profile or every axis skipped — or after a contained fault) ·
+`3` = `--score-only` only: decoded, but the budget ran out before the score
+was judged (nothing on stdout; `--budget-ms 0` never yields 3).
 
 Normative source: [`spec/03-errors.md`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/03-errors.md).

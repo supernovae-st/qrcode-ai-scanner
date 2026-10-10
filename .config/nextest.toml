@@ -9,7 +9,8 @@
 # serially). The others are the suite's heaviest CPU consumers, which starve
 # any budget running beside them: the artistic score pins (deep-ladder decode
 # + full stress score), the threaded-determinism pin (four budget-free
-# full-ladder scans at once), the score sweeps (one judgment per work quota
+# full-ladder scans at once, every non-PDF417 symbology fixture included),
+# the score sweeps (one judgment per work quota
 # of three symbols · one scan per budget step) and the budget-flag sweeps
 # (one scan per budget step of six symbols · unbounded scans of eight across
 # three profiles). All share one

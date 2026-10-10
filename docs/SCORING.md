@@ -1,10 +1,17 @@
-# Score contract v3
+# Score contract v5
 
-> `Versions.score_contract = 3`. The composite, the axes, the caps, and the
+> `Versions.score_contract = 5`. The composite, the axes, the caps, and the
 > weights below are a published contract: changing any of them bumps the
 > version. Output language: **validation**, never ISO *verification* — no
 > calibrated optics are involved (geometry-class signals transfer to digital
-> images; reflectance-class signals are relative).
+> images; reflectance-class signals are relative). The normative text is
+> [`spec/04-score.md`](../spec/04-score.md).
+
+A judgment is whole or absent. A present `score` ran its calibration and
+every planned stress cell, so no wall-clock budget moves it (only a knee
+label, `refined_failed_at`, may be missing — and `trace.budget_exhausted`
+then says so). A judgment the budget interrupts is `score: null` with
+`trace.budget_exhausted: true`: "not judged", never a zero.
 
 ## Shape
 
@@ -41,12 +48,13 @@ Perspective/rotation/lighting exist because they are the documented blind
 spot of naive scorers (BoofCV categories · DiffQRCoder WACV 2025): artistic
 codes erode the *grid-estimation* margin first.
 
-## Structural caps
+## Caps
 
 | Check | Cap | Why |
 |---|---|---|
 | finder integrity < 0.5 (worst of 3) | score ≤ 40 | #1 documented AI-art killer |
 | quiet zone violated | score ≤ 60 | breaks locators in the wild |
+| measured UEC margin `m` < 0.5 | score ≤ round(40 + 120·m) — 0.5 → 100 · 0.25 → 70 · 0.0 → 40 | a consumed RS budget is invisible to the stress axes; a decode at the RS limit is never a pass |
 
 Finder integrity = 1:1:3:1:1 pattern match in module space (0.0-1.0 per
 corner, local threshold). Quiet zone = 2-module outer ring ≥80% lighter
@@ -61,6 +69,18 @@ per-block RS syndromes → Berlekamp-Massey degree = exact corrected-error
 count `t`. `margin = 1 − 2t/d` (worst block) · grades A ≥0.62 · B ≥0.50 ·
 C ≥0.37 · D ≥0.25 · F below.
 
+The stream is the one of the orientation the decode verified (a mirrored
+symbol is measured transposed, with that orientation's EC level and mask),
+and a margin is read only when every block of it error-corrects errors-only
+under that format. A stream that does not has no `uec`, no cap and no
+margin hint — absent, never a guess. A stream the S5 rescue recovered
+needed erasures, so it keeps its errors-only count (typically margin 0).
+
+The margin caps the value whether or not `uec` is published: skipping the
+`uec` check (`score_skip_checks`) withholds `score.uec`, the ISO
+`unused_error_correction` parameter and the two margin hints, while
+`value`, `grade` and the ISO `overall` never move.
+
 Known limits (deliberate, documented): the ISO `p` misdecode-protection
 codewords of the very low versions are not subtracted (v1-v2 margins read
 marginally optimistic); margins reflect the *digital image*, not a print.
@@ -71,12 +91,14 @@ Machine-actionable, stable order — the generate → scan → act → regenerat
 loop: `fix_finder_pattern{corner}` · `restore_quiet_zone` ·
 `increase_contrast` (contrast survival ≤40%) · `enlarge_modules`
 (resolution survival ≤40%) · `reduce_art_texture` (dies at mildest blur) ·
-`raise_error_correction{current}` (score &lt;70 **or** UEC grade D/F, when
-EC < H) · `low_correction_margin{errors,capacity}` (UEC margin exactly 0:
+`raise_error_correction{current}` (the score before the margin cap &lt;70
+**or** a published UEC grade D/F, when EC < H) ·
+`low_correction_margin{errors,capacity}` (the published UEC margin exactly 0:
 the worst block consumed its entire correction budget — the miscorrection
 signature; caught live on the zxing blackbox corpus where rqrr returned
 "photography" for a "photograph" ground truth at 12/24 errors. Consumers
-should treat the decoded content as unverified).
+should treat the decoded content as unverified). Score hints come only with
+a completed judgment.
 
 ## ISO/IEC 15415 mapping — and what we honestly claim
 
@@ -86,8 +108,9 @@ What this scanner measures maps onto that vocabulary as follows:
 
 Since v0.3 the report carries an explicit **`score.iso15415` grade card**
 (present whenever symbol geometry was measured): per-parameter
-`{value, grade}` in the ISO bands, plus `overall` = the LOWEST parameter —
-the ISO 15415 overall-grade rule.
+`{value, grade}` in the ISO bands, plus `overall` = the LOWEST measured
+parameter — the ISO 15415 overall-grade rule (an `unused_error_correction`
+withheld by a skipped `uec` check still counts).
 
 | ISO 15415 parameter | This scanner | Fidelity |
 |---|---|---|
@@ -119,7 +142,7 @@ DL URI Syntax §4.4/§4.5).
 
 ## Calibration status
 
-Weights and ramp intensities are v3 engineering constants, corpus-informed
-but **not yet human-device calibrated**. The calibration pass (Modal
-playbook: ~200 artistic codes × 2-3 phones, screen + paper) is phase D;
-expect a `score_contract: 4` when it lands.
+Weights and ramp intensities are engineering constants (unchanged since
+v3), corpus-informed but **not yet human-device calibrated**. A calibration
+pass (~200 artistic codes × 2-3 phones, screen + paper) would change them,
+and with them the score contract version.

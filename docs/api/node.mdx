@@ -35,7 +35,11 @@ const sync = scanSync(buffer, { profile: "fast" }); // scripts only
 `signal` rejects tasks still QUEUED on the pool (and pre-aborted signals
 reject immediately with `AbortError`). A RUNNING scan is not interrupted —
 it completes within its `profile`/`budgetMs` bound. Budget is the real
-latency control.
+latency control — and a report it cut says so: `trace.budget_exhausted`
+is `true`, empty detections are then not final, and a `null` score beside
+a detection means "not judged", never 0. `budgetMs: 0` is unbounded and
+reproducible; unset keeps the profile default (full 4000 · fast 800 ·
+frame 80 ms).
 </Warning>
 
 ## Server recipe (Nitro/Express upload endpoint)
@@ -51,8 +55,10 @@ export default defineEventHandler(async (event) => {
     if (!report.detections.length) return { ok: false, reason: "no_qr" };
     const d = report.detections[0];
     const untrusted = report.hints.some(h => h.hint === "low_correction_margin");
+    // null = not judged (a budget cut, or no score in this profile), never 0
     return { ok: true, text: d.content.text, kind: d.payload.kind,
-             score: report.score?.value ?? null, untrusted };
+             score: report.score?.value ?? null,
+             final: report.trace.budget_exhausted === false, untrusted };
   } catch (e) {
     const code = (e as Error).message.match(/QRS-\d{3}/)?.[0];
     throw createError({ statusCode: code === "QRS-001" ? 422 : 413 });

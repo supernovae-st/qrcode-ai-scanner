@@ -38,16 +38,27 @@ const onVerify = async () => {
   // decodes in the deep stage — `fast` would read NO on valid output.
   // 1500 ms bounds the UI thread.
   const report = scan_image(bytes, "full", undefined, undefined, 1500);
+  const cut = report.trace.budget_exhausted === true;
 
   if (!report.detections.length) {
-    scanStatus.value = ScanStatus.NO;
+    // a cut search is not a "no": it ran out of time before the deep stage
+    scanStatus.value = cut ? ScanStatus.NOT_JUDGED : ScanStatus.NO;
+  } else if (report.score === null) {
+    // decoded, not judged within the budget — never read null as 0
+    scanStatus.value = ScanStatus.NOT_JUDGED;
   } else {
-    const score = report.score?.value ?? 0;
+    const score = report.score.value; // a present score is always complete
     scanStatus.value =
       score >= 80 ? ScanStatus.HIGH : score >= 60 ? ScanStatus.MEDIUM : ScanStatus.LOW;
   }
 };
 ```
+
+`NOT_JUDGED` is a status of its own: the budget ran out before the deep
+stage or the score finished. Show a neutral "still checking" state and
+re-scan off the critical path — on idle or at export — with a larger
+budget or `0` (unbounded). Collapsing it into `NO` or `LOW` would grade a
+valid design on the clock of the user's device.
 
 ## The status mapping
 
@@ -56,7 +67,8 @@ const onVerify = async () => {
 | HIGH | score ≥ 80 | safe on all devices and conditions |
 | MEDIUM | 60-79 | fine; older phones / poor light may struggle |
 | LOW | decoded, < 60 | works here, fragile in the wild |
-| NO | no detection | regenerate |
+| NO | no detection, `trace.budget_exhausted === false` | regenerate |
+| NOT_JUDGED | decoded with no score, or no detection with `trace.budget_exhausted === true` | not a verdict: re-scan with more time |
 
 ## Product upgrades the report enables
 

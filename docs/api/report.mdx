@@ -25,10 +25,14 @@ Machine-readable mirrors — load these directly in tools and agents:
 </ResponseField>
 
 <ResponseField name="score" type="Score | null" required>
-  Scannability of the PRIMARY (first) detection. `null` in the `frame`
-  profile or when nothing decoded. Carries `weights_run` (how much of the
-  six-axis contract ran — the honesty integer behind partial scores) and
-  per-axis `refined_failed_at` (the bisected knee: "blur 2.25"). See
+  Scannability of the PRIMARY (first) detection. `null` exactly when no
+  judgment was published: nothing decoded · a configuration that computes
+  no score (the `frame` profile, every axis skipped) · a judgment the
+  budget interrupted (`trace.budget_exhausted: true` — not judged, re-scan
+  with a larger budget or `0`) · a contained fault. Never partial, never
+  `0`. Carries `weights_run` (how much of the six-axis contract ran — the
+  honesty integer behind a score on skipped axes) and per-axis
+  `refined_failed_at` (the bisected knee: "blur 2.25"). See
   [Scoring](/concepts/scoring).
 </ResponseField>
 
@@ -56,7 +60,13 @@ Machine-readable mirrors — load these directly in tools and agents:
   — why the scan succeeded or came back empty. `detections_found` counts
   the reads the engines delivered, before reconciliation; it includes hits
   the scanner refuses or holds for confirmation — read `detections`, not
-  the counter.
+  the counter. `total_ms` is the wall clock of the ladder walk(s) only.
+  `budget_exhausted` (score_contract ≥ 5) says whether the report is
+  final: `false` = every planned unit ran, the report is the unbounded
+  one (wall clock aside); `true` = the wall-clock budget cut planned work
+  (a stage or attempt, a rescue candidate, a score cell, a knee
+  bisection, an envelope probe) — partial. Absent on older reports:
+  unknown, never final.
 </ResponseField>
 
 <ResponseField name="versions" type="Versions" required>

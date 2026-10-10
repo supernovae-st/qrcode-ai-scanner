@@ -74,10 +74,15 @@ Rescued detections carry `engines: ["rescue"]` and a `"rescue"` entry in
 </Frame>
 
 <Note>
-Determinism contract: same bytes + same config + same version ⇒ the same
-attempt sequence, bit for bit on a given platform. A wall-clock budget
-makes the *cut point* machine-dependent; cross-platform, libm
-transcendentals may differ in the last ulp.
+Determinism contract: same bytes + same config + same scanner build ⇒ the
+same attempt sequence, bit for bit on a given platform. A wall-clock budget
+makes the *cut point* machine-dependent, and the report says when it cut:
+a planned stage, attempt or rescue candidate the deadline prevents sets
+`trace.budget_exhausted: true` (partial); `false` is the unbounded report.
+The grid re-derivations, the re-read and the end-of-walk pass have no
+budget and never set it. Cross-platform, libm transcendentals may differ in
+the last ulp; rxing's PDF417 decoder breaks ties in randomized order (the
+one engine exception).
 </Note>
 
 The normative version of this page is

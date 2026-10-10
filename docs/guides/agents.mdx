@@ -18,7 +18,8 @@ workflows, CI bots) consuming the scanner.
 ## Invariants you can rely on
 
 1. **Empty `detections` is success-with-nothing** — exit 1 on the CLI,
-   resolved Promise elsewhere. Only `QRS-\d{3}` faults are errors.
+   resolved Promise elsewhere. Only `QRS-\d{3}` faults are errors. It is
+   final only when `trace.budget_exhausted` is `false`.
 2. The JSON shape is identical on every surface and evolves additively —
    tolerate unknown fields/kinds/hints.
 3. `content.raw` (base64) is the byte truth; `text` is its one reading
@@ -32,14 +33,29 @@ workflows, CI bots) consuming the scanner.
    (and `eci`, `fnc1`) with what you encoded. `eci` is present only when
    the symbol declares an ECI (`[]` when it could not be located); `fnc1`
    only for GS1 (`first`) or AIM-application (`second`) data.
-5. Determinism: unbounded budget ⇒ same input → same report (per
-   platform/build). Safe to cache by input hash + `versions`.
-6. `meta`/`corners` are measured or `null` — never fabricated.
+5. **`trace.budget_exhausted` says whether a report is final.** `false`:
+   every planned unit ran, and the report equals the unbounded report for
+   the same input, configuration and scanner build on the same platform
+   (wall clock aside; PDF417 excepted — its decoder breaks ties in
+   randomized order, spec/04 § Determinism). `true`: the wall-clock budget
+   cut planned work. Then **re-scan unbounded first** (`--budget-ms 0`,
+   `budgetMs: 0`, `budget_ms=0`); never regenerate, accept or reject on
+   that report. Absent (older reports): unknown, never final.
+6. Cache only reports whose flag is `false`, keyed on the input + the WHOLE
+   configuration (profile, budget, skipped axes and checks, alpha options)
+   + `versions`, on the same build.
+7. **`score: null` is never `0`.** With detections it means the
+   configuration computes no score (`frame`, every axis skipped), the
+   budget interrupted the judgment (`trace.budget_exhausted: true` — not
+   judged, re-scan), or a contained fault. A present score is always a
+   complete judgment.
+8. `meta`/`corners` are measured or `null` — never fabricated.
 
 ## The regenerate loop
 
 ```text
 generate(params) → scan(full) →
+  ├─ trace.budget_exhausted  → re-scan unbounded first (never act on it)
   ├─ no detection            → adjust per trace (which stage died) + retry
   ├─ hints non-empty         → apply the mapped fixes:
   │    fix_finder_pattern{corner} → clear art at that corner
@@ -67,14 +83,19 @@ agent can drive generation parameters from the report alone.
 ## CLI patterns for tool use
 
 ```bash
-qrscan in.png | jq '{text: .detections[0].content.text,
-                     charset: .detections[0].content.charset,
-                     kind: .detections[0].payload.kind,
-                     score: .score.value,
-                     hints: [.hints[].hint]}'
+qrscan in.png --budget-ms 0 | jq '{text: .detections[0].content.text,
+                                   charset: .detections[0].content.charset,
+                                   kind: .detections[0].payload.kind,
+                                   score: .score.value,
+                                   final: (.trace.budget_exhausted == false),
+                                   hints: [.hints[].hint]}'
 ```
 
 Gate on `charset` before acting on `text`: `"unknown"` means the scanner
-could not read every byte.
+could not read every byte. `--budget-ms 0` makes the report final and
+reproducible; under a budget, read `final` first.
 
-Exit codes are the branch signal: `0` decoded · `1` nothing · `2` fault.
+Exit codes are the branch signal: `0` decoded · `1` nothing · `2` fault
+(or, with `--score-only`, a configuration that computes no score) · `3`
+(`--score-only` only) decoded, but not judged within the budget — re-scan
+with `--budget-ms 0`.

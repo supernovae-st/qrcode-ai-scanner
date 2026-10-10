@@ -24,7 +24,7 @@ artifacts off one Rust core.
     The 5-stage deterministic ladder, S1 pyramid → S5 erasure rescue
   </Card>
   <Card title="Scoring" icon="gauge-high" href="/concepts/scoring">
-    Score v3, the synthetic UEC margin, the ISO 15415-informed grade card
+    Score contract v5, the synthetic UEC margin, the ISO 15415-informed grade card
   </Card>
   <Card title="Report reference" icon="file-code" href="/api/report">
     Every field of the ScanReport, with the JSON Schema
@@ -35,10 +35,12 @@ artifacts off one Rust core.
 
 1. **A deterministic multi-engine decode ladder** — rxing (ZXing lineage)
    + rqrr (quirc lineage) + curated preprocessing rungs. No RNG anywhere:
-   same input, same result, always.
-2. **Score contract v3** — survival ramps across six stress axes with
-   structural caps. The 0-100 value is a real *margin* measure, not
-   "did it decode".
+   same input and configuration, same report — unbounded, or whenever the
+   report says the budget cut nothing (`trace.budget_exhausted: false`).
+2. **Score contract v5** — survival ramps across six stress axes with
+   structural caps and the error-correction margin cap. The 0-100 value is
+   a real *margin* measure, not "did it decode" — and a whole judgment or
+   none: a budget never ships a partial score.
 3. **Synthetic UEC** — the ISO 15415 Unused Error Correction margin from
    RS syndromes (exact corrected-error counts). It catches real
    Reed-Solomon *miscorrections* and flags them.

@@ -32,16 +32,40 @@ fn normalized_json(mut report: qrcode_ai_scanner::ScanReport) -> String {
     serde_json::to_string(&report).unwrap()
 }
 
+/// Every symbology fixture but the PDF417 ones: rxing's PDF417 decoder
+/// breaks codeword-confidence ties in randomized `HashMap` order, the one
+/// documented engine exception (spec/04 § Determinism). Other symbologies'
+/// readers carry no such order (std `RandomState` re-keys every map, so
+/// in-process repetition alone would expose one).
+fn symbology_fixtures() -> Vec<String> {
+    let dir = format!("{}/../../fixtures/symbology", env!("CARGO_MANIFEST_DIR"));
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| {
+            (name.ends_with(".png") || name.ends_with(".jpg")) && !name.starts_with("pdf417")
+        })
+        .collect();
+    names.sort();
+    assert!(names.len() >= 20, "the symbology set: {names:?}");
+    names
+        .into_iter()
+        .map(|name| format!("symbology/{name}"))
+        .collect()
+}
+
 /// One clean decode, one artistic decode (deep-ladder + full stress score),
 /// one frontier blind spot (the whole ladder runs and finds nothing) — the
-/// three report shapes the pipeline can produce.
+/// three report shapes the pipeline can produce — and every non-PDF417
+/// symbology fixture (their readers, their stress cells).
 #[test]
 fn concurrent_scans_yield_byte_identical_reports() {
-    let cases = [
-        ("clean/OK_68ms_100_4e875a2c.png", true),
-        ("artistic/blob-style-monkey-logo.webp", true),
-        ("frontier/scene-photo-overlay.webp", false),
+    let mut cases = vec![
+        ("clean/OK_68ms_100_4e875a2c.png".to_owned(), true),
+        ("artistic/blob-style-monkey-logo.webp".to_owned(), true),
+        ("frontier/scene-photo-overlay.webp".to_owned(), false),
     ];
+    cases.extend(symbology_fixtures().into_iter().map(|rel| (rel, true)));
     // The budget cut point is wall-clock and thus load-dependent — under
     // thread contention it WOULD flake (the documented caveat). `None`
     // is the reproducible mode; everything else is the stock Full profile.
@@ -52,7 +76,7 @@ fn concurrent_scans_yield_byte_identical_reports() {
         .build();
 
     for (rel, decodes) in cases {
-        let bytes = fixture(rel);
+        let bytes = fixture(&rel);
         let baseline = scanner.scan(ImageInput::encoded(&bytes)).unwrap();
         // Semantic anchor first — equality of the WRONG reports proves nothing.
         assert_eq!(

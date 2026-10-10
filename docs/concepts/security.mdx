@@ -34,15 +34,24 @@ and fuzzed.
 
 ## Determinism
 
-Same bytes + same config + same crate version ⇒ the same attempt
-sequence and the same report, **bit for bit on a given platform**, because
-there is no RNG anywhere in the pipeline. Two bounded caveats:
+Same bytes + same config + same scanner build ⇒ the same attempt sequence
+and the same report, **bit for bit on a given platform** (wall clock
+aside), because there is no RNG anywhere in the pipeline. Three bounded
+caveats:
 
-1. a wall-clock budget makes the *cut point* machine-dependent — use an
-   unbounded budget for strictly reproducible reports;
+1. a wall-clock budget makes the *cut point* machine-dependent — and every
+   report says whether it was cut: `trace.budget_exhausted: false` is the
+   unbounded report, `true` is partial (a judgment it interrupts is
+   `score: null`, never a deflated value). Use an unbounded budget for
+   strictly reproducible reports, and cache only reports whose flag is
+   `false`;
 2. across platforms, libm transcendentals (warp kernels, gaussian blur)
    can differ in the last ulp — a stress cell sitting exactly on a knee
-   can flip.
+   can flip;
+3. a known dependency exception: rxing's PDF417 decoder breaks codeword
+   confidence ties in randomized order, so a PDF417 symbol near a decode
+   threshold can score (and a marginal one decode) differently between
+   runs. QR-family symbols and every other symbology are unaffected.
 
 ## Verification surface
 

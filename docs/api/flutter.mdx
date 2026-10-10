@@ -31,7 +31,11 @@ final frame = await QrcodeAiScanner.scanFrame(rgba, w, h); // profile: 'frame'
 ```
 
 Scans run on flutter_rust_bridge's Rust worker pool, so `await` never blocks the
-UI isolate. Profiles: `'full'` · `'fast'` · `'frame'`.
+UI isolate. Profiles: `'full'` · `'fast'` · `'frame'`, each under its default
+wall-clock budget (4000 · 800 · 80 ms — this release cannot override it). A
+report the budget cut says so: `report.trace.budgetExhausted == true`; a null
+`score` beside a detection then means "not judged", never 0. A null
+`budgetExhausted` is an older report: unknown, never final.
 
 Unlike the Kotlin/Swift bindings (which return a JSON string), Flutter ships a
 **typed** [`ScanReport`](/api/report) — sealed `Payload`/`Hint`, `Score` with the

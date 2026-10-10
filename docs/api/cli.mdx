@@ -10,10 +10,17 @@ cargo install qrcode-ai-scanner-cli
 ## Usage
 
 ```bash
-qrscan <image> [--profile full|fast|frame] [--score-preset design|capture]
+qrscan <image> [--profile full|fast|frame] [--budget-ms <ms>]
+               [--score-preset design|capture]
                [--alpha-background auto|white|black|none|"#rrggbb"]
                [--pretty|-p] [--score-only|-s]
 ```
+
+`--budget-ms` overrides the profile's wall-clock budget (`full` 4000 ·
+`fast` 800 · `frame` 80 ms); `--budget-ms 0` is unbounded — the
+reproducible mode, the one for CI gates. A report the budget cut says so:
+`trace.budget_exhausted` is `true`, `--pretty` names what was cut, and
+`--score-only` exits 3 when the budget left a decoded QR unjudged.
 
 `--alpha-background` picks the background flattened under transparent
 pixels (`auto` default — opaque images are untouched); `--pretty` then
@@ -23,8 +30,8 @@ renders the flatten verdict plus the placement-envelope strip
 | Mode | Output |
 |---|---|
 | default | the full `ScanReport` JSON, pretty-printed, on stdout |
-| `--pretty` | human summary: content, payload, symbol, score + axes, UEC, ISO grade card, hints |
-| `--score-only` | the bare composite value (`87`) — for shell gates |
+| `--pretty` | human summary: content, payload, symbol, score + axes, UEC, ISO grade card, hints — or why the score is missing (`not computed`, `not judged`, `unavailable`) |
+| `--score-only` | the bare composite value (`87`) — for shell gates; a complete judgment, never a deflated one |
 
 ## Example (`--pretty`)
 
@@ -58,15 +65,19 @@ That single line is the actionable truth a plain "decoded" never gives you. See
 
 | Exit | Meaning |
 |---|---|
-| `0` | ≥1 QR decoded |
-| `1` | scan ran clean, no QR found (all modes) |
-| `2` | invalid input/usage — message on stderr with `[QRS-xxx]` |
+| `0` | ≥1 QR decoded (with `--score-only`: its complete score on stdout) |
+| `1` | no QR found (all modes) — final only when the scan was not cut (`trace.budget_exhausted: false`) |
+| `2` | invalid input/usage — message on stderr with `[QRS-xxx]` · `--score-only` with a configuration that computes no score (`frame`, every axis skipped) or after a contained fault |
+| `3` | `--score-only` only: a QR decoded, but the budget ran out before its score was judged — nothing on stdout; retry with a larger `--budget-ms` (`0` never yields 3) |
+
+Branch on the code, never on the message text.
 
 ## Recipes
 
 ```bash
-# CI quality gate: fail the build under score 70
-score=$(qrscan render.png -s) && [ "$score" -ge 70 ] || exit 1
+# CI quality gate: fail the build under score 70 — unbounded, so the gate
+# never depends on how loaded the runner is (and never exits 3)
+score=$(qrscan render.png -s --budget-ms 0) && [ "$score" -ge 70 ] || exit 1
 
 # extract just the decoded text
 qrscan in.png | jq -r '.detections[0].content.text'

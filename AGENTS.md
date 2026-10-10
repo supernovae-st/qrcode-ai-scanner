@@ -70,7 +70,16 @@ manifest only and reports the gate as NOT VERIFIED, never as a pass.
 
 - **Zero `unwrap`/`expect`/`panic!` in `src/`** (tests are exempt). Clippy
   denies it.
-- **No RNG anywhere** — the pipeline is deterministic by contract.
+- **No RNG anywhere** — the pipeline is deterministic by contract (known
+  dependency exception: rxing's PDF417 decoder breaks confidence ties in
+  randomized `HashMap` order — spec/04 § Determinism; the threaded
+  determinism pin excludes the PDF417 fixtures).
+- **A budget cut is flagged, never partial**: `trace.budget_exhausted` is
+  `true` exactly when the deadline prevented a planned unit (spec/02 §
+  Budget semantics); a judgment it interrupts is `score: null`. Bounded
+  checks with no budget (grid re-derivations, the re-read, the end-of-walk
+  pass) never set it. A test that asserts a score runs unbounded, or
+  asserts "absent with the flag set, or the unbounded value".
 - **Additive wire evolution only**: never rename/remove a JSON field or
   enum value. New variants are fine — consumers parse leniently.
 - **Every contract change cascades** through ALL of: the Rust types →
