@@ -3,8 +3,9 @@
 `xtask bench …` measures what the correctness oracle does not: outer-call
 latency, memory, allocations, throughput and WASM cost of the scanner,
 **base** (the published 0.9.0) versus **candidate** (this tree), by the
-benchmark protocol `qrscan-oracle/v1.5`. Correctness stays with
-`xtask oracle`; the bench only records whether outputs agree.
+method this file states (every run's JSON output names it under
+`protocol`). Correctness stays with `xtask oracle`; the bench only records
+whether outputs agree.
 
 Everything here is deterministic — no RNG, no resampling. Timing depends on
 the host, which is why a timing run is gated on a calm host (below) and a
@@ -265,9 +266,10 @@ codes and `file.rs:line:column` panic locations.
 ## Host gate
 
 A timing segment starts only when the one-minute load average is at most
-0.5 per logical core (6 on 12 cores), no sibling build runs (a cargo /
-rustc process in any worktree of this repository, or carrying the `qrscan`
-/ `qrcode-ai-scanner` markers — arguments are read to classify, never
+0.5 per logical core (for example 6 on a 12-core host), no other build
+runs (a cargo / rustc process in any worktree of this repository, or
+carrying the `qrscan` / `qrcode-ai-scanner` markers — arguments are read
+to classify, never
 printed), the host is on AC power outside Low Power Mode, swap use is at
 most 8 GB (8 × 10⁹ bytes), and the run holds the host-wide bench lock
 (`/var/tmp/qrscan-bench.lock`, outside the cleaned `/tmp`). A run takes the
@@ -277,7 +279,7 @@ without following a symbolic link and only as a regular file (never
 truncated through anything else), and its inode is re-checked at every
 reading. A reading opens only while this run holds the lock. Readings
 fail closed: an unreadable load, process table, swap or power state, a
-sibling-build probe that fails or passes its cap — the worktree list,
+probe for other builds that fails or passes its cap — the worktree list,
 read at every reading, or the working directory of a build process still
 running — any other probe past its cap, or a replaced lock file closes
 the gate. The gate is read before every segment, every
@@ -291,7 +293,7 @@ A dry run enforces only the host floor: it refuses to start, and stops,
 while load1 > 30, swap use > 8 GB or another bench run holds the lock; once
 stopped it starts no new phase.
 
-A dry run also pre-screens instability, before any quiet window: per
+A dry run also pre-screens instability, before any gated run: per
 budgeted mode and set, the share of images whose A/B outputs disagree —
 between the variants, or across one variant's repetitions — with the sets
 above 10 % flagged, since there the exclusion rule would make every gated
@@ -304,11 +306,11 @@ xtask bench gate                # exit 0 open, 3 closed
 xtask bench gate --wait 3600    # poll until open or the deadline; holds the host lock while it waits
 ```
 
-A gated run starts only in a quiet window the operator declares (no other
-build of this repository; other work on the host informed). Build the
-harness once, in a slot-checked development-profile step, and run the
-binary directly — `cargo run` would compile first, and no cargo process
-would show the run to others.
+Start a gated run only when nothing else builds this repository and
+whoever else uses the host knows a measurement is running. Build the
+harness once, with the development profile, as a step of its own while
+nothing else builds, then run the binary directly: `cargo run` would
+compile at the start of the run instead.
 
 ## Commands
 
@@ -338,7 +340,7 @@ $X bench run --dry-run --per-group 1 --reps 2 --out <fresh dir> \
   --lib-base … --lib-candidate … --cli-base … --cli-candidate … \
   --node-base … --node-candidate … --wasm-base … --wasm-candidate …
 
-# 5. the gated measurement, in a declared quiet window: waits for the lock and the gate up to the deadline
+# 5. the gated measurement, while nothing else builds: waits for the lock and the gate up to the deadline
 $X bench run --wait-gate 14400 --out <fresh dir> …
 ```
 
