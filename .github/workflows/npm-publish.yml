@@ -18,10 +18,12 @@ name: npm-publish
 # napi, no pnpm and no package script. `pack-native` and `build-wasm` pack
 # and inspect every tarball; the publish jobs read those very files back and
 # upload them with `npm publish <tarball> --ignore-scripts`: npm repacks
-# nothing and runs no lifecycle script. Every action they use is pinned by
-# commit; setup-node's Node 24 line is the one relaxation (RELEASING.md §
-# Publishing). The build jobs whose outputs ship pin their third-party
-# actions by commit and restore no build cache on a tag.
+# nothing and runs no lifecycle script, and each npm publish first checks
+# that its operand is a tarball the in-job re-inspection recorded. Every
+# action they use is pinned by commit; setup-node's Node 24 line is the one
+# relaxation (RELEASING.md § Publishing). The build jobs whose outputs ship
+# pin their third-party actions by commit and restore no build cache on a
+# tag.
 
 on:
   push:
@@ -195,9 +197,12 @@ jobs:
       # The very tarballs pack-native inspected, read back once more before
       # anything is uploaded (their bytes, no repacking): the committed
       # loader and manifest, no install script, the main package and one
-      # platform package per pin, nothing else.
+      # platform package per pin, nothing else. The record of what passed
+      # (path and sha256) is what each npm publish checks its operand against.
       - name: re-inspect the release set about to be uploaded
-        run: python3 scripts/package-inspect.py archive npm-release/*/*.tgz --release-set --strict --quiet
+        run: >
+          python3 scripts/package-inspect.py archive npm-release/*/*.tgz --release-set --strict --quiet
+          --record "$RUNNER_TEMP/npm-inspected.sha256"
       # Every platform package missing at this version is uploaded, and one
       # that cannot be stops the job before the main package. Then every pin
       # must resolve on the registry; only then does the main package go up.
@@ -207,6 +212,17 @@ jobs:
       - name: publish the platform packages missing at this version, then the main package
         run: |
           set -euo pipefail
+          # The operand of every npm publish below: a regular .tgz file, no
+          # directory or link, whose path and sha256 the re-inspection above
+          # recorded. A variable naming anything else stops the job.
+          inspected() {
+            if [ -f "$1" ] && [ ! -L "$1" ] && [[ "$1" == *.tgz ]] &&
+              grep -qxF "$(sha256sum -- "$1")" "$RUNNER_TEMP/npm-inspected.sha256"; then
+              return 0
+            fi
+            echo "::error::$1 is not a regular .tgz file the re-inspection recorded (path and sha256)"
+            exit 1
+          }
           field() { tar -xzOf "$1" package/package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).$2"; }
           status() { curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${1/\//%2f}/$2"; }
           # A version already on npm must be the very tarball inspected here:
@@ -231,6 +247,7 @@ jobs:
               200) echo "$name@$version already on npm - skipping"; verify_live "$tgz" "$name" "$version" ;;
               404)
                 echo "publishing $name@$version"
+                inspected "$tgz"
                 if out=$(npm publish "$tgz" --access public --ignore-scripts 2>&1); then
                   echo "$out"
                 else
@@ -348,14 +365,29 @@ jobs:
         with:
           name: npm-wasm-tarball
           path: npm-wasm
+      # The record of what passed (path and sha256) is what npm publish
+      # checks its operand against.
       - name: re-inspect the wasm tarball about to be uploaded
-        run: python3 scripts/package-inspect.py archive npm-wasm/*.tgz --strict --quiet
+        run: >
+          python3 scripts/package-inspect.py archive npm-wasm/*.tgz --strict --quiet
+          --record "$RUNNER_TEMP/npm-inspected.sha256"
       # Idempotent: a version already on npm is skipped (safe re-runs), and
       # one npm calls "previously published" is live already.
       - name: publish the wasm tarball (skip if this version is on npm)
         run: |
           set -euo pipefail
           shopt -s nullglob
+          # The operand of npm publish below: a regular .tgz file, no
+          # directory or link, whose path and sha256 the re-inspection above
+          # recorded. A variable naming anything else stops the job.
+          inspected() {
+            if [ -f "$1" ] && [ ! -L "$1" ] && [[ "$1" == *.tgz ]] &&
+              grep -qxF "$(sha256sum -- "$1")" "$RUNNER_TEMP/npm-inspected.sha256"; then
+              return 0
+            fi
+            echo "::error::$1 is not a regular .tgz file the re-inspection recorded (path and sha256)"
+            exit 1
+          }
           tarballs=(npm-wasm/*.tgz)
           if [ "${#tarballs[@]}" -ne 1 ]; then
             echo "::error::expected exactly one wasm tarball, found: ${tarballs[*]}"
@@ -386,6 +418,7 @@ jobs:
             200) echo "$name@$version already on npm - skipping"; verify_live ;;
             404)
               echo "publishing $name@$version"
+              inspected "$tgz"
               if out=$(npm publish "$tgz" --access public --ignore-scripts 2>&1); then
                 echo "$out"
               else

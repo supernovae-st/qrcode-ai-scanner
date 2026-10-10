@@ -85,6 +85,13 @@ tokens). Every privileged job must:
                option; never pnpm, yarn or bun publish. A trailing shell
                comment is stripped from every code line first, so the required
                words cannot hide in one
+  operand      `publish` reads how the operand is spelled, and a variable
+               named *tgz may hold a directory: so every `npm publish` command
+               line comes right after the command line `inspected <its
+               operand>`, in a step that defines `inspected` once, exactly as
+               NPM_OPERAND_CHECK says (a regular .tgz file, no directory or
+               link, whose path and sha256 the job's re-inspection recorded),
+               and that re-inspection runs with --record NPM_RECORD
   concurrency  join publish-${{ github.workflow }}-${{ github.ref }}, never
                cancelling, so a re-run on the tag waits instead of racing
 
@@ -156,6 +163,22 @@ REINSPECT_JOBS = {
 # its first publishing step: every file PyPI already serves at the version must
 # be the local one (sha256), since --skip-existing skips a live file by name.
 PYPI_LIVE_RUN = "python3 scripts/package-inspect.py pypi-live dist/* --strict --quiet"
+
+# The check every `npm publish` runs on its operand first, in the same step,
+# as its command lines read (comments stripped): the operand must be a regular
+# .tgz file, not a link, whose path and sha256 the job's re-inspection wrote to
+# NPM_RECORD (`package-inspect.py archive … --record`). Anything else exits.
+NPM_RECORD = "$RUNNER_TEMP/npm-inspected.sha256"
+NPM_OPERAND_CHECK = (
+    "inspected() {",
+    'if [ -f "$1" ] && [ ! -L "$1" ] && [[ "$1" == *.tgz ]] &&',
+    f'grep -qxF "$(sha256sum -- "$1")" "{NPM_RECORD}"; then',
+    "return 0",
+    "fi",
+    'echo "::error::$1 is not a regular .tgz file the re-inspection recorded (path and sha256)"',
+    "exit 1",
+    "}",
+)
 
 # The job each publishing job must need: the one that inspects (for the iOS
 # zip, builds) what it uploads. A publishing job missing here fails.
@@ -553,6 +576,39 @@ def _npm_publish_operand(line: str):
     return None
 
 
+def _operand_check_problems(lines: list) -> list:
+    """Why the `npm publish` command lines among LINES (one step's) do not each
+    come right after `inspected <operand>`, below the step's one definition of
+    the check, NPM_OPERAND_CHECK's; [] when they do or when there is none."""
+    uploads = [k for k, line in enumerate(lines) if _invokes(line, "npm", NPM_UPLOAD)]
+    if not uploads:
+        return []
+    size = len(NPM_OPERAND_CHECK)
+    found = [k for k in range(len(lines) - size + 1) if tuple(lines[k:k + size]) == NPM_OPERAND_CHECK]
+    defined = [k for k, line in enumerate(lines) if re.match(r"function\s+inspected\b|inspected\s*\(\s*\)", line)]
+    problems = []
+    if len(found) != 1 or defined != found:
+        problems.append("the step must define `inspected` once, exactly as NPM_OPERAND_CHECK says (a regular .tgz "
+                        f"file, no directory or link, whose path and sha256 the re-inspection wrote to {NPM_RECORD})")
+    for k in uploads:
+        parsed = _npm_publish_operand(lines[k])
+        operand = parsed[0] if parsed else None
+        if operand is None:
+            continue  # the publish rule names an npm publish without an operand
+        if not found or k - 1 < found[0] + size or _words(lines[k - 1]) != ["inspected", operand]:
+            problems.append(f"`{lines[k]}` must come right after the command line `inspected {operand}`, below the "
+                            "check's definition")
+    return problems
+
+
+def _records_operands(line: str) -> bool:
+    """LINE re-inspects archives under --strict and writes the record the operand check reads."""
+    words = _words(line)
+    if not re.search(r"package-inspect\.py\s+archive\b", line) or "--strict" not in words or "--record" not in words:
+        return False
+    return words[words.index("--record") + 1:][:1] == [NPM_RECORD]
+
+
 def _words(text: str) -> list:
     """Shell words of TEXT, each stripped of the quotes and the punctuation a
     command substitution or a sequence wraps around it."""
@@ -894,6 +950,8 @@ def check_job(workflow: str, job_id: str, job: dict, wf: dict) -> list:
                 if _invokes(line, tool, {"publish"}):
                     flag("npm-publish", f"`{line}`: {tool} publish packs a directory and runs its scripts; upload "
                                         "the inspected tarball with npm publish --ignore-scripts", i)
+        for message in _operand_check_problems(_code_lines(step.get("run"))):
+            flag("npm-operand", message, i)
     for level, env_map in (("job", job.get("env")), *((f"step {i + 1}", s.get("env")) for i, s in enumerate(steps))):
         value = env_map.get("RUST_TOOLCHAIN") if isinstance(env_map, dict) else None
         if value is not None and not EXACT.fullmatch(str(value)):
@@ -908,7 +966,11 @@ def check_job(workflow: str, job_id: str, job: dict, wf: dict) -> list:
             for step in steps[:first_publish] for line in _code_lines(step.get("run"))):
         flag("reinspect", "must run `package-inspect.py archive … --strict` on the downloaded artifact before the "
                           "first publishing step (the versions gate does not prove the bytes a sibling job built)")
-    pypi = [step for step in steps if re.fullmatch(r"pypa/gh-action-pypi-publish(/.+)?", _uses(step)[0])]
+    if any(_invokes(line, "npm", NPM_UPLOAD) for step in steps for line in _code_lines(step.get("run"))) and not any(
+            _records_operands(line) for step in steps[:first_publish] for line in _code_lines(step.get("run"))):
+        flag("npm-operand", f"re-inspect with `package-inspect.py archive … --strict --record \"{NPM_RECORD}\"` "
+                            "before the first publishing step: the operand check reads that record")
+    pypi =[step for step in steps if re.fullmatch(r"pypa/gh-action-pypi-publish(/.+)?", _uses(step)[0])]
     if pypi:
         inputs = [step.get("with") if isinstance(step.get("with"), dict) else {} for step in pypi]
         dirs = sorted({str(given.get("packages-dir", "dist")).strip().rstrip("/") for given in inputs})
@@ -1154,8 +1216,26 @@ RUSTUP_STEP = "      - name: Rust ${{ env.RUST_TOOLCHAIN }} through rustup\n    
 REINSPECT = "      - name: re-inspect the release set about to be uploaded\n"
 WASM_TAIL = "      # the very tarball build-wasm packed, smoke-tested and inspected\n"
 NATIVE_PUBLISH = '                if out=$(npm publish "$tgz" --access public --ignore-scripts 2>&1); then'
+NATIVE_CALL = '                inspected "$tgz"\n'
 WASM_PUBLISH = ('              echo "publishing $name@$version"\n'
+                '              inspected "$tgz"\n'
                 '              if out=$(npm publish "$tgz" --access public --ignore-scripts 2>&1); then')
+OPERAND_CHECK = """\
+          inspected() {
+            if [ -f "$1" ] && [ ! -L "$1" ] && [[ "$1" == *.tgz ]] &&
+              grep -qxF "$(sha256sum -- "$1")" "$RUNNER_TEMP/npm-inspected.sha256"; then
+              return 0
+            fi
+            echo "::error::$1 is not a regular .tgz file the re-inspection recorded (path and sha256)"
+            exit 1
+          }
+"""
+RECORDED = '          --record "$RUNNER_TEMP/npm-inspected.sha256"\n'
+NATIVE_REINSPECT = ("      - name: re-inspect the release set about to be uploaded\n        run: >\n"
+                    "          python3 scripts/package-inspect.py archive npm-release/*/*.tgz --release-set --strict"
+                    " --quiet\n" + RECORDED)
+WASM_REINSPECT = ("      - name: re-inspect the wasm tarball about to be uploaded\n        run: >\n"
+                  "          python3 scripts/package-inspect.py archive npm-wasm/*.tgz --strict --quiet\n" + RECORDED)
 PYPI = "      - uses: pypa/gh-action-pypi-publish"
 PY_REINSPECT = ("      - name: re-inspect the exact set about to be uploaded\n"
                 "        run: python3 scripts/package-inspect.py archive dist/* --release-set --strict --quiet\n")
@@ -1522,13 +1602,10 @@ MUTATIONS = (
         "      - run: |\n          pnpm install # --frozen-lockfile\n" + REINSPECT)], {}, 1,
      "npm-publish.yml › publish-native [unlocked-install]"),
     # -- the in-job re-inspection of the downloaded artifact
-    ("publish-native drops its re-inspect step", P, [("npm-publish.yml",
-        "      - name: re-inspect the release set about to be uploaded\n        run: python3 scripts/package-inspect.py"
-        " archive npm-release/*/*.tgz --release-set --strict --quiet\n", "")], {}, 1,
+    ("publish-native drops its re-inspect step", P, [("npm-publish.yml", NATIVE_REINSPECT, "")], {}, 1,
      "npm-publish.yml › publish-native [reinspect]"),
-    ("publish-wasm drops its re-inspect step", P, [("npm-publish.yml",
-        "      - name: re-inspect the wasm tarball about to be uploaded\n        run: python3 scripts/package-inspect.py"
-        " archive npm-wasm/*.tgz --strict --quiet\n", "")], {}, 1, "npm-publish.yml › publish-wasm [reinspect]"),
+    ("publish-wasm drops its re-inspect step", P, [("npm-publish.yml", WASM_REINSPECT, "")], {}, 1,
+     "npm-publish.yml › publish-wasm [reinspect]"),
     ("python release drops its re-inspect step", P, [("python.yml", PY_REINSPECT, "")], {}, 1,
      "python.yml › release [reinspect]"),
     ("python release re-inspects only after publishing", P, [
@@ -1552,6 +1629,35 @@ MUTATIONS = (
     ("the upload from another directory than the one compared", P, [
         ("python.yml", "          packages-dir: dist\n", "          packages-dir: wheelhouse\n")], {}, 1,
      "python.yml › release [pypi-live]"),
+    # -- the operand check every npm publish runs first: `publish` reads only how
+    #    the operand is spelled, and a variable named *tgz may hold a directory
+    ("publish-native publishes with no operand check", P, [("npm-publish.yml", NATIVE_CALL + NATIVE_PUBLISH,
+                                                             NATIVE_PUBLISH)], {}, 1,
+     "npm-publish.yml › publish-native [npm-operand]"),
+    ("publish-wasm publishes with no operand check", P, [
+        ("npm-publish.yml", WASM_PUBLISH, WASM_PUBLISH.replace('              inspected "$tgz"\n', ""))], {}, 1,
+     "npm-publish.yml › publish-wasm [npm-operand]"),
+    ("the operand check run on another word than the operand", P, [
+        ("npm-publish.yml", NATIVE_CALL, NATIVE_CALL.replace("$tgz", "$main"))], {}, 1,
+     "npm-publish.yml › publish-native [npm-operand]"),
+    ("the operand check failing open", P, [("npm-publish.yml", OPERAND_CHECK, OPERAND_CHECK.replace("exit 1",
+                                                                                                      "return 0"))],
+     {}, 1, "npm-publish.yml › publish-native [npm-operand]"),
+    ("the operand check redefined to pass anything", P, [
+        ("npm-publish.yml", OPERAND_CHECK + "          tarballs=",
+         OPERAND_CHECK + "          inspected() { :; }\n          tarballs=")], {}, 1,
+     "npm-publish.yml › publish-wasm [npm-operand]"),
+    ("publish-wasm without the operand check's definition", P, [
+        ("npm-publish.yml", OPERAND_CHECK + "          tarballs=", "          tarballs=")], {}, 1,
+     "npm-publish.yml › publish-wasm [npm-operand]"),
+    ("the operand check defined only below the publish", P, [
+        ("npm-publish.yml", OPERAND_CHECK + "          tarballs=", "          tarballs="),
+        ("npm-publish.yml", None, OPERAND_CHECK)], {}, 1, "npm-publish.yml › publish-wasm [npm-operand]"),
+    ("the re-inspection writes no record", P, [("npm-publish.yml", RECORDED, "")], {}, 1,
+     "npm-publish.yml › publish-native [npm-operand]"),
+    ("the record written where the operand check does not read", P, [
+        ("npm-publish.yml", RECORDED, RECORDED.replace("npm-inspected", "other"))], {}, 1,
+     "npm-publish.yml › publish-native [npm-operand]"),
     # -- the named exception: three exact steps, nothing else
     ("the Flutter waiver claimed by another job", P, [("python.yml", PYPI, "      - run: flutter pub get\n" + PYPI)],
      {}, 1, "FAIL    python.yml › release [unlocked-pub-get]"),
