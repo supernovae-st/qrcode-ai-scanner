@@ -109,7 +109,9 @@ and candidate are the same file, or whose Node or WASM driver did not load
   image a variant completed); `trace.total_ms` as a secondary column only.
 - Valid pairs only: an image enters a paired test only when both variants
   completed every call — reference walk, warm-up and timed calls — without
-  error, with one output over every call, the two variants agreeing.
+  error, with one output over every call, the two variants agreeing. A
+  reference walk that errors is an error exclusion, never a walk every
+  timed call would read as truncated against.
   Excluded pairs are counted by reason (resource failure, error,
   incomplete, no reference, unstable, disagreement) in every class row and
   the status line.

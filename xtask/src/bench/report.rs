@@ -80,7 +80,8 @@ struct ImageSide {
     timed: usize,
     /// Timed calls that returned a report.
     ok: usize,
-    /// Error replies of every call, the warm-up included.
+    /// Error replies of every call, the warm-up and (budgeted modes) the
+    /// reference walk included.
     errors: usize,
     /// Resource failures of this image and variant: its reference walk,
     /// its warm-up and its timed calls.
@@ -102,7 +103,8 @@ struct ImageSide {
     /// that the median call(s) completed — `None` without a reference walk
     /// that tried any.
     work_share: Option<f64>,
-    /// Budgeted modes: whether the image's reference walk came back.
+    /// Budgeted modes: whether the image's reference walk came back with a
+    /// report.
     reference: bool,
     /// Timed calls truncated — their walk or judgment differs from the
     /// reference's — and, of every timed call, those whose walk differs,
@@ -162,6 +164,11 @@ fn image_side(
         .count();
     let budget = mode.budget_ms().map(|b| ms(b * 1_000_000));
     let reference = reference.filter(|_| mode.budgeted());
+    // a reference walk that errored is no walk to read truncation from:
+    // the pair is an error exclusion, like an erroring warm-up or timed
+    // call — never a side whose every call reads as truncated
+    let reference_error = reference.is_some_and(|r| r.error.is_some());
+    let reference = reference.filter(|r| r.error.is_none());
     let truncated = |s: &Sample| reference.is_some_and(|r| s.truncated(r, mode));
     let judged = |s: &Sample| reference.is_some_and(|r| s.judgment_cut(r, mode));
     let middle = median_calls(&ok);
@@ -180,7 +187,7 @@ fn image_side(
     ImageSide {
         timed: timed(samples).count(),
         ok: ok.len(),
-        errors: samples.iter().filter(|s| s.error.is_some()).count(),
+        errors: samples.iter().filter(|s| s.error.is_some()).count() + usize::from(reference_error),
         failures,
         median_ms: stats::median(&ms_values),
         median_total_ms: stats::median(&totals),
@@ -2276,6 +2283,76 @@ mod tests {
             pair_status(&unreferenced, &unreferenced, 5, Mode::FullUnbounded),
             Ok(()),
             "an unbudgeted mode has no reference walk to need"
+        );
+    }
+
+    /// A reference walk that errors leaves no walk to read truncation
+    /// from: the pair is an error exclusion — out of latency and of the
+    /// `McNemar` tests, counted under errors — like an erroring warm-up or
+    /// timed call. Read as a walk, it would make every timed call of its
+    /// side truncated, and six such images a truncation regression
+    /// (p = 1/64).
+    #[test]
+    fn an_erroring_reference_walk_is_an_error_exclusion() {
+        let failed = || Sample {
+            error: Some(String::from("QRS-001")),
+            ..Sample::default()
+        };
+        let runs: Vec<Sample> = (0..=5).map(|r| sample(r, 2_000_000, "x")).collect();
+        let clean = image_side(&runs, Some(&sample(0, 2_000_000, "x")), 0, Mode::Frame);
+        let broken = image_side(&runs, Some(&failed()), 0, Mode::Frame);
+        assert_eq!(
+            (broken.errors, broken.reference, broken.truncated),
+            (1, false, 0),
+            "the error counts; no call is read against it"
+        );
+        assert_eq!(
+            pair_status(&clean, &broken, 5, Mode::Frame),
+            Err(Excluded::Error)
+        );
+        let images = (0..6)
+            .map(|_| {
+                [
+                    (
+                        calls(&[10.0; 5], (1, 3), "x", None),
+                        call(0, 1.0, (1, 3), "x", None),
+                    ),
+                    (calls(&[10.0; 5], (1, 3), "x", None), failed()),
+                ]
+            })
+            .collect();
+        let m = measurement(&complete_scope(), 6, vec![model(Mode::Frame, images)]);
+        let mut declared = Vec::new();
+        let json = segment_json(
+            &m,
+            &m.segments[0],
+            false,
+            &mut declared,
+            &mut Tables::default(),
+        );
+        let set = json["classes"]
+            .as_array()
+            .and_then(|c| c.iter().find(|c| c["class"] == "vendored"))
+            .expect("set row");
+        assert_eq!(
+            (&set["pairs"]["valid"], &set["pairs"]["excluded"]["error"]),
+            (&json!(0), &json!(6))
+        );
+        assert_eq!(set["candidate"]["errors"], 6);
+        for metric in ["truncation", "work", "latency_p50"] {
+            assert_eq!(
+                row(&declared, "vendored", metric).verdict,
+                "not_testable",
+                "{metric}"
+            );
+        }
+        assert_eq!(
+            set_rows(&m).breaches,
+            vec![
+                String::from("lib/frame vendored: 0 valid pairs"),
+                String::from("lib/frame vendored: 6 of 6 images excluded"),
+            ],
+            "the exclusions reach the status"
         );
     }
 
