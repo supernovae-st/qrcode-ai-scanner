@@ -2174,6 +2174,44 @@ fn d11_a_refused_neighbour_never_hides_a_well_formed_symbol_of_equal_content() {
     }
 }
 
+#[test]
+fn d12_a_parse_of_one_symbol_never_carries_a_twin_of_equal_bytes() {
+    // ECI 4 [A1] dark-on-light beside ECI 9 [A1] light-on-dark: at the
+    // direct stage rqrr parses the first (located), rxing's port reads both
+    // and only signals their declarations. The first symbol's parse carries
+    // the read where it lies, never the other: that one is re-read at its
+    // own corner points and located — two contents, frame and walk alike.
+    let eci9 = v3(|b| {
+        b.push_eci_designator(9)?;
+        b.push_byte_data(&[0xA1])
+    });
+    let png = png_row_styled(&[
+        (eci4_a1().to_colors(), eci4_a1().width(), false),
+        (eci9.to_colors(), eci9.width(), true),
+    ]);
+    for (profile, report) in [("frame", scan_content(&png)), ("walk", scan_walk(&png))] {
+        let ctx = format!("{profile}: {:?}", summary(&report));
+        assert_eq!(report.detections.len(), 2, "{ctx}");
+        let declared = |designator: u64| {
+            report
+                .detections
+                .iter()
+                .find(|d| content(d)["eci"][0]["designator"] == designator)
+                .unwrap_or_else(|| panic!("ECI {designator}: {ctx}"))
+        };
+        let a1 = declared(4);
+        assert_content(a1, A1, &ctx);
+        assert_both_engines(a1);
+        let nine = declared(9);
+        assert_content(
+            nine,
+            r#"{"text":"‘","raw":"oQ==","charset":"eci","eci":[{"designator":9,"start":0}]}"#,
+            &ctx,
+        );
+        assert_eq!(nine.engines, vec![EngineKind::Rxing], "{ctx}");
+    }
+}
+
 // --------------------------------------------- E · single-engine paths
 
 #[test]

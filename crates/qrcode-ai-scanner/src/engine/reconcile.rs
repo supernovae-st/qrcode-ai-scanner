@@ -1547,6 +1547,173 @@ mod tests {
         assert!(published(&walk2).is_empty());
     }
 
+    /// A port refusal of `raw` at a 100 px square at `x`.
+    fn port_at(raw: &[u8], x: f32) -> Refusal {
+        port(raw, Some(x))
+    }
+
+    /// The publication as a set: what stands, never in which order.
+    fn published_set(store: &ReadStore) -> Vec<(Vec<u8>, Vec<EngineKind>)> {
+        let mut found = published(store);
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found
+    }
+
+    #[test]
+    fn a_refused_stream_is_one_record_wherever_it_is_refused() {
+        // a record is keyed by the stream's names, never by where it was
+        // refused. One name refused at 17 jittered places (one symbol
+        // rescaled at every attempt) is one record, so a second name refused
+        // after it is a full-strength record: its read stays withheld after
+        // the attempt that refused it
+        let mut store = ReadStore::default();
+        for i in 0..=16u16 {
+            store.refuse(port_at(b"aaa", 10.0 + f32::from(i) * 0.25), u32::from(i));
+        }
+        store.refuse(port(b"bbb", R), 17);
+        store.collect(read(17, b"bbb", Signalled, X, R));
+        store.collect(read(18, b"bbb", Signalled, X, R));
+        assert!(published(&store).is_empty(), "{:?}", published(&store));
+        assert_eq!(store.refusals.len(), 2, "one record per name");
+    }
+
+    #[test]
+    fn a_refusal_found_again_past_capacity_withholds_up_to_its_latest_attempt() {
+        // 16 refused streams fill the capacity; a 17th found again at the
+        // same place in a later attempt withholds up to that attempt — then
+        // lapses where it is not found again
+        let mut store = ReadStore::default();
+        for i in 0..MAX_REFUSALS {
+            store.refuse(port(&[u8::try_from(i).unwrap()], None), 0);
+        }
+        store.refuse(port(b"zzz", R), 17);
+        store.refuse(port(b"zzz", R), 18);
+        store.collect(read(18, b"zzz", Signalled, X, R));
+        assert!(published(&store).is_empty(), "found again: withheld");
+        store.collect(read(19, b"zzz", Signalled, X, R));
+        assert_eq!(published(&store).len(), 1, "then it lapses");
+    }
+
+    #[test]
+    fn refusals_and_reads_withhold_alike_in_every_arrival_order() {
+        // within capacity, what a walk withholds depends on its refusals and
+        // reads, never on their order. One symbol refused at 15 jittered
+        // places first; then a small set in every order, each event at the
+        // attempt it arrives in: a 16th place of that symbol, a second
+        // stream, its read, a read of the first content elsewhere (another
+        // symbol: it stands) and an unrelated read
+        type Event = fn(&mut ReadStore, u32);
+        let events: [Event; 5] = [
+            |store, attempt| store.refuse(port_at(b"aaa", 14.0), attempt),
+            |store, attempt| store.refuse(port(b"bbb", R), attempt),
+            |store, attempt| store.collect(read(attempt, b"bbb", Signalled, X, R)),
+            |store, attempt| store.collect(read(attempt, b"aaa", Signalled, X, Some(410.0))),
+            |store, attempt| store.collect(read(attempt, b"zzz", NoEci, X, NOWHERE)),
+        ];
+        for order in permutations(events.len()) {
+            let mut store = ReadStore::default();
+            for i in 0..15u16 {
+                store.refuse(port_at(b"aaa", 10.0 + f32::from(i) * 0.25), u32::from(i));
+            }
+            for (k, &event) in order.iter().enumerate() {
+                events[event](&mut store, 15 + u32::try_from(k).unwrap());
+            }
+            assert_eq!(
+                published_set(&store),
+                [
+                    (b"aaa".to_vec(), vec![Rxing]),
+                    (b"zzz".to_vec(), vec![Rxing])
+                ],
+                "order {order:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_refusal_bookkeeping_is_bounded_and_fails_closed() {
+        // past capacity at most as many records again are kept, never one
+        // per refused grid of every attempt; past that the walk fails
+        // closed — every unparsed QR Code read collected up to that attempt
+        // is withheld, a parsed one never
+        let mut store = ReadStore::default();
+        store.collect(read(500, b"plain", NoEci, X, NOWHERE));
+        store.collect(parsed(read(500, b"parsed", eci4(), Q, L)));
+        for i in 0..1000u32 {
+            store.refuse(port(format!("s{i}").as_bytes(), None), i);
+        }
+        assert!(
+            store.overflow.len() <= MAX_REFUSALS,
+            "{}",
+            store.overflow.len()
+        );
+        assert_eq!(published_set(&store), [(b"parsed".to_vec(), vec![Rqrr])]);
+        store.collect(read(1000, b"later", NoEci, X, NOWHERE));
+        assert_eq!(published(&store).len(), 2, "a later read stands");
+        // the opposite-background walk starts from a bounded seed and fails
+        // closed throughout
+        let seed = store.seed(0);
+        assert!(
+            seed.refusals.len() <= 2 * MAX_REFUSALS,
+            "{}",
+            seed.refusals.len()
+        );
+        let mut walk2 = ReadStore::seeded(seed);
+        walk2.collect(read(3, b"other", NoEci, X, NOWHERE));
+        assert!(published(&walk2).is_empty());
+    }
+
+    #[test]
+    fn a_read_made_at_nine_scales_of_one_symbol_keeps_a_place_for_its_twin() {
+        // places are told apart by containment, never by exact equality:
+        // one symbol read at nine attempt scales is one place, so a twin
+        // read elsewhere is recorded too and a refusal of the first symbol
+        // never withholds the folded read — whichever arrives last
+        let scales: Vec<Read> = (1..=9u16)
+            .map(|i| {
+                read(
+                    u32::from(i),
+                    b"abc",
+                    Signalled,
+                    X,
+                    Some(10.0 + f32::from(i) * 0.1),
+                )
+            })
+            .collect();
+        let twin = read(10, b"abc", Signalled, X, R);
+        for twin_first in [true, false] {
+            let mut reads = scales.clone();
+            if twin_first {
+                reads.insert(0, twin.clone());
+            } else {
+                reads.push(twin.clone());
+            }
+            let store = store(reads, &[port(b"abc", L)]);
+            assert_eq!(published(&store).len(), 1, "twin first: {twin_first}");
+            assert_eq!(store.reads[0].places.len(), 2, "one place per symbol");
+        }
+    }
+
+    #[test]
+    fn geometry_comes_from_the_detections_earliest_read_that_carries_it() {
+        // spec/07: geometry comes from the detection's earliest read that
+        // carries it. An unobserved rqrr read (attempt 0, corners) joins the
+        // detection a later parsed read forms (attempt 1) in step 3: the
+        // corners and their photometry are the earlier read's, in any order
+        let mut early = read(0, A1, Unobserved, Q, L);
+        early.geometry.corners = Some((square_at(10.0), true));
+        let mut later = parsed(read(1, A1, NoEci, Q, Some(12.0)));
+        later.geometry.corners = Some((square_at(12.0), false));
+        let found = every_order(&[early, later], &[]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0]
+                .geometry
+                .corners
+                .map(|(corners, inverted)| (corners[0].x, inverted)),
+            Some((10.0, true))
+        );
+    }
+
     #[test]
     fn the_walk_goes_on_while_only_signalled_qr_reads_were_found() {
         // continuation over the reads that stand
