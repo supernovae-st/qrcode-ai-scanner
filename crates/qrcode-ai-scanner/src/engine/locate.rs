@@ -502,3 +502,328 @@ fn decode_version(word: u32) -> Option<u8> {
         })
         .and_then(|version| u8::try_from(version).ok())
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_precision_loss)]
+
+    use qrcode::bits::Bits;
+    use qrcode::canvas::{Canvas, MaskPattern};
+
+    use super::*;
+    use crate::engine::content::DoubleByteMode;
+
+    const SCALE: usize = 4;
+    const QUIET: usize = 4;
+    const MASKS: [MaskPattern; 8] = [
+        MaskPattern::Checkerboard,
+        MaskPattern::HorizontalLines,
+        MaskPattern::VerticalLines,
+        MaskPattern::DiagonalLines,
+        MaskPattern::LargeCheckerboard,
+        MaskPattern::Fields,
+        MaskPattern::Diamonds,
+        MaskPattern::Meadow,
+    ];
+
+    type Push = fn(&mut Bits) -> qrcode::types::QrResult<()>;
+
+    /// A symbol built from `push` with mask `mask`, rendered at 4 px per
+    /// module with a 4-module quiet zone (transposed on request), and the
+    /// points rxing reports for it: the outer corners plus half a pixel.
+    /// `None` when the data does not fit the version.
+    fn render(
+        version: i16,
+        ec: qrcode::EcLevel,
+        mask: usize,
+        transposed: bool,
+        push: Push,
+    ) -> Option<(LumaImage, [Point; 4])> {
+        let symbol = qrcode::Version::Normal(version);
+        let mut bits = Bits::new(symbol);
+        push(&mut bits).ok()?;
+        bits.push_terminator(ec).ok()?;
+        let (data, ecc) = qrcode::ec::construct_codewords(&bits.into_bytes(), symbol, ec).ok()?;
+        let mut canvas = Canvas::new(symbol, ec);
+        canvas.draw_all_functional_patterns();
+        canvas.draw_data(&data, &ecc);
+        canvas.apply_mask(MASKS[mask]);
+        let colors = canvas.into_colors();
+        let width = usize::try_from(symbol.width()).ok()?;
+        let side = (width + 2 * QUIET) * SCALE;
+        let mut pixels = vec![255u8; side * side];
+        for row in 0..width {
+            for column in 0..width {
+                let (module_row, module_column) = if transposed {
+                    (column, row)
+                } else {
+                    (row, column)
+                };
+                if colors[module_row * width + module_column] == qrcode::Color::Dark {
+                    for dy in 0..SCALE {
+                        for dx in 0..SCALE {
+                            let pixel_row = (row + QUIET) * SCALE + dy;
+                            let pixel_column = (column + QUIET) * SCALE + dx;
+                            pixels[pixel_row * side + pixel_column] = 0;
+                        }
+                    }
+                }
+            }
+        }
+        let lo = (QUIET * SCALE) as f32 + 0.5;
+        let hi = ((QUIET + width) * SCALE) as f32 + 0.5;
+        let points = [
+            Point { x: lo, y: lo },
+            Point { x: hi, y: lo },
+            Point { x: hi, y: hi },
+            Point { x: lo, y: hi },
+        ];
+        let side = u32::try_from(side).ok()?;
+        Some((LumaImage::new(pixels, side, side), points))
+    }
+
+    fn level(ec: qrcode::EcLevel) -> EcLevel {
+        match ec {
+            qrcode::EcLevel::L => EcLevel::L,
+            qrcode::EcLevel::M => EcLevel::M,
+            qrcode::EcLevel::Q => EcLevel::Q,
+            qrcode::EcLevel::H => EcLevel::H,
+        }
+    }
+
+    fn hint(points: [Point; 4], ec: EcLevel, modifier: u8) -> LocateHint {
+        LocateHint {
+            points,
+            frame: Frame::OuterCorners,
+            inverted: false,
+            ec,
+            version: None,
+            modifier: Some(modifier),
+        }
+    }
+
+    fn marks(list: &[(u32, usize)]) -> Vec<EciMark> {
+        list.iter()
+            .map(|&(value, start)| EciMark { value, start })
+            .collect()
+    }
+
+    /// (designators, payload, push)
+    type Case = (&'static [(u32, usize)], &'static [u8], Push);
+
+    const CASES: [Case; 5] = [
+        (&[], b"abc", |b| b.push_byte_data(b"abc")),
+        (&[(4, 0)], &[0xA1], |b| {
+            b.push_eci_designator(4)?;
+            b.push_byte_data(&[0xA1])
+        }),
+        (&[(26, 0)], &[0xC3, 0xA9], |b| {
+            b.push_eci_designator(26)?;
+            b.push_byte_data(&[0xC3, 0xA9])
+        }),
+        (&[(4, 0), (26, 2)], &[0xA1, 0xA2, 0x41], |b| {
+            b.push_eci_designator(4)?;
+            b.push_byte_data(&[0xA1, 0xA2])?;
+            b.push_eci_designator(26)?;
+            b.push_byte_data(&[0x41])
+        }),
+        (&[(7, 5)], b"12345\xBF", |b| {
+            b.push_numeric_data(b"12345")?;
+            b.push_eci_designator(7)?;
+            b.push_byte_data(&[0xBF])
+        }),
+    ];
+
+    #[test]
+    fn locate_replays_clean_symbols() {
+        // every version, EC level and designator list the data fits, each
+        // with a mask of its own, as read and transposed
+        let mut located = 0;
+        for (i, version) in [1i16, 2, 3, 5, 6, 7, 10, 14, 25, 40]
+            .into_iter()
+            .enumerate()
+        {
+            for (j, ec) in [
+                qrcode::EcLevel::L,
+                qrcode::EcLevel::M,
+                qrcode::EcLevel::Q,
+                qrcode::EcLevel::H,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                for (k, (list, payload, push)) in CASES.into_iter().enumerate() {
+                    let mask = (i + j + k) % 8;
+                    for transposed in [false, true] {
+                        let Some((img, points)) = render(version, ec, mask, transposed, push)
+                        else {
+                            continue;
+                        };
+                        let modifier = if list.is_empty() { 1 } else { 2 };
+                        let (found, spent) =
+                            locate_spending(&img, &hint(points, level(ec), modifier), payload);
+                        let expected = Located::Parsed {
+                            eci: marks(list),
+                            fnc1: Fnc1::None,
+                            segments: Vec::new(),
+                            version: u8::try_from(version).unwrap(),
+                            mask: u8::try_from(mask).unwrap(),
+                            mirrored: transposed,
+                        };
+                        let case = format!("v{version} {ec:?} {list:?} mask {mask} T{transposed}");
+                        assert_eq!(found, expected, "{case}");
+                        assert!(spent.format_probes <= MAX_PROBES, "{case}: {spent:?}");
+                        located += 1;
+                    }
+                }
+            }
+        }
+        assert!(located >= 300, "{located} symbols replayed");
+    }
+
+    #[test]
+    fn located_segments_are_the_parse_s() {
+        // Kanji after byte data: the re-read observes the segment
+        let push: Push = |b| {
+            b.push_byte_data(b"QR")?;
+            b.push_kanji_data(&[0x93, 0xFA])
+        };
+        let (img, points) = render(2, qrcode::EcLevel::M, 3, false, push).unwrap();
+        let found = locate(&img, &hint(points, EcLevel::M, 1), b"QR\x93\xFA");
+        let Located::Parsed { segments, eci, .. } = found else {
+            panic!("{found:?}");
+        };
+        assert!(eci.is_empty());
+        assert_eq!(
+            segments,
+            [DoubleByteSpan {
+                mode: DoubleByteMode::Kanji,
+                start: 2,
+                end: 4
+            }]
+        );
+    }
+
+    #[test]
+    fn a_read_elsewhere_or_of_other_bytes_is_not_located() {
+        // the points shifted by two modules, one payload byte changed,
+        // another EC level, a modifier the stream disagrees with
+        let (img, points) = render(3, qrcode::EcLevel::M, 5, false, CASES[1].2).unwrap();
+        let shift = (2 * SCALE) as f32;
+        let shifted = points.map(|p| Point {
+            x: p.x + shift,
+            y: p.y + shift,
+        });
+        assert_eq!(
+            locate(&img, &hint(shifted, EcLevel::M, 2), &[0xA1]),
+            Located::Unverified
+        );
+        assert_eq!(
+            locate(&img, &hint(points, EcLevel::M, 2), &[0xA2]),
+            Located::Unverified
+        );
+        assert_eq!(
+            locate(&img, &hint(points, EcLevel::Q, 2), &[0xA1]),
+            Located::Unverified
+        );
+        for modifier in [1, 3, 4] {
+            assert_eq!(
+                locate(&img, &hint(points, EcLevel::M, modifier), &[0xA1]),
+                Located::Unverified,
+                "]Q{modifier}"
+            );
+        }
+        // the same call, again: deterministic
+        assert!(matches!(
+            locate(&img, &hint(points, EcLevel::M, 2), &[0xA1]),
+            Located::Parsed { .. }
+        ));
+    }
+
+    #[test]
+    fn a_call_spends_at_most_its_bound() {
+        // a textured image where nothing verifies: every version,
+        // orientation and pass is probed once — 240, never more
+        let side = 400u32;
+        let pixels = (0..side * side)
+            .map(|i| {
+                if (i % side / 3 + i / side / 3).is_multiple_of(2) {
+                    0
+                } else {
+                    255
+                }
+            })
+            .collect();
+        let img = LumaImage::new(pixels, side, side);
+        let points = [
+            Point { x: 20.5, y: 20.5 },
+            Point { x: 380.5, y: 20.5 },
+            Point { x: 380.5, y: 380.5 },
+            Point { x: 20.5, y: 380.5 },
+        ];
+        let (found, spent) = locate_spending(&img, &hint(points, EcLevel::M, 2), b"abc");
+        assert_eq!(found, Located::Unverified);
+        assert!(spent.format_probes <= MAX_PROBES, "{spent:?}");
+        assert!(spent.rs_attempts <= spent.format_probes, "{spent:?}");
+        // an rqrr hint (its measured version) probes that version only
+        let rqrr = LocateHint {
+            version: Some(3),
+            modifier: None,
+            frame: Frame::GridBounds,
+            ..hint(points, EcLevel::M, 2)
+        };
+        let (_, spent) = locate_spending(&img, &rqrr, b"abc");
+        assert!(spent.format_probes <= 6, "{spent:?}");
+    }
+
+    #[test]
+    fn format_and_version_words_correct_three_bit_errors() {
+        for data in 0u32..32 {
+            let code = (data << 10) | bch_remainder(data << 10, 0x537);
+            let expected = decode_format(u16::try_from(code).unwrap()).unwrap();
+            assert_eq!(u32::from(expected.1), data & 7);
+            for errors in [0b1u32, 0b101, 0b1_0000_0001_0001] {
+                let word = u16::try_from(code ^ (errors << (data % 3))).unwrap();
+                assert_eq!(
+                    decode_format(word),
+                    Some(expected),
+                    "{data:05b} ^ {errors:b}"
+                );
+            }
+        }
+        for version in 7u32..=40 {
+            let code = (version << 12) | bch_remainder(version << 12, 0x1F25);
+            for errors in [0u32, 0b1, 0b1000_0000_0001, 0b1_0000_0001_0000_0001] {
+                assert_eq!(
+                    decode_version(code ^ errors),
+                    u8::try_from(version).ok(),
+                    "v{version} ^ {errors:b}"
+                );
+            }
+        }
+        assert_eq!(bch_remainder(0b101, 0), 0b101, "no generator, no division");
+    }
+
+    #[test]
+    fn the_modifier_states_the_eci_signal_and_the_fnc1_position() {
+        for (modifier, eci, fnc1) in [
+            (0, false, Fnc1::None),
+            (1, false, Fnc1::None),
+            (2, true, Fnc1::None),
+            (3, false, Fnc1::First),
+            (4, true, Fnc1::First),
+            (5, false, Fnc1::Second),
+            (6, true, Fnc1::Second),
+        ] {
+            assert!(agrees(eci, fnc1, Some(modifier)), "]Q{modifier}");
+            assert!(!agrees(!eci, fnc1, Some(modifier)), "]Q{modifier}");
+            assert!(
+                !agrees(eci, Fnc1::Unobserved, Some(modifier)),
+                "]Q{modifier}"
+            );
+        }
+        // rqrr states nothing: only FNC1 none, whatever the declarations
+        assert!(agrees(true, Fnc1::None, None) && agrees(false, Fnc1::None, None));
+        assert!(!agrees(false, Fnc1::First, None));
+    }
+}
