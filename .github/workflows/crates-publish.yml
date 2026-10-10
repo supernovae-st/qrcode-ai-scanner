@@ -110,6 +110,18 @@ jobs:
           for crate in qrcode-ai-scanner qrcode-ai-scanner-cli; do
             if live "$crate" "$ws"; then
               echo "$crate $ws already on crates.io — skip"
+              # It must be the archive inspected here: the sparse index records
+              # each version's cksum (sha256 of the .crate). A mismatch means
+              # another publisher (e.g. an old ref's token job) uploaded it.
+              path="${crate:0:2}/${crate:2:2}/$crate"
+              index=$(curl -sSL -H "User-Agent: qrcode-ai-scanner-ci (release gate)" "https://index.crates.io/$path" || true)
+              cksum_live=$(printf '%s' "$index" | grep -F "\"vers\":\"$ws\"" | sed -nE 's/.*"cksum":"([0-9a-f]{64})".*/\1/p' | head -n1 || true)
+              cksum_local=$(sha256sum "$RUNNER_TEMP/inspected/$crate-$ws.crate" | cut -d' ' -f1)
+              if [ "$cksum_live" != "$cksum_local" ]; then
+                echo "::error::$crate $ws on crates.io ($cksum_live) is not the archive inspected here ($cksum_local): yank or align"
+                exit 1
+              fi
+              echo "$crate $ws on crates.io matches the inspected archive"
             else
               cargo publish -p "$crate" --locked --no-verify
               if ! cmp "target/package/$crate-$ws.crate" "$RUNNER_TEMP/inspected/$crate-$ws.crate"; then

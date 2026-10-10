@@ -209,12 +209,26 @@ jobs:
           set -euo pipefail
           field() { tar -xzOf "$1" package/package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).$2"; }
           status() { curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${1/\//%2f}/$2"; }
+          # A version already on npm must be the very tarball inspected here:
+          # compare the registry's dist.integrity (sha512 of the published .tgz)
+          # with this tarball's. A mismatch means someone else published it.
+          verify_live() {
+            local tgz=$1 name=$2 version=$3 manifest live mine
+            manifest=$(curl -sS "https://registry.npmjs.org/${name/\//%2f}/$version")
+            live=$(printf '%s' "$manifest" | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).dist.integrity")
+            mine="sha512-$(node -e 'const c=require("crypto"),f=require("fs");process.stdout.write(c.createHash("sha512").update(f.readFileSync(process.argv[1])).digest("base64"))' "$tgz")"
+            if [ "$live" != "$mine" ]; then
+              echo "::error::$name@$version on npm ($live) is not the tarball inspected here ($mine)"
+              exit 1
+            fi
+            echo "$name@$version on npm matches the inspected tarball"
+          }
           publish_missing() {
             local tgz=$1 name version out
             name=$(field "$tgz" name)
             version=$(field "$tgz" version)
             case "$(status "$name" "$version")" in
-              200) echo "$name@$version already on npm - skipping" ;;
+              200) echo "$name@$version already on npm - skipping"; verify_live "$tgz" "$name" "$version" ;;
               404)
                 echo "publishing $name@$version"
                 if out=$(npm publish "$tgz" --access public --ignore-scripts 2>&1); then
@@ -223,6 +237,7 @@ jobs:
                   echo "$out"
                   grep -q -e EPUBLISHCONFLICT -e 'previously published' <<<"$out" || exit 1
                   echo "$name@$version is live already (previously published) - continuing"
+                  verify_live "$tgz" "$name" "$version"
                 fi
                 ;;
               *) echo "::error::registry probe for $name@$version failed"; exit 1 ;;
@@ -354,8 +369,21 @@ jobs:
             echo "::error::$tgz is $name, not the wasm package"
             exit 1
           fi
+          # A version already on npm must be this very tarball: compare the
+          # registry's dist.integrity (sha512) with the tarball inspected here.
+          verify_live() {
+            local manifest live mine
+            manifest=$(curl -sS "https://registry.npmjs.org/${name/\//%2f}/$version")
+            live=$(printf '%s' "$manifest" | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).dist.integrity")
+            mine="sha512-$(node -e 'const c=require("crypto"),f=require("fs");process.stdout.write(c.createHash("sha512").update(f.readFileSync(process.argv[1])).digest("base64"))' "$tgz")"
+            if [ "$live" != "$mine" ]; then
+              echo "::error::$name@$version on npm ($live) is not the tarball inspected here ($mine)"
+              exit 1
+            fi
+            echo "$name@$version on npm matches the inspected tarball"
+          }
           case "$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${name/\//%2f}/$version")" in
-            200) echo "$name@$version already on npm - skipping" ;;
+            200) echo "$name@$version already on npm - skipping"; verify_live ;;
             404)
               echo "publishing $name@$version"
               if out=$(npm publish "$tgz" --access public --ignore-scripts 2>&1); then
@@ -364,6 +392,7 @@ jobs:
                 echo "$out"
                 grep -q -e EPUBLISHCONFLICT -e 'previously published' <<<"$out" || exit 1
                 echo "$name@$version is live already (previously published) - continuing"
+                verify_live
               fi
               ;;
             *) echo "::error::registry probe for $name@$version failed"; exit 1 ;;

@@ -264,8 +264,10 @@ jobs:
           set -euo pipefail
           zip=build/QrcodeAiScannerFFI.xcframework.zip
           # SwiftPM's checksum is the archive's SHA-256 (what `swift package
-          # compute-checksum` prints), so sha256sum checks it on Linux.
-          pinned="$(grep -oE '[a-f0-9]{64}' bindings/swift/Package.swift | head -n1 || true)"
+          # compute-checksum` prints), so sha256sum checks it on Linux. Read
+          # the pin from the active binaryTarget's `checksum:` line, not the
+          # first 64-hex string anywhere in the file (a comment could carry one).
+          pinned="$(grep -oE 'checksum:[[:space:]]*"[a-f0-9]{64}"' bindings/swift/Package.swift | grep -oE '[a-f0-9]{64}' | head -n1 || true)"
           echo "Package.swift   : ${pinned:-<none>}"
           # 1. Never clobber an attached asset (release.sh's, whose checksum
           #    Package.swift pins); attach the CI-built one only on a match.
@@ -280,6 +282,9 @@ jobs:
               echo "::error::Attach the zip  bindings/swift/release.sh $GITHUB_REF_NAME  built, then re-run this job."
               exit 1
             fi
+            # checksum.txt from the sha256 THIS job computed for the zip it
+            # checked, never the downloaded file trusted unseen.
+            printf '%s\n' "$built" > build/checksum.txt
             # The release must exist — create if absent, else confirm. Never
             # mask a real create failure behind `|| true`.
             gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes 2>/dev/null \
