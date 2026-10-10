@@ -1672,7 +1672,8 @@ fn method_json(m: &Measurement) -> Value {
             "poll_ms": super::proc::POLL.as_millis(),
             "memory_sampled": "resident size (macOS: or the physical footprint, whichever is larger) and the kernel's high-water mark, so a spike between two samples is still seen",
             "returned": "a call that returns with a kernel peak above the memory cap, or after its wall cap, is a resource failure",
-            "survive_the_harness": "every child in its own process group; SIGTERM, SIGHUP and SIGINT kill every live group before the harness exits; one-shot children carry a kernel CPU-time limit at their wall cap; workers leave within about 50 ms once their parent changes; a child whose memory cannot be sampled is not run; only Mach-O or ELF executables and the resolved node run",
+            "survive_the_harness": "every child in its own process group; SIGTERM, SIGHUP, SIGINT and SIGQUIT kill every live group before the harness exits; SIGTSTP, SIGTTIN and SIGTTOU stop every live group, then the harness, and SIGCONT continues them; a signal that lands while a child is being started is held until the child is registered; one-shot children carry a kernel CPU-time limit at their wall cap; workers leave within about 50 ms once their parent changes; a child whose memory cannot be sampled is not run; only Mach-O or ELF executables and the resolved node run; SIGKILL and SIGSTOP of the harness itself remain residuals",
+            "stops": "a call, throughput pass or cold start whose wall interval contains a stop is discarded and repeated, never kept as a sample; the watchdog restarts the wall cap of a call a stop fell into, and the gate's own-load allowance restarts",
         },
         "gate": {
             "load_per_core": super::gate::LOAD_PER_CORE, "threshold": m.threshold,

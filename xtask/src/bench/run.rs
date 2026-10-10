@@ -1502,14 +1502,15 @@ pub(crate) enum Call {
 /// One `qrscan` process: outer wall time, its own peak RSS and CPU, and
 /// the report's trace and detections (parsed, text hashed, then dropped).
 /// `unbounded` runs the profile without its budget (`--budget-ms 0`): the
-/// full-unbounded mode, and every reference walk.
+/// full-unbounded mode, and every reference walk. `None` when a stop fell
+/// inside the call: its time is no sample, and the caller repeats it.
 fn cli_call(
     bin: &Path,
     (mode, unbounded): (Mode, bool),
     image: &Image,
     rep: u32,
     caps: Caps,
-) -> Result<Call, String> {
+) -> Result<Option<Call>, String> {
     let mut command = Command::new(bin);
     command.arg(&image.abs).args(["--profile", mode.profile()]);
     if unbounded || mode == Mode::FullUnbounded {
@@ -1517,7 +1518,10 @@ fn cli_call(
     }
     let done = proc::run_once(&mut command, caps)?;
     if let Some(failure) = done.failure {
-        return Ok(Call::Failed(failure));
+        return Ok(Some(Call::Failed(failure)));
+    }
+    if done.interrupted {
+        return Ok(None);
     }
     let mut sample = Sample {
         rep,
@@ -1557,14 +1561,14 @@ fn cli_call(
             );
         }
         Exit::Signal(signal) => {
-            return Ok(Call::Failed(Failure {
+            return Ok(Some(Call::Failed(Failure {
                 kind: proc::Kind::Signal(signal),
                 peak_rss: done.usage.max_rss,
                 wall_ns: done.ns,
-            }));
+            })));
         }
     }
-    Ok(Call::Done(sample))
+    Ok(Some(Call::Done(sample)))
 }
 
 fn script(name: &str) -> PathBuf {
@@ -1705,6 +1709,32 @@ pub(crate) struct Context<'a> {
     pub(crate) fixture: PathBuf,
     /// Set once a dry run's host floor stopped the run: no later phase starts.
     pub(crate) stopped: RefCell<Option<String>>,
+}
+
+/// The clock of a phase's own load allowance: how long its busy threads
+/// have run, restarted by a stop — stopped threads build no load, so the
+/// time a run stood stopped never widens the allowance.
+struct Busy {
+    since: Instant,
+    epoch: u64,
+}
+
+impl Busy {
+    fn start() -> Self {
+        Self {
+            since: Instant::now(),
+            epoch: proc::stop_epoch(),
+        }
+    }
+
+    fn elapsed(&mut self) -> Duration {
+        let epoch = proc::stop_epoch();
+        if epoch != self.epoch {
+            self.since = Instant::now();
+            self.epoch = epoch;
+        }
+        self.since.elapsed()
+    }
 }
 
 /// One variant's driver within an attempt: a persistent worker (respawned
@@ -1876,6 +1906,8 @@ impl Side {
         self.request(ctx, (mode, true), image, 0)
     }
 
+    /// One call, repeated while a stop falls inside it: a call whose wall
+    /// interval holds a stop is discarded, never kept as a sample.
     fn request(
         &mut self,
         ctx: &Context<'_>,
@@ -1883,6 +1915,25 @@ impl Side {
         image: &Image,
         rep: u32,
     ) -> Result<Call, String> {
+        loop {
+            if let Some(call) = self.once(ctx, (mode, unbounded), image, rep)? {
+                return Ok(call);
+            }
+            println!(
+                "{}: {}: a stop fell inside the call — discarded, repeated",
+                self.label, image.path
+            );
+        }
+    }
+
+    /// One call; `None` when a stop fell inside it.
+    fn once(
+        &mut self,
+        ctx: &Context<'_>,
+        (mode, unbounded): (Mode, bool),
+        image: &Image,
+        rep: u32,
+    ) -> Result<Option<Call>, String> {
         let (budget, wall) = if unbounded {
             ("unbounded", Mode::FullUnbounded.wall_cap())
         } else {
@@ -1895,11 +1946,12 @@ impl Side {
                 .map_err(|e| format!("{}: {}: {e}", self.label, image.path));
         };
         let memory = rep == 0 && !unbounded && self.runtime == Runtime::Lib;
-        match server.request(&scan_line(mode, budget, &image.abs, memory), caps.wall) {
+        match server.request_timed(&scan_line(mode, budget, &image.abs, memory), caps.wall) {
             Ok(reply) => parse_reply(&reply, rep)
-                .map(Call::Done)
+                .map(|sample| Some(Call::Done(sample)))
                 .map_err(|e| format!("{}: {}: {e}", self.label, image.path)),
-            Err(CallError::Died(failure)) => Ok(Call::Failed(failure)),
+            Err(CallError::Died(failure)) => Ok(Some(Call::Failed(failure))),
+            Err(CallError::Interrupted) => Ok(None),
             Err(e) => Err(format!("{}: {}: {e}", self.label, image.path)),
         }
     }
@@ -1998,12 +2050,12 @@ fn reference_pass(
     segment: &mut Segment,
     sides: &mut BTreeMap<Variant, Side>,
     variants: &[Variant],
-    started: Instant,
+    busy: &mut Busy,
 ) -> Result<Result<BTreeMap<usize, BTreeSet<Variant>>, Reading>, String> {
     let phase = format!("{}/{}", segment.runtime.as_str(), segment.mode.as_str());
     let mut abandoned: BTreeMap<usize, BTreeSet<Variant>> = BTreeMap::new();
     for (index, image) in ctx.images.iter().enumerate() {
-        let reading = ctx.during(&format!("{phase} reference"), 1, started.elapsed());
+        let reading = ctx.during(&format!("{phase} reference"), 1, busy.elapsed());
         if !reading.open {
             ctx.stop(&reading);
             return Ok(Err(reading));
@@ -2042,16 +2094,16 @@ fn attempt(ctx: &Context<'_>, segment: &mut Segment) -> Result<Option<Reading>, 
         );
     }
     let phase = format!("{}/{}", runtime.as_str(), mode.as_str());
-    let started = Instant::now();
+    let mut busy = Busy::start();
     let mut lost = BTreeMap::new();
     if mode.budgeted() {
-        match reference_pass(ctx, segment, &mut sides, &variants, started)? {
+        match reference_pass(ctx, segment, &mut sides, &variants, &mut busy)? {
             Ok(abandoned) => lost = abandoned,
             Err(crossed) => return Ok(Some(crossed)),
         }
     }
     for (index, image) in ctx.images.iter().enumerate() {
-        let reading = ctx.during(&format!("{phase} image"), 1, started.elapsed());
+        let reading = ctx.during(&format!("{phase} image"), 1, busy.elapsed());
         if !reading.open {
             ctx.stop(&reading);
             return Ok(Some(reading));
@@ -2122,7 +2174,7 @@ pub(crate) fn run_segment(ctx: &Context<'_>, runtime: Runtime, mode: Mode) -> Se
     let phase = format!("{}/{}", runtime.as_str(), mode.as_str());
     while segment.attempts < ATTEMPTS {
         segment.attempts += 1;
-        let started = Instant::now();
+        let mut busy = Busy::start();
         match ctx.before(&format!("{phase} start")) {
             Ok(readings) => segment.readings.extend(readings),
             Err(readings) => {
@@ -2136,7 +2188,7 @@ pub(crate) fn run_segment(ctx: &Context<'_>, runtime: Runtime, mode: Mode) -> Se
         }
         match attempt(ctx, &mut segment) {
             Ok(None) => {
-                let after = ctx.during(&format!("{phase} after"), 1, started.elapsed());
+                let after = ctx.during(&format!("{phase} after"), 1, busy.elapsed());
                 let held = ctx.options.dry_run || after.open;
                 ctx.stop(&after);
                 segment.readings.push(after);
@@ -2357,9 +2409,12 @@ pub(crate) fn run_throughput(ctx: &Context<'_>, mode: Mode) -> Result<Vec<Throug
             list.0.display()
         );
         // the passes run back to back: the series' own load builds from the
-        // first pass on, so the allowance counts from there
-        let series = Instant::now();
-        for (pass, &variant) in abba(&variants, 2).iter().enumerate() {
+        // first pass on (or from the last stop), so the allowance counts
+        // from there
+        let mut series = Busy::start();
+        let order = abba(&variants, 2);
+        let mut pass = 0;
+        while let Some(&variant) = order.get(pass) {
             let side = sides.get_mut(&variant).ok_or("throughput side")?;
             let server = side.server.as_mut().ok_or("throughput server")?;
             let mut crossing = None;
@@ -2372,6 +2427,14 @@ pub(crate) fn run_throughput(ctx: &Context<'_>, mode: Mode) -> Result<Vec<Throug
                 open
             });
             match reply {
+                Err(CallError::Interrupted) => {
+                    // a stop fell inside the pass: it is no sample, run it again
+                    println!(
+                        "{phase} {}: a stop fell inside the pass — discarded, repeated",
+                        variant.letter()
+                    );
+                    continue;
+                }
                 Ok(reply) => {
                     let done = parse_pass(&reply, variant)?;
                     println!(
@@ -2416,6 +2479,7 @@ pub(crate) fn run_throughput(ctx: &Context<'_>, mode: Mode) -> Result<Vec<Throug
                 }
                 Err(CallError::Protocol(e)) => return Err(e),
             }
+            pass += 1;
         }
         if result.outcome != Outcome::Discarded {
             let after = ctx.during(&format!("{phase} after"), threads, series.elapsed());
@@ -2547,9 +2611,13 @@ pub(crate) fn parse_cold(fields: &[String], peak_rss: Option<u64>) -> Result<Col
 
 /// Sizes, then the cold starts: one warm-up per variant, then
 /// [`COLD_PAIRS`] processes each in A B B A order, every one under the caps
-/// with the gate read before it and enforced after the series. The sizes
-/// step reads the gate (a dry run: the host floor) first; a stopped run
-/// starts neither.
+/// with the gate read before it and enforced after the series; a cold
+/// start a stop fell into is repeated. The sizes step reads the gate (a
+/// dry run: the host floor) first; a stopped run starts neither.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the sizes, the cold starts and their gate reads read best in one place"
+)]
 pub(crate) fn run_wasm_cost(ctx: &Context<'_>) -> Result<WasmCost, String> {
     let variants = ctx.variants(Runtime::Wasm);
     let mut cost = WasmCost {
@@ -2610,22 +2678,33 @@ pub(crate) fn run_wasm_cost(ctx: &Context<'_>) -> Result<WasmCost, String> {
         .chain(abba(&variants, COLD_PAIRS).iter())
         .copied()
         .collect();
-    let started = Instant::now();
+    let mut busy = Busy::start();
     for (k, variant) in runs.into_iter().enumerate() {
-        let reading = ctx.during("wasm/cold during", 1, started.elapsed());
-        if !reading.open {
-            ctx.stop(&reading);
-            cost.readings.push(reading);
-            cost.outcome = if ctx.options.dry_run {
-                Outcome::NotRun
-            } else {
-                Outcome::Discarded
-            };
-            cost.runs.clear();
-            return Ok(cost);
-        }
-        let dir = ctx.path(Runtime::Wasm, variant)?;
-        let (fields, done) = wasm_tool(ctx, &[dir.as_path(), ctx.fixture.as_path()], "cold")?;
+        // a cold start a stop fell into is no sample: read the gate again,
+        // and start it again
+        let (fields, done) = loop {
+            let reading = ctx.during("wasm/cold during", 1, busy.elapsed());
+            if !reading.open {
+                ctx.stop(&reading);
+                cost.readings.push(reading);
+                cost.outcome = if ctx.options.dry_run {
+                    Outcome::NotRun
+                } else {
+                    Outcome::Discarded
+                };
+                cost.runs.clear();
+                return Ok(cost);
+            }
+            let dir = ctx.path(Runtime::Wasm, variant)?;
+            let (fields, done) = wasm_tool(ctx, &[dir.as_path(), ctx.fixture.as_path()], "cold")?;
+            if !done.interrupted || done.failure.is_some() {
+                break (fields, done);
+            }
+            println!(
+                "wasm/cold {}: a stop fell inside the cold start — discarded, repeated",
+                variant.letter()
+            );
+        };
         if let Some(failure) = done.failure {
             cost.failures.push((variant, failure));
             cost.outcome = Outcome::Failed;
@@ -2638,7 +2717,7 @@ pub(crate) fn run_wasm_cost(ctx: &Context<'_>) -> Result<WasmCost, String> {
         }
         list.push(cold);
     }
-    let after = ctx.during("wasm/cold after", 1, started.elapsed());
+    let after = ctx.during("wasm/cold after", 1, busy.elapsed());
     if !ctx.options.dry_run && !after.open {
         cost.outcome = Outcome::Discarded;
         cost.runs.clear();
@@ -3512,6 +3591,136 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A fake CLI: every call sleeps 0.2 s, then reports one decoded `x`.
+    #[cfg(all(unix, target_pointer_width = "64"))]
+    fn slow_cli(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let report = r#"{"trace":{"total_ms":1.0,"engine_panics":0,"stages":[{"stage":"direct","transforms_tried":1}]},"score":null,"detections":[{"symbology":"qr_code","content":{"text":"x"}}]}"#;
+        let path = dir.join("slow-cli.sh");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\nsleep 0.2\nprintf '%s' '{report}'\n"),
+        )
+        .expect("script");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
+    }
+
+    /// The helper side of the stop-inside-a-call test: one CLI segment of
+    /// one image, the samples' times printed in milliseconds.
+    #[test]
+    #[ignore = "a helper process of a_call_that_spans_a_stop_is_repeated"]
+    #[cfg(all(unix, target_pointer_width = "64"))]
+    fn stop_segment_helper() {
+        if proc::tests::helper_role().as_deref() != Some("stop-segment") {
+            return;
+        }
+        proc::guard_signals().expect("handlers");
+        let dir = PathBuf::from(std::env::var("QRSCAN_BENCH_TEST_DIR").expect("dir"));
+        let cli = slow_cli(&dir);
+        let options = opts(&[
+            "--out",
+            "/nonexistent/out",
+            "--modes",
+            "full-unbounded",
+            "--sets",
+            "vendored",
+            "--cli-base",
+            cli.to_str().expect("utf-8"),
+        ])
+        .expect("options");
+        let images = fake_images(&["a"]);
+        let gate = Gate::scripted(&[true; 8]);
+        let ctx = Context {
+            options: &options,
+            gate: &gate,
+            images: &images,
+            artifacts: options.artifacts.clone(),
+            deadline: Instant::now(),
+            fixture: PathBuf::from("/nonexistent/fixture.png"),
+            stopped: RefCell::new(None),
+        };
+        println!("ready");
+        let segment = run_segment(&ctx, Runtime::Cli, Mode::FullUnbounded);
+        let times: Vec<String> = segment
+            .samples
+            .values()
+            .flat_map(BTreeMap::values)
+            .flatten()
+            .map(|s| format!("{:.0}", ms(s.ns)))
+            .collect();
+        println!("samples {}", times.join(" "));
+    }
+
+    /// With a fake CLI: the harness is stopped (SIGTSTP) 0.3 s into an
+    /// image's calls and continued 1.5 s later. The call the stop fell into
+    /// is discarded and repeated — its group stood stopped with the
+    /// harness — so the image still has its warm-up and five timed calls,
+    /// none carrying the stopped time.
+    #[test]
+    #[cfg(all(unix, target_pointer_width = "64"))]
+    fn a_call_that_spans_a_stop_is_repeated() {
+        use std::io::BufRead as _;
+        #[cfg(target_os = "macos")]
+        const PAUSE: i32 = 18;
+        #[cfg(target_os = "macos")]
+        const RESUME: i32 = 19;
+        #[cfg(not(target_os = "macos"))]
+        const PAUSE: i32 = 20;
+        #[cfg(not(target_os = "macos"))]
+        const RESUME: i32 = 18;
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        let dir =
+            std::env::temp_dir().join(format!("qrscan-bench-stopcall-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let mut helper =
+            proc::tests::helper("bench::run::tests::stop_segment_helper", "stop-segment")
+                .env("QRSCAN_BENCH_TEST_DIR", &dir)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("helper");
+        let pid = i32::try_from(helper.id()).expect("pid");
+        let mut lines = std::io::BufReader::new(helper.stdout.take().expect("stdout")).lines();
+        let ready = lines
+            .by_ref()
+            .map_while(Result::ok)
+            .any(|l| l.trim() == "ready");
+        std::thread::sleep(Duration::from_millis(300));
+        // SAFETY: plain signals to the helper this test spawned and holds.
+        unsafe { kill(pid, PAUSE) };
+        std::thread::sleep(Duration::from_millis(1500));
+        // SAFETY: as above.
+        unsafe { kill(pid, RESUME) };
+        let rest: Vec<String> = lines.map_while(Result::ok).collect();
+        let _ = helper.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        let samples: Vec<f64> = rest
+            .iter()
+            .find_map(|l| {
+                l.strip_prefix("samples ").map(|times| {
+                    times
+                        .split_whitespace()
+                        .filter_map(|v| v.parse().ok())
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+        assert!(ready, "the helper started");
+        assert!(
+            samples.len() == 6 && samples.iter().all(|ms| *ms < 1000.0),
+            "{samples:?}"
+        );
+        assert!(
+            rest.iter()
+                .any(|l| l.ends_with("a stop fell inside the call — discarded, repeated")),
+            "{rest:?}"
+        );
     }
 
     /// The inputs are checked against their pins — both manifests, each

@@ -208,8 +208,18 @@ The caps outlive the harness:
 
 - every child runs in its own process group; the harness kills groups,
   never a pid alone;
-- `bench run` handles SIGTERM, SIGHUP and SIGINT by killing every live
-  child's group before it exits (128 + the signal);
+- `bench run` handles SIGTERM, SIGHUP, SIGINT and SIGQUIT by killing every
+  live child's group before it exits (128 + the signal), and SIGTSTP,
+  SIGTTIN and SIGTTOU by stopping every live child's group, then itself;
+  SIGCONT continues them all;
+- a child is registered with these handlers before any signal can act: a
+  signal that lands while a child is being started is held until the
+  child is in the table, then acted on with it;
+- a stop is no time of the child's: the watchdog restarts the wall cap of
+  a call a stop fell into, and a call whose wall interval contains a stop
+  is discarded and repeated — never kept as a sample, never a failure —
+  as is a throughput pass or a cold start; the own-load allowance of the
+  gate restarts too;
 - workers — the generated library workers and both Node drivers — exit
   within about 50 ms once their parent changes, even mid-scan;
 - one-shot children (CLI scans, WASM tools) carry a kernel CPU-time limit
@@ -221,10 +231,16 @@ The caps outlive the harness:
   `--node-bin` is resolved once to node's own path (`node -p
   process.execPath`).
 
-Stop a run with SIGTERM, SIGHUP or SIGINT (`kill <pid>`, Ctrl-C): the
-handler kills every child's group first. SIGKILL cannot be handled — the
-workers then leave on their own, and a CLI scan already running ends by
-itself or once it has used its CPU-time limit. Children never inherit `RUST_BACKTRACE`,
+Stop a run with SIGTERM, SIGHUP, SIGINT or SIGQUIT (`kill <pid>`, Ctrl-C,
+Ctrl-\\): the handler kills every child's group first. Ctrl-Z pauses the
+run and its children together; `fg` or `bg` continues them. SIGKILL and
+SIGSTOP of the harness itself cannot be handled, and remain residuals:
+after a SIGKILL the workers leave on their own (their parent is gone) and
+a CLI scan already running ends by itself or once it has used its
+CPU-time limit; during a SIGSTOP every child runs on unwatched until the
+harness continues — a CLI scan still within its CPU-time limit, a worker
+until the scan it is on ends — and a call that spans it is discarded
+and repeated. Children never inherit `RUST_BACKTRACE`,
 `RUST_LIB_BACKTRACE`, `NAPI_RS_NATIVE_LIBRARY_PATH` or `NODE_OPTIONS`;
 their stderr is drained on its own thread and reduced to counts, `QRS-`
 codes and `file.rs:line:column` panic locations.

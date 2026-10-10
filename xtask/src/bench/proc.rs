@@ -11,12 +11,24 @@
 //! peak above the memory cap, or after its wall cap, is a resource failure
 //! all the same.
 //!
-//! The caps outlive the harness: [`guard_signals`] makes SIGTERM, SIGHUP
-//! and SIGINT kill every live child's group before the harness exits; a
-//! one-shot child carries a kernel CPU-time limit at its wall cap; workers
-//! leave on their own when their parent changes (`worker.rs`, the Node
-//! drivers), told which parent to keep through [`super::worker::PARENT_ENV`].
-//! A child whose memory cannot be sampled is killed before it runs.
+//! The caps outlive the harness: [`guard_signals`] makes SIGTERM, SIGHUP,
+//! SIGINT and SIGQUIT kill every live child's group before the harness
+//! exits, and SIGTSTP, SIGTTIN and SIGTTOU stop every live child's group
+//! before the harness stops, SIGCONT continuing them; a one-shot child
+//! carries a kernel CPU-time limit at its wall cap; workers leave on their
+//! own when their parent changes (`worker.rs`, the Node drivers), told
+//! which parent to keep through [`super::worker::PARENT_ENV`]. A child is
+//! registered with the handlers before any signal can act on the harness:
+//! one that arrives while a child is being spawned is held until the child
+//! is registered, then acted on. A child whose memory cannot be sampled is
+//! killed before it runs.
+//!
+//! A stop is no time of the child's: every stop and continue moves the
+//! [`stop_epoch`], a watchdog restarts the wall cap of a call a stop fell
+//! into, and such a call is reported as interrupted — its caller discards
+//! and repeats it, never keeps it as a sample. SIGSTOP and SIGKILL of the
+//! harness itself cannot be handled: the parent guard of the workers and
+//! the CPU limit of one-shot children bound what then runs on.
 //!
 //! No reused pid or group is ever signalled: the reaper first waits for
 //! the exit without reaping (`waitid(WNOWAIT)` — the pid, and with it the
@@ -34,7 +46,7 @@
 use std::collections::BTreeSet;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release, SeqCst};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64};
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
@@ -145,6 +157,15 @@ pub(crate) struct Failure {
 
 pub(crate) fn nanos(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// Every stop and continue the handlers see moves it on.
+static STOPS: AtomicU64 = AtomicU64::new(0);
+
+/// The stop epoch: a call that ends in another epoch than it began had a
+/// stop inside its wall interval.
+pub(crate) fn stop_epoch() -> u64 {
+    STOPS.load(SeqCst)
 }
 
 /// The resource failure that ended a call, if one did: the watchdog's
@@ -399,6 +420,16 @@ mod sys {
         max: u64,
     }
 
+    /// The head of `siginfo_t`, `si_code` its third int, padded to the
+    /// larger layout: 128 bytes on Linux, 104 on macOS.
+    #[repr(C, align(8))]
+    struct SigInfo {
+        _signo: i32,
+        _errno: i32,
+        code: i32,
+        _rest: [i32; 29],
+    }
+
     /// `idtype_t` `P_PID` and the `waitid` options of each platform.
     const P_PID: i32 = 1;
     const WEXITED: i32 = 4;
@@ -406,14 +437,33 @@ mod sys {
     const WNOWAIT: i32 = 0x20;
     #[cfg(not(target_os = "macos"))]
     const WNOWAIT: i32 = 0x0100_0000;
+    /// The `si_code`s of a child still alive: trapped, stopped, continued.
+    const CLD_TRAPPED: i32 = 4;
+    const CLD_STOPPED: i32 = 5;
+    const CLD_CONTINUED: i32 = 6;
     const SIGHUP: i32 = 1;
     const SIGINT: i32 = 2;
+    const SIGQUIT: i32 = 3;
     const SIGKILL: i32 = 9;
     const SIGTERM: i32 = 15;
+    const SIGTTIN: i32 = 21;
+    const SIGTTOU: i32 = 22;
+    #[cfg(target_os = "macos")]
+    const SIGSTOP: i32 = 17;
+    #[cfg(target_os = "macos")]
+    const SIGTSTP: i32 = 18;
+    #[cfg(target_os = "macos")]
+    const SIGCONT: i32 = 19;
     #[cfg(target_os = "macos")]
     const SIGCHLD: i32 = 20;
     #[cfg(not(target_os = "macos"))]
     const SIGCHLD: i32 = 17;
+    #[cfg(not(target_os = "macos"))]
+    const SIGCONT: i32 = 18;
+    #[cfg(not(target_os = "macos"))]
+    const SIGSTOP: i32 = 19;
+    #[cfg(not(target_os = "macos"))]
+    const SIGTSTP: i32 = 20;
     const SIG_DFL: usize = 0;
     const SIG_ERR: usize = usize::MAX;
     const RLIMIT_CPU: i32 = 0;
@@ -421,8 +471,9 @@ mod sys {
 
     unsafe extern "C" {
         fn wait4(pid: i32, status: *mut i32, options: i32, rusage: *mut Rusage) -> i32;
-        fn waitid(idtype: i32, id: u32, info: *mut u64, options: i32) -> i32;
+        fn waitid(idtype: i32, id: u32, info: *mut SigInfo, options: i32) -> i32;
         fn kill(pid: i32, signal: i32) -> i32;
+        fn getpid() -> i32;
         fn signal(signum: i32, handler: usize) -> usize;
         fn write(fd: i32, buf: *const u8, count: usize) -> isize;
         fn _exit(status: i32) -> !;
@@ -439,20 +490,31 @@ mod sys {
         i32::try_from(pid).map_err(|_| format!("pid {pid} out of range"))
     }
 
-    /// Block until child `pid` has exited, leaving it unreaped.
+    /// Block until child `pid` has exited, leaving it unreaped. macOS also
+    /// reports a child that stands stopped, unasked and on every call while
+    /// it stays so: that child is alive, and its exit is polled for — a stop
+    /// of the run must never end the call.
     pub(super) fn wait_exited(pid: u32) -> Result<(), String> {
-        // siginfo_t is 104 bytes on macOS, 128 on Linux
-        let mut info = [0u64; 32];
+        let mut info = SigInfo {
+            _signo: 0,
+            _errno: 0,
+            code: 0,
+            _rest: [0; 29],
+        };
         loop {
-            // SAFETY: `info` outlives the call and is larger than any
-            // siginfo_t; `pid` is our own child.
-            let done = unsafe { waitid(P_PID, pid, info.as_mut_ptr(), WEXITED | WNOWAIT) };
+            // SAFETY: `info` outlives the call and is as large as either
+            // platform's siginfo_t; `pid` is our own child.
+            let done = unsafe { waitid(P_PID, pid, &raw mut info, WEXITED | WNOWAIT) };
             if done == 0 {
-                return Ok(());
-            }
-            let err = std::io::Error::last_os_error();
-            if err.kind() != std::io::ErrorKind::Interrupted {
-                return Err(format!("waitid {pid}: {err}"));
+                if !matches!(info.code, CLD_TRAPPED | CLD_STOPPED | CLD_CONTINUED) {
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            } else {
+                let err = std::io::Error::last_os_error();
+                if err.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(format!("waitid {pid}: {err}"));
+                }
             }
         }
     }
@@ -490,12 +552,12 @@ mod sys {
         })
     }
 
-    /// `SIGKILL` the process group `pgid` leads. Async-signal-safe.
-    pub(super) fn kill_group_raw(pgid: i32) {
+    /// Send `signal` to the process group `pgid` leads. Async-signal-safe.
+    pub(super) fn signal_group_raw(pgid: i32, signal: i32) {
         if pgid > 0 {
             // SAFETY: plain syscall; the callers only name groups whose
             // leader is our own unreaped child.
-            unsafe { kill(-pgid, SIGKILL) };
+            unsafe { kill(-pgid, signal) };
         }
     }
 
@@ -503,7 +565,7 @@ mod sys {
     /// it; what it left in the group dies).
     pub(super) fn kill_group(pid: u32) {
         if let Ok(pgid) = pid_of(pid) {
-            kill_group_raw(pgid);
+            signal_group_raw(pgid, SIGKILL);
         }
     }
 
@@ -532,11 +594,11 @@ mod sys {
         Ok(())
     }
 
-    /// The stop handler: every live child's group is killed, then the
-    /// harness exits with 128 + the signal. Only atomics and
-    /// async-signal-safe calls.
-    extern "C" fn on_stop(signal: i32) {
-        super::live::kill_all();
+    /// The end of a run by `signal`: every live child's group killed, a
+    /// note, then `_exit(128 + signal)`. Only atomics and async-signal-safe
+    /// calls.
+    pub(super) fn end(signal: i32) -> ! {
+        super::live::each(SIGKILL);
         let note = b"bench: stopped by a signal; every child process group was killed\n";
         // SAFETY: write(2) and _exit are async-signal-safe; the buffer is
         // static.
@@ -546,17 +608,66 @@ mod sys {
         }
     }
 
-    /// SIGTERM, SIGHUP and SIGINT stop the run through [`on_stop`];
+    /// A pause: every live child's group stopped, then the harness itself
+    /// (SIGSTOP, which nothing catches). Async-signal-safe.
+    pub(super) fn pause() {
+        super::live::each(SIGSTOP);
+        // SAFETY: plain syscalls on our own pid.
+        unsafe { kill(getpid(), SIGSTOP) };
+    }
+
+    /// SIGTERM, SIGHUP, SIGINT, SIGQUIT: the children die first; a spawn
+    /// in flight ends the run once its child is registered.
+    extern "C" fn on_end(signal: i32) {
+        super::live::each(SIGKILL);
+        if !super::live::hold_end(signal) {
+            end(signal);
+        }
+    }
+
+    /// SIGTSTP, SIGTTIN, SIGTTOU: the epoch moves on, the children stop
+    /// first, then the harness — or the spawn in flight stops them all
+    /// once its child is registered.
+    extern "C" fn on_pause(_signal: i32) {
+        super::STOPS.fetch_add(1, super::SeqCst);
+        super::live::each(SIGSTOP);
+        if super::live::pause_now() {
+            pause();
+        }
+    }
+
+    /// SIGCONT: the epoch moves on, a pause still held is dropped, and every
+    /// child continues with the harness.
+    extern "C" fn on_continue(_signal: i32) {
+        super::STOPS.fetch_add(1, super::SeqCst);
+        super::live::resume();
+        super::live::each(SIGCONT);
+    }
+
+    /// SIGTERM, SIGHUP, SIGINT and SIGQUIT end the run through [`on_end`];
+    /// SIGTSTP, SIGTTIN and SIGTTOU pause it, children first, through
+    /// [`on_pause`]; SIGCONT continues them through [`on_continue`].
     /// SIGCHLD goes back to its default, so the kernel never reaps a child
     /// behind our back and frees its pid.
     pub(super) fn guard_signals() -> Result<(), String> {
-        // SAFETY: installing dispositions; the handler is async-signal-safe.
+        let handlers = [
+            (SIGHUP, on_end as *const () as usize),
+            (SIGINT, on_end as *const () as usize),
+            (SIGQUIT, on_end as *const () as usize),
+            (SIGTERM, on_end as *const () as usize),
+            (SIGTSTP, on_pause as *const () as usize),
+            (SIGTTIN, on_pause as *const () as usize),
+            (SIGTTOU, on_pause as *const () as usize),
+            (SIGCONT, on_continue as *const () as usize),
+        ];
+        // SAFETY: installing dispositions; every handler is
+        // async-signal-safe.
         unsafe {
             if signal(SIGCHLD, SIG_DFL) == SIG_ERR {
                 return Err(String::from("signal(SIGCHLD)"));
             }
-            for number in [SIGHUP, SIGINT, SIGTERM] {
-                if signal(number, on_stop as *const () as usize) == SIG_ERR {
+            for (number, handler) in handlers {
+                if signal(number, handler) == SIG_ERR {
                     return Err(format!("signal({number})"));
                 }
             }
@@ -634,10 +745,18 @@ mod sys {
         Err(String::from(UNSUPPORTED))
     }
 
-    #[allow(dead_code, reason = "only the stop handler kills every group")]
-    pub(super) fn kill_group_raw(_pgid: i32) {}
+    #[allow(dead_code, reason = "only the signal handlers signal every group")]
+    pub(super) fn signal_group_raw(_pgid: i32, _signal: i32) {}
 
     pub(super) fn kill_group(_pid: u32) {}
+
+    /// No handler runs here (`guard_signals` refuses), so nothing is ever
+    /// held for a spawn to end or pause.
+    pub(super) fn end(signal: i32) -> ! {
+        std::process::exit(128 + signal)
+    }
+
+    pub(super) fn pause() {}
 
     #[allow(dead_code, reason = "only unix spawns pre-exec limits")]
     pub(super) fn limit_cpu(_seconds: u64) -> std::io::Result<()> {
@@ -659,9 +778,10 @@ pub(crate) const CAPS_ENFORCED: bool = cfg!(all(
     target_pointer_width = "64"
 ));
 
-/// Install the stop handler: SIGTERM, SIGHUP and SIGINT kill every live
-/// child's process group, then the harness exits with 128 + the signal.
-/// Call once, before the first child.
+/// Install the signal handlers: SIGTERM, SIGHUP, SIGINT and SIGQUIT kill
+/// every live child's process group, then the harness exits with 128 + the
+/// signal; SIGTSTP, SIGTTIN and SIGTTOU stop every live child's group, then
+/// the harness; SIGCONT continues them. Call once, before the first child.
 pub(crate) fn guard_signals() -> Result<(), String> {
     sys::guard_signals()
 }
@@ -672,14 +792,97 @@ pub(crate) fn memory_sampled() -> bool {
     sys::memory(std::process::id()).is_some()
 }
 
-/// The process groups the stop handler kills: one slot per live child,
-/// filled at spawn and emptied before the reap.
+/// The process groups the signal handlers act on: one slot per live
+/// child, filled at spawn and emptied before the reap — and what they hold
+/// while a spawn is in flight, so that no child escapes a signal that
+/// lands between its start and its registration.
+///
+/// A handler records the signal, then reads the spawns in flight; a
+/// spawner registers its child, leaves the count, then reads what is held.
+/// Every step is sequentially consistent, so either the handler sees the
+/// spawn and leaves the signal to the spawner, or the spawner's child was
+/// registered before the handler acts; a held pause is taken by exactly
+/// one of them.
 mod live {
-    use std::sync::atomic::AtomicI32;
-    use std::sync::atomic::Ordering::{AcqRel, Acquire};
+    use std::sync::atomic::Ordering::{AcqRel, Acquire, SeqCst};
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize};
 
     const SLOTS: usize = 64;
     static GROUPS: [AtomicI32; SLOTS] = [const { AtomicI32::new(0) }; SLOTS];
+    /// Spawns in flight: started, their child not registered yet.
+    static SPAWNING: AtomicUsize = AtomicUsize::new(0);
+    /// An ending signal held for a spawn in flight (0: none).
+    static HELD_END: AtomicI32 = AtomicI32::new(0);
+    /// A pause held for a spawn in flight.
+    static HELD_PAUSE: AtomicBool = AtomicBool::new(false);
+
+    /// A spawn in flight: dropped once its child is registered (or failed
+    /// to start), it acts on what a handler held meanwhile — the end of
+    /// the run, or a pause of every group and the harness.
+    pub(super) struct Spawning;
+
+    impl Spawning {
+        pub(super) fn begin() -> Self {
+            SPAWNING.fetch_add(1, SeqCst);
+            Self
+        }
+    }
+
+    impl Drop for Spawning {
+        fn drop(&mut self) {
+            // the last spawn in flight acts for all of them
+            if SPAWNING.fetch_sub(1, SeqCst) != 1 {
+                return;
+            }
+            let end = HELD_END.load(SeqCst);
+            if end != 0 {
+                super::sys::end(end);
+            }
+            if HELD_PAUSE.swap(false, SeqCst) {
+                super::sys::pause();
+            }
+        }
+    }
+
+    /// The ending handler's side: hold `signal`; true when a spawn in
+    /// flight will end the run once its child is registered.
+    #[cfg_attr(
+        not(all(
+            any(target_os = "macos", target_os = "linux"),
+            target_pointer_width = "64"
+        )),
+        allow(dead_code, reason = "only the caps platforms' handlers hold a signal")
+    )]
+    pub(super) fn hold_end(signal: i32) -> bool {
+        HELD_END.store(signal, SeqCst);
+        SPAWNING.load(SeqCst) > 0
+    }
+
+    /// The pausing handler's side: hold the pause; true when the handler
+    /// takes it now — no spawn in flight, and no spawner took it first.
+    #[cfg_attr(
+        not(all(
+            any(target_os = "macos", target_os = "linux"),
+            target_pointer_width = "64"
+        )),
+        allow(dead_code, reason = "only the caps platforms' handlers hold a signal")
+    )]
+    pub(super) fn pause_now() -> bool {
+        HELD_PAUSE.store(true, SeqCst);
+        SPAWNING.load(SeqCst) == 0 && HELD_PAUSE.swap(false, SeqCst)
+    }
+
+    /// A continue drops a pause still held.
+    #[cfg_attr(
+        not(all(
+            any(target_os = "macos", target_os = "linux"),
+            target_pointer_width = "64"
+        )),
+        allow(dead_code, reason = "only the caps platforms' handlers hold a signal")
+    )]
+    pub(super) fn resume() {
+        HELD_PAUSE.store(false, SeqCst);
+    }
 
     /// False when every slot is taken (the child must not run).
     pub(super) fn register(pid: u32) -> bool {
@@ -699,17 +902,21 @@ mod live {
         }
     }
 
-    /// Async-signal-safe: atomic loads and `kill`.
+    /// Send `signal` to every live group. Async-signal-safe: atomic loads
+    /// and `kill`.
     #[cfg_attr(
         not(all(
             any(target_os = "macos", target_os = "linux"),
             target_pointer_width = "64"
         )),
-        allow(dead_code, reason = "only the caps platforms' stop handler calls it")
+        allow(
+            dead_code,
+            reason = "only the caps platforms' handlers signal every group"
+        )
     )]
-    pub(super) fn kill_all() {
+    pub(super) fn each(signal: i32) {
         for slot in &GROUPS {
-            super::sys::kill_group_raw(slot.load(Acquire));
+            super::sys::signal_group_raw(slot.load(SeqCst), signal);
         }
     }
 
@@ -734,6 +941,10 @@ struct Watch {
     rss_cap: u64,
     /// Nanoseconds after `base`; [`NO_DEADLINE`] while idle.
     deadline: AtomicU64,
+    /// The wall of the call in flight, and the stop epoch its deadline was
+    /// set in: a stop restarts it.
+    wall: AtomicU64,
+    epoch: AtomicU64,
     stop: AtomicBool,
     killed: AtomicU8,
     /// Largest memory seen: samples and the kernel's high-water mark.
@@ -743,8 +954,24 @@ struct Watch {
 impl Watch {
     fn arm(&self, wall: Duration) {
         let wall = u64::try_from(wall.as_nanos()).unwrap_or(u64::MAX);
+        self.wall.store(wall, Release);
+        self.epoch.store(stop_epoch(), Release);
         self.deadline
             .store(nanos(self.base).saturating_add(wall), Release);
+    }
+
+    /// A stop fell inside the call: its wall starts again now — the
+    /// stopped time was not the child's. Only an armed deadline moves, so
+    /// a call that just ended is never armed again.
+    fn rearm(&self, armed: u64, epoch: u64) {
+        self.epoch.store(epoch, Release);
+        let wall = self.wall.load(Acquire);
+        let _ = self.deadline.compare_exchange(
+            armed,
+            nanos(self.base).saturating_add(wall),
+            AcqRel,
+            Acquire,
+        );
     }
 
     fn disarm(&self) {
@@ -782,10 +1009,17 @@ fn watchdog(pid: u32, watch: &Watch, sample: Sampler) {
             exited = memory.exited;
         }
         let deadline = watch.deadline.load(Acquire);
-        if !exited && deadline != NO_DEADLINE && nanos(watch.base) >= deadline {
-            watch.killed.store(KILLED_WALL, Release);
-            sys::kill_group(pid);
-            return;
+        if !exited && deadline != NO_DEADLINE {
+            let epoch = stop_epoch();
+            if epoch != watch.epoch.load(Acquire) {
+                watch.rearm(deadline, epoch);
+            } else if nanos(watch.base) >= deadline && stop_epoch() == epoch {
+                // past the wall with no stop in between: the clock read
+                // above holds no stopped time
+                watch.killed.store(KILLED_WALL, Release);
+                sys::kill_group(pid);
+                return;
+            }
         }
         std::thread::park_timeout(POLL);
     }
@@ -838,14 +1072,31 @@ impl Supervised {
         #[cfg(not(unix))]
         let _ = cpu;
         let base = Instant::now();
-        let child = command.spawn().map_err(|e| format!("spawn: {e}"))?;
+        // the child runs before spawn() returns: a signal meanwhile is held
+        // until it is registered (or known never to have started), then
+        // acted on with it in the table
+        let spawning = live::Spawning::begin();
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                drop(spawning);
+                return Err(format!("spawn: {e}"));
+            }
+        };
         let pid = child.id();
         let registered = live::register(pid);
+        if !registered {
+            // no slot: killed before any held signal could leave it running
+            sys::kill_group(pid);
+        }
+        drop(spawning);
         let first = sample(pid);
         let watch = Arc::new(Watch {
             base,
             rss_cap,
             deadline: AtomicU64::new(NO_DEADLINE),
+            wall: AtomicU64::new(0),
+            epoch: AtomicU64::new(stop_epoch()),
             stop: AtomicBool::new(false),
             killed: AtomicU8::new(0),
             peak: AtomicU64::new(first.map_or(0, Memory::most)),
@@ -934,13 +1185,21 @@ impl Supervised {
             .max(self.sampled_peak())
     }
 
-    /// The call this child did not complete — see [`classify`].
-    fn failure(&self, usage: Usage, wall_ns: u64, caps: Caps, mid_call: bool) -> Option<Failure> {
+    /// The call this child did not complete — see [`classify`]. A call a
+    /// stop fell into (`interrupted`) is never past its wall for the time
+    /// it stood stopped: only the watchdog's own verdict on time counts.
+    fn failure(
+        &self,
+        usage: Usage,
+        wall_ns: u64,
+        caps: Caps,
+        (mid_call, interrupted): (bool, bool),
+    ) -> Option<Failure> {
         let peak = self.peak(Some(usage));
         let kind = classify(
             self.watch.cause(),
             Some(usage.exit),
-            (peak, wall_ns),
+            (peak, if interrupted { 0 } else { wall_ns }),
             caps,
             mid_call,
         )?;
@@ -962,13 +1221,16 @@ impl Drop for Supervised {
 }
 
 /// A one-shot child: wall time from spawn to exit, its output, usage and
-/// stderr summary, and the resource failure that ended it, if one did.
+/// stderr summary, the resource failure that ended it, if one did, and
+/// whether a stop fell inside its wall interval.
 pub(crate) struct Finished {
     pub(crate) ns: u64,
     pub(crate) stdout: Vec<u8>,
     pub(crate) stderr: Stderr,
     pub(crate) usage: Usage,
     pub(crate) failure: Option<Failure>,
+    /// A stop fell inside the call: its time is not a sample.
+    pub(crate) interrupted: bool,
 }
 
 /// Run `command` to completion under `caps`, with a kernel CPU-time limit
@@ -1005,6 +1267,7 @@ fn run_once_with(command: &mut Command, caps: Caps, sample: Sampler) -> Result<F
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let epoch = stop_epoch();
     let started = Instant::now();
     let mut child = Supervised::spawn_sampled(command, caps.rss, Some(caps.wall), sample)?;
     child.watch.arm(caps.wall);
@@ -1012,7 +1275,8 @@ fn run_once_with(command: &mut Command, caps: Caps, sample: Sampler) -> Result<F
     let stdout = child.child.stdout.take().map(slurp);
     let usage = child.wait()?;
     let ns = nanos(started);
-    let failure = child.failure(usage, ns, caps, false);
+    let interrupted = stop_epoch() != epoch;
+    let failure = child.failure(usage, ns, caps, (false, interrupted));
     let stdout = match stdout.map(|r| r.recv_timeout(PIPE_WAIT)) {
         Some(Ok(Ok(bytes))) => bytes,
         Some(Ok(Err(e))) if failure.is_none() => return Err(format!("read stdout: {e}")),
@@ -1027,6 +1291,7 @@ fn run_once_with(command: &mut Command, caps: Caps, sample: Sampler) -> Result<F
         stderr,
         usage,
         failure,
+        interrupted,
     })
 }
 
@@ -1039,6 +1304,9 @@ pub(crate) enum CallError {
     Aborted,
     /// The pipe or the protocol broke — the harness's fault, not the scan's.
     Protocol(String),
+    /// A stop fell inside the call: the reply is discarded, the worker
+    /// kept, and the caller repeats the call.
+    Interrupted,
 }
 
 impl std::fmt::Display for CallError {
@@ -1050,6 +1318,7 @@ impl std::fmt::Display for CallError {
             },
             Self::Aborted => f.write_str("abandoned"),
             Self::Protocol(e) => f.write_str(e),
+            Self::Interrupted => f.write_str("a stop fell inside the call"),
         }
     }
 }
@@ -1138,16 +1407,28 @@ impl Server {
         self.child.pid()
     }
 
-    /// One request line, one reply line, within `wall`.
+    /// One request line, one reply line, within `wall` — for a request
+    /// whose time is no sample (`hello`, priming, `quit`): a stop inside it
+    /// costs nothing.
     pub(crate) fn request(&mut self, line: &str, wall: Duration) -> Result<String, CallError> {
+        self.exchange(line, wall, Duration::MAX, &mut |_| true)
+            .map(|(reply, _)| reply)
+    }
+
+    /// One measured call: [`Server::request`], but a call a stop fell into
+    /// is [`CallError::Interrupted`] — its reply discarded, the worker
+    /// kept — for the caller to repeat.
+    pub(crate) fn request_timed(
+        &mut self,
+        line: &str,
+        wall: Duration,
+    ) -> Result<String, CallError> {
         self.request_watch(line, wall, Duration::MAX, &mut |_| true)
     }
 
-    /// [`Server::request`], calling `tick` with the elapsed time about every
-    /// `every` while waiting; `tick` returning false kills the worker and
-    /// gives [`CallError::Aborted`]. A reply that comes past `wall`, or with
-    /// the worker's kernel peak above the memory cap, is a resource failure:
-    /// the worker is killed and reaped.
+    /// [`Server::request_timed`], calling `tick` with the elapsed time about
+    /// every `every` while waiting; `tick` returning false kills the worker
+    /// and gives [`CallError::Aborted`].
     pub(crate) fn request_watch(
         &mut self,
         line: &str,
@@ -1155,6 +1436,25 @@ impl Server {
         every: Duration,
         tick: &mut dyn FnMut(Duration) -> bool,
     ) -> Result<String, CallError> {
+        match self.exchange(line, wall, every, tick)? {
+            (_, true) => Err(CallError::Interrupted),
+            (reply, false) => Ok(reply),
+        }
+    }
+
+    /// Send `line` and wait for its reply: the reply, and whether a stop
+    /// fell inside the call. A reply that comes past `wall` with no stop in
+    /// between, or with the worker's kernel peak above the memory cap, is a
+    /// resource failure: the worker is killed and reaped. The grace past
+    /// the wall the harness gives its own watchdog restarts after a stop.
+    fn exchange(
+        &mut self,
+        line: &str,
+        wall: Duration,
+        every: Duration,
+        tick: &mut dyn FnMut(Duration) -> bool,
+    ) -> Result<(String, bool), CallError> {
+        let epoch = stop_epoch();
         let started = Instant::now();
         let Some(stdin) = self.stdin.as_mut() else {
             return Err(CallError::Protocol(format!("{}: stdin closed", self.label)));
@@ -1164,27 +1464,37 @@ impl Server {
             .and_then(|()| stdin.flush())
             .is_err()
         {
-            return Err(self.died(started, wall));
+            return Err(self.died(started, wall, epoch));
         }
         let limit = wall.saturating_add(GRACE);
         let mut ticked = Instant::now();
+        // the grace counts from the call's start, or from its last stop
+        let (mut since, mut seen) = (started, epoch);
         loop {
             match self.replies.recv_timeout(POLL) {
                 Ok(reply) => {
                     self.child.watch.disarm();
-                    return self.returned(reply, started, wall);
+                    let interrupted = stop_epoch() != epoch;
+                    return self
+                        .returned(reply, started, (wall, interrupted))
+                        .map(|reply| (reply, interrupted));
                 }
-                Err(mpsc::RecvTimeoutError::Disconnected) => return Err(self.died(started, wall)),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(self.died(started, wall, epoch));
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
             // killed by the watchdog: an orphaned grandchild may still hold
             // the pipe open, so the kill — not end of file — ends the wait
             if self.child.watch.cause().is_some() {
-                return Err(self.died(started, wall));
+                return Err(self.died(started, wall, epoch));
             }
-            if started.elapsed() >= limit {
+            let now = stop_epoch();
+            if now != seen {
+                (since, seen) = (Instant::now(), now);
+            } else if since.elapsed() >= limit && stop_epoch() == seen {
                 self.child.watch.killed.store(KILLED_WALL, Release);
-                return Err(self.died(started, wall));
+                return Err(self.died(started, wall, epoch));
             }
             if ticked.elapsed() >= every {
                 ticked = Instant::now();
@@ -1198,13 +1508,13 @@ impl Server {
     }
 
     /// A reply arrived: still a resource failure when it came past the wall
-    /// cap or the kernel's high-water mark passed the memory cap between
-    /// two watchdog samples.
+    /// cap (unless a stop fell inside the call) or the kernel's high-water
+    /// mark passed the memory cap between two watchdog samples.
     fn returned(
         &mut self,
         reply: String,
         started: Instant,
-        wall: Duration,
+        (wall, interrupted): (Duration, bool),
     ) -> Result<String, CallError> {
         let wall_ns = nanos(started);
         if let Some(memory) = (self.child.sample)(self.child.pid()) {
@@ -1215,7 +1525,8 @@ impl Server {
             rss: self.child.watch.rss_cap,
             wall,
         };
-        let Some(kind) = classify(None, None, (peak, wall_ns), caps, false) else {
+        let timed = if interrupted { 0 } else { wall_ns };
+        let Some(kind) = classify(None, None, (peak, timed), caps, false) else {
             return Ok(reply);
         };
         self.child.kill();
@@ -1228,17 +1539,19 @@ impl Server {
     }
 
     /// The worker went away during a call: kill what is left, reap, and
-    /// describe the failure.
-    fn died(&mut self, started: Instant, wall: Duration) -> CallError {
+    /// describe the failure (its wall unread when a stop fell inside the
+    /// call, `epoch` being the stop epoch the call began in).
+    fn died(&mut self, started: Instant, wall: Duration, epoch: u64) -> CallError {
         self.child.kill();
         let caps = Caps {
             rss: self.child.watch.rss_cap,
             wall,
         };
+        let interrupted = stop_epoch() != epoch;
         match self.child.wait() {
             Ok(usage) => self
                 .child
-                .failure(usage, nanos(started), caps, true)
+                .failure(usage, nanos(started), caps, (true, interrupted))
                 .map_or_else(
                     || CallError::Protocol(format!("{}: the worker left", self.label)),
                     CallError::Died,
@@ -1259,6 +1572,7 @@ impl Server {
     /// A worker that does not leave within [`QUIT_WALL`] is killed; a cap
     /// or a signal that ends it here is its [`End::failure`].
     pub(crate) fn finish(mut self) -> End {
+        let epoch = stop_epoch();
         let started = Instant::now();
         let farewell = self.request("quit", QUIT_WALL).unwrap_or_default();
         drop(self.stdin.take());
@@ -1268,7 +1582,11 @@ impl Server {
             rss: self.child.watch.rss_cap,
             wall: QUIT_WALL.saturating_add(QUIT_WALL),
         };
-        let failure = usage.and_then(|u| self.child.failure(u, nanos(started), caps, false));
+        let interrupted = stop_epoch() != epoch;
+        let failure = usage.and_then(|u| {
+            self.child
+                .failure(u, nanos(started), caps, (false, interrupted))
+        });
         End {
             farewell,
             usage,
@@ -1822,6 +2140,268 @@ pub(crate) mod tests {
             !format!("{summary:?}").contains("secret"),
             "no stderr text is kept"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    const PAUSES: [i32; 3] = [18, 21, 22];
+    #[cfg(target_os = "macos")]
+    const RESUME: i32 = 19;
+    #[cfg(not(target_os = "macos"))]
+    const PAUSES: [i32; 3] = [20, 21, 22];
+    #[cfg(not(target_os = "macos"))]
+    const RESUME: i32 = 18;
+
+    /// `ps -o stat=` of a pid: `T…` stopped, `S…` or `R…` running.
+    fn state(pid: u32) -> String {
+        let out = Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps");
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// Stopped (or running again) within 3 s.
+    fn stopped_within(pid: u32, stopped: bool) -> bool {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(3) {
+            if state(pid).starts_with('T') == stopped {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    fn signal(pid: u32, number: i32) {
+        // SAFETY: a plain signal to a process this test spawned.
+        unsafe { kill(i32::try_from(pid).expect("pid"), number) };
+    }
+
+    /// SIGQUIT (Ctrl-\) ends the run like SIGTERM: the child's group dies
+    /// first, then the harness exits 128 + 3.
+    #[test]
+    fn quit_is_handled_like_term() {
+        let mut harness = helper("bench::proc::tests::stop_helper", "stop")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("helper");
+        let victim = read_pid(harness.stdout.take().expect("stdout"), "victim ");
+        signal(harness.id(), 3);
+        let status = harness.wait().expect("the harness exits");
+        let went = gone_within(victim, Duration::from_secs(2));
+        signal(victim, 9);
+        assert_eq!((status.code(), went), (Some(131), true), "128 + SIGQUIT");
+    }
+
+    /// The helper side of the pause test: the handlers installed, one
+    /// supervised child alive, then a long wait.
+    #[test]
+    #[ignore = "a helper process of a_paused_harness_pauses_its_children"]
+    fn pause_helper() {
+        if helper_role().as_deref() != Some("pause") {
+            return;
+        }
+        guard_signals().expect("handlers");
+        let server = Server::spawn(sh("exec sleep 30"), "victim", 64 * MIB).expect("spawn");
+        println!("victim {}", server.pid());
+        std::thread::sleep(Duration::from_secs(30));
+        drop(server);
+    }
+
+    /// With a fake child: SIGTSTP (Ctrl-Z), SIGTTIN and SIGTTOU stop the
+    /// child's group, then the harness; SIGCONT continues both. Left to
+    /// run, the child would go on uncapped while the harness's watchdogs
+    /// stood still.
+    #[test]
+    fn a_paused_harness_pauses_its_children() {
+        let mut harness = helper("bench::proc::tests::pause_helper", "pause")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("helper");
+        let victim = read_pid(harness.stdout.take().expect("stdout"), "victim ");
+        let pid = harness.id();
+        let mut seen = Vec::new();
+        for number in PAUSES {
+            signal(pid, number);
+            seen.push((number, "harness stopped", stopped_within(pid, true)));
+            seen.push((number, "child stopped", state(victim).starts_with('T')));
+            signal(pid, RESUME);
+            seen.push((number, "harness continued", stopped_within(pid, false)));
+            seen.push((number, "child continued", !state(victim).starts_with('T')));
+        }
+        signal(pid, RESUME);
+        signal(pid, 15);
+        let status = harness.wait().expect("the harness exits");
+        let went = gone_within(victim, Duration::from_secs(2));
+        signal(victim, 9);
+        let failed: Vec<_> = seen.iter().filter(|(_, _, ok)| !ok).collect();
+        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!((status.code(), went), (Some(143), true));
+    }
+
+    /// The helper side of the registration test: a child whose spawn
+    /// returns only 2 s after it started running — a grandchild forked
+    /// before exec holds the pipe std waits on — so a signal can land in
+    /// between.
+    #[test]
+    #[ignore = "a helper process of a_signal_during_a_spawn_reaches_the_child"]
+    fn window_helper() {
+        unsafe extern "C" {
+            fn fork() -> i32;
+            fn sleep(seconds: u32) -> u32;
+            fn _exit(status: i32) -> !;
+        }
+        if helper_role().as_deref() != Some("window") {
+            return;
+        }
+        guard_signals().expect("handlers");
+        let file = std::env::var("QRSCAN_BENCH_TEST_FILE").expect("file");
+        let mut command = sh(&format!("echo $$ > {file}; exec sleep 30"));
+        // SAFETY: fork, sleep and _exit are async-signal-safe; the
+        // grandchild runs nothing else.
+        unsafe {
+            use std::os::unix::process::CommandExt as _;
+            command.pre_exec(|| {
+                if fork() == 0 {
+                    sleep(2);
+                    _exit(0);
+                }
+                Ok(())
+            });
+        }
+        let server = Server::spawn(command, "window", 64 * MIB).expect("spawn");
+        std::thread::sleep(Duration::from_secs(30));
+        drop(server);
+    }
+
+    /// With a fake child: SIGTERM lands while the child already runs but
+    /// its spawn has not returned. The handler holds it until the child
+    /// is registered, then kills its group and exits 128 + 15 — nothing
+    /// is left running.
+    #[test]
+    fn a_signal_during_a_spawn_reaches_the_child() {
+        let file =
+            std::env::temp_dir().join(format!("qrscan-bench-window-{}.pid", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let mut harness = helper("bench::proc::tests::window_helper", "window")
+            .env("QRSCAN_BENCH_TEST_FILE", &file)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("helper");
+        let started = Instant::now();
+        let mut child = None;
+        while child.is_none() && started.elapsed() < Duration::from_millis(1500) {
+            child = std::fs::read_to_string(&file)
+                .ok()
+                .and_then(|t| t.trim().parse::<u32>().ok());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let child = child.expect("the child wrote its pid");
+        signal(harness.id(), 15);
+        let status = harness.wait().expect("the harness exits");
+        let went = gone_within(child, Duration::from_secs(4));
+        signal(child, 9);
+        let _ = std::fs::remove_file(&file);
+        assert_eq!((status.code(), went), (Some(143), true));
+    }
+
+    /// The helper side of the stop-and-wall test: one 0.8 s call under a
+    /// 1 s wall cap, its outcome printed.
+    #[test]
+    #[ignore = "a helper process of a_stop_never_becomes_a_wall_failure"]
+    fn wall_helper() {
+        if helper_role().as_deref() != Some("wall") {
+            return;
+        }
+        guard_signals().expect("handlers");
+        println!("ready");
+        let done = run_once(&mut sh("sleep 0.8"), caps(64, Duration::from_secs(1))).expect("runs");
+        println!(
+            "outcome {:?} {}",
+            done.failure.map(|f| f.kind),
+            done.interrupted
+        );
+    }
+
+    /// A stop inside a call is no time of the child's: a 0.8 s call under
+    /// a 1 s wall cap, stopped 0.3 s in for 1.5 s, ends with no failure —
+    /// its group stood stopped with the harness and the watchdog restarted
+    /// its wall — and is marked interrupted, for its caller to repeat.
+    #[test]
+    fn a_stop_never_becomes_a_wall_failure() {
+        let mut harness = helper("bench::proc::tests::wall_helper", "wall")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("helper");
+        let mut lines = BufReader::new(harness.stdout.take().expect("stdout")).lines();
+        let ready = lines
+            .by_ref()
+            .map_while(Result::ok)
+            .any(|l| l.trim() == "ready");
+        std::thread::sleep(Duration::from_millis(300));
+        signal(harness.id(), PAUSES[0]);
+        std::thread::sleep(Duration::from_millis(1500));
+        signal(harness.id(), RESUME);
+        let outcome = lines
+            .map_while(Result::ok)
+            .find_map(|l| l.strip_prefix("outcome ").map(str::to_owned))
+            .unwrap_or_default();
+        let _ = harness.wait();
+        assert!(ready, "the helper started");
+        assert_eq!(outcome, "None true");
+    }
+
+    /// The helper side of the interrupted-worker test: two measured calls
+    /// of 0.5 s each to one worker, their results printed.
+    #[test]
+    #[ignore = "a helper process of an_interrupted_worker_call_keeps_its_worker"]
+    fn worker_pause_helper() {
+        if helper_role().as_deref() != Some("worker-pause") {
+            return;
+        }
+        guard_signals().expect("handlers");
+        let mut server = Server::spawn(
+            sh("while read l; do sleep 0.5; echo \"re:$l\"; done"),
+            "echo",
+            64 * MIB,
+        )
+        .expect("spawn");
+        println!("ready");
+        let wall = Duration::from_secs(10);
+        let first = server.request_timed("one", wall);
+        let second = server.request_timed("two", wall);
+        println!("calls {first:?} {second:?}");
+    }
+
+    /// A worker call a stop fell into is `Interrupted` — its reply
+    /// discarded, the worker kept, no failure — and the next call answers.
+    #[test]
+    fn an_interrupted_worker_call_keeps_its_worker() {
+        let mut harness = helper("bench::proc::tests::worker_pause_helper", "worker-pause")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("helper");
+        let mut lines = BufReader::new(harness.stdout.take().expect("stdout")).lines();
+        let ready = lines
+            .by_ref()
+            .map_while(Result::ok)
+            .any(|l| l.trim() == "ready");
+        std::thread::sleep(Duration::from_millis(200));
+        signal(harness.id(), PAUSES[0]);
+        std::thread::sleep(Duration::from_secs(1));
+        signal(harness.id(), RESUME);
+        let calls = lines
+            .map_while(Result::ok)
+            .find_map(|l| l.strip_prefix("calls ").map(str::to_owned))
+            .unwrap_or_default();
+        let _ = harness.wait();
+        assert!(ready, "the helper started");
+        assert_eq!(calls, "Err(Interrupted) Ok(\"re:two\")");
     }
 
     #[test]
