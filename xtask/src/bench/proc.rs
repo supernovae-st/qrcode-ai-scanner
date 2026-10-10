@@ -464,6 +464,8 @@ mod sys {
     const SIGSTOP: i32 = 19;
     #[cfg(not(target_os = "macos"))]
     const SIGTSTP: i32 = 20;
+    /// `EPERM`: a process that exists but is not ours to signal.
+    const EPERM: i32 = 1;
     const SIG_DFL: usize = 0;
     const SIG_ERR: usize = usize::MAX;
     const RLIMIT_CPU: i32 = 0;
@@ -567,6 +569,17 @@ mod sys {
         if let Ok(pgid) = pid_of(pid) {
             signal_group_raw(pgid, SIGKILL);
         }
+    }
+
+    /// Whether `pid` names a process, ours to signal or not (a zombie
+    /// still counts).
+    pub(super) fn alive(pid: u32) -> bool {
+        let Ok(pid) = pid_of(pid) else {
+            return false;
+        };
+        // SAFETY: signal 0 only probes for existence.
+        let found = unsafe { kill(pid, 0) } == 0;
+        found || std::io::Error::last_os_error().raw_os_error() == Some(EPERM)
     }
 
     /// Between fork and exec: a CPU-time limit (never above the inherited
@@ -750,6 +763,10 @@ mod sys {
 
     pub(super) fn kill_group(_pid: u32) {}
 
+    pub(super) fn alive(_pid: u32) -> bool {
+        false
+    }
+
     /// No handler runs here (`guard_signals` refuses), so nothing is ever
     /// held for a spawn to end or pause.
     pub(super) fn end(signal: i32) -> ! {
@@ -784,6 +801,11 @@ pub(crate) const CAPS_ENFORCED: bool = cfg!(all(
 /// the harness; SIGCONT continues them. Call once, before the first child.
 pub(crate) fn guard_signals() -> Result<(), String> {
     sys::guard_signals()
+}
+
+/// Whether `pid` names a live process (any owner; a zombie counts).
+pub(crate) fn alive(pid: u32) -> bool {
+    sys::alive(pid)
 }
 
 /// Whether this process's own memory can be sampled — the precondition of

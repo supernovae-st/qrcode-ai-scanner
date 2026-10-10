@@ -7,8 +7,10 @@
 //! the gate is discarded, never adjusted.
 //!
 //! Every reading fails closed: an unreadable load, process table, swap use
-//! or (where `pmset` exists) power state, a probe past its cap, or a lock
-//! file that no longer names the held lock closes it.
+//! or (where `pmset` exists) power state, a sibling-build probe — the
+//! worktree list, a build process's working directory — that fails or
+//! passes its cap, a lock file that no longer names the held lock, or a
+//! run that does not hold the lock at all closes it.
 //!
 //! While a pass runs, its own busy threads count against it, but only as
 //! much as they can have built: the one-minute load average is an
@@ -30,12 +32,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use super::env::{self, Power, probe};
+use super::env::{self, Power, probe, probe_run};
 
 /// Load-average ceiling per logical core (6 on 12 cores).
 pub(crate) const LOAD_PER_CORE: f64 = 0.5;
@@ -173,14 +175,21 @@ pub(crate) struct SiblingBuild {
     pub(crate) tool: String,
 }
 
+/// The working directory of a process: `Ok(None)` when it is gone, an
+/// error when it runs and its directory cannot be read.
+pub(crate) type Cwd<'a> = &'a dyn Fn(u32) -> Result<Option<String>, String>;
+
 /// Classify a process table. `cwd` reads a working directory (injected for
-/// tests); `own` is this process — it and its ancestors never count.
+/// tests); `own` is this process — it and its ancestors never count. With
+/// the sibling builds come the errors of the build processes whose working
+/// directory could not be read: such a process could be one, so the
+/// reading closes.
 pub(crate) fn sibling_builds_in(
     table: &[Process],
     markers: &[String],
     own: u32,
-    cwd: &dyn Fn(u32) -> Option<String>,
-) -> Vec<SiblingBuild> {
+    cwd: Cwd<'_>,
+) -> (Vec<SiblingBuild>, Vec<String>) {
     let parent: BTreeMap<u32, u32> = table.iter().map(|p| (p.pid, p.ppid)).collect();
     let mut ours = BTreeSet::from([own]);
     let mut at = own;
@@ -196,11 +205,21 @@ pub(crate) fn sibling_builds_in(
         .filter(|p| !ours.contains(&p.pid))
         .filter_map(|p| build_tool(&p.args).map(|tool| (p, tool)))
         .collect();
-    let mut siblings: BTreeSet<u32> = candidates
-        .iter()
-        .filter(|(p, _)| names(&p.args) || cwd(p.pid).is_some_and(|dir| names(&dir)))
-        .map(|(p, _)| p.pid)
-        .collect();
+    let mut errors = Vec::new();
+    let mut siblings: BTreeSet<u32> = BTreeSet::new();
+    for (p, _) in &candidates {
+        if names(&p.args) {
+            siblings.insert(p.pid);
+            continue;
+        }
+        match cwd(p.pid) {
+            Ok(Some(dir)) if names(&dir) => {
+                siblings.insert(p.pid);
+            }
+            Ok(_) => {}
+            Err(e) => errors.push(e),
+        }
+    }
     // a build process under a sibling build is part of it
     let descends = |pid: u32, siblings: &BTreeSet<u32>| {
         let mut seen = BTreeSet::new();
@@ -222,41 +241,67 @@ pub(crate) fn sibling_builds_in(
         .filter(|pid| !siblings.contains(pid) && descends(*pid, &siblings))
         .collect();
     siblings.extend(inherited);
-    candidates
+    let found = candidates
         .into_iter()
         .filter(|(p, _)| siblings.contains(&p.pid))
         .map(|(p, tool)| SiblingBuild { pid: p.pid, tool })
-        .collect()
+        .collect();
+    (found, errors)
 }
 
-/// A working directory through `lsof` (macOS has no `/proc`).
-fn cwd_of(pid: u32) -> Option<String> {
-    if let Ok(link) = std::fs::read_link(format!("/proc/{pid}/cwd")) {
-        return Some(link.to_string_lossy().into_owned());
+/// A working directory: `/proc` (Linux), else `lsof` (macOS). `Ok(None)`
+/// when the process is gone; an error when it runs and the directory
+/// cannot be read, or the probe failed or passed its cap.
+fn cwd_of(pid: u32) -> Result<Option<String>, String> {
+    match std::fs::read_link(format!("/proc/{pid}/cwd")) {
+        Ok(link) => return Ok(Some(link.to_string_lossy().into_owned())),
+        // a build process that ended since the process table was read
+        Err(_) if !super::proc::alive(pid) => return Ok(None),
+        Err(_) => {}
     }
-    probe(Command::new("lsof").args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"]))?
+    let done =
+        probe_run(Command::new("lsof").args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"]))
+            .map_err(|e| format!("lsof: {e}"))?;
+    if done.failure.is_some() {
+        return Err(String::from("lsof: past its cap"));
+    }
+    let dir = String::from_utf8_lossy(&done.stdout)
         .lines()
-        .find_map(|l| l.strip_prefix('n').map(str::to_owned))
+        .find_map(|l| l.strip_prefix('n').map(str::to_owned));
+    match dir {
+        Some(dir) => Ok(Some(dir)),
+        None if !super::proc::alive(pid) => Ok(None),
+        None => Err(format!(
+            "lsof: no working directory for build process {pid}"
+        )),
+    }
 }
 
 /// The project markers plus every worktree of this repository
 /// (`git worktree list --porcelain`): parallel work builds inside them.
-pub(crate) fn worktree_markers(repo: &Path) -> Vec<String> {
-    let mut markers: Vec<String> = PROJECT_MARKERS.iter().map(|m| (*m).to_owned()).collect();
-    if let Some(list) =
+/// Read at every reading, so a worktree added mid-run counts at once; a
+/// list that cannot be read is an error — without it a sibling build in
+/// another worktree would pass unseen.
+pub(crate) fn worktree_markers(repo: &Path) -> Result<Vec<String>, String> {
+    let list =
         probe(
             Command::new("git")
                 .arg("-C")
                 .arg(repo)
                 .args(["worktree", "list", "--porcelain"]),
         )
-    {
-        markers.extend(
-            list.lines()
-                .filter_map(|l| l.strip_prefix("worktree "))
-                .map(str::to_owned),
-        );
-    }
+        .ok_or("git worktree list: no answer")?;
+    Ok(markers_from(&list))
+}
+
+/// The project markers plus every worktree a porcelain list names.
+fn markers_from(list: &str) -> Vec<String> {
+    let mut markers: Vec<String> = PROJECT_MARKERS.iter().map(|m| (*m).to_owned()).collect();
+    markers.extend(
+        list.lines()
+            .filter_map(|l| l.strip_prefix("worktree "))
+            .map(str::to_owned),
+    );
     markers
 }
 
@@ -267,6 +312,48 @@ mod lock {
     const LOCK_SH: i32 = 1;
     const LOCK_EX: i32 = 2;
     const LOCK_NB: i32 = 4;
+    /// `O_NOFOLLOW`: the open fails on a symbolic link instead of following
+    /// it. The BSD family (macOS included) gives it one value; Linux gives
+    /// it another on arm and powerpc than on every other architecture.
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    pub(super) const NOFOLLOW: i32 = 0x0100;
+    #[cfg(all(
+        not(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd",
+            target_os = "dragonfly"
+        )),
+        any(
+            target_arch = "aarch64",
+            target_arch = "arm",
+            target_arch = "powerpc",
+            target_arch = "powerpc64"
+        )
+    ))]
+    pub(super) const NOFOLLOW: i32 = 0o100_000;
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    )))]
+    pub(super) const NOFOLLOW: i32 = 0o400_000;
 
     unsafe extern "C" {
         fn flock(fd: i32, operation: i32) -> i32;
@@ -310,14 +397,25 @@ fn identity(meta: &std::fs::Metadata) -> (u64, u64) {
 }
 
 impl HostLock {
+    /// Open (or create) the lock file without following a symbolic link,
+    /// and only a regular file: whatever another user left at the path is
+    /// refused, never truncated through.
     fn open(path: &Path) -> Result<std::fs::File, String> {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(lock::NOFOLLOW);
+        }
+        let file = options
             .open(path)
-            .map_err(|e| format!("the host lock file: {}", e.kind()))
+            .map_err(|e| format!("the host lock file: {}", e.kind()))?;
+        match file.metadata() {
+            Ok(meta) if meta.is_file() => Ok(file),
+            Ok(_) => Err(String::from("the host lock file: not a regular file")),
+            Err(e) => Err(format!("the host lock file: {}", e.kind())),
+        }
     }
 
     /// Take the lock; `None` while another process holds it.
@@ -352,9 +450,10 @@ impl HostLock {
         true
     }
 
-    /// Whether another process holds the lock now.
+    /// Whether another process holds the lock now. Nothing at the path is
+    /// no holder; a link or anything but a regular file is an error.
     pub(crate) fn held_elsewhere(path: &Path) -> Result<bool, String> {
-        if !path.exists() {
+        if std::fs::symlink_metadata(path).is_err() {
             return Ok(false);
         }
         let file = Self::open(path)?;
@@ -383,6 +482,8 @@ pub(crate) struct Reading {
     pub(crate) sibling_builds: Vec<SiblingBuild>,
     pub(crate) swap_used: Option<u64>,
     pub(crate) power: Option<Power>,
+    /// This run holds the host-wide lock, and the lock file still names it.
+    pub(crate) lock_held: bool,
     /// Set while another bench run holds the host-wide lock.
     pub(crate) lock_held_elsewhere: bool,
     pub(crate) open: bool,
@@ -422,6 +523,8 @@ impl Reading {
         }
         if self.lock_held_elsewhere {
             notes.push(String::from("another bench run holds the lock"));
+        } else if !self.lock_held {
+            notes.push(String::from("this run does not hold the host lock"));
         }
         if let Some(error) = &self.error {
             notes.push(format!("unreadable: {error}"));
@@ -451,13 +554,15 @@ impl Reading {
     }
 }
 
-/// Whether a reading opens its rule. Both rules need every part read, no
-/// other run's lock, and swap use read and at most 8 × 10⁹ bytes; the gate
-/// also needs no sibling build, mains power outside Low Power Mode and
-/// load1 within the ceiling plus the allowance, the floor load1 ≤ 30.
+/// Whether a reading opens its rule. Both rules need every part read, the
+/// host lock held by this run (none by another), and swap use read and at
+/// most 8 × 10⁹ bytes; the gate also needs no sibling build, mains power
+/// outside Low Power Mode and load1 within the ceiling plus the allowance,
+/// the floor load1 ≤ 30.
 fn opens(reading: &Reading) -> bool {
     let load = reading.load.map(|l| l.one);
     reading.error.is_none()
+        && reading.lock_held
         && !reading.lock_held_elsewhere
         && reading.swap_used.is_some_and(|s| s <= FLOOR_SWAP)
         && match reading.rule {
@@ -480,9 +585,9 @@ pub(crate) fn unix_now() -> u64 {
 pub(crate) struct Gate {
     pub(crate) cores: usize,
     pub(crate) threshold: f64,
+    /// The repository whose worktrees mark a sibling build — listed at every
+    /// reading, never before the run holds the lock.
     repo: PathBuf,
-    /// Read on the first reading — never before the run holds the lock.
-    markers: OnceLock<Vec<String>>,
     own: u32,
     lock_path: PathBuf,
     held: Mutex<Option<HostLock>>,
@@ -506,7 +611,6 @@ impl Gate {
             cores,
             threshold,
             repo: repo.to_path_buf(),
-            markers: OnceLock::new(),
             own: std::process::id(),
             lock_path: lock_path.to_path_buf(),
             held: Mutex::new(None),
@@ -516,7 +620,7 @@ impl Gate {
     }
 
     /// A gate whose readings follow `opens` in order (then stay closed),
-    /// on a 12-core host, holding no lock.
+    /// on a 12-core host, its lock taken for granted.
     #[cfg(test)]
     pub(crate) fn scripted(opens: &[bool]) -> Self {
         let mut opens = opens.to_vec();
@@ -525,7 +629,6 @@ impl Gate {
             cores: 12,
             threshold: 6.0,
             repo: PathBuf::new(),
-            markers: OnceLock::from(Vec::new()),
             own: 0,
             lock_path: PathBuf::from("/nonexistent/qrscan-bench-test.lock"),
             held: Mutex::new(None),
@@ -602,6 +705,7 @@ impl Gate {
             sibling_builds: Vec::new(),
             swap_used: None,
             power: None,
+            lock_held: true,
             lock_held_elsewhere: false,
             open,
             error: None,
@@ -609,19 +713,25 @@ impl Gate {
     }
 
     /// One reading. It fails closed: any part that cannot be read — load,
-    /// process table, swap, the power state under the gate rule, the lock —
-    /// is an error, and an error closes it.
+    /// the worktree list, the process table, a build process's working
+    /// directory, swap, the power state under the gate rule, the lock — is
+    /// an error, and an error closes it.
     fn measure(&self, phase: &str, rule: Rule, allowance: f64) -> Reading {
         if let Some(reading) = self.scripted_reading(phase, rule, allowance) {
             return reading;
         }
         let mut errors: Vec<String> = Vec::new();
         let load = read_load().map_err(|e| errors.push(e)).ok();
-        let markers = self.markers.get_or_init(|| worktree_markers(&self.repo));
+        let markers = worktree_markers(&self.repo).unwrap_or_else(|e| {
+            errors.push(e);
+            PROJECT_MARKERS.iter().map(|m| (*m).to_owned()).collect()
+        });
         let sibling_builds = if let Some(table) =
             probe(Command::new("ps").args(["-axww", "-o", "pid=,ppid=,args="]))
         {
-            sibling_builds_in(&parse_ps(&table), markers, self.own, &cwd_of)
+            let (found, unread) = sibling_builds_in(&parse_ps(&table), &markers, self.own, &cwd_of);
+            errors.extend(unread);
+            found
         } else {
             errors.push(String::from("ps: no answer"));
             Vec::new()
@@ -656,6 +766,7 @@ impl Gate {
             sibling_builds,
             swap_used,
             power: Some(power),
+            lock_held: holding,
             lock_held_elsewhere,
             open: false,
             error: (!errors.is_empty()).then(|| errors.join("; ")),
@@ -813,12 +924,15 @@ mod tests {
             String::from("qrcode_ai_scanner"),
             String::from("/work/scanner"),
         ];
-        let cwd = |pid: u32| match pid {
-            200 | 300 => Some(String::from("/work/scanner/other-worktree")),
-            400 => Some(String::from("/elsewhere")),
-            _ => None,
+        let cwd = |pid: u32| -> Result<Option<String>, String> {
+            Ok(match pid {
+                200 | 300 => Some(String::from("/work/scanner/other-worktree")),
+                400 => Some(String::from("/elsewhere")),
+                _ => None,
+            })
         };
-        let found = sibling_builds_in(&table(), &markers, 210, &cwd);
+        let (found, unread) = sibling_builds_in(&table(), &markers, 210, &cwd);
+        assert!(unread.is_empty());
         assert_eq!(
             found,
             vec![
@@ -857,6 +971,7 @@ mod tests {
             }],
             swap_used: Some(9 << 30),
             power,
+            lock_held: false,
             lock_held_elsewhere: true,
             open: false,
             error: None,
@@ -894,8 +1009,8 @@ mod tests {
     }
 
     /// Readings fail closed — swap unread or above 8 × 10⁹ bytes, an
-    /// unreadable part (power under the gate rule), a battery — and open
-    /// exactly at the limits.
+    /// unreadable part (power under the gate rule), a battery, a run that
+    /// does not hold the lock — and open exactly at the limits.
     #[test]
     fn readings_fail_closed() {
         let calm = |rule: Rule| Reading {
@@ -912,6 +1027,7 @@ mod tests {
                 battery_percent: Some(100),
                 low_power_mode: Some(false),
             }),
+            lock_held: true,
             lock_held_elsewhere: false,
             ..reading(None)
         };
@@ -936,6 +1052,14 @@ mod tests {
                 ..calm(rule)
             };
             assert!(!opens(&blind), "an unreadable part closes {rule:?}");
+            let unheld = Reading {
+                lock_held: false,
+                ..calm(rule)
+            };
+            assert!(
+                !opens(&unheld),
+                "a reading without the lock closes {rule:?}"
+            );
         }
         let battery = Reading {
             power: Some(Power {
@@ -1012,6 +1136,210 @@ mod tests {
         );
         drop(gate);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A build process whose working directory cannot be read could be a
+    /// sibling build: its error closes the reading. One that ended since
+    /// the process table was read is no build; one whose arguments already
+    /// carry a marker needs no probe.
+    #[test]
+    fn an_unreadable_working_directory_closes_the_reading() {
+        let markers = vec![String::from("qrcode_ai_scanner")];
+        let cwd = |pid: u32| -> Result<Option<String>, String> {
+            match pid {
+                300 => Err(String::from("lsof: past its cap")),
+                400 => Ok(None),
+                _ => Ok(Some(String::from("/elsewhere"))),
+            }
+        };
+        let (found, unread) = sibling_builds_in(&table(), &markers, 210, &cwd);
+        assert_eq!(unread, vec![String::from("lsof: past its cap")]);
+        assert_eq!(
+            found,
+            vec![SiblingBuild {
+                pid: 500,
+                tool: String::from("rustc")
+            }],
+            "the marker in its arguments decides, with no probe"
+        );
+    }
+
+    /// The helper side of the working-directory test: one reading, its
+    /// state and error printed. Its PATH leads with an `lsof` that fails.
+    #[test]
+    #[ignore = "a helper process of a_failing_working_directory_probe_closes_the_reading"]
+    #[cfg(target_os = "macos")]
+    fn cwd_probe_helper() {
+        if crate::bench::proc::tests::helper_role().as_deref() != Some("cwd-probe") {
+            return;
+        }
+        let lock = PathBuf::from(std::env::var("QRSCAN_BENCH_TEST_FILE").expect("lock path"));
+        let gate = Gate::with_lock(Path::new("/nonexistent/qrscan-bench-repo"), &lock);
+        assert_eq!(gate.acquire(), Ok(true));
+        let reading = gate.floor("probe");
+        println!(
+            "reading {} {}",
+            reading.open,
+            reading.error.unwrap_or_default()
+        );
+    }
+
+    /// End to end, with a fake `rustc` whose arguments name no marker and
+    /// an `lsof` that fails: that build process could be a sibling build,
+    /// so the reading closes on the `lsof` error. macOS only — Linux reads
+    /// `/proc` and never asks `lsof`.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_failing_working_directory_probe_closes_the_reading() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::process::CommandExt as _;
+        let dir = std::env::temp_dir().join(format!("bench-cwd-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let lsof = dir.join("lsof");
+        std::fs::write(&lsof, "#!/bin/sh\nexit 1\n").expect("fake lsof");
+        std::fs::set_permissions(&lsof, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let mut rustc = Command::new("/bin/sleep")
+            .arg0("rustc")
+            .arg("30")
+            .current_dir("/")
+            .spawn()
+            .expect("a fake rustc");
+        let path = format!(
+            "{}:{}",
+            dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let out =
+            crate::bench::proc::tests::helper("bench::gate::tests::cwd_probe_helper", "cwd-probe")
+                .env("PATH", path)
+                .env("QRSCAN_BENCH_TEST_FILE", dir.join("lock"))
+                .stderr(std::process::Stdio::null())
+                .output()
+                .expect("helper");
+        let _ = rustc.kill();
+        let _ = rustc.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        let line = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|l| l.strip_prefix("reading ").map(str::to_owned))
+            .unwrap_or_default();
+        assert!(
+            line.starts_with("false ") && line.contains("lsof"),
+            "{line}"
+        );
+    }
+
+    /// A worktree list that cannot be read closes the reading: without it,
+    /// a sibling build in another worktree would pass unseen. One that is
+    /// read adds every worktree it names to the project markers.
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_worktree_list_closes_the_reading() {
+        assert!(worktree_markers(Path::new("/nonexistent/qrscan-bench-repo")).is_err());
+        let list = [
+            "worktree /src/scanner",
+            "HEAD 0123456789abcdef0123456789abcdef01234567",
+            "branch refs/heads/main",
+            "",
+            "worktree /src/scanner-topic",
+            "HEAD 0123456789abcdef0123456789abcdef01234567",
+            "detached",
+        ]
+        .join("\n");
+        let expected: Vec<String> = PROJECT_MARKERS
+            .iter()
+            .copied()
+            .chain(["/src/scanner", "/src/scanner-topic"])
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(markers_from(&list), expected);
+        let path =
+            std::env::temp_dir().join(format!("qrscan-bench-worktrees-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let gate = Gate::with_lock(Path::new("/nonexistent/qrscan-bench-repo"), &path);
+        assert_eq!(gate.acquire(), Ok(true));
+        let reading = gate.floor("probe");
+        drop(gate);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            !reading.open
+                && reading
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("git worktree list: no answer")),
+            "{}",
+            reading.line()
+        );
+    }
+
+    /// The host lock never follows a symbolic link — a link another user
+    /// left at the path, dangling or not, is refused, and the file it
+    /// names is neither truncated nor created — and a directory is no lock
+    /// file.
+    #[test]
+    #[cfg(unix)]
+    fn the_host_lock_never_follows_a_symlink() {
+        let dir =
+            std::env::temp_dir().join(format!("qrscan-bench-lock-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let target = dir.join("precious.txt");
+        std::fs::write(&target, "keep").expect("target");
+        let link = dir.join("qrscan-bench.lock");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let refused = HostLock::acquire(&link).is_err();
+        let held = HostLock::held_elsewhere(&link);
+        let kept = std::fs::read_to_string(&target).expect("target");
+        let dangling = dir.join("dangling.lock");
+        let absent = dir.join("absent.txt");
+        std::os::unix::fs::symlink(&absent, &dangling).expect("symlink");
+        let refused_dangling = HostLock::acquire(&dangling).is_err();
+        let created = absent.exists();
+        let refused_dir = HostLock::acquire(&dir).is_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            (refused, held.is_err(), kept.as_str()),
+            (true, true, "keep")
+        );
+        assert_eq!(
+            (refused_dangling, created, refused_dir),
+            (true, false, true)
+        );
+    }
+
+    /// A reading opens only while this run holds the lock — one that never
+    /// took it reads closed, saying so — and a run whose lock file was
+    /// replaced and cannot be taken again stays closed.
+    #[test]
+    #[cfg(unix)]
+    fn a_reading_without_the_lock_stays_closed() {
+        let path = std::env::temp_dir().join(format!("qrscan-bench-unheld-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let gate = Gate::with_lock(&crate::repo_root(), &path);
+        let reading = gate.floor("unheld");
+        assert!(
+            !reading.open
+                && !reading.lock_held
+                && reading
+                    .line()
+                    .contains("this run does not hold the host lock"),
+            "{}",
+            reading.line()
+        );
+        assert_eq!(gate.acquire(), Ok(true));
+        std::fs::remove_file(&path).expect("a cleanup unlinks it");
+        std::fs::create_dir(&path).expect("and something else takes its place");
+        let replaced = gate.floor("replaced");
+        let after = gate.floor("after");
+        drop(gate);
+        let _ = std::fs::remove_dir(&path);
+        assert!(!replaced.open, "{}", replaced.line());
+        assert!(
+            !after.open && !after.lock_held,
+            "the lock is gone, so the reading stays closed: {}",
+            after.line()
+        );
     }
 
     #[test]

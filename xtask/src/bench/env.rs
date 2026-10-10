@@ -24,10 +24,17 @@ const PROBE_CAPS: Caps = Caps {
 /// setuid tool such as macOS `ps` runs too); `None` when it failed, was
 /// capped, or printed nothing.
 pub(crate) fn probe(command: &mut Command) -> Option<String> {
-    let done = proc::run_probe(command, PROBE_CAPS).ok()?;
+    let done = probe_run(command).ok()?;
     (done.failure.is_none() && done.usage.exit == Exit::Code(0))
         .then(|| String::from_utf8_lossy(&done.stdout).trim().to_owned())
         .filter(|s| !s.is_empty())
+}
+
+/// A probe run under [`PROBE_CAPS`], whole: its exit, output and the
+/// failure a cap made of it — for a caller that must tell a probe that
+/// answered nothing from one that failed.
+pub(crate) fn probe_run(command: &mut Command) -> Result<proc::Finished, String> {
+    proc::run_probe(command, PROBE_CAPS)
 }
 
 fn stdout_of(program: &str, args: &[&str]) -> Option<String> {

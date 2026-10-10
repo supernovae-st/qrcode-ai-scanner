@@ -255,10 +255,15 @@ printed), the host is on AC power outside Low Power Mode, swap use is at
 most 8 GB (8 × 10⁹ bytes), and the run holds the host-wide bench lock
 (`/var/tmp/qrscan-bench.lock`, outside the cleaned `/tmp`). A run takes the
 lock before anything else — before node, the images, the environment
-probes and the hellos — and holds it to the end; the lock file's inode is
-re-checked at every reading. Readings fail closed: an unreadable load,
-process table, swap or power state, a probe past its cap, or a replaced
-lock file closes the gate. The gate is read before every segment, every
+probes and the hellos — and holds it to the end; the lock file is opened
+without following a symbolic link and only as a regular file (never
+truncated through anything else), and its inode is re-checked at every
+reading. A reading opens only while this run holds the lock. Readings
+fail closed: an unreadable load, process table, swap or power state, a
+sibling-build probe that fails or passes its cap — the worktree list,
+read at every reading, or the working directory of a build process still
+running — any other probe past its cap, or a replaced lock file closes
+the gate. The gate is read before every segment, every
 reference-pass image, every image, the WASM sizes, every cold start, every
 10 s of a throughput pass, and after each; a pass's own load counts against
 it only as much as it can have built, T·(1 − e^(−t/60)) for T busy threads
@@ -332,7 +337,10 @@ appear in its status line.
 ## Receipts
 
 A run directory — always a fresh one; an existing non-empty `--out` is
-refused — holds `receipt.json` (method, caps, environment with the
+refused, and a run claims its `--out` (creating `artifacts/` itself)
+before it waits for the host lock, so a second run given the same `--out`
+is refused at once and two runs never share one; a run refused before it
+measures removes what it created — holds `receipt.json` (method, caps, environment with the
 harness binary's sha256, inputs with their pin check, artifact hashes with
 their build manifests, parity, gate log, per-class summaries, resource
 failures, verdicts — a `not_testable` row, with why, for every metric of

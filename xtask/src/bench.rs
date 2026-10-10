@@ -739,7 +739,14 @@ fn gate_command(args: Vec<String>) -> i32 {
     let gate = gate::Gate::new(&repo());
     let open = match wait {
         None => {
-            let reading = gate.read("now", 0.0);
+            // a reading opens only with the lock held: take it for this
+            // one reading (another run holding it reads closed)
+            let held = gate.acquire();
+            let mut reading = gate.read("now", 0.0);
+            if let Err(e) = held {
+                reading.error = Some(e);
+                reading.open = false;
+            }
             println!("{}", reading.line());
             reading.open
         }
@@ -799,29 +806,71 @@ fn checked_children(options: &mut run::Options) -> Result<(), String> {
     Ok(())
 }
 
+/// A run directory this run claimed: `--out` created by it (or found
+/// empty), and its `artifacts/` created by it alone — the exclusive step,
+/// so two runs given one `--out` never share it.
+struct OutDir {
+    path: PathBuf,
+    created: bool,
+}
+
+impl OutDir {
+    fn claim(out: &Path) -> Result<Self, String> {
+        if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        let created = match std::fs::create_dir(out) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(e) => return Err(format!("{}: {e}", out.display())),
+        };
+        let fresh = created || (out.is_dir() && is_empty_dir(out));
+        if !fresh {
+            return Err(format!(
+                "{} exists and is not empty — every run gets a fresh --out",
+                out.display()
+            ));
+        }
+        match std::fs::create_dir(out.join("artifacts")) {
+            Ok(()) => Ok(Self {
+                path: out.to_path_buf(),
+                created,
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(format!(
+                "{}: another run claimed it — every run gets a fresh --out",
+                out.display()
+            )),
+            Err(e) => Err(format!("{}: {e}", out.display())),
+        }
+    }
+
+    /// A run refused before it measured leaves nothing behind: what it
+    /// created goes, if nothing else came into it.
+    fn release(self) {
+        let _ = std::fs::remove_dir(self.path.join("artifacts"));
+        if self.created {
+            let _ = std::fs::remove_dir(&self.path);
+        }
+    }
+}
+
 /// What must hold before a run starts anything: the caps can be enforced
-/// here, the stop handler is installed before the first child, process
+/// here, the signal handlers are installed before the first child, process
 /// memory can be sampled, and the run directory is fresh (receipts are
-/// immutable).
-fn preconditions(options: &run::Options) -> Result<(), String> {
+/// immutable) and claimed by this run — before it waits for the host lock.
+fn preconditions(options: &run::Options) -> Result<OutDir, String> {
     if !proc::CAPS_ENFORCED {
         return Err(String::from(
             "the resource caps need 64-bit macOS or Linux (see Resource caps in bench/README.md)",
         ));
     }
-    proc::guard_signals().map_err(|e| format!("cannot install the stop handler: {e}"))?;
+    proc::guard_signals().map_err(|e| format!("cannot install the signal handlers: {e}"))?;
     if !proc::memory_sampled() {
         return Err(String::from(
             "process memory cannot be sampled here, so no memory cap can hold (see Resource caps in bench/README.md)",
         ));
     }
-    if !is_empty_dir(&options.out) {
-        return Err(format!(
-            "{} exists and is not empty — every run gets a fresh --out",
-            options.out.display()
-        ));
-    }
-    Ok(())
+    OutDir::claim(&options.out)
 }
 
 /// The run's first line: what it measures, and under which caps.
@@ -855,10 +904,15 @@ fn measure(args: Vec<String>) -> i32 {
             return 2;
         }
     };
-    if let Err(e) = preconditions(&options) {
-        eprintln!("bench: {e}");
-        return 2;
-    }
+    // the run directory is claimed before the lock wait: a second run given
+    // the same --out is refused at once, never waits to write into it
+    let claim = match preconditions(&options) {
+        Ok(claim) => claim,
+        Err(e) => {
+            eprintln!("bench: {e}");
+            return 2;
+        }
+    };
     let repo = repo();
     let gate = gate::Gate::new(&repo);
     let deadline = Instant::now() + Duration::from_secs(options.wait_gate.unwrap_or(0));
@@ -868,25 +922,27 @@ fn measure(args: Vec<String>) -> i32 {
     match gate.acquire_by(deadline) {
         Ok(true) => {}
         Ok(false) => {
+            claim.release();
             eprintln!(
                 "bench: another bench run holds the host lock — refused, nothing started (exit 3)"
             );
             return 3;
         }
         Err(e) => {
+            claim.release();
             eprintln!("bench: {e} — refused, nothing started (exit 3)");
             return 3;
         }
     }
     if let Err(e) = checked_children(&mut options) {
+        claim.release();
         eprintln!("bench: {e}");
         return 2;
     }
-    let out = match std::fs::create_dir_all(&options.out)
-        .and_then(|()| std::fs::canonicalize(&options.out))
-    {
+    let out = match std::fs::canonicalize(&options.out) {
         Ok(out) => out,
         Err(e) => {
+            claim.release();
             eprintln!("bench: {}: {e}", options.out.display());
             return 2;
         }
@@ -898,6 +954,7 @@ fn measure(args: Vec<String>) -> i32 {
     let (images, inputs, artifacts) = match prepared {
         Ok(prepared) => prepared,
         Err(e) => {
+            claim.release();
             eprintln!("bench: {e}");
             return 2;
         }
@@ -1138,6 +1195,74 @@ mod tests {
             "{refused:?}"
         );
         assert!(!root.join("bench/not-created").exists(), "nothing created");
+    }
+
+    fn dry_run_options(out: &Path) -> run::Options {
+        run::parse_options(
+            [
+                "--out",
+                out.to_str().expect("utf-8"),
+                "--dry-run",
+                "--lib-base",
+                "/nonexistent/worker",
+            ]
+            .iter()
+            .map(|a| (*a).to_owned())
+            .collect(),
+        )
+        .expect("options")
+    }
+
+    /// Two runs given one `--out` never share it: the first claims it
+    /// before it waits for the host lock, the second is refused at once —
+    /// whether the directory was new or there and empty. A released claim
+    /// leaves nothing it created behind.
+    #[test]
+    fn two_runs_never_share_an_out_directory() {
+        let out = std::env::temp_dir().join(format!("qrscan-bench-claim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let (first, second) = (dry_run_options(&out), dry_run_options(&out));
+        let claim = preconditions(&first).expect("the first run claims it");
+        assert!(out.join("artifacts").is_dir());
+        let refused = preconditions(&second);
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|e| e.ends_with("every run gets a fresh --out")),
+            "{:?}",
+            refused.err()
+        );
+        claim.release();
+        assert!(!out.exists(), "a released claim leaves nothing");
+        std::fs::create_dir_all(&out).expect("an empty directory the user made");
+        let claim = preconditions(&first).expect("an empty --out is claimed");
+        assert!(preconditions(&second).is_err(), "once");
+        claim.release();
+        assert!(
+            out.is_dir() && is_empty_dir(&out),
+            "the user's directory stays, empty"
+        );
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// A run refused after its claim — here by a worker that does not exist,
+    /// once it held the host lock for an instant (or by another run's lock)
+    /// — leaves no run directory behind.
+    #[test]
+    fn a_refused_run_releases_its_out_directory() {
+        let out =
+            std::env::temp_dir().join(format!("qrscan-bench-released-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let args = [
+            "--out",
+            out.to_str().expect("utf-8"),
+            "--dry-run",
+            "--lib-base",
+            "/nonexistent/worker",
+        ];
+        let code = measure(args.iter().map(|a| (*a).to_owned()).collect());
+        assert!(matches!(code, 2 | 3), "{code}");
+        assert!(!out.exists(), "nothing left behind");
     }
 
     /// A run never writes into a directory that already holds something —
