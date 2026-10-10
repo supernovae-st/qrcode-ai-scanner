@@ -49,6 +49,11 @@ tokens). Every privileged job must:
   gate         run, as its first step after the checkout, exactly
                `python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet`
                (no key but name and working-directory, nothing joined to it)
+  reinspect    the three jobs that download an artifact another job built
+               (publish-native, publish-wasm, python › release) re-inspect it
+               in the job — a `package-inspect.py archive … --strict` step —
+               before their first publishing step, so a swapped artifact
+               cannot reach a registry on the versions gate alone
   toolchains   Rust through rustup or a pinned action at RUST_TOOLCHAIN,
                resolved step > job > workflow to an exact x.y.z and never set
                in a script, no rust-toolchain file; pnpm, Flutter, Dart and
@@ -131,6 +136,15 @@ GATE_RUN = 'python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --st
 SHA = re.compile(r"[0-9a-f]{40}")
 EXACT = re.compile(r"\d+\.\d+\.\d+")
 DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
+
+# Jobs that download an artifact another job built and upload it: each must
+# re-inspect that artifact in the job itself, before its first publishing step
+# — the versions gate does not prove the bytes a sibling job produced.
+REINSPECT_JOBS = {
+    ("npm-publish.yml", "publish-native"),
+    ("npm-publish.yml", "publish-wasm"),
+    ("python.yml", "release"),
+}
 
 # The job each publishing job must need: the one that inspects (for the iOS
 # zip, builds) what it uploads. A publishing job missing here fails.
@@ -878,6 +892,11 @@ def check_job(workflow: str, job_id: str, job: dict, wf: dict) -> list:
     if set(gate) - {"run", "name", "working-directory"} or str(gate.get("run", "")).strip() != GATE_RUN:
         flag("gate", f"the first step after the checkout must be exactly `{GATE_RUN}`, with no other key")
     first_publish = min((i for i, _ in publishing), default=len(steps))
+    if (workflow, job_id) in REINSPECT_JOBS and not any(
+            re.search(r"package-inspect\.py\s+archive\b", line) and "--strict" in _words(line)
+            for step in steps[:first_publish] for line in _code_lines(step.get("run"))):
+        flag("reinspect", "must run `package-inspect.py archive … --strict` on the downloaded artifact before the "
+                          "first publishing step (the versions gate does not prove the bytes a sibling job built)")
     for runtime, block in PRINTED.items():
         setups = [i for i, step in enumerate(steps) if _uses(step)[0] == runtime]
         if setups and not any(set(step) <= {"name", "run"} and _block(step.get("run")) == block
@@ -1476,6 +1495,24 @@ MUTATIONS = (
     ("pnpm install in a run block, --frozen-lockfile in a trailing comment", P, [("npm-publish.yml", REINSPECT,
         "      - run: |\n          pnpm install # --frozen-lockfile\n" + REINSPECT)], {}, 1,
      "npm-publish.yml › publish-native [unlocked-install]"),
+    # -- the in-job re-inspection of the downloaded artifact
+    ("publish-native drops its re-inspect step", P, [("npm-publish.yml",
+        "      - name: re-inspect the release set about to be uploaded\n        run: python3 scripts/package-inspect.py"
+        " archive npm-release/*/*.tgz --release-set --strict --quiet\n", "")], {}, 1,
+     "npm-publish.yml › publish-native [reinspect]"),
+    ("publish-wasm drops its re-inspect step", P, [("npm-publish.yml",
+        "      - name: re-inspect the wasm tarball about to be uploaded\n        run: python3 scripts/package-inspect.py"
+        " archive npm-wasm/*.tgz --strict --quiet\n", "")], {}, 1, "npm-publish.yml › publish-wasm [reinspect]"),
+    ("python release drops its re-inspect step", P, [("python.yml",
+        "      - name: re-inspect the exact set about to be uploaded\n        run: python3 scripts/package-inspect.py"
+        " archive dist/* --release-set --strict --quiet\n", "")], {}, 1, "python.yml › release [reinspect]"),
+    ("python release re-inspects only after publishing", P, [("python.yml",
+        "      - name: re-inspect the exact set about to be uploaded\n        run: python3 scripts/package-inspect.py"
+        " archive dist/* --release-set --strict --quiet\n      - uses: pypa/gh-action-pypi-publish@"
+        "cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0",
+        "      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0\n"
+        "      - name: re-inspect the exact set about to be uploaded\n        run: python3 scripts/package-inspect.py"
+        " archive dist/* --release-set --strict --quiet")], {}, 1, "python.yml › release [reinspect]"),
     # -- the named exception: three exact steps, nothing else
     ("the Flutter waiver claimed by another job", P, [("python.yml", PYPI, "      - run: flutter pub get\n" + PYPI)],
      {}, 1, "FAIL    python.yml › release [unlocked-pub-get]"),
