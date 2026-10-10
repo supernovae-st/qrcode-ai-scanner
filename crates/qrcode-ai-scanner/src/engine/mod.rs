@@ -81,6 +81,13 @@ pub(crate) struct RawDetection {
     /// whose modifier leaves its declarations unverified, an rqrr read whose
     /// grid decided nothing. Attempt space.
     pub locate: Option<LocateHint>,
+    /// The walk publishes this read only once a read at an independent scale
+    /// confirms it (07-pipeline § Acceptance): a symbology the readers invent
+    /// from module noise, its payload guarded by a check digit or a checksum
+    /// alone (UPC-E, DataBar, DataBar Expanded), or a PDF417 symbol at
+    /// error-correction level 0 or 1 (two or four EC codewords) or at no
+    /// stated level. Set by the rxing adapter only.
+    pub needs_confirmation: bool,
 }
 
 /// The content rxing's zxing-cpp port reports for a stream: its bytes, a
@@ -180,6 +187,7 @@ impl RawDetection {
             engine_reading: EngineReading::None,
             location: None,
             locate: None,
+            needs_confirmation: false,
         }
     }
 }

@@ -122,6 +122,7 @@ pub(super) fn decode(luma: &LumaImage, orient_candidates: bool) -> Pass {
             engine_reading: EngineReading::None,
             location: Some(bounds),
             locate,
+            needs_confirmation: false,
         };
         publish_orientation(&mut read, orientation);
         pass.found.push(read);

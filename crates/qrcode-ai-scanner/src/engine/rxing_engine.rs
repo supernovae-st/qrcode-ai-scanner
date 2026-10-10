@@ -24,7 +24,10 @@
 //! geometry; the result points stay internal (they tell symbols apart and
 //! frame the re-read). Other symbologies carry the ISO/IEC 8859-1 bytes of
 //! the engine's text when it fits, else its UTF-8 (spec/01 § raw), and the
-//! FNC1 position their symbology identifier states.
+//! FNC1 position their symbology identifier states. A DataBar read is a
+//! GTIN-14 or nothing; the reads of the symbologies rxing invents from
+//! noise (and of thinly protected PDF417 symbols) wait for confirmation at
+//! an independent scale (07-pipeline § Acceptance).
 
 use rxing::RXingResultMetadataType as MetaKey;
 use rxing::RXingResultMetadataValue as MetaValue;
@@ -196,12 +199,22 @@ fn observe(result: &rxing::RXingResult) -> Option<RawDetection> {
         engine_reading: EngineReading::None,
         location: None,
         locate: None,
+        needs_confirmation: false,
     };
     if !symbology.is_qr_family() {
+        let text = result.getText();
+        // DataBar (RSS-14) carries a GTIN-14: any other text is no DataBar
+        // the reader decoded
+        if symbology == Symbology::DataBar
+            && !(text.len() == 14 && text.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return None;
+        }
         // outside the QR content contract: the engine's reading, never its
         // byte segments (they omit every non-byte encodation)
-        detection.raw = non_qr_raw(result.getText());
+        detection.raw = non_qr_raw(text);
         detection.fnc1 = identifier_fnc1(identifier);
+        detection.needs_confirmation = needs_confirmation(symbology, ec_level);
         return Some(detection);
     }
     detection.location = location(result.getPoints());
@@ -279,6 +292,22 @@ fn reads_as(raw: &[u8], text: &str) -> bool {
             encoding_rs::UTF_8.decode(raw).0 == text
         }
         _ => raw == text.as_bytes(),
+    }
+}
+
+/// Whether a non-QR read waits for a read at an independent scale before the
+/// walk publishes it: UPC-E, DataBar and DataBar Expanded — rxing reads them
+/// out of module noise, and a check digit or a checksum is all that guards
+/// their payload — and PDF417 at error-correction level 0 or 1, or at no
+/// stated level: `2^(level + 1)` EC codewords, two or four, barely refuse a
+/// misread.
+fn needs_confirmation(symbology: Symbology, ec_level: Option<&str>) -> bool {
+    match symbology {
+        Symbology::UpcE | Symbology::DataBar | Symbology::DataBarExpanded => true,
+        Symbology::Pdf417 => ec_level
+            .and_then(|level| level.parse::<u8>().ok())
+            .is_none_or(|level| level < 2),
+        _ => false,
     }
 }
 
@@ -789,6 +818,102 @@ mod tests {
         assert_eq!(d.raw, vec![0xC3, 0xA9]);
         assert_eq!((d.eci, d.fnc1), (EciEvidence::Unobserved, Fnc1::First));
         assert!(d.location.is_none() && d.locate.is_none());
+    }
+
+    /// An rxing result of `format` with `text`, its identifier and, when
+    /// given, its error-correction level as rxing's PDF417 reader states it.
+    fn other_result(
+        format: rxing::BarcodeFormat,
+        text: &str,
+        identifier: &str,
+        ec_level: Option<&str>,
+    ) -> rxing::RXingResult {
+        let mut result =
+            rxing::RXingResult::new(text, text.as_bytes().to_vec(), Vec::new(), format);
+        result.putMetadata(
+            MetaKey::SYMBOLOGY_IDENTIFIER,
+            MetaValue::SymbologyIdentifier(identifier.to_owned()),
+        );
+        if let Some(level) = ec_level {
+            result.putMetadata(
+                MetaKey::ERROR_CORRECTION_LEVEL,
+                MetaValue::ErrorCorrectionLevel(level.to_owned()),
+            );
+        }
+        result
+    }
+
+    #[test]
+    fn a_databar_text_is_exactly_fourteen_digits() {
+        // DataBar (RSS-14) carries a GTIN-14: anything else is no DataBar the
+        // reader decoded (0.9.3 can write a saturated fifteenth character)
+        let read = |text: &str| {
+            observe(&other_result(
+                rxing::BarcodeFormat::RSS_14,
+                text,
+                "]e0",
+                None,
+            ))
+        };
+        let d = read("09506000134352").expect("a GTIN-14");
+        assert_eq!(d.raw, b"09506000134352");
+        for text in [
+            "095060001343520",
+            "0950600013435",
+            "0950600013435a",
+            "09506000134352 ",
+            "",
+        ] {
+            assert!(read(text).is_none(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn invention_prone_reads_wait_for_confirmation() {
+        use rxing::BarcodeFormat as F;
+        let waits = |format, text: &str, identifier: &str, level: Option<&str>| {
+            observe(&other_result(format, text, identifier, level))
+                .expect("a read")
+                .needs_confirmation
+        };
+        assert!(waits(F::UPC_E, "04917052", "]E0", None));
+        assert!(waits(F::RSS_14, "09506000134352", "]e0", None));
+        assert!(waits(F::RSS_EXPANDED, "(01)09955188000001", "]e0", None));
+        // PDF417 at level 0 or 1 (2 or 4 EC codewords) or no stated level
+        for level in [Some("0"), Some("1"), None] {
+            assert!(waits(F::PDF_417, "pdf", "]L2", level), "{level:?}");
+        }
+        for level in ["2", "5", "8"] {
+            assert!(!waits(F::PDF_417, "pdf", "]L2", Some(level)), "{level}");
+        }
+        // the retail and 2D symbologies keep settling on one read
+        assert!(!waits(F::EAN_13, "9506000134352", "]E0", None));
+        assert!(!waits(F::CODE_128, "QRCAI-0042", "]C0", None));
+        assert!(!waits(F::DATA_MATRIX, "abc", "]d1", None));
+        // and QR-family reads never wait: their margins decide
+        let found = decode(&render(b"plain", qrcode::EcLevel::M), FormatFilter::All);
+        assert!(!qr(&found).needs_confirmation);
+    }
+
+    #[test]
+    fn the_pdf417_fixtures_settle_on_one_read() {
+        // rxing's writer default (level 2) and zxing-cpp's: neither is a
+        // symbol the walk holds for confirmation
+        for name in ["pdf417.png", "pdf417-utf8-cafe.png"] {
+            let path = format!(
+                "{}/../../fixtures/symbology/{name}",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let bytes = std::fs::read(&path).unwrap();
+            let img = image::load_from_memory(&bytes).unwrap().to_luma8();
+            let (w, h) = (img.width(), img.height());
+            let found = decode(&LumaImage::new(img.into_raw(), w, h), FormatFilter::All);
+            let d = found
+                .iter()
+                .find(|d| d.symbology == Symbology::Pdf417)
+                .unwrap_or_else(|| panic!("{name}: a PDF417 read"));
+            assert!(!d.needs_confirmation, "{name}");
+        }
     }
 
     #[test]
