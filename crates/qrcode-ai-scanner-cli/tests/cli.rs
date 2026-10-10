@@ -1,5 +1,6 @@
 //! Exit-code contract tests — the CLI's headline promise (header of main.rs):
-//! 0 = QR found · 1 = no QR found · 2 = invalid input/usage error.
+//! 0 = QR found · 1 = no QR found · 2 = invalid input/usage error ·
+//! 3 = --score-only: decoded, not judged within the budget.
 //! Zero-dep harness: cargo exposes the built binary via `CARGO_BIN_EXE`_*.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -90,11 +91,14 @@ fn score_only_prints_bare_value_on_found() {
     assert!(value > 0);
 }
 
+/// Budget-free (`--budget-ms 0`): under the frame profile's 80 ms budget a
+/// loaded machine could cut the ladder before the decode, turning the usage
+/// error into "no QR found".
 #[test]
 fn score_only_under_frame_profile_is_usage_error_2() {
     let out = qrscan()
         .arg(fixture("clean/gen_v2_l.png"))
-        .args(["--score-only", "--profile", "frame"])
+        .args(["--score-only", "--profile", "frame", "--budget-ms", "0"])
         .output()
         .unwrap();
     assert_eq!(
@@ -102,6 +106,191 @@ fn score_only_under_frame_profile_is_usage_error_2() {
         Some(2),
         "score suppressed by profile = usage error"
     );
+    assert!(out.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(out.stderr).unwrap(),
+        "✖ the frame profile computes no score (use --profile full|fast)\n"
+    );
+}
+
+/// No QR, nothing cut: the 0.9 notice, exit 1.
+#[test]
+fn score_only_without_a_detection_is_exit_1_and_says_so() {
+    let out = qrscan()
+        .arg(white_png())
+        .args(["--score-only", "--budget-ms", "0"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(out.stderr).unwrap(),
+        "no QR code found — no score\n"
+    );
+}
+
+/// A configuration that computes no score is a usage error that names its
+/// cause: every stress axis skipped is not the frame profile.
+#[test]
+fn score_only_with_every_axis_skipped_is_usage_error_2() {
+    let out = qrscan()
+        .arg(fixture("clean/gen_v2_l.png"))
+        .args([
+            "--score-only",
+            "--budget-ms",
+            "0",
+            "--score-skip-axes",
+            "resolution,blur,contrast,perspective,rotation,lighting",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(out.stderr).unwrap(),
+        "✖ every stress axis is skipped — no score to print (drop an axis from --score-skip-axes)\n"
+    );
+}
+
+/// The value of a pristine EC-Q symbol, unbounded: the reference for the
+/// budgeted run below.
+fn unbounded_score_only(rel: &str) -> String {
+    let out = qrscan()
+        .arg(fixture(rel))
+        .args(["--score-only", "--budget-ms", "0"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// Under a 1 ms budget the outcome depends on the machine, never the value:
+/// the unbounded value (exit 0), a decode the budget left unjudged (exit 3,
+/// nothing on stdout), or a search the budget cut (exit 1). 0.9 printed a
+/// deflated `0` and exited 0.
+#[test]
+fn score_only_under_a_cut_budget_prints_the_whole_value_or_nothing() {
+    let whole = unbounded_score_only("clean/gen_v5_q.png");
+    assert!(whole.trim().parse::<u8>().unwrap() > 0, "{whole}");
+    let out = qrscan()
+        .arg(fixture("clean/gen_v5_q.png"))
+        .args(["--score-only", "--budget-ms", "1"])
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    );
+    match out.status.code() {
+        Some(0) => {
+            assert_eq!(stdout, whole, "a printed value is the whole judgment");
+            assert!(stderr.is_empty(), "{stderr}");
+        }
+        Some(3) => {
+            assert!(stdout.is_empty(), "{stdout}");
+            assert_eq!(
+                stderr,
+                "✖ not judged: the 1 ms budget ran out before the score was complete — \
+                 raise --budget-ms (0 = unbounded)\n"
+            );
+        }
+        Some(1) => {
+            assert!(stdout.is_empty(), "{stdout}");
+            assert_eq!(
+                stderr,
+                "no QR code found within the 1 ms budget — no score (the search was cut: \
+                 raise --budget-ms, 0 = unbounded)\n"
+            );
+        }
+        other => panic!("exit {other:?}: {stdout} {stderr}"),
+    }
+}
+
+/// `--pretty` says why a score is missing; an unbounded scan has no budget
+/// line.
+#[test]
+fn pretty_says_why_a_score_is_missing() {
+    let frame = qrscan()
+        .arg(fixture("clean/gen_v2_l.png"))
+        .args(["--pretty", "--profile", "frame", "--budget-ms", "0"])
+        .output()
+        .unwrap();
+    assert_eq!(frame.status.code(), Some(0));
+    let lines: Vec<String> = String::from_utf8(frame.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_line(&lines, "score     not computed (frame profile)");
+    let skipped = qrscan()
+        .arg(fixture("clean/gen_v2_l.png"))
+        .args([
+            "--pretty",
+            "--budget-ms",
+            "0",
+            "--score-skip-axes",
+            "resolution,blur,contrast,perspective,rotation,lighting",
+        ])
+        .output()
+        .unwrap();
+    let lines: Vec<String> = String::from_utf8(skipped.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_line(&lines, "score     not computed (every stress axis skipped)");
+    let full = qrscan()
+        .arg(fixture("clean/gen_v2_l.png"))
+        .args(["--pretty", "--budget-ms", "0"])
+        .output()
+        .unwrap();
+    assert_eq!(full.status.code(), Some(0));
+    let text = String::from_utf8(full.stdout).unwrap();
+    assert!(text.lines().any(|l| l.starts_with("score     ")), "{text}");
+    assert!(!text.lines().any(|l| l.starts_with("budget")), "{text}");
+}
+
+/// Every JSON report carries the flag; an unbounded scan is final, found or
+/// not.
+#[test]
+fn json_reports_say_an_unbounded_scan_is_final() {
+    for (path, code) in [(fixture("clean/gen_v2_l.png"), 0), (white_png(), 1)] {
+        let out = qrscan()
+            .args(["--budget-ms", "0"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(code), "{path:?}");
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            report["trace"]["budget_exhausted"],
+            serde_json::Value::Bool(false),
+            "{path:?}"
+        );
+    }
+}
+
+/// The help names exit 3 where it can happen.
+#[test]
+fn help_names_the_not_judged_exit() {
+    let out = qrscan().arg("--help").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    // help text may wrap anywhere: compare word runs
+    let help = String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        help.contains("3 = a decoded QR the budget left unjudged"),
+        "{help}"
+    );
+    assert!(help.contains("exits 3"), "{help}");
 }
 
 #[test]
