@@ -565,6 +565,12 @@ impl ReadStore {
     pub(crate) fn reconcile(&self) -> Vec<Reconciled> {
         reconcile(self.live())
     }
+
+    /// The refusal records kept, within capacity and past it.
+    #[cfg(test)]
+    pub(crate) fn records(&self) -> usize {
+        self.refusals.len() + self.overflow.len()
+    }
 }
 
 /// A signalled QR Code read no agreeing candidate parse contains.

@@ -268,6 +268,18 @@ fn scan_with(png: &[u8], profile: ScanProfile, budget_ms: Option<u64>) -> ScanRe
         .unwrap()
 }
 
+/// The Full profile with its scoring and no wall clock: the scored path
+/// (score and alpha code included) whose verdict a budget cut cannot flake.
+fn scan_scored(png: &[u8]) -> ScanReport {
+    let mut config = ScanProfile::Full.config();
+    config.budget_ms = None;
+    Scanner::builder()
+        .profile(ScanProfile::Custom(config))
+        .build()
+        .scan(ImageInput::encoded(png))
+        .unwrap()
+}
+
 /// A committed fixture's bytes.
 fn fixture(rel: &str) -> Vec<u8> {
     let path = format!("{}/../../fixtures/{rel}", env!("CARGO_MANIFEST_DIR"));
@@ -313,6 +325,24 @@ fn content(d: &Detection) -> Value {
 /// The wire shape of a detection's payload (spec/05).
 fn payload(d: &Detection) -> Value {
     serde_json::to_value(&d.payload).expect("payload serializes")
+}
+
+/// The `meta` of a symbol only rxing read: the EC level its decoder states,
+/// nothing measured.
+#[track_caller]
+fn assert_rxing_only_meta(d: &Detection, ec_level: &str, ctx: &str) {
+    assert_eq!(
+        serde_json::to_value(d.meta).expect("meta serializes"),
+        serde_json::json!({
+            "version": null,
+            "ec_level": ec_level,
+            "mask": null,
+            "modules": null,
+            "inverted": null
+        }),
+        "{ctx}"
+    );
+    assert!(d.corners.is_none(), "{ctx}");
 }
 
 /// A content object, written as its wire JSON.
@@ -624,7 +654,11 @@ fn a1_eci4_byte_is_one_detection_with_the_declared_text() {
         let d = one(&report);
         assert_content(d, A1, &format!("stray={stray}"));
         assert_eq!(payload(d), wire(r#"{"kind":"text"}"#));
-        assert_both_engines(d);
+        assert_eq!(
+            d.engines,
+            vec![EngineKind::Rxing, EngineKind::Rqrr],
+            "stray={stray}"
+        );
         assert!(
             d.corners.is_some() && d.meta.version == Some(3),
             "geometry reaches the reconciled detection (stray={stray}): {:?}",
@@ -637,10 +671,9 @@ fn a1_eci4_byte_is_one_detection_with_the_declared_text() {
 fn a2_eci4_full_profile_scores_with_geometry_sections() {
     // The scored primary must be the reconciled detection that carries
     // geometry and the sampled stream: structural, UEC and ISO sections all
-    // present (they read the rqrr grid, not the stress matcher).
-    let report = Scanner::default()
-        .scan(ImageInput::encoded(&png(&eci4_a1(), false)))
-        .unwrap();
+    // present (they read the rqrr grid, not the stress matcher). Full
+    // profile, unbounded.
+    let report = scan_scored(&png(&eci4_a1(), false));
     let d = one(&report);
     assert_content(d, A1, "Full");
     let score = report.score.as_ref().expect("Full scores the primary");
@@ -1102,7 +1135,7 @@ fn a13_a_light_on_dark_declaration_is_located_by_the_re_read() {
     let d = one(&report);
     assert_content(d, A1, "light-on-dark ECI 4");
     assert_eq!(d.engines, vec![EngineKind::Rxing], "{:?}", report.trace);
-    assert!(d.corners.is_none(), "the re-read's geometry stays internal");
+    assert_rxing_only_meta(d, "m", "the re-read's geometry stays internal");
 }
 
 #[test]
@@ -1661,11 +1694,14 @@ fn hanzi_segments_read_as_gb18030() {
     let report = scan_content(&stream_png(
         Stream::default().kanji(&NIHON_SJIS).hanzi(&ZHONGWEN_GB),
     ));
+    let d = one(&report);
     assert_content(
-        one(&report),
+        d,
         r#"{"text":"日本中文","raw":"k/qWe9bQzsQ=","charset":"unknown"}"#,
         "G13",
     );
+    assert_eq!(d.engines, vec![EngineKind::Rxing], "G13");
+    assert!(d.corners.is_some(), "G13: the candidate's grid");
 }
 
 #[test]
@@ -1771,7 +1807,12 @@ fn d2_fnc1_first_double_percent_is_one_literal_percent() {
         r#"{"text":"10AB%C","raw":"MTBBQiVD","charset":"utf8","fnc1":"first"}"#,
         "FNC1 first %%",
     );
-    assert_gs1(d, true, None);
+    assert_eq!(
+        payload(d),
+        wire(
+            r#"{"kind":"gs1","elements":[{"ai":"10","value":"AB%C"}],"gtin":null,"conformant":true,"issues":[]}"#
+        )
+    );
     assert_eq!(d.engines, vec![EngineKind::Rescue], "{:?}", report.trace);
 }
 
@@ -2094,8 +2135,14 @@ fn d6_plain_and_fnc1_first_twins_stay_two_detections() {
         r#"{"text":"0109506000134352","raw":"MDEwOTUwNjAwMDEzNDM1Mg==","charset":"utf8"}"#,
         "plain twin",
     );
-    assert_gs1(plain, false, Some("09506000134352"));
-    assert_both_engines(plain);
+    // the GS1 syntax without its mode header: the FNC1 issue, never GS1 data
+    assert_eq!(
+        payload(plain),
+        wire(
+            r#"{"kind":"gs1","elements":[{"ai":"01","value":"09506000134352"}],"gtin":"09506000134352","conformant":false,"issues":["FNC1-in-first-position mode header missing — valid GS1 element syntax in a non-GS1 carrier (ISO 18004 §7.4.9; regenerate with GS1 mode enabled)"]}"#
+        )
+    );
+    assert_eq!(plain.engines, vec![EngineKind::Rxing, EngineKind::Rqrr]);
 }
 
 #[test]
@@ -2229,7 +2276,7 @@ fn e1_micro_qr_byte_keeps_the_original_byte() {
         "M3-M E9",
     );
     assert_eq!(d.engines, vec![EngineKind::Rxing]);
-    assert!(d.corners.is_none() && d.meta.version.is_none());
+    assert_rxing_only_meta(d, "m", "M3-M");
 }
 
 #[test]
@@ -2461,6 +2508,9 @@ fn n8_a_databar_gtin_has_no_fnc1_key() {
         r#"{"text":"09506000134352","raw":"MDk1MDYwMDAxMzQzNTI=","charset":"utf8"}"#,
         "DataBar",
     );
+    // the payload 0.9 gave it: DataBar is no retail GTIN carrier, and its
+    // AI-less digits are no GS1 element string
+    assert_eq!(payload(d), wire(r#"{"kind":"text"}"#));
 }
 
 // ------------------------------------------------------------ R · re-read
@@ -2551,7 +2601,7 @@ fn r1_to_r6_rxing_only_artistic_declarations_are_located() {
             let d = one(&report);
             assert_content(d, &expected, &ctx);
             assert_eq!(d.engines, vec![EngineKind::Rxing], "{ctx}");
-            assert!(d.corners.is_none() && d.meta.version.is_none(), "{ctx}");
+            assert_rxing_only_meta(d, "m", &ctx);
             assert_eq!(report.trace.engine_panics, 0, "{ctx}");
             let again = scan_content(&png);
             assert_eq!(again.detections, report.detections, "{ctx}: deterministic");
@@ -2717,20 +2767,67 @@ fn assert_invariants(report: &ScanReport, ctx: &str) {
     }
 }
 
+/// I9 (spec/01 § Comparing contents) across reports of one symbol: two
+/// detections with the same located content (symbology, `raw`, FNC1
+/// position, equal `eci` lists) carry the same `text` and `charset`.
+#[track_caller]
+fn assert_located_contents_read_alike(reports: &[(&str, &ScanReport)], ctx: &str) {
+    let located: Vec<(&str, &Detection)> = reports
+        .iter()
+        .flat_map(|&(profile, report)| report.detections.iter().map(move |d| (profile, d)))
+        .filter(|(_, d)| d.content.eci.as_ref().is_some_and(|list| !list.is_empty()))
+        .collect();
+    for (p, a) in &located {
+        for (q, b) in &located {
+            if (a.symbology, &a.content.raw, a.content.fnc1, &a.content.eci)
+                == (b.symbology, &b.content.raw, b.content.fnc1, &b.content.eci)
+            {
+                assert_eq!(
+                    (&a.content.text, a.content.charset),
+                    (&b.content.text, b.content.charset),
+                    "{ctx}: I9, {p} against {q}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn f1_global_invariants_over_the_matrix() {
     // Every published content of the single-symbol matrix, on pure and
-    // non-pure renders, frame and walk: the content invariants, one
-    // detection, and determinism.
+    // non-pure renders: frame and walk unbounded, the Full walk under a
+    // 2000 ms budget and the scored Full scan — the content invariants, one
+    // detection (at most one under the budget, which may cut the walk),
+    // one located content read alike in every profile (I9), and
+    // determinism.
     for (name, code) in matrix() {
         for stray in [false, true] {
             let bytes = png(&code, stray);
-            for (profile, report) in [("frame", scan_content(&bytes)), ("walk", scan_walk(&bytes))]
-            {
+            let reports = [
+                ("frame", scan_content(&bytes)),
+                ("walk", scan_walk(&bytes)),
+                (
+                    "full 2000 ms",
+                    scan_with(&bytes, ScanProfile::Full, Some(2000)),
+                ),
+                ("scored full", scan_scored(&bytes)),
+            ];
+            for (profile, report) in &reports {
                 let ctx = format!("{name} (stray={stray}, {profile})");
-                assert_invariants(&report, &ctx);
-                assert_eq!(report.detections.len(), 1, "{ctx}: {:?}", summary(&report));
+                assert_invariants(report, &ctx);
+                let most = if profile.contains("2000") {
+                    0..=1
+                } else {
+                    1..=1
+                };
+                assert!(
+                    most.contains(&report.detections.len()),
+                    "{ctx}: {:?}",
+                    summary(report)
+                );
             }
+            let views: Vec<(&str, &ScanReport)> = reports.iter().map(|(p, r)| (*p, r)).collect();
+            assert_located_contents_read_alike(&views, &format!("{name} (stray={stray})"));
             let (first, again) = (scan_content(&bytes), scan_content(&bytes));
             assert_eq!(again.detections, first.detections, "{name}: deterministic");
         }
@@ -2751,10 +2848,17 @@ fn found_per_stage(report: &ScanReport) -> Vec<(&str, u32)> {
 fn f2_detections_found_counts_raw_engine_hits_before_any_veto() {
     // spec/01: `detections_found` is RAW engine hits, pre-merge. rxing's
     // port read of a refused symbol is such a hit — the scanner then
-    // refuses it; rqrr's refused decode never becomes a hit.
+    // refuses it; rqrr's refused decode never becomes a hit. The frame walk
+    // tries the direct attempt only: [["direct", 1, 1]].
     let report = scan_content(&png_from_bit_stream(&eci_above_the_register_abc()));
     assert!(report.detections.is_empty(), "{:?}", summary(&report));
-    assert_eq!(found_per_stage(&report), vec![("direct", 1)]);
+    let stages: Vec<(&str, u32, u32)> = report
+        .trace
+        .stages
+        .iter()
+        .map(|s| (s.stage.as_str(), s.transforms_tried, s.detections_found))
+        .collect();
+    assert_eq!(stages, vec![("direct", 1, 1)]);
 }
 
 #[test]
@@ -2865,9 +2969,6 @@ fn g2_a_qr_beside_a_retail_barcode_is_located() {
         .find(|d| d.symbology == Symbology::Ean13)
         .expect("the EAN-13");
     assert_eq!(ean.content.text, "9506000134352");
-    assert!(
-        matches!(ean.payload, Payload::Gs1 { .. }),
-        "{:?}",
-        ean.payload
-    );
+    // the GTIN, zero-padded to 14 digits, its check digit valid
+    assert_gs1(ean, true, Some("09506000134352"));
 }

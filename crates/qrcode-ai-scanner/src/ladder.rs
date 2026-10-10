@@ -32,9 +32,7 @@ use web_time::Instant;
 
 use crate::engine::content::{self, ContentKey, EciEvidence, Fnc1, Reading, Segments};
 use crate::engine::locate::{LocateHint, Located};
-use crate::engine::reconcile::{
-    Geometry, Rank, Read, ReadStore, Reconciled, Seed, inside, source,
-};
+use crate::engine::reconcile::{Geometry, Rank, Read, ReadStore, Reconciled, Seed, inside, source};
 use crate::engine::{self, RawDetection, Refusal};
 use crate::error::{Result, ScanError};
 use crate::input::LumaImage;
@@ -830,9 +828,10 @@ impl Run<'_> {
                     && other.key.agrees(&read.key)
                     && inside(read.location, other.location)
             });
-            let Some(hint) = hint.clone().filter(|_| {
-                !carried && self.rereads < MAX_REREADS && !self.store.withheld(read)
-            }) else {
+            let Some(hint) = hint
+                .clone()
+                .filter(|_| !carried && self.rereads < MAX_REREADS && !self.store.withheld(read))
+            else {
                 i += 1;
                 continue;
             };
@@ -2252,6 +2251,8 @@ mod ladder_mutant_kills {
         let outcome = run(&planes, &config, &CancelToken::new(), None).unwrap();
         assert!(outcome.merged.is_empty(), "{:?}", outcome.merged);
         assert_eq!(outcome.rereads, 0, "{:?}", outcome.trace.stages);
+        // refused at every attempt scale, one record
+        assert_eq!(outcome.store.records(), 1, "{:?}", outcome.trace.stages);
     }
 
     /// A 100 px square at `x`.
@@ -2499,6 +2500,36 @@ mod ladder_mutant_kills {
         assert!(
             found >= 1,
             "`*=` freezes every stage's detections_found at 0"
+        );
+    }
+
+    #[test]
+    fn the_trace_counts_every_hit_past_the_read_bound() {
+        // one attempt delivering 65 distinct hits — the trace counts
+        // all 65 (what `stage` adds to `detections_found`), 64 distinct
+        // reads are reconciled (the 65th counted), at most 16 published
+        let cancel = CancelToken::new();
+        let img = LumaImage::new(vec![255u8; 64 * 64], 64, 64);
+        let mut run = fresh_run(&cancel, (64, 64));
+        let outcome = engine::EngineOutcome {
+            detections: (0..65)
+                .map(|i| {
+                    RawDetection::qr(
+                        format!("symbol-{i}").as_bytes(),
+                        EciEvidence::NoEci,
+                        Fnc1::None,
+                        EngineKind::Rxing,
+                    )
+                })
+                .collect(),
+            ..engine::EngineOutcome::default()
+        };
+        assert_eq!(run.collect_attempt(&img, outcome, false), 65);
+        assert_eq!(run.store.dropped, 1, "the 65th distinct read is counted");
+        let walked = run.finish(Vec::new(), Instant::now()).unwrap();
+        assert_eq!(
+            walked.merged.len(),
+            crate::engine::reconcile::MAX_DETECTIONS
         );
     }
 
