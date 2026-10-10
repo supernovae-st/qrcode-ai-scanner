@@ -37,7 +37,10 @@ PATH (run cargo as `PATH cargo ...`) · --allow-dirty (passed to cargo) ·
 --release-set (node · archive: the set about to publish, complete and
 nothing else — npm: the main package pins every napi target and each pin has
 its platform package; Python: one wheel per row of python.yml's wheels
-matrix and one sdist).
+matrix and one sdist) · --record FILE (archive: once nothing failed, one
+`<sha256>  <file>` line per archive given, in sha256sum's format, so a later
+step can prove it holds the very bytes inspected; removed when anything
+failed).
 
 Verdicts: PASS · FAIL · UNAVAILABLE (a tool or input this host lacks, named,
 never a pass) · BLOCKED (a known structural blocker that packaging metadata
@@ -258,6 +261,7 @@ class Host:
         self.artifacts: list[Artifact] = []
         self.version = workspace_version()
         self.opener = urllib.request.urlopen  # pypi-live's one GET; the self-test answers it from fixtures
+        self.recorded: list = []  # archive: (sha256, file as given) of each archive inspected, for --record
         if self.out:
             (self.out / "logs").mkdir(parents=True, exist_ok=True)
 
@@ -1399,18 +1403,21 @@ def cmd_archive(host: Host) -> None:
         # the symlink-resolved path (which can name a private home directory).
         path = pathlib.Path(name)
         note = [f"given archive {name}"]
+        art = None
         if not path.is_file():
             host.add(Artifact(f"archive {name}", "archive")).check("file exists", False, name)
         elif path.name.endswith(".crate"):
-            inspect_crate(host, path, notes=note)
+            art = inspect_crate(host, path, notes=note)
         elif path.name.endswith(".whl"):
-            inspect_wheel(host, path, notes=note)
+            art = inspect_wheel(host, path, notes=note)
         elif path.name.endswith(".tgz"):
-            inspect_npm(host, path, notes=note)
+            art = inspect_npm(host, path, notes=note)
         elif path.name.endswith(".tar.gz"):
-            inspect_sdist(host, path, notes=note)
+            art = inspect_sdist(host, path, notes=note)
         else:
             host.add(Artifact(f"archive {name}", "archive")).check("known archive kind", False, path.suffix)
+        if art is not None:
+            host.recorded.append((art.sha256, name))
     if host.args.release_set:
         check_release_set(host)
 
@@ -1585,6 +1592,18 @@ def _with_scripts(files: dict, **scripts: str) -> dict:
     pkg = json.loads(files["package.json"])
     pkg["scripts"] = dict(pkg.get("scripts") or {}, **scripts)
     return files | {"package.json": json.dumps(pkg, indent=2).encode()}
+
+
+def _run_main(argv: list) -> int:
+    """main(ARGV)'s exit code, its output swallowed, with no CI annotation or step summary written."""
+    saved = {key: os.environ.pop(key) for key in ("GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY") if key in os.environ}
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return main(argv)
+    except SystemExit as err:
+        return err.code if isinstance(err.code, int) else 1
+    finally:
+        os.environ.update(saved)
 
 
 # python.yml › wheels builds one wheel per row, each tagged like these (the
@@ -1984,6 +2003,31 @@ def self_test() -> int:
         judge("release set + a second copy of a platform package", [main, *platforms, npm("set-twin", twin)], FAIL,
               f"{NODE_NAME}-{napi_suffixes()[0]} appears 2 times", release_set=True)
 
+        # --record: once nothing failed, one `<sha256>  <file>` line per archive
+        # given, in sha256sum's format (what npm-publish checks each `npm
+        # publish` operand against); none when anything failed, a stale record
+        # removed.
+        def judge_record(name: str, files: list, want: int, *options: str, stale: bool = False) -> None:
+            nonlocal ran
+            ran += 1
+            record = base / "records" / re.sub(r"[^a-z0-9]+", "-", name) / "inspected.sha256"
+            record.parent.mkdir(parents=True, exist_ok=True)
+            if stale:
+                record.write_text(f"{'0' * 64}  stale.tgz\n")
+            code = _run_main(["archive", *map(str, files), *options, "--quiet", "--record", str(record)])
+            want_text = "".join(f"{sha256(p.read_bytes())}  {p}\n" for p in files) if want == 0 else None
+            got = record.read_text() if record.exists() else None
+            if code != want or got != want_text:
+                failures.append(f"{name}: exit {code} (want {want}), record {got!r:.90} (want {want_text!r:.90})")
+
+        judge_record("--record after a passing npm release set", [main, *platforms], 0, "--release-set")
+        judge_record("--record after a failing npm release set, a stale record removed", [main, *platforms[:-1]], 1,
+                     "--release-set", stale=True)
+        judge_record("--record after one wasm tarball", [npm("record-wasm", _npm_wasm(version))], 0)
+        ran += 1
+        if _run_main(["versions", "--record", str(base / "versions.sha256")]) != 2:
+            failures.append("--record with versions: not refused as a usage error (exit 2)")
+
     for failure in failures:
         print(f"SELF-TEST FAILED · {failure}", file=sys.stderr)
     print(f"self-test: {ran - len(failures)}/{ran} scenarios as expected")
@@ -2039,6 +2083,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sync", action="store_true", help="licenses: rewrite stale copies")
     parser.add_argument("--nightly", help="profiles: the nightly toolchain for --unit-graph")
     parser.add_argument("--tag", help="versions: the release tag (vX.Y.Z or refs/tags/vX.Y.Z)")
+    parser.add_argument("--record", help="archive: once nothing failed, write `<sha256>  <file>` per archive given "
+                                         "(sha256sum's format) to this file; removed when anything failed")
     parser.add_argument("--release-set", action="store_true",
                         help="node · archive: the set about to publish, complete and nothing else — npm: the main "
                              "package pins every napi target at this version and every pin has its platform "
@@ -2047,8 +2093,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> int:
-    args = build_parser().parse_args()
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.record and args.target != "archive":
+        parser.error("--record goes with archive")
     if args.target == "selftest":
         return self_test()
 
@@ -2082,6 +2131,14 @@ def main() -> int:
             sink.write(report)
     failing = {FAIL} | ({UNAVAILABLE} if args.strict else set())
     bad = [a for a in host.artifacts if a.status in failing]
+    if args.record:
+        # What this run judged, path as given and sha256: a later step proves
+        # it holds those very bytes. Nothing to prove when anything failed.
+        record = pathlib.Path(args.record)
+        if bad:
+            record.unlink(missing_ok=True)
+        else:
+            record.write_text("".join(f"{digest}  {name}\n" for digest, name in host.recorded))
     annotate = "::error title=package-inspect::" if os.environ.get("GITHUB_ACTIONS") else "package-inspect: "
     for art in bad:
         print(f"{annotate}{art.name}: {art.status.upper()} "
