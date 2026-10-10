@@ -223,11 +223,11 @@ fn observe(result: &rxing::RXingResult) -> Option<RawDetection> {
         Reader::Port => {
             let raw = result.getRawBytes();
             // a plain read of ASCII text carries that text's bytes: anything
-            // else is not the port's payload (another reader's shape)
-            if identifier == "]Q1"
-                && result.getText().is_ascii()
-                && !reads_as(raw, result.getText())
-            {
+            // else is not the port's payload (another reader's shape). An
+            // empty text claims nothing of them: it is what rxing renders for
+            // a segment its decoders reject (a Kanji pair 5949-5951)
+            let text = result.getText();
+            if identifier == "]Q1" && !text.is_empty() && text.is_ascii() && !reads_as(raw, text) {
                 return None;
             }
             detection.raw = raw.to_vec();
@@ -712,6 +712,13 @@ mod tests {
         // non-ASCII text is the content contract's to decide
         assert!(observe(&port_result("\u{104}", vec![0xA1], "]Q1")).is_some());
         assert!(observe(&port_result("abc", vec![0xA1], "]Q2")).is_some());
+        // an empty text claims nothing of the bytes: rxing renders a segment
+        // its decoder rejects (the Kanji pair 9F FD, value 5949) as nothing,
+        // and the content contract reads the bytes. A non-empty ASCII text
+        // that is not the bytes still refuses, with such a pair in them too
+        let d = observe(&port_result("", vec![0x9F, 0xFD], "]Q1")).expect("an empty text");
+        assert_eq!(d.raw, [0x9F, 0xFD]);
+        assert!(observe(&port_result("QR", b"QR\x9F\xFD".to_vec(), "]Q1")).is_none());
     }
 
     /// Cell 825 of the rescue-stress grid: a v6-M symbol of a 120-byte filler
