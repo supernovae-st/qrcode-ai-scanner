@@ -14,6 +14,8 @@ manifest (napi adds only the pins) and no install-time script; the wasm and
 platform packages carry no scripts at all. Nothing is ever uploaded: packing
 goes through `cargo package`, `npm pack --pack-destination`,
 scripts/build-wasm.sh (wasm-pack), maturin and `pub publish --dry-run`.
+pypi-live alone reads the network: one GET of PyPI's public JSON for the
+workspace version, no credential.
 
   package-inspect.py all [--no-build]          every target this host can run
   package-inspect.py crates [--verify]         the .crate of each published crate
@@ -22,6 +24,7 @@ scripts/build-wasm.sh (wasm-pack), maturin and `pub publish --dry-run`.
   package-inspect.py python                    wheel + sdist through maturin
   package-inspect.py flutter [--flutter BIN]   the pub.dev package
   package-inspect.py archive FILE...           already-built .crate · .tgz · .whl · .tar.gz
+  package-inspect.py pypi-live FILE...         wheels + sdist against what PyPI already serves at this version
   package-inspect.py licenses [--sync]         every LICENSE copy against the root text
   package-inspect.py profiles [--nightly TC]   effective release profile per build root
   package-inspect.py versions [--tag vX.Y.Z]   publish-surface versions (+ the release tag)
@@ -60,6 +63,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.error
+import urllib.request
 import zipfile
 
 try:
@@ -93,6 +98,9 @@ PUBLISHED_CRATES = ("qrcode-ai-scanner", "qrcode-ai-scanner-cli")
 NODE_NAME = "@supernovae-st/qrcode-ai-scanner"
 WASM_NAME = "@supernovae-st/qrcode-ai-scanner-wasm"
 PYPI_NAME = "qrcode-ai-scanner"
+# Every file PyPI serves at one version, with its sha256 (a 404: no such
+# version). pypi-live reads it; twine's --skip-existing compares names only.
+PYPI_JSON = "https://pypi.org/pypi/{project}/{version}/json"
 
 # Exact npm file sets: the `files` allowlist plus what npm always adds
 # (package.json · README · LICENSE). Anything else is a stray.
@@ -249,6 +257,7 @@ class Host:
         self.scratch = pathlib.Path(tempfile.mkdtemp(prefix="package-inspect-"))
         self.artifacts: list[Artifact] = []
         self.version = workspace_version()
+        self.opener = urllib.request.urlopen  # pypi-live's one GET; the self-test answers it from fixtures
         if self.out:
             (self.out / "logs").mkdir(parents=True, exist_ok=True)
 
@@ -1055,6 +1064,85 @@ def cmd_python(host: Host) -> None:
         inspect_wheel(host, wheels[0], notes=["maturin build --release --locked (host wheel)"])
 
 
+# ---------------------------------------------------------------- pypi-live
+
+
+def pypi_live_files(host: Host):
+    """{file name: (sha256, yanked)} of what PyPI serves at host.version, or
+    None on a 404 (PyPI has no such version: nothing is live). Any other answer
+    raises OSError or ValueError: what cannot be read cannot be compared."""
+    url = PYPI_JSON.format(project=PYPI_NAME, version=host.version)
+    request = urllib.request.Request(url, headers={"Accept": "application/json",
+                                                   "User-Agent": "qrcode-ai-scanner-ci (release gate)"})
+    try:
+        with host.opener(request, timeout=60) as response:
+            payload = json.load(response)
+    except urllib.error.HTTPError as err:
+        if err.code == 404:
+            return None
+        raise
+    if not isinstance(payload, dict) or not isinstance(payload.get("urls"), list):
+        raise ValueError("the answer holds no `urls` list")
+    info = payload.get("info")
+    answered = info.get("version") if isinstance(info, dict) else None
+    if answered != host.version:
+        raise ValueError(f"the answer is for version {answered!r}, not {host.version}")
+    files = {}
+    for entry in payload["urls"]:
+        entry = entry if isinstance(entry, dict) else {}
+        digests = entry.get("digests") if isinstance(entry.get("digests"), dict) else {}
+        name, digest = entry.get("filename"), digests.get("sha256")
+        if not isinstance(name, str) or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"a `urls` entry without a file name and a sha256: {json.dumps(entry)[:160]}")
+        if name in files:
+            raise ValueError(f"{name} listed twice")
+        files[name] = (digest, entry.get("yanked") is True)
+    return files
+
+
+def cmd_pypi_live(host: Host) -> None:
+    """Every file given that PyPI already serves at this version is that very
+    file (sha256), and PyPI serves no other file there. python › release runs
+    it on the inspected set right before the upload, whose skip-existing then
+    skips only files proven identical: twine skips a live file by name alone."""
+    if not host.args.files:
+        print("pypi-live: give at least one file", file=sys.stderr)
+        sys.exit(2)
+    art = host.add(Artifact(f"PyPI files at {PYPI_NAME} {host.version}", "pypi-live"))
+    local, unknown = {}, []
+    for name in host.args.files:
+        path = pathlib.Path(name)
+        if path.is_file() and path.name.endswith((".whl", ".tar.gz")) and path.name not in local:
+            local[path.name] = sha256(path.read_bytes())
+        else:
+            unknown.append(name)
+    art.check("every file given is a wheel or an sdist, each name once", not unknown, ", ".join(unknown))
+    question = f"PyPI's JSON for {PYPI_NAME} {host.version} read (a 404: no such version, nothing live)"
+    try:
+        live = pypi_live_files(host)
+    except (OSError, ValueError) as err:
+        art.check(question, False, str(err))
+        return
+    art.check(question, True, "404" if live is None else f"{len(live)} file(s) at this version")
+    live = live or {}
+
+    def yanked(name: str) -> str:
+        return " (yanked)" if live[name][1] else ""
+
+    same = sorted(n for n in local if n in live and live[n][0] == local[n])
+    differ = sorted(n for n in local if n in live and live[n][0] != local[n])
+    extra = sorted(set(live) - set(local))
+    art.listing = ([f"{n}: on PyPI, identical{yanked(n)}" for n in same]
+                   + [f"{n}: on PyPI, other bytes" for n in differ]
+                   + [f"{n}: not on PyPI yet" for n in sorted(set(local) - set(live))]
+                   + [f"{n}: on PyPI, not in the local set{yanked(n)}" for n in extra])
+    art.check("every local file PyPI already serves is byte-identical to it (sha256)", not differ,
+              "; ".join(f"{n}: PyPI sha256 {live[n][0][:16]}… ≠ local {local[n][:16]}…" for n in differ)
+              or f"{len(same)} identical on PyPI, {len(local) - len(same)} not on PyPI yet")
+    art.check(f"PyPI serves no file at {host.version} that the local set does not hold", not extra,
+              "; ".join(f"{n}{yanked(n)}" for n in extra))
+
+
 # ---------------------------------------------------------------- flutter
 
 
@@ -1743,6 +1831,82 @@ def self_test() -> int:
               [*pypi, pypi_sdist, wheel("pypi-mac14", _clean_wheel(version, "macosx_14_0_arm64"), "macosx_14_0_arm64")],
               FAIL, "macOS arm64", release_set=True)
 
+        # pypi-live: before the upload, every file PyPI already serves at this
+        # version must be the local one (twine's --skip-existing would skip it
+        # by name), and PyPI may serve nothing else there. The one GET is
+        # answered from a fixture; it must ask for this project at this version
+        # (spelled out here, not derived from PYPI_JSON).
+        url = f"https://pypi.org/pypi/qrcode-ai-scanner/{version}/json"
+        digests = {p.name: sha256(p.read_bytes()) for p in (*pypi, pypi_sdist)}
+        win, sdist_name, release = pypi[-1].name, pypi_sdist.name, [*pypi, pypi_sdist]
+
+        def answer(files: dict, version_: str = version, yanked=()) -> bytes:
+            return json.dumps({"info": {"name": PYPI_NAME, "version": version_}, "urls": [
+                {"filename": n, "digests": {"blake2b_256": "0" * 64, "md5": "0" * 32, "sha256": d},
+                 "packagetype": "sdist" if n.endswith(".tar.gz") else "bdist_wheel", "yanked": n in yanked}
+                for n, d in files.items()]}).encode()
+
+        def judge_live(name: str, paths: list, reply, want: str, *needles: str) -> None:
+            nonlocal ran
+            ran += 1
+            host = Host(build_parser().parse_args(["pypi-live", *map(str, paths)]))
+            asked = []
+
+            def opener(request, timeout=None):
+                asked.append(request.full_url)
+                if isinstance(reply, BaseException):
+                    raise reply
+                return io.BytesIO(reply)
+
+            host.opener = opener
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    cmd_pypi_live(host)
+            finally:
+                shutil.rmtree(host.scratch, ignore_errors=True)
+            got = FAIL if any(a.status == FAIL for a in host.artifacts) else PASS
+            failed = " · ".join(f"{c.name}: {c.detail}" for a in host.artifacts for c in a.checks if not c.ok)
+            missing = [n for n in needles if n not in failed]
+            if got != want or missing or asked != [url]:
+                failures.append(f"{name}: {got.upper()} (want {want.upper()})"
+                                + (f", no failing check names {missing}" if missing else "")
+                                + (f", asked for {asked}, not [{url}]" if asked != [url] else "")
+                                + (f" — failing: {failed}" if failed else ""))
+
+        def http(code: int, why: str) -> urllib.error.HTTPError:
+            return urllib.error.HTTPError(url, code, why, None, None)
+
+        judge_live("pypi-live: no such version on PyPI (404)", release, http(404, "Not Found"), PASS)
+        judge_live("pypi-live: the version listed with no file", release, answer({}), PASS)
+        judge_live("pypi-live: every file live and identical (a re-run)", release, answer(digests), PASS)
+        judge_live("pypi-live: two files live and identical, the rest not yet", release,
+                   answer({win: digests[win], sdist_name: digests[sdist_name]}), PASS)
+        judge_live("pypi-live: an identical file, yanked", release, answer({win: digests[win]}, yanked={win}), PASS)
+        judge_live("pypi-live: a live wheel under its name, other bytes", release, answer({win: "0" * 64}), FAIL,
+                   f"{win}: PyPI sha256 0000000000000000… ≠ local {digests[win][:16]}…")
+        judge_live("pypi-live: the live sdist differs, the wheels not up yet", release, answer({sdist_name: "1" * 64}),
+                   FAIL, sdist_name)
+        judge_live("pypi-live: two live files identical, a third other bytes", release,
+                   answer({pypi[0].name: digests[pypi[0].name], pypi[1].name: digests[pypi[1].name],
+                           pypi[2].name: "2" * 64}), FAIL, pypi[2].name)
+        judge_live("pypi-live: a live file the local set does not hold", release,
+                   answer({f"qrcode_ai_scanner-{version}-py3-none-any.whl": "3" * 64}), FAIL, "py3-none-any")
+        judge_live("pypi-live: an answer for another version", release, answer(digests, "0.0.1"), FAIL, "'0.0.1'")
+        judge_live("pypi-live: an entry without a sha256", release, json.dumps({
+            "info": {"version": version}, "urls": [{"filename": win, "digests": {"md5": "0" * 32}}]}).encode(),
+                   FAIL, "without a file name and a sha256")
+        judge_live("pypi-live: a file listed twice", release, json.dumps({"info": {"version": version}, "urls": [
+            {"filename": win, "digests": {"sha256": digests[win]}}] * 2}).encode(), FAIL, "listed twice")
+        judge_live("pypi-live: PyPI unavailable (503)", release, http(503, "Service Unavailable"), FAIL, "503")
+        judge_live("pypi-live: no network", release, urllib.error.URLError("no route to host"), FAIL,
+                   "no route to host")
+        judge_live("pypi-live: an answer that is no JSON", release, b"<html>down for maintenance</html>", FAIL,
+                   "Expecting value")
+        notes = place("pypi-notes", "notes.txt")
+        notes.write_bytes(b"x\n")
+        judge_live("pypi-live: a file that is neither a wheel nor an sdist", [*release, notes], answer({}), FAIL,
+                   "notes.txt")
+
         # Lifecycle scripts: npm runs them on install (and on a directory
         # publish), never in a tarball we inspected. The main package keeps its
         # committed build/test/prepack scripts and nothing that runs on install.
@@ -1861,8 +2025,8 @@ def markdown(host: Host, title: str) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("target", choices=["all", "crates", "node", "wasm", "python", "flutter",
-                                           "archive", "licenses", "profiles", "versions", "selftest"])
-    parser.add_argument("files", nargs="*", help="archive: files to inspect")
+                                           "archive", "pypi-live", "licenses", "profiles", "versions", "selftest"])
+    parser.add_argument("files", nargs="*", help="archive: files to inspect · pypi-live: wheels and sdist to compare")
     parser.add_argument("--out", help="write package-inspect.{json,md} + logs/ here")
     parser.add_argument("--strict", action="store_true", help="UNAVAILABLE fails too")
     parser.add_argument("--quiet", action="store_true", help="stdout: the verdict table and failed checks only")
@@ -1892,7 +2056,7 @@ def main() -> int:
     try:
         {
             "all": cmd_all, "crates": cmd_crates, "node": cmd_node, "wasm": cmd_wasm,
-            "python": cmd_python, "flutter": cmd_flutter, "archive": cmd_archive,
+            "python": cmd_python, "flutter": cmd_flutter, "archive": cmd_archive, "pypi-live": cmd_pypi_live,
             "licenses": cmd_licenses, "profiles": cmd_profiles, "versions": cmd_versions,
         }[args.target](host)
     finally:
