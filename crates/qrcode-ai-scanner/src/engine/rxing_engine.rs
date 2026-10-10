@@ -24,7 +24,7 @@
 //! geometry; the result points stay internal (they tell symbols apart and
 //! frame the re-read). Other symbologies carry the ISO/IEC 8859-1 bytes of
 //! the engine's text when it fits, else its UTF-8 (spec/01 § raw), and the
-//! FNC1 position their symbology identifier states. A DataBar read is a
+//! FNC1 position their symbology identifier states. A `DataBar` read is a
 //! GTIN-14 or nothing; the reads of the symbologies rxing invents from
 //! noise (and of thinly protected PDF417 symbols) wait for confirmation at
 //! an independent scale (07-pipeline § Acceptance).
@@ -297,7 +297,7 @@ fn reads_as(raw: &[u8], text: &str) -> bool {
 }
 
 /// Whether a non-QR read waits for a read at an independent scale before the
-/// walk publishes it: UPC-E, DataBar and DataBar Expanded — rxing reads them
+/// walk publishes it: UPC-E, `DataBar` and `DataBar` Expanded — rxing reads them
 /// out of module noise, and a check digit or a checksum is all that guards
 /// their payload — and PDF417 at error-correction level 0 or 1, or at no
 /// stated level: `2^(level + 1)` EC codewords, two or four, barely refuse a

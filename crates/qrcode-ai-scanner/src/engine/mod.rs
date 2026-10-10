@@ -84,7 +84,7 @@ pub(crate) struct RawDetection {
     /// The walk publishes this read only once a read at an independent scale
     /// confirms it (07-pipeline § Acceptance): a symbology the readers invent
     /// from module noise, its payload guarded by a check digit or a checksum
-    /// alone (UPC-E, DataBar, DataBar Expanded), or a PDF417 symbol at
+    /// alone (UPC-E, `DataBar`, `DataBar` Expanded), or a PDF417 symbol at
     /// error-correction level 0 or 1 (two or four EC codewords) or at no
     /// stated level. Set by the rxing adapter only.
     pub needs_confirmation: bool,
