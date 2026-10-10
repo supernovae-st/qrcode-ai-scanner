@@ -35,7 +35,9 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   its inspected archive byte for byte. Publishing jobs run only actions
   pinned by commit. A run from any other ref builds and inspects every
   archive and stops, and the npm main package goes up only once every
-  platform package it pins is live.
+  platform package it pins is live. A live version on crates.io or npm
+  must match the inspected archive, a tarball npm would read differently
+  fails, and manifests and Python sources are bound to the checkout.
 - **Source builds of the Python package need maturin 1.9.3 or newer** —
   the build requirement is now `maturin>=1.9.3,<2.0`, the first maturin
   that puts PEP 639 license files into source distributions.
