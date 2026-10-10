@@ -26,6 +26,7 @@
 use super::content::{ContentKey, DoubleByteSpan, EciEvidence, EngineReading, Fnc1, Segments};
 use super::{MaskedStream, Refusal};
 use crate::report::{EcLevel, EngineKind, Point, Symbology};
+use crate::rescue::Margin;
 
 /// Distinct reads a walk reconciles; later distinct reads are counted.
 pub(crate) const MAX_DISTINCT_READS: usize = 64;
@@ -117,6 +118,9 @@ pub(crate) struct Read {
     sources: Sources,
     /// The scanner's own parser read its stream.
     pub(crate) parsed: bool,
+    /// The best correction margin a read folded into this one measured on
+    /// its own received word (`Unknown`: none did).
+    pub(crate) margin: Margin,
 }
 
 /// Which read of a fold supplied each part: every part comes from the
@@ -155,6 +159,7 @@ impl Read {
                 ec: rank,
             },
             parsed: false,
+            margin: Margin::Unknown,
         }
     }
 
@@ -234,6 +239,7 @@ impl Read {
             self.sources.ec = theirs.ec;
         }
         self.parsed |= other.parsed;
+        self.margin = self.margin.best(other.margin);
     }
 
     /// An engine delivered it (it is no candidate parse).

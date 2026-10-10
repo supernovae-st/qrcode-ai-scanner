@@ -88,6 +88,11 @@ pub(crate) struct RawDetection {
     /// error-correction level 0 or 1 (two or four EC codewords) or at no
     /// stated level. Set by the rxing adapter only.
     pub needs_confirmation: bool,
+    /// The correction margin of the read's own received word, when the
+    /// scanner error-corrected that word itself (the rqrr adapter's
+    /// re-derivation); `Unknown` otherwise — an rxing read gets one only from
+    /// a re-read that locates it.
+    pub margin: crate::rescue::Margin,
 }
 
 /// The content rxing's zxing-cpp port reports for a stream: its bytes, a
@@ -188,6 +193,7 @@ impl RawDetection {
             location: None,
             locate: None,
             needs_confirmation: false,
+            margin: crate::rescue::Margin::Unknown,
         }
     }
 }

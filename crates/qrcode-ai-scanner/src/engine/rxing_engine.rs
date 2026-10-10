@@ -37,7 +37,7 @@ use super::content::{EciEvidence, EngineReading, Fnc1, Segments};
 use super::locate::{Frame, LocateHint};
 use crate::input::LumaImage;
 use crate::report::{EcLevel, EngineKind, Point, Symbology};
-use crate::rescue::bitstream;
+use crate::rescue::{Margin, bitstream};
 
 /// rxing format → our wire symbology. `None` = formats we refuse to
 /// publish unlabeled (extensions, unrecognized).
@@ -200,6 +200,7 @@ fn observe(result: &rxing::RXingResult) -> Option<RawDetection> {
         location: None,
         locate: None,
         needs_confirmation: false,
+        margin: Margin::Unknown,
     };
     if !symbology.is_qr_family() {
         let text = result.getText();

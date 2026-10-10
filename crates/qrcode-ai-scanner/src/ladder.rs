@@ -37,7 +37,7 @@ use crate::engine::{self, RawDetection, Refusal};
 use crate::error::{Result, ScanError};
 use crate::input::LumaImage;
 use crate::report::{EngineKind, PipelineTrace, Point, StageTrace, Symbology};
-use crate::rescue::{Acceptance, Rederived, RescueCandidate};
+use crate::rescue::{Acceptance, Margin, Rederived, RescueCandidate};
 use crate::transform::{self, Channel, SourcePlanes};
 
 /// Cooperative cancellation handle. Cheap to clone; `Send + Sync`.
@@ -782,6 +782,7 @@ impl Run<'_> {
         read.segments = hit.segments;
         read.engine_reading = hit.engine_reading;
         read.parsed = hit.parsed;
+        read.margin = hit.margin;
         read.geometry = geometry;
         (read, hit.locate)
     }
@@ -807,7 +808,7 @@ impl Run<'_> {
                 )
             });
             match derived {
-                Rederived::Parsed(parsed) => {
+                Rederived::Parsed { parsed, .. } => {
                     let key = ContentKey {
                         raw: parsed.bytes,
                         eci: EciEvidence::from_marks(parsed.eci),
@@ -828,7 +829,7 @@ impl Run<'_> {
                 Rederived::Malformed { port } => {
                     refusals.extend(Refusal::new(port, None, Some(candidate.corners)));
                 }
-                Rederived::Unverified => {}
+                Rederived::Unverified(_) => {}
             }
         }
         (reads, refusals)
@@ -941,6 +942,7 @@ impl Run<'_> {
                     .at(Some(candidate.corners));
                 read.segments = Segments::Observed(rescued.segments);
                 read.parsed = true;
+                read.margin = Margin::Known(rescued.margin);
                 read.geometry = candidate_geometry(&candidate);
                 self.store.collect(read);
                 break; // first rescue wins — candidates are dedupes of one symbol

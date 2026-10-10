@@ -71,6 +71,9 @@ pub(crate) struct Rescued {
     pub eci: Vec<EciMark>,
     /// The Kanji segments of the stream (a Hanzi stream is not rescued).
     pub segments: Vec<DoubleByteSpan>,
+    /// The worst block's correction margin ([`margin`]): never negative,
+    /// the erasures' unspent parity kept.
+    pub margin: i32,
 }
 
 /// ISO/IEC 18004 Annex B misdecode-protection codewords `p`, as Table 9
@@ -106,6 +109,45 @@ const ERASURE_SPARE: usize = 2;
 /// [`ERASURE_SPARE`] parity codewords unspent past the reserve `p`.
 fn erasure_budget(npar: usize, p: usize) -> usize {
     npar.saturating_sub(p).saturating_sub(ERASURE_SPARE)
+}
+
+/// The worst block's correction margin of a corrected stream (07-pipeline
+/// § Acceptance): the least, over its blocks, of ⌊(npar − p − f)/2⌋ − e
+/// with `p` from Table 9 ([`protection`]) — the errors a block could still
+/// have taken inside the Annex B reserve, negative past it. `None` without
+/// a block.
+pub(crate) fn margin(counts: &[BlockCount], version: u8, ec: EcLevel) -> Option<i32> {
+    let p = protection(version, ec);
+    counts
+        .iter()
+        .map(|block| {
+            let budget = block.npar.saturating_sub(p).saturating_sub(block.erasures) / 2;
+            let budget = i32::try_from(budget).unwrap_or(i32::MAX);
+            budget.saturating_sub(i32::try_from(block.errors).unwrap_or(i32::MAX))
+        })
+        .min()
+}
+
+/// What a read's own received word says of its correction margin.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Margin {
+    /// The scanner error-corrected no word of the read.
+    #[default]
+    Unknown,
+    /// The worst block's margin ([`margin`]).
+    Known(i32),
+}
+
+impl Margin {
+    /// The better of two reads' margins: a known one over none, the larger
+    /// of two known ones.
+    pub(crate) fn best(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Known(a), Self::Known(b)) => Self::Known(a.max(b)),
+            (Self::Known(m), Self::Unknown) | (Self::Unknown, Self::Known(m)) => Self::Known(m),
+            (Self::Unknown, Self::Unknown) => Self::Unknown,
+        }
+    }
 }
 
 /// Per-interleaved-codeword confidence: the worst |sample − threshold|
@@ -182,7 +224,7 @@ pub(crate) fn attempt(luma: &LumaImage, candidate: &RescueCandidate) -> Option<R
     let margins = codeword_margins(sample_luma, candidate, codewords.len())?;
 
     let p = Acceptance::Scanner.reserve(candidate.version, candidate.ec);
-    let (data, _) = corrected_data(&codewords, candidate.version, candidate.ec, p, |block| {
+    let (data, counts) = corrected_data(&codewords, candidate.version, candidate.ec, p, |block| {
         let len = block.bytes.len();
         // rank this block's codewords by confidence, worst first
         let mut ranked: Vec<(usize, f32)> = block
@@ -217,6 +259,7 @@ pub(crate) fn attempt(luma: &LumaImage, candidate: &RescueCandidate) -> Option<R
         fnc1: parsed.fnc1,
         eci: parsed.eci,
         segments: parsed.segments,
+        margin: margin(&counts, candidate.version, candidate.ec)?,
     })
 }
 
@@ -290,8 +333,14 @@ impl Acceptance {
 /// What re-deriving a sampled stream found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Rederived {
-    /// The RS-verified data codewords, parsed.
-    Parsed(Parsed),
+    /// The RS-verified data codewords, parsed, and the worst block's
+    /// correction margin ([`margin`]).
+    Parsed {
+        /// The parse of the corrected data codewords.
+        parsed: Parsed,
+        /// The worst block's margin under Table 9.
+        margin: i32,
+    },
     /// The codewords verify, but the segment stream is not one ISO 18004
     /// defines (a `111xxxxx` designator, an assignment number past
     /// 999999, FNC1 in both positions…) — refuse the symbol, as zbar does.
@@ -301,10 +350,22 @@ pub(crate) enum Rederived {
         /// See [`bitstream::port_read`].
         port: Option<PortRead>,
     },
-    /// No verified codewords: a stream shorter than its version, a block
-    /// beyond RS capacity or past the acceptance's budget — e.g. the
-    /// unmirrored read of a symbol the engine decoded mirrored.
-    Unverified,
+    /// No verified codewords, and why.
+    Unverified(Unverified),
+}
+
+/// Why a re-derivation verified no codewords.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unverified {
+    /// No orientation error-corrects: a stream shorter than its version, a
+    /// block beyond RS capacity or past the acceptance's budget — e.g. the
+    /// unmirrored read of a symbol the engine decoded mirrored. An engine
+    /// that decoded such a grid took a word the scanner's bounded decoder
+    /// refuses.
+    NothingVerifies,
+    /// Both orientations error-correct, to different results (crafted
+    /// grids): nothing is decided either way.
+    Ambiguous,
 }
 
 /// Re-derive the segment structure of a sampled stream — the clean path of
@@ -317,20 +378,25 @@ pub(crate) fn rederive(
     mask: u8,
     acceptance: Acceptance,
 ) -> Rederived {
+    let nothing = Rederived::Unverified(Unverified::NothingVerifies);
     if !(1..=40).contains(&version) {
-        return Rederived::Unverified;
+        return nothing;
     }
     let Some(codewords) =
         unmask_to_codewords(&stream.bits, stream.bit_len, usize::from(version), mask)
     else {
-        return Rederived::Unverified;
+        return nothing;
     };
     let reserved = acceptance.reserve(version, ec);
-    let Some((data, _)) = corrected_data(&codewords, version, ec, reserved, |_| Vec::new()) else {
-        return Rederived::Unverified;
+    let Some((data, counts)) = corrected_data(&codewords, version, ec, reserved, |_| Vec::new())
+    else {
+        return nothing;
+    };
+    let Some(margin) = margin(&counts, version, ec) else {
+        return nothing;
     };
     match bitstream::parse(&data, version) {
-        Some(parsed) => Rederived::Parsed(parsed),
+        Some(parsed) => Rederived::Parsed { parsed, margin },
         None => Rederived::Malformed {
             port: bitstream::port_read(&data, version),
         },
@@ -615,7 +681,7 @@ mod differential {
                     candidate.mask,
                     Acceptance::Engine,
                 ) {
-                    Rederived::Parsed(parsed) => assert_eq!(
+                    Rederived::Parsed { parsed, .. } => assert_eq!(
                         parsed.bytes, engine_raw,
                         "re-derivation diverges on {path:?}"
                     ),
@@ -954,7 +1020,7 @@ mod codewords {
         assert_eq!(grids.len(), 1);
         let (engine, candidate) = &grids[0];
         assert_eq!(engine.as_deref(), Some(&[0xA1][..]), "rqrr: bytes only");
-        let Rederived::Parsed(parsed) = rederived(candidate, Acceptance::Engine) else {
+        let Rederived::Parsed { parsed, .. } = rederived(candidate, Acceptance::Engine) else {
             panic!("a clean stream re-derives");
         };
         assert_eq!(parsed.bytes, vec![0xA1], "same bytes as rqrr");
@@ -997,7 +1063,7 @@ mod codewords {
         let data = stream("0111 00000100 0100 00000011 01100001 01100010 01100011 0000");
         let luma = from_codewords(qrcode::Version::Normal(1), qrcode::EcLevel::M, &data);
         let found = grids(&luma);
-        let Rederived::Parsed(parsed) = rederived(&found[0].1, Acceptance::Engine) else {
+        let Rederived::Parsed { parsed, .. } = rederived(&found[0].1, Acceptance::Engine) else {
             panic!("a well-formed designator re-derives");
         };
         assert_eq!(parsed.bytes, b"abc");
@@ -1019,14 +1085,14 @@ mod codewords {
         for acceptance in [Acceptance::Scanner, Acceptance::Engine] {
             assert!(matches!(
                 rederived(&candidate, acceptance),
-                Rederived::Unverified
+                Rederived::Unverified(Unverified::NothingVerifies)
             ));
         }
         // and a version outside the table never reaches the parser
         candidate.version = 41;
         assert!(matches!(
             rederived(&candidate, Acceptance::Engine),
-            Rederived::Unverified
+            Rederived::Unverified(Unverified::NothingVerifies)
         ));
     }
 
@@ -1047,11 +1113,11 @@ mod codewords {
         assert!(
             matches!(
                 rederived(&candidate, Acceptance::Scanner),
-                Rederived::Unverified
+                Rederived::Unverified(Unverified::NothingVerifies)
             ),
             "the scanner's own acceptance keeps the reserve"
         );
-        let Rederived::Parsed(parsed) = rederived(&candidate, Acceptance::Engine) else {
+        let Rederived::Parsed { parsed, .. } = rederived(&candidate, Acceptance::Engine) else {
             panic!("rqrr's acceptance: plain RS");
         };
         assert_eq!(parsed.bytes, vec![0xA1]);
@@ -1066,7 +1132,7 @@ mod codewords {
         let (_, candidate) = grids(&luma).remove(0);
         assert!(matches!(
             rederived(&candidate, Acceptance::Scanner),
-            Rederived::Parsed(_)
+            Rederived::Parsed { .. }
         ));
     }
 
@@ -1214,6 +1280,97 @@ mod codewords {
         }
         assert_eq!(version_of_data(0, EcLevel::M), None);
         assert_eq!(version_of_data(17, EcLevel::M), None, "no v-M has 17");
+    }
+
+    #[test]
+    fn a_rederivation_reports_its_worst_blocks_margin() {
+        // ⌊(npar − p)/2⌋ − e on the worst block, p from Table 9: v1-L has
+        // seven parity codewords and p = 3, so two errors fit the reserve
+        let abc = stream("0100 00000011 01100001 01100010 01100011 0000");
+        let v1 = qrcode::Version::Normal(1);
+        for (corrupt, margin) in [(&[0, 2][..], 0), (&[0, 2, 4][..], -1)] {
+            let luma = from_corrupted_codewords(v1, qrcode::EcLevel::L, &abc, corrupt);
+            let (engine, candidate) = grids(&luma).remove(0);
+            assert_eq!(engine.as_deref(), Some(&b"abc"[..]), "{corrupt:?}");
+            let Rederived::Parsed {
+                parsed,
+                margin: got,
+            } = rederived(&candidate, Acceptance::Engine)
+            else {
+                panic!("plain RS corrects {corrupt:?}");
+            };
+            assert_eq!(
+                (parsed.bytes.as_slice(), got),
+                (&b"abc"[..], margin),
+                "{corrupt:?}"
+            );
+        }
+        // v6-Q: four blocks of 24 parity codewords (interleaved: block 0 holds
+        // data codewords 0, 4, 8…); twelve errors in block 0 spend it whole
+        let block0: Vec<usize> = (0..12).map(|i| 4 * i).collect();
+        let luma = from_corrupted_codewords(
+            qrcode::Version::Normal(6),
+            qrcode::EcLevel::Q,
+            &abc,
+            &block0,
+        );
+        let (_, candidate) = grids(&luma).remove(0);
+        assert!(matches!(
+            rederived(&candidate, Acceptance::Engine),
+            Rederived::Parsed { margin: 0, .. }
+        ));
+        // a clean stream keeps its whole budget: v1-L ⌊(7 − 3)/2⌋ = 2
+        let luma = from_codewords(v1, qrcode::EcLevel::L, &abc);
+        let (_, candidate) = grids(&luma).remove(0);
+        assert!(matches!(
+            rederived(&candidate, Acceptance::Engine),
+            Rederived::Parsed { margin: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn a_rescue_reports_the_margin_its_correction_left() {
+        // v2-M (16 parity codewords, p = 0) with twelve gray EC codewords:
+        // the rescue marks them as erasures and finds no error, ⌊(16 −
+        // 12)/2⌋ − 0 = 2; clean, the same symbol keeps ⌊16/2⌋ = 8
+        let payload = b"https://bank.example/t?a=9";
+        let clean = test_symbols::v2m_codewords(payload);
+        let gray: Vec<usize> = (28..40).collect();
+        for (gray, margin) in [(&gray[..], 2), (&[][..], 8)] {
+            let luma = test_symbols::smudged_v2m(&clean, gray);
+            let (_, candidate) = grids(&luma).remove(0);
+            let rescued = attempt(&luma, &candidate).expect("within the floor");
+            assert_eq!(
+                (rescued.raw.as_slice(), rescued.margin),
+                (&payload[..], margin),
+                "{gray:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn margins_count_erasures_and_errors_against_table_9() {
+        let block = |errors, erasures, npar| BlockCount {
+            errors,
+            erasures,
+            npar,
+        };
+        // the worst block decides
+        assert_eq!(
+            margin(&[block(1, 0, 16), block(5, 0, 16)], 6, EcLevel::M),
+            Some(3)
+        );
+        // erasures halve into the budget: ⌊(16 − 14)/2⌋ − 0 = 1
+        assert_eq!(margin(&[block(0, 14, 16)], 2, EcLevel::M), Some(1));
+        // v2-L reserves two: ⌊(10 − 2)/2⌋ − 5 = −1; no reserve, the same
+        // block keeps ⌊10/2⌋ − 5 = 0
+        assert_eq!(margin(&[block(5, 0, 10)], 2, EcLevel::L), Some(-1));
+        assert_eq!(margin(&[block(5, 0, 10)], 2, EcLevel::M), Some(0));
+        assert_eq!(margin(&[], 2, EcLevel::M), None);
+        // the fold keeps the best evidence
+        assert_eq!(Margin::Known(-1).best(Margin::Known(2)), Margin::Known(2));
+        assert_eq!(Margin::Unknown.best(Margin::Known(-1)), Margin::Known(-1));
+        assert_eq!(Margin::Unknown.best(Margin::Unknown), Margin::Unknown);
     }
 }
 

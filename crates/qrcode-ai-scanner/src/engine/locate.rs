@@ -148,7 +148,7 @@ pub(crate) fn locate_spending(
                 spent.rs_attempts += 1;
                 let stream = grid.masked_stream();
                 match crate::rescue::rederive(&stream, version, hint.ec, mask, Acceptance::Engine) {
-                    Rederived::Parsed(parsed)
+                    Rederived::Parsed { parsed, .. }
                         if parsed.bytes == payload
                             && agrees(!parsed.eci.is_empty(), parsed.fnc1, hint.modifier) =>
                     {

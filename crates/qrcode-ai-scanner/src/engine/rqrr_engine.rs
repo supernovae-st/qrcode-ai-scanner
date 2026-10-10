@@ -20,7 +20,7 @@ use super::{MaskedStream, RawDetection, Refusal};
 use crate::input::LumaImage;
 use crate::report::{EcLevel, EngineKind, Point, Symbology};
 use crate::rescue::bitstream::PortRead;
-use crate::rescue::{Acceptance, MAX_CANDIDATES, Rederived, RescueCandidate};
+use crate::rescue::{Acceptance, MAX_CANDIDATES, Margin, Rederived, RescueCandidate, Unverified};
 
 /// rqrr `ecc_level` is the QR format-info two-bit field: M=0 · L=1 · H=2 · Q=3.
 /// Pinned empirically by the engine tests (generated at known EC levels).
@@ -79,14 +79,15 @@ pub(super) fn decode(luma: &LumaImage, orient_candidates: bool) -> Pass {
         };
         let bounds = corners(&grid);
         let (derived, orientation) = rederive_decoded(&grid, &decoded);
-        let (raw, eci, fnc1, segments, parsed) = match account(decoded, derived) {
+        let (raw, eci, fnc1, segments, parsed, margin) = match account(decoded, derived) {
             Account::Read {
                 raw,
                 eci,
                 fnc1,
                 segments,
                 parsed,
-            } => (raw, eci, fnc1, segments, parsed),
+                margin,
+            } => (raw, eci, fnc1, segments, parsed, margin),
             Account::Refused { rqrr, port } => {
                 pass.refused
                     .extend(Refusal::new(port, Some(rqrr), Some(bounds)));
@@ -123,6 +124,7 @@ pub(super) fn decode(luma: &LumaImage, orient_candidates: bool) -> Pass {
             location: Some(bounds),
             locate,
             needs_confirmation: false,
+            margin,
         };
         publish_orientation(&mut read, orientation);
         pass.found.push(read);
@@ -210,7 +212,7 @@ fn rescue_input<G: rqrr::BitGrid>(grid: &rqrr::Grid<G>) -> Option<RescueCandidat
     };
     let sampled = sampled_input(grid);
     let sampled_derived = sampled.as_ref().map(rederive);
-    if matches!(sampled_derived, Some(Rederived::Parsed(_))) {
+    if matches!(sampled_derived, Some(Rederived::Parsed { .. })) {
         return sampled
             .zip(sampled_derived)
             .map(|(candidate, derived)| decided(candidate, derived));
@@ -226,7 +228,7 @@ fn rescue_input<G: rqrr::BitGrid>(grid: &rqrr::Grid<G>) -> Option<RescueCandidat
         // another result
         (Some(sampled), Some(malformed @ Rederived::Malformed { .. }), _, other) => {
             let stands = match &other {
-                None | Some(Rederived::Unverified) => true,
+                None | Some(Rederived::Unverified(_)) => true,
                 Some(other) => *other == malformed,
             };
             Some(decided(
@@ -234,29 +236,35 @@ fn rescue_input<G: rqrr::BitGrid>(grid: &rqrr::Grid<G>) -> Option<RescueCandidat
                 if stands {
                     malformed
                 } else {
-                    Rederived::Unverified
+                    Rederived::Unverified(Unverified::Ambiguous)
                 },
             ))
         }
         // the sampled grid does not verify: the transpose when it does
-        (_, _, Some(transposed), Some(derived)) if derived != Rederived::Unverified => {
+        (_, _, Some(transposed), Some(derived)) if !matches!(derived, Rederived::Unverified(_)) => {
             Some(decided(transposed, derived))
         }
-        (sampled, _, _, _) => sampled.map(|candidate| decided(candidate, Rederived::Unverified)),
+        (sampled, _, _, _) => sampled.map(|candidate| {
+            decided(
+                candidate,
+                Rederived::Unverified(Unverified::NothingVerifies),
+            )
+        }),
     }
 }
 
 /// What the scanner makes of one rqrr decode.
 #[derive(Debug, PartialEq, Eq)]
 enum Account {
-    /// Published: the payload and what was observed of its declarations and
-    /// double-byte segments.
+    /// Published: the payload, what was observed of its declarations and
+    /// double-byte segments, and the correction margin of its word.
     Read {
         raw: Vec<u8>,
         eci: EciEvidence,
         fnc1: Fnc1,
         segments: Segments,
         parsed: bool,
+        margin: Margin,
     },
     /// Refused: the stream rqrr decoded is not one ISO 18004 defines (rqrr
     /// reads a `111xxxxx` designator as one byte, an assignment number past
@@ -273,22 +281,30 @@ fn account(decoded: Vec<u8>, derived: Rederived) -> Account {
     match derived {
         // the RS-verified stream of the orientation rqrr decoded ([`settle`])
         // is the truth, bytes included — rqrr's own conversion is not
-        Rederived::Parsed(parsed) => Account::Read {
+        Rederived::Parsed { parsed, margin } => Account::Read {
             raw: parsed.bytes,
             eci: EciEvidence::from_marks(parsed.eci),
             fnc1: parsed.fnc1,
             segments: Segments::Observed(parsed.segments),
             parsed: true,
+            margin: Margin::Known(margin),
         },
         // no orientation verifies (or both do): nothing observable of the
         // declarations; rqrr decoded the symbol, so its stream held no FNC1
-        // indicator
-        Rederived::Unverified => Account::Read {
+        // indicator. Its word is past the scanner's bounded decoder when no
+        // orientation verifies — rqrr's correction has no degree bound — so
+        // a known negative margin; two orientations that verify differently
+        // say nothing of it
+        Rederived::Unverified(reason) => Account::Read {
             raw: decoded,
             eci: EciEvidence::Unobserved,
             fnc1: Fnc1::None,
             segments: Segments::NotObserved,
             parsed: false,
+            margin: match reason {
+                Unverified::NothingVerifies => Margin::Known(-1),
+                Unverified::Ambiguous => Margin::Unknown,
+            },
         },
         Rederived::Malformed { port } => Account::Refused {
             rqrr: decoded,
@@ -323,10 +339,10 @@ fn rederive_decoded<G: rqrr::BitGrid>(
     decoded: &[u8],
 ) -> (Rederived, Option<Oriented>) {
     let derive = |read: &Option<Oriented>| {
-        read.as_ref()
-            .map_or(Rederived::Unverified, |(meta, raw_data)| {
-                rederive_sampled(meta, raw_data)
-            })
+        read.as_ref().map_or(
+            Rederived::Unverified(Unverified::NothingVerifies),
+            |(meta, raw_data)| rederive_sampled(meta, raw_data),
+        )
     };
     let sampled = grid.get_raw_data().ok();
     let mut transposed = None;
@@ -354,25 +370,46 @@ fn rederive_decoded<G: rqrr::BitGrid>(
 /// bytes (rqrr's correction has no degree bound; the scanner's bounded RS
 /// is the stricter evidence), and a malformed one refuses. The same result
 /// both ways is no ambiguity (a transpose-symmetric grid): it stands. Two
-/// different results decide nothing (`Unverified`) — never a refusal on
-/// ambiguity. The transpose is read only when needed.
+/// different results decide nothing (`Unverified`, ambiguous) — never a
+/// refusal on ambiguity; no orientation verifying decides nothing either
+/// (`Unverified`, nothing verifies). The transpose is read only when needed.
 fn settle(
     sampled: Rederived,
     transposed: impl FnOnce() -> Rederived,
     decoded: &[u8],
 ) -> (Rederived, Decision) {
-    if matches!(&sampled, Rederived::Parsed(parsed) if rqrr_converts_to(&parsed.bytes, decoded)) {
+    if matches!(&sampled, Rederived::Parsed { parsed, .. } if rqrr_converts_to(&parsed.bytes, decoded))
+    {
         return (sampled, Decision::Sampled);
     }
     let other = transposed();
     match (sampled, other) {
-        (Rederived::Unverified, Rederived::Unverified) => {
-            (Rederived::Unverified, Decision::Neither)
-        }
-        (Rederived::Unverified, other) => (other, Decision::Transposed),
-        (sampled, Rederived::Unverified) => (sampled, Decision::Sampled),
+        (Rederived::Unverified(_), Rederived::Unverified(_)) => (
+            Rederived::Unverified(Unverified::NothingVerifies),
+            Decision::Neither,
+        ),
+        (Rederived::Unverified(_), other) => (other, Decision::Transposed),
+        (sampled, Rederived::Unverified(_)) => (sampled, Decision::Sampled),
+        // one parse both ways: the word rqrr read is either, so the worse
+        // of their margins
+        (
+            Rederived::Parsed { parsed, margin },
+            Rederived::Parsed {
+                parsed: theirs,
+                margin: their_margin,
+            },
+        ) if parsed == theirs => (
+            Rederived::Parsed {
+                parsed,
+                margin: margin.min(their_margin),
+            },
+            Decision::Sampled,
+        ),
         (sampled, other) if other == sampled => (sampled, Decision::Sampled),
-        _ => (Rederived::Unverified, Decision::Neither),
+        _ => (
+            Rederived::Unverified(Unverified::Ambiguous),
+            Decision::Neither,
+        ),
     }
 }
 
@@ -400,7 +437,7 @@ fn rederive_sampled(meta: &rqrr::MetaData, raw_data: &rqrr::RawData) -> Rederive
         map_ec(meta.ecc_level),
         u8::try_from(meta.mask),
     ) else {
-        return Rederived::Unverified;
+        return Rederived::Unverified(Unverified::NothingVerifies);
     };
     crate::rescue::rederive(&masked(raw_data), version, ec, mask, Acceptance::Engine)
 }
@@ -438,17 +475,30 @@ mod tests {
     use crate::input::LumaImage;
     use crate::report::{EcLevel, EngineKind, Symbology};
     use crate::rescue::bitstream::{Parsed, PortRead};
-    use crate::rescue::{Acceptance, Rederived, test_symbols};
+    use crate::rescue::{Acceptance, Margin, Rederived, Unverified, test_symbols};
 
     fn parsed_bytes(bytes: &[u8]) -> Rederived {
-        Rederived::Parsed(Parsed {
-            bytes: bytes.to_vec(),
-            eci: Vec::new(),
-            fnc1: Fnc1::None,
-            structured_append: false,
-            segments: Vec::new(),
-            byte_segments: Vec::new(),
-        })
+        Rederived::Parsed {
+            parsed: Parsed {
+                bytes: bytes.to_vec(),
+                eci: Vec::new(),
+                fnc1: Fnc1::None,
+                structured_append: false,
+                segments: Vec::new(),
+                byte_segments: Vec::new(),
+            },
+            margin: 0,
+        }
+    }
+
+    /// No orientation error-corrects.
+    fn nothing() -> Rederived {
+        Rederived::Unverified(Unverified::NothingVerifies)
+    }
+
+    /// Both orientations error-correct, to different results.
+    fn ambiguous() -> Rederived {
+        Rederived::Unverified(Unverified::Ambiguous)
     }
 
     fn malformed() -> Rederived {
@@ -502,31 +552,31 @@ mod tests {
             ),
             (
                 "mirrored",
-                Rederived::Unverified,
+                nothing(),
                 Some(parsed_bytes(abc)),
                 abc.to_vec(),
                 parsed_bytes(abc),
             ),
             (
                 "mirrored, other bytes",
-                Rederived::Unverified,
+                nothing(),
                 Some(parsed_bytes(b"xyz")),
                 abc.to_vec(),
                 parsed_bytes(b"xyz"),
             ),
             (
                 "mirrored malformed",
-                Rederived::Unverified,
+                nothing(),
                 Some(malformed()),
                 abc.to_vec(),
                 malformed(),
             ),
             (
                 "neither",
-                Rederived::Unverified,
-                Some(Rederived::Unverified),
+                nothing(),
+                Some(nothing()),
                 abc.to_vec(),
-                Rederived::Unverified,
+                nothing(),
             ),
         ]
     }
@@ -541,7 +591,7 @@ mod tests {
                 malformed(),
                 Some(parsed_bytes(abc)),
                 abc.to_vec(),
-                Rederived::Unverified,
+                ambiguous(),
             ),
             (
                 "malformed both ways, identical",
@@ -555,7 +605,7 @@ mod tests {
                 malformed_reading(abc),
                 Some(malformed_reading(b"xyz")),
                 abc.to_vec(),
-                Rederived::Unverified,
+                ambiguous(),
             ),
             (
                 "other bytes both ways, identical",
@@ -567,7 +617,7 @@ mod tests {
             (
                 "malformed, transpose unverified",
                 malformed(),
-                Some(Rederived::Unverified),
+                Some(nothing()),
                 abc.to_vec(),
                 malformed(),
             ),
@@ -576,19 +626,19 @@ mod tests {
                 parsed_bytes(b"xyz"),
                 Some(parsed_bytes(abc)),
                 abc.to_vec(),
-                Rederived::Unverified,
+                ambiguous(),
             ),
             (
                 "other bytes, transpose malformed",
                 parsed_bytes(b"xyz"),
                 Some(malformed()),
                 abc.to_vec(),
-                Rederived::Unverified,
+                ambiguous(),
             ),
             (
                 "other bytes alone",
                 parsed_bytes(b"xyz"),
-                Some(Rederived::Unverified),
+                Some(nothing()),
                 abc.to_vec(),
                 parsed_bytes(b"xyz"),
             ),
@@ -598,7 +648,7 @@ mod tests {
                 parsed_bytes(&[0x9F, 0xFC]),
                 Some(parsed_bytes(&[0xDF, 0xFC])),
                 vec![0xDF, 0xFC],
-                Rederived::Unverified,
+                ambiguous(),
             ),
         ]
     }
@@ -626,7 +676,7 @@ mod tests {
             assert_eq!(settled, stands, "{name} (transpose consulted: {consulted})");
             // the orientation published beside the read is the one that
             // decided: none when nothing did
-            let expected = if settled == Rederived::Unverified {
+            let expected = if matches!(settled, Rederived::Unverified(_)) {
                 Decision::Neither
             } else if settled == sampled {
                 Decision::Sampled
@@ -635,6 +685,21 @@ mod tests {
             };
             assert_eq!(decision, expected, "{name}");
         }
+    }
+
+    #[test]
+    fn one_parse_both_ways_stands_with_the_worse_margin() {
+        // the same parse of two different words: the result stands as it
+        // did, and the word rqrr read may be either
+        let xyz = |margin| match parsed_bytes(b"xyz") {
+            Rederived::Parsed { parsed, .. } => Rederived::Parsed { parsed, margin },
+            other => other,
+        };
+        assert_eq!(
+            settle(xyz(3), || xyz(-1), b"abc"),
+            (xyz(-1), Decision::Sampled)
+        );
+        assert_eq!(settle(xyz(-1), || xyz(3), b"abc").0, xyz(-1));
     }
 
     /// For the one grid rqrr detects in `luma`: rqrr's bytes, then the
@@ -653,7 +718,7 @@ mod tests {
         grid.decode_to(&mut decoded)
             .expect("rqrr decodes the render");
         let derive = |read: Result<(rqrr::MetaData, rqrr::RawData), rqrr::DeQRError>| {
-            read.map_or(Rederived::Unverified, |(meta, raw_data)| {
+            read.map_or(nothing(), |(meta, raw_data)| {
                 rederive_sampled(&meta, &raw_data)
             })
         };
@@ -673,18 +738,20 @@ mod tests {
         };
         let kanji = |b: &mut qrcode::bits::Bits| b.push_kanji_data(&[0x9F, 0xFD]);
         let (v3, m) = (qrcode::Version::Normal(3), qrcode::EcLevel::M);
-        let located = |bytes: &[u8]| {
-            Rederived::Parsed(Parsed {
+        // v3-M: 26 parity codewords, no error — a margin of 13
+        let located = |bytes: &[u8]| Rederived::Parsed {
+            parsed: Parsed {
                 bytes: bytes.to_vec(),
                 eci: vec![EciMark { value: 4, start: 0 }],
                 fnc1: Fnc1::None,
                 structured_append: false,
                 segments: Vec::new(),
                 byte_segments: std::iter::once(0..bytes.len()).collect(),
-            })
+            },
+            margin: 13,
         };
-        let kanji_pair = || {
-            Rederived::Parsed(Parsed {
+        let kanji_pair = || Rederived::Parsed {
+            parsed: Parsed {
                 bytes: vec![0x9F, 0xFD],
                 eci: Vec::new(),
                 fnc1: Fnc1::None,
@@ -695,7 +762,8 @@ mod tests {
                     end: 2,
                 }],
                 byte_segments: Vec::new(),
-            })
+            },
+            margin: 13,
         };
         let cases: [(&str, LumaImage, bool, Rederived, Vec<u8>); 4] = [
             (
@@ -736,7 +804,7 @@ mod tests {
                 (sampled, transposed)
             };
             assert_eq!(right, verified, "{name}: the orientation rqrr decoded");
-            assert_eq!(wrong, Rederived::Unverified, "{name}: the other one");
+            assert_eq!(wrong, nothing(), "{name}: the other one");
             let (again_decoded, sampled, transposed) = orientations(&luma);
             assert_eq!(
                 settle(sampled, || transposed, &again_decoded),
@@ -854,17 +922,18 @@ mod tests {
 
     #[test]
     fn the_verified_stream_decides_the_payload_and_its_account() {
-        let parsed = |bytes: &[u8], eci: Vec<EciMark>| {
-            Rederived::Parsed(Parsed {
+        let parsed = |bytes: &[u8], eci: Vec<EciMark>| Rederived::Parsed {
+            parsed: Parsed {
                 bytes: bytes.to_vec(),
                 eci,
                 fnc1: Fnc1::None,
                 structured_append: false,
                 segments: Vec::new(),
                 byte_segments: Vec::new(),
-            })
+            },
+            margin: 2,
         };
-        let read = |raw: &[u8], eci: EciEvidence, parsed: bool| Account::Read {
+        let read = |raw: &[u8], eci: EciEvidence, parsed: bool, margin: Margin| Account::Read {
             raw: raw.to_vec(),
             eci,
             fnc1: Fnc1::None,
@@ -874,24 +943,31 @@ mod tests {
                 Segments::NotObserved
             },
             parsed,
+            margin,
         };
         let eci4 = vec![EciMark { value: 4, start: 0 }];
         // equal bytes: the located declaration
         assert_eq!(
             account(vec![0xA1], parsed(&[0xA1], eci4.clone())),
-            read(&[0xA1], EciEvidence::Located(eci4), true)
+            read(&[0xA1], EciEvidence::Located(eci4), true, Margin::Known(2))
         );
         // rqrr's own conversion differs (its Kanji inversion): the verified
         // bytes are the payload, never rqrr's
         assert_eq!(
             account(vec![0xDF, 0xFD], parsed(&[0x9F, 0xFD], Vec::new())),
-            read(&[0x9F, 0xFD], EciEvidence::NoEci, true)
+            read(&[0x9F, 0xFD], EciEvidence::NoEci, true, Margin::Known(2))
         );
         // no orientation verifies: rqrr's bytes, nothing observable of the
-        // declarations, and no FNC1 (rqrr decodes neither mode)
+        // declarations, and no FNC1 (rqrr decodes neither mode); rqrr took a
+        // word the scanner's bounded decoder refuses — a known negative
+        // margin; two orientations that verify differently say nothing of it
         assert_eq!(
-            account(b"abc".to_vec(), Rederived::Unverified),
-            read(b"abc", EciEvidence::Unobserved, false)
+            account(b"abc".to_vec(), nothing()),
+            read(b"abc", EciEvidence::Unobserved, false, Margin::Known(-1))
+        );
+        assert_eq!(
+            account(b"abc".to_vec(), ambiguous()),
+            read(b"abc", EciEvidence::Unobserved, false, Margin::Unknown)
         );
         // malformed: refused, with what the refusal withholds by — rqrr's
         // own bytes for rqrr's reads, and what the port reports
@@ -1039,7 +1115,7 @@ mod tests {
             let stream = d.masked_stream.as_ref().expect("the verified stream");
             assert_eq!(stream.bits, super::masked(expected).bits, "{name}");
             let (version, ec, mask) = (d.version.unwrap(), d.ec.unwrap(), d.mask.unwrap());
-            let Rederived::Parsed(parsed) =
+            let Rederived::Parsed { parsed, .. } =
                 crate::rescue::rederive(stream, version, ec, mask, Acceptance::Engine)
             else {
                 panic!("{name}: the published stream error-corrects");
@@ -1099,7 +1175,7 @@ mod tests {
         assert!(
             pass.rescue[..crate::rescue::MAX_CANDIDATES]
                 .iter()
-                .all(|candidate| matches!(candidate.rederived, Some(Rederived::Parsed(_))))
+                .all(|candidate| matches!(candidate.rederived, Some(Rederived::Parsed { .. })))
         );
         let discarded = decode(&luma, false);
         assert_eq!(discarded.rescue.len(), 6);
@@ -1211,7 +1287,7 @@ mod tests {
                     "{name}"
                 );
             } else {
-                let Rederived::Parsed(parsed) = derived else {
+                let Rederived::Parsed { parsed, .. } = derived else {
                     panic!("{name}: {derived:?}");
                 };
                 assert_eq!(parsed.bytes, b"0109506000134352", "{name}");
