@@ -138,7 +138,10 @@ pub enum EcLevel {
 /// a complete decoding of `raw` that the scanner checked byte for byte; it
 /// states the encoder's declared interpretation only when
 /// [`DecodedContent::eci`] lists it. `Unknown` is the only lossy value, now
-/// and in every later version: test with [`Charset::is_lossy`].
+/// and in every later version: test with [`Charset::is_lossy`]. Outside the
+/// QR family `raw` is the engine's reading, which under an ECI can omit a
+/// segment the engine could not decode; the label describes `raw` as
+/// published and is not downgraded for it (spec/01 § raw).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -225,7 +228,8 @@ pub struct DecodedContent {
     /// every decode path (designators excluded), never an engine's text.
     /// Other symbologies: the ISO/IEC 8859-1 encoding of the engine's text
     /// when every character is ≤ U+00FF (exact on its non-ECI paths), else
-    /// its UTF-8 (spec/01 § raw).
+    /// its UTF-8; under an ECI the engine's text can omit a segment it could
+    /// not decode (spec/01 § raw).
     #[cfg_attr(feature = "serde", serde(with = "raw_b64"))]
     pub raw: Vec<u8>,
     /// How `text` relates to `raw`.
@@ -254,7 +258,8 @@ pub struct DecodedContent {
 pub struct QrMeta {
     /// Symbol version, 1-40, when an engine measured it (rqrr path).
     pub version: Option<u8>,
-    /// Error-correction level when measured.
+    /// Error-correction level when measured — or, for a symbol only rxing
+    /// read, the level its decoder states (the one field such a read fills).
     pub ec_level: Option<EcLevel>,
     /// Mask pattern 0-7 when measured.
     pub mask: Option<u8>,
@@ -290,7 +295,9 @@ pub struct Detection {
     /// error-corrected itself — `engines` may then list rxing alone) or the
     /// S5 rescue candidate.
     pub corners: Option<[Point; 4]>,
-    /// Symbol metadata, from the same source as `corners`.
+    /// Symbol metadata, from the same source as `corners`; a symbol only
+    /// rxing read carries the EC level its decoder states and nothing else
+    /// (spec/01 § Detection).
     pub meta: QrMeta,
     /// Engines that confirmed this payload (consensus surface for scoring).
     pub engines: Vec<EngineKind>,

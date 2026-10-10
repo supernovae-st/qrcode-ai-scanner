@@ -248,7 +248,8 @@ class DecodedContent {
   final String text;
 
   /// QR family: the original bytes; other symbologies: the bytes of the
-  /// engine's reading (base64-decoded from the wire `raw` string).
+  /// engine's reading, which under an ECI can omit a segment the engine
+  /// could not decode (base64-decoded from the wire `raw` string).
   final Uint8List raw;
   final Charset charset;
 

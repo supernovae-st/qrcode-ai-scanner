@@ -75,7 +75,10 @@ export interface EciSegment {
 export interface DecodedContent {
   /** raw decoded as charset states; empty if and only if raw is empty. */
   text: string;
-  /** Payload bytes, base64. QR family: the original bytes; other symbologies: the bytes of the engine's reading. */
+  /**
+   * Payload bytes, base64. QR family: the original bytes; other symbologies: the bytes of the engine's reading
+   * (under an ECI it can omit a segment the engine could not decode).
+   */
   raw: string;
   charset: Charset;
   /** ECI designators in symbol order. ABSENT: none observed; []: ECI use signalled but not located. */

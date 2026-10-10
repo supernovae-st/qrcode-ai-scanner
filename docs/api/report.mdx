@@ -106,8 +106,9 @@ Machine-readable mirrors — load these directly in tools and agents:
 
 <ResponseField name="meta" type="QrMeta" required>
   `version` (1-40) · `ec_level` · `mask` · `modules` (= version×4+17) ·
-  `inverted` (light-on-dark, MEASURED). All `null` when no geometry —
-  never fabricated.
+  `inverted` (light-on-dark, MEASURED). `null` when no geometry was
+  measured — never fabricated — except `ec_level`: a symbol only rxing
+  read carries the level its decoder states.
 </ResponseField>
 
 <ResponseField name="engines" type="EngineKind[]" required>

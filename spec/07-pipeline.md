@@ -89,8 +89,9 @@ Normative properties:
    codewords) on every source except S5 rescue, which keeps the Annex B
    reserve because no engine decoded that stream. In each attempt: the
    engines run (`rxing`, then `rqrr`); detected grids are re-derived; the
-   re-read runs for port reads no parse of the attempt matched; refusals
-   apply; the reads are collected.
+   refusals they prove are recorded; the re-read runs for the reads no
+   parse of the attempt carries and no recorded refusal withholds, and
+   records its own refusals; the reads are collected.
 
    **ECI evidence.** *located*: a parse above found the designators.
    *no-ECI*: a parse found no designator; modifier `]Q0`/`]Q1`/`]Q3`/`]Q5`;
@@ -104,7 +105,9 @@ Normative properties:
    `]Q0`/`]Q1` with a payload that is not valid UTF-8, and for an `rqrr`
    read whose grid decided nothing — unless a read the scanner parsed, or a
    grid it re-derived, in the same attempt carries the same content (same
-   bytes, a matching account). At most 16 re-reads per scan.
+   bytes, a matching account) where the read lies (the read lies inside
+   it), or a recorded refusal withholds the read (below). At most 16
+   re-reads per scan.
    - The scanner samples the attempt image at the four outer symbol
      corners the engine reports. Candidates are versions 1–40 (`rqrr`: its
      measured version) in both orientations, through three sampler passes
@@ -140,17 +143,30 @@ Normative properties:
    without corner points never fails this test — is withheld,
    retroactively and for the rest of the scan, unless a read the scanner
    parsed, or a grid it re-derived, carries a matching account; `rqrr`'s
-   bytes withhold only `rqrr`'s part of a read. The names of at most 16
-   refused streams are kept per scan; a refusal beyond that still withholds
-   the reads collected up to its attempt. The opposite-background walk
-   starts with the names (and the parsed contents that protect reads) of
-   the first walk. Withheld reads still count in `detections_found`.
+   bytes withhold only `rqrr`'s part of a read. A refused stream is one
+   record per pair of names (a stream `rqrr` decoded carries both; the
+   re-read and a re-derived grid name the tolerant reading only), whatever
+   the attempt or place it was refused in: the record keeps the distinct
+   places — a place whose centre lies inside a recorded one is the same
+   symbol — at most 8; past that it withholds wherever its names match. A
+   walk keeps 16 records that withhold for the whole scan, then 16 more
+   that each withhold the reads collected up to the latest attempt that
+   refused their stream; past those it fails closed: every QR Code read
+   the scanner did not parse, collected up to that attempt, is withheld
+   unless a parse carries a matching account. Within these bounds what is
+   withheld depends on the refusals and reads, not their order. The
+   opposite-background walk starts with the first walk's records, each
+   withholding for its whole walk (failing closed throughout when the
+   first walk did), and with the parsed contents that protect reads.
+   Withheld reads still count in `detections_found`.
 
    **Reconciliation.** Reads identical in symbology, `raw`, FNC1 position,
    evidence, observed segments and engine reading are kept once: engines
    are united; the earliest attempt, the first corners and the first
-   geometry are kept. At most 64 such distinct reads are kept per walk, in
-   attempt order; later distinct reads are counted, not reconciled.
+   geometry are kept, with the distinct places it was read at — a place
+   whose centre lies inside a recorded one is the same symbol — at most 8.
+   At most 64 such distinct reads are kept per walk, in attempt order;
+   later distinct reads are counted, not reconciled.
 
    After the ladder completes, withheld reads are dropped; a re-derived
    grid joins as a read only when it contains an engine read of the same

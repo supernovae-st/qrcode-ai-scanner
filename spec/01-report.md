@@ -90,9 +90,11 @@ Semantics that bite:
   decode, from a grid it detected but could not decode that the scanner
   error-corrected itself (FNC1, Hanzi and structured-append symbols;
   `engines` may then list `rxing` alone), or from the S5 rescue candidate.
-  `rxing` measures none of them — expect `null`s for a symbol only `rxing`
-  read. (Micro QR/rMQR decode via `rxing` only, so they carry no geometry
-  today.) For a symbol decoded mirrored, `ec_level` and `mask` are those of
+  `rxing` measures no geometry: a symbol only `rxing` read carries `null`
+  corners, version and mask, and the EC level its decoder states —
+  `ec_level` is the one `meta` field such a read fills. (Micro QR/rMQR
+  decode via `rxing` only, so they carry no geometry today.) For a symbol
+  decoded mirrored, `ec_level` and `mask` are those of
   the orientation that decoded, and the score measures that orientation
   (04-score.md § UEC). An `rqrr` decode whose grid the scanner could not
   verify (07-pipeline.md property 6) carries no stream, version, EC level
@@ -161,8 +163,10 @@ Other symbologies carry the bytes of their decoding engine's reading: the
 ISO/IEC 8859-1 encoding of the engine's text when every character is at
 most U+00FF — exactly the symbol's bytes on the engine's paths without ECI
 (Data Matrix ASCII, upper shift and Base256; PDF417 byte compaction; Aztec
-binary data) — and otherwise the UTF-8 encoding of that text. The
-original-bytes guarantee covers the QR family only.
+binary data) — and otherwise the UTF-8 encoding of that text. Under an ECI
+the engine's reading can omit a segment its decoder cannot read; `raw` is
+that reading and its label is not downgraded for it. The original-bytes
+guarantee covers the QR family only.
 
 ### `eci` (optional key)
 
@@ -253,8 +257,8 @@ applies. Otherwise exactly one rule applies.
      Shift_JIS and Hanzi pairs as gb18030, an ill-formed pair getting the
      WHATWG replacement; ASCII bytes outside the segments stay; every other
      byte becomes one U+FFFD. When the reads of one detection observed
-     different segments, no pair is read: ASCII bytes stay, every other
-     byte becomes one U+FFFD.
+     different non-empty segments, no pair is read: ASCII bytes stay,
+     every other byte becomes one U+FFFD.
 
    Segments not observed (Micro QR and rMQR always; a QR symbol only one
    engine read and that the scanner could not re-read): if `raw` is valid
