@@ -95,9 +95,12 @@ Seven things no other pure-Rust library ships together:
    `light_only`/`dark_only`/`any` placement verdict, every endpoint a
    measured background, never interpolation).
 
-7. **Exact content** · `content.raw` is the payload's original bytes on
-   every decode path, with its ECI and FNC1 declarations read once;
-   `charset: "unknown"` is the only lossy reading. Detections are the
+7. **Exact content** · for the QR family, `content.raw` is the payload's
+   original bytes on every decode path, with its ECI and FNC1
+   declarations read once; other symbologies carry their decoding
+   engine's reading re-encoded (ISO/IEC 8859-1 when every character fits,
+   else UTF-8) and report no ECI. `charset: "unknown"` is the only lossy
+   reading. Detections are the
    distinct contents the scanner can tell apart, never keyed on text, and a
    read it cannot stand behind (a malformed stream, a correction past the
    standard's misdecode reserve, an unconfirmed barcode a reader could

@@ -38,8 +38,10 @@ q.version()  # "0.4.0"
 the dict is built from the same serde JSON every binding ships. Types ship too
 (`qrcode_ai_scanner.pyi`).
 
-Each detection's `content` carries the payload's bytes (`raw`, base64), their
-reading (`text`) and how the two relate (`charset`: `utf8` · `shift_jis` ·
+Each detection's `content` carries the payload's bytes (`raw`, base64: the
+original bytes for the QR family, the decoding engine's reading for other
+symbologies), their reading (`text`) and how the two relate (`charset`:
+`utf8` · `shift_jis` ·
 `latin1` · `gb18030` · `eci` · `unknown`). Test `charset == "unknown"` — the
 only lossy value: there is no verified reading, use `raw`. The optional `eci`
 and `fnc1` keys carry the ECI designators and the FNC1 position; compare

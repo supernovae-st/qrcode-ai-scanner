@@ -52,6 +52,8 @@ catch-all variants — never a throw (the contract is additively forward-compati
 `Charset` is the exception: a newer wire value decodes to `Charset.unrecognized`
 (a complete reading), while `Charset.unknown` is the wire's lossy value — test
 `content.charset.isLossy` and then use `content.raw`, the payload's bytes.
+`content.eci` and `content.fnc1` are null when none was observed or the
+symbology does not report it — not proof that the symbol declares none.
 
 ## License
 

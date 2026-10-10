@@ -5,10 +5,12 @@ photo-captured** QR codes. Deterministic multi-engine ladder (rxing + rqrr),
 score contract v5 (six survival-ramp stress axes incl. perspective/rotation/
 lighting, finder-integrity + quiet-zone caps), and the **synthetic UEC** —
 the ISO 15415 unused-error-correction margin computed from the verified
-stream the decoder read. Exact content: `content.raw` is the payload's
-original bytes, `charset` says how `text` reads them (`unknown`, the only
-lossy value, means use `raw`), and detections are distinct contents, never
-keyed on text. Machine-actionable hints close the generate → scan →
+stream the decoder read. Exact content: for the QR family `content.raw` is
+the payload's original bytes (other symbologies: the decoding engine's
+reading, ISO/IEC 8859-1 when every character fits, else UTF-8), `charset`
+says how `text` reads them (`unknown`, the only lossy value, means use
+`raw`), and detections are distinct contents, never keyed on text.
+Machine-actionable hints close the generate → scan →
 regenerate loop.
 
 ```rust

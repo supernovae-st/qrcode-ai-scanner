@@ -454,7 +454,7 @@
         "raw": {
           "type": "string",
           "contentEncoding": "base64",
-          "description": "Payload bytes, base64. QR family: the original payload bytes on every decode path, ECI designators excluded. Other symbologies: the bytes of the decoding engine's reading - exact on its non-ECI paths (the ISO/IEC 8859-1 encoding of its text), otherwise the UTF-8 encoding of that text (spec/01 § raw)."
+          "description": "Payload bytes, base64. QR family: the original payload bytes on every decode path, ECI designators excluded. Other symbologies: the decoding engine's text re-encoded - its ISO/IEC 8859-1 encoding when every character is at most U+00FF (the symbol's own bytes on the engine's paths without ECI), else its UTF-8 encoding; no ECI is observed for them (spec/01 § raw)."
         },
         "charset": {
           "$ref": "#/$defs/Charset"

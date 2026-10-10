@@ -44,8 +44,9 @@ ISO 15415 / UEC grade cards. Unknown enum values and payload kinds decode to
 except `Charset`, whose newer wire values decode to `Charset.unrecognized`, a
 complete reading: `Charset.unknown` is the wire's own lossy value, so test
 `d.content.charset.isLossy` (then use `d.content.raw`, the payload's bytes).
-`d.content.eci` and `d.content.fnc1` are null when the symbol declares no ECI
-or FNC1; compare contents by symbology, `raw`, `fnc1` and `eci`, never by text.
+`d.content.eci` and `d.content.fnc1` are null when none was observed or the
+symbology does not report it — not proof that the symbol declares none;
+compare contents by symbology, `raw`, `fnc1` and `eci`, never by text.
 
 ```dart
 if (report.detections.isEmpty) {

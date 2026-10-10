@@ -90,15 +90,18 @@ Machine-readable mirrors — load these directly in tools and agents:
 </ResponseField>
 
 <ResponseField name="content" type="object" required>
-  One exact reading of the symbol's data. `raw` (base64 — the ORIGINAL
-  bytes, the truth) · `text` (`raw` decoded once) · `charset`, how `text`
+  One exact reading of the symbol's data. `raw` (base64 — QR family: the
+  ORIGINAL payload bytes; other symbologies: the decoding engine's reading,
+  ISO/IEC 8859-1 when every character fits, else UTF-8) · `text` (`raw`
+  decoded once) · `charset`, how `text`
   relates to `raw`: `utf8` · `shift_jis` · `latin1` · `gb18030` (exactly
   that decoder over all of `raw`), `eci` (decoded under the listed
   designators), `unknown` — the ONLY lossy value, now and later: `text` is
   not a complete decoding, use `raw`. Optional keys: `eci` — the ECI
   designators observed, `[{ "designator", "start" }]` in symbol order
-  (`[]`: an ECI is signalled but could not be located); `fnc1` — `first`
-  (GS1) or `second` (AIM application). Compare contents by identity
+  (`[]`: an ECI is signalled but could not be located; only the QR family
+  reports one); `fnc1` — `first` (GS1) or `second` (AIM application). An
+  absent key means none was observed. Compare contents by identity
   (symbology, `raw`, `fnc1`, compatible `eci`), never by `text`. Rules:
   [`spec/01-report.md` § Content](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/01-report.md).
 </ResponseField>

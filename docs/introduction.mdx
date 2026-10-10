@@ -51,10 +51,12 @@ artifacts off one Rust core.
    re-decodes the bitstream itself with errors-and-erasures Reed-Solomon.
    Measured: center-logo occlusion tolerance grows from 20% to **30%
    radius** (2.2× the area).
-6. **Exact content** — `content.raw` is the payload's original bytes, its
-   ECI and FNC1 declarations are read once, and `charset: "unknown"` is the
-   only lossy reading. Detections are the distinct contents the scanner can
-   tell apart, never keyed on text, and a read it cannot stand behind (a
+6. **Exact content** — for the QR family, `content.raw` is the payload's
+   original bytes and its ECI and FNC1 declarations are read once; other
+   symbologies carry their decoding engine's reading re-encoded (ISO/IEC
+   8859-1 when every character fits, else UTF-8). `charset: "unknown"` is
+   the only lossy reading. Detections are the distinct contents the scanner
+   can tell apart, never keyed on text, and a read it cannot stand behind (a
    malformed stream, a correction past the standard's misdecode reserve) is
    refused: absent, never wrong.
 

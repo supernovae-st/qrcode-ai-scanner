@@ -22,17 +22,23 @@ workflows, CI bots) consuming the scanner.
    final only when `trace.budget_exhausted` is `false`.
 2. The JSON shape is identical on every surface and evolves additively —
    tolerate unknown fields/kinds/hints.
-3. `content.raw` (base64) is the byte truth; `text` is its one reading
-   and `charset` says how. `charset === "unknown"` is the ONLY lossy value,
+3. For the QR family, `content.raw` (base64) is the byte truth: the
+   payload's original bytes. Other symbologies carry their decoding
+   engine's reading re-encoded (ISO/IEC 8859-1 when every character fits,
+   else UTF-8) and report no ECI. `text` is the one reading of `raw` and
+   `charset` says how. `charset === "unknown"` is the ONLY lossy value,
    now and in every later version: then `text` is not a complete decoding
    — never act on it; use `raw` (with `content.eci`). Any other value,
    even one newer than your types, is a complete decoding the scanner
    checked byte for byte.
 4. A content's identity is (`symbology`, `raw`, `fnc1`, compatible
-   `eci`), never `text`: to check a symbol you generated, compare `raw`
-   (and `eci`, `fnc1`) with what you encoded. `eci` is present only when
-   the symbol declares an ECI (`[]` when it could not be located); `fnc1`
-   only for GS1 (`first`) or AIM-application (`second`) data.
+   `eci`), never `text`. To check a QR-family symbol you generated,
+   compare `raw` (and `eci`, `fnc1`) with what you encoded; for other
+   symbologies compare `text`, or `raw` only when you encoded no ECI.
+   `eci` is present only when an ECI was observed (`[]` when it could not
+   be located); `fnc1` only for GS1 (`first`) or AIM-application
+   (`second`) data. An absent key means none was observed, or the
+   symbology does not report it — not that the symbol declares none.
 5. **`trace.budget_exhausted` says whether a report is final.** `false`:
    every planned unit ran, and the report equals the unbounded report for
    the same input, configuration and scanner build on the same platform

@@ -67,7 +67,9 @@ export default defineEventHandler(async (event) => {
 ```
 
 `d.content.text` is a complete reading of the payload's bytes
-(`d.content.raw`, base64) unless `d.content.charset === "unknown"` — the
+(`d.content.raw`, base64: the original bytes for the QR family, the
+decoding engine's reading for other symbologies) unless
+`d.content.charset === "unknown"` — the
 only lossy value: then there is no verified reading, use `raw`. The
 `Charset` type has six values (`utf8`, `shift_jis`, `latin1`, `gb18030`,
 `eci`, `unknown`); give an exhaustive switch a default arm, since a later

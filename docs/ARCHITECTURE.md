@@ -34,11 +34,13 @@ skips them by design — see the root `Cargo.toml` comment):
 3. **Sync by design**: async belongs to the bindings.
 4. **Engine-isolated**: third-party decoder panics are caught at the engine
    boundary (`catch_unwind`), counted in the trace, never propagated.
-5. **Raw bytes are the truth**: `DecodedContent.raw` carries the original
-   payload bytes (QR family: designators excluded, never an engine's text).
-   What the data declares — ECI designators and where each takes effect,
-   the FNC1 position, Kanji/Hanzi segments — is observed by the scanner's
-   own parser over error-corrected codewords, and the text is decoded ONCE
+5. **Raw bytes are the truth**: for the QR family `DecodedContent.raw`
+   carries the original payload bytes (designators excluded, never an
+   engine's text); other symbologies carry their decoding engine's reading
+   re-encoded (spec/01 § raw). What a QR symbol declares — ECI designators
+   and where each takes effect, the FNC1 position, Kanji/Hanzi segments —
+   is observed by the scanner's own parser over error-corrected codewords
+   wherever it can parse the stream, and the text is decoded ONCE
    from the bytes (spec/01 § Content): located designators decide it, else
    the observed segments, the decoding engine's mode-aware reading or the
    legacy order (UTF-8 → `Shift_JIS` → Windows-1252). `charset` says how;

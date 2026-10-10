@@ -46,8 +46,9 @@ documented failure class:
 ## From reads to detections
 
 Engines report **reads**, never text. The scanner error-corrects and
-parses QR streams itself, so `content.raw` is the original payload and
-the declarations (ECI, FNC1, Kanji and Hanzi segments) are read once:
+parses QR streams itself, so a QR-family `content.raw` is the original
+payload and the declarations (ECI, FNC1, Kanji and Hanzi segments) are
+read once (other symbologies carry their decoding engine's reading):
 
 - **Sources.** The grid `rqrr` decoded (in the orientation that
   error-corrects); grids `rqrr` detected but could not decode — FNC1,

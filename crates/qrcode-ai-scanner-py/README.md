@@ -33,7 +33,8 @@ if report["detections"]:
   then means "not judged".
 - "No QR found" returns a `dict` with empty `detections`; `ValueError` is raised only for
   invalid input.
-- `content["raw"]` is the payload's bytes (base64); `content["text"]` reads them as
+- `content["raw"]` is the payload's bytes (base64; QR family: the original bytes, other
+  symbologies: the decoding engine's reading); `content["text"]` reads them as
   `content["charset"]` says. Test `charset == "unknown"` — the only lossy value: no
   verified reading, use `raw`. The optional `eci` and `fnc1` keys carry the ECI
   designators and the FNC1 position; compare contents by `symbology`, `raw`, `fnc1` and
