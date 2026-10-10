@@ -73,13 +73,14 @@ pub(crate) struct Rescued {
     pub segments: Vec<DoubleByteSpan>,
 }
 
-/// ISO/IEC 18004 Annex B misdecode-protection codewords `p` — only the low
-/// versions reserve them; the erasure budget must subtract `p`.
+/// ISO/IEC 18004 Annex B misdecode-protection codewords `p`, as Table 9
+/// gives them (ISO/IEC 18004:2015) — only the low versions reserve them;
+/// the erasure budget must subtract `p`.
 fn protection(version: u8, ec: EcLevel) -> usize {
     match (version, ec) {
         (1, EcLevel::L) => 3,
-        (1, EcLevel::M) => 2,
-        (1, EcLevel::Q | EcLevel::H) | (2 | 3, EcLevel::L) => 1,
+        (1, EcLevel::M) | (2, EcLevel::L) => 2,
+        (1, EcLevel::Q | EcLevel::H) | (3, EcLevel::L) => 1,
         _ => 0,
     }
 }
@@ -231,8 +232,8 @@ pub(crate) enum Acceptance {
     /// Annex B misdecode-protection codewords stay reserved, `2t + e + p ≤
     /// npar` — the guard of [`attempt`].
     Scanner,
-    /// Plain RS, `2t ≤ npar` — only `p` is relaxed (v1-L 3, v1-M 2, v1-Q/H
-    /// 1, v2-L 1, v3-L 1 codewords) — for every stream an engine read or
+    /// Plain RS, `2t ≤ npar` — only `p` is relaxed (v1-L 3, v1-M and v2-L 2,
+    /// v1-Q/H and v3-L 1 codewords) — for every stream an engine read or
     /// detected: the grid rqrr decoded, a grid it detected but could not
     /// decode, the re-read at an engine's corner points. A block is within
     /// `⌊npar/2⌋` of at most one codeword, which rqrr's decoder (Berlekamp-
@@ -1142,12 +1143,13 @@ mod pins {
 
     // ── protection() · ISO/IEC 18004 Annex B misdecode-protection `p` ──
 
-    /// Independent enumeration of the Annex B `p` codewords — derived from ISO
-    /// 18004 (only version-1 across all EC levels, plus v2-L and v3-L, reserve
-    /// any misdecode-protection codewords), NOT re-derived from the match's own
-    /// arms. Pins every relevant cell, so `protection → 0`, `protection → 1`
-    /// (whole-body replacements) and any single arm deletion move a cell off
-    /// its value.
+    /// Independent enumeration of the misdecode-protection codewords `p` —
+    /// ISO/IEC 18004:2015 Table 9 and its footnote: 3 in version 1-L; 2 in
+    /// version 1-M and 2-L; 1 in version 1-Q, 1-H and 3-L; 0 in every other
+    /// QR Code symbol (the footnote's Micro QR values are not this table's) —
+    /// NOT re-derived from the match's own arms. Pins every relevant cell, so
+    /// `protection → 0`, `protection → 1` (whole-body replacements) and any
+    /// single arm deletion move a cell off its value.
     #[test]
     fn protection_matches_iso_annex_b_table() {
         let table = [
@@ -1155,7 +1157,7 @@ mod pins {
             (1, EcLevel::M, 2),
             (1, EcLevel::Q, 1),
             (1, EcLevel::H, 1),
-            (2, EcLevel::L, 1),
+            (2, EcLevel::L, 2),
             (2, EcLevel::M, 0),
             (2, EcLevel::Q, 0),
             (2, EcLevel::H, 0),
