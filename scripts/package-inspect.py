@@ -943,12 +943,12 @@ def inspect_wheel(host: Host, path: pathlib.Path, notes=()) -> Artifact:
         return data.replace(b"\r\n", b"\n") if data is not None else None
     for stub, source in (("qrcode_ai_scanner/__init__.pyi", PY_DIR / "qrcode_ai_scanner.pyi"),
                          ("qrcode_ai_scanner/py.typed", PY_DIR / "py.typed")):
-        art.check(f"{stub} is {rel(source)}, byte for byte (CRLF-normalised)",
-                  source.is_file() and _nl(files.get(stub)) == _nl(source.read_bytes()),
-                  f"differs from {rel(source)}" if stub in files else "absent")
-    art.check("qrcode_ai_scanner/__init__.py is the import shim maturin generates",
-              files.get("qrcode_ai_scanner/__init__.py") == MATURIN_INIT_PY,
-              "differs from maturin's generated __init__.py")
+        same = source.is_file() and _nl(files.get(stub)) == _nl(source.read_bytes())
+        art.check(f"{stub} is {rel(source)}, byte for byte (CRLF-normalised)", same,
+                  "" if same else f"differs from {rel(source)}" if stub in files else "absent")
+    shim = files.get("qrcode_ai_scanner/__init__.py") == MATURIN_INIT_PY
+    art.check("qrcode_ai_scanner/__init__.py is the import shim maturin generates", shim,
+              "" if shim else "differs from maturin's generated __init__.py")
     modules = [n for n in files if re.match(r"qrcode_ai_scanner/qrcode_ai_scanner\.[^/]*(so|pyd)$", n)]
     art.check("exactly one compiled extension module", len(modules) == 1, ", ".join(modules))
     # auditwheel's grafts, and nothing else, under qrcode_ai_scanner.libs/: only
@@ -1528,9 +1528,14 @@ def self_test() -> int:
             got = FAIL if any(a.status == FAIL for a in host.artifacts) else PASS
             failed = " · ".join(f"{c.name}: {c.detail}" for a in host.artifacts for c in a.checks if not c.ok)
             missing = [n for n in needles if n not in failed]
-            if got != want or missing:
+            # A check that passed reports no difference: the report, and the CI
+            # job summary it is written to, must never read "ok · differs from".
+            contradicted = [f"{c.name}: {c.detail}" for a in host.artifacts for c in a.checks
+                            if c.ok and c.detail.startswith("differ")]
+            if got != want or missing or contradicted:
                 failures.append(f"{name}: {got.upper()} (want {want.upper()})"
                                 + (f", no failing check names {missing}" if missing else "")
+                                + (f", passing checks report a difference: {contradicted}" if contradicted else "")
                                 + (f" — failing: {failed}" if failed else ""))
 
         def place(name: str, filename: str) -> pathlib.Path:
