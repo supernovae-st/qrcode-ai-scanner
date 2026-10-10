@@ -181,7 +181,7 @@ jobs:
   # occlusion scans per pass — uncapped, then a capped pass at
   # max_engine_side 400 that sends the v6/v10 canvases to the engines
   # downscaled, so the rescue's capped-geometry branch is measured too.
-  # Two invariants gate:
+  # Three invariants gate:
   #   1. same-machine determinism — two runs must be byte-identical
   #      (cross-machine byte-parity is NOT asserted; f32 warp sampling may
   #      differ in the last ulp across platforms, spec/04 determinism note)
@@ -192,6 +192,11 @@ jobs:
   #      and must also show a non-empty rescue population: 0 wrong out of 0
   #      decodes measures nothing. A platform where the rescue miscorrects
   #      is a REAL finding, not a flake — this stays a hard gate.
+  #   3. the binary's own output gate, over these two passes and a third,
+  #      dual-occluder pass: every published detection on every path is
+  #      the truth or is held by a row of
+  #      xtask/data/rescue-stress-dispositions.tsv, and each pass's floor
+  #      and panic counts equal their pins (the exit code, below).
   # The full table uploads as an artifact for trend reading.
   rescue-stress:
     runs-on: ubuntu-24.04
@@ -216,14 +221,20 @@ jobs:
         run: |
           set -euo pipefail
           ulimit -v 12582912
-          # The binary gates itself too: exit 1 on a rescue-path wrong decode
-          # in EITHER pass. Capture it instead of dying on the redirect under
-          # -e, so the log still shows which pass failed.
+          # The binary gates itself too. Exit 1 is any gate failure: a
+          # rescue-path wrong output in the uncapped or capped pass, a pass
+          # without rescue decodes, a wrong output without a dispositions row,
+          # a stale row, or a floor or panic count off its pin (each failure
+          # prints a GATE FAILED line on stderr and a line under gate_failures
+          # in run1.txt). Exit 2 is a malformed dispositions file; anything
+          # else is a crash. Capture the code instead of dying on the redirect
+          # under -e, so the log still shows what failed.
           rc=0
           cargo run --release --locked -p xtask -- rescue-stress > run1.txt || rc=$?
           if [ "$rc" -ne 0 ]; then
-            echo "::error::rescue-stress exited $rc (1: a rescue-path WRONG decode in either pass; otherwise a crash)"
+            echo "::error::rescue-stress exited $rc (1: any gate failure, listed under gate_failures below; 2: a malformed dispositions file; otherwise a crash)"
             grep -E 'rescue_' run1.txt || true
+            grep -E '^gate_failures|^  - ' run1.txt || true
             exit 1
           fi
           cargo run --release --locked -p xtask -- rescue-stress > run2.txt
