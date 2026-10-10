@@ -57,18 +57,56 @@ fn symbology_fixtures() -> Vec<String> {
         .collect()
 }
 
+/// The `DataBar` fixture's native size reads at one scale only, and a lone
+/// `DataBar` read waits for one at an independent scale (07-pipeline
+/// § Acceptance): it publishes nothing there.
+const DATABAR: &str = "symbology/databar-gtin.png";
+
+/// The `DataBar` fixture at twice its size (nearest neighbour): the 512 px
+/// pyramid and the 768 px plane both read it, so it is published and its
+/// reader's stress cells run.
+fn databar_twice() -> Vec<u8> {
+    let native = image::load_from_memory(&fixture(DATABAR))
+        .unwrap()
+        .to_luma8();
+    let twice = image::imageops::resize(
+        &native,
+        native.width() * 2,
+        native.height() * 2,
+        image::imageops::FilterType::Nearest,
+    );
+    let mut png = Vec::new();
+    image::DynamicImage::ImageLuma8(twice)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    png
+}
+
 /// One clean decode, one artistic decode (deep-ladder + full stress score),
 /// one frontier blind spot (the whole ladder runs and finds nothing) — the
 /// three report shapes the pipeline can produce — and every non-PDF417
-/// symbology fixture (their readers, their stress cells).
+/// symbology fixture (their readers, their stress cells; the `DataBar`'s
+/// at twice its size).
 #[test]
 fn concurrent_scans_yield_byte_identical_reports() {
-    let mut cases = vec![
-        ("clean/OK_68ms_100_4e875a2c.png".to_owned(), true),
-        ("artistic/blob-style-monkey-logo.webp".to_owned(), true),
-        ("frontier/scene-photo-overlay.webp".to_owned(), false),
-    ];
-    cases.extend(symbology_fixtures().into_iter().map(|rel| (rel, true)));
+    let mut cases: Vec<(String, Vec<u8>, bool)> = [
+        ("clean/OK_68ms_100_4e875a2c.png", true),
+        ("artistic/blob-style-monkey-logo.webp", true),
+        ("frontier/scene-photo-overlay.webp", false),
+    ]
+    .into_iter()
+    .map(|(rel, decodes)| (rel.to_owned(), fixture(rel), decodes))
+    .collect();
+    cases.extend(symbology_fixtures().into_iter().map(|rel| {
+        let decodes = rel != DATABAR;
+        let bytes = fixture(&rel);
+        (rel, bytes, decodes)
+    }));
+    cases.push((
+        format!("{DATABAR} at twice its size"),
+        databar_twice(),
+        true,
+    ));
     // The budget cut point is wall-clock and thus load-dependent — under
     // thread contention it WOULD flake (the documented caveat). `None`
     // is the reproducible mode; everything else is the stock Full profile.
@@ -78,8 +116,7 @@ fn concurrent_scans_yield_byte_identical_reports() {
         .profile(ScanProfile::Custom(config))
         .build();
 
-    for (rel, decodes) in cases {
-        let bytes = fixture(&rel);
+    for (rel, bytes, decodes) in cases {
         let baseline = scanner.scan(ImageInput::encoded(&bytes)).unwrap();
         // Semantic anchor first — equality of the WRONG reports proves nothing.
         assert_eq!(
