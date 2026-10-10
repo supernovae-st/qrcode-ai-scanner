@@ -16,6 +16,8 @@
 //!   (see `rotation_sweep.rs`). Non-gating dashboard.
 //! - `baseline` — run the corpus through a v0.2 CLI binary (`--bin <path>`)
 //!   and write `docs/baseline-v02.json` (the Phase A exit-gate comparator).
+//! - `bench` — latency, memory, allocations, throughput and WASM cost,
+//!   base versus candidate, under the host gate (see `bench.rs`).
 
 #![allow(
     clippy::unwrap_used,
@@ -24,7 +26,9 @@
     clippy::cast_sign_loss
 )] // automation tool: fail loud, bounded pixel math
 
+mod bench;
 mod external;
+mod oracle;
 mod rescue_stress;
 mod rotation_sweep;
 mod sync_version;
@@ -75,7 +79,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use qrcode_ai_scanner::{ImageInput, ScanProfile, Scanner};
+use qrcode_ai_scanner::{ImageInput, Symbology};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -106,6 +110,8 @@ fn main() {
         Some("gen-fixtures") => gen_fixtures(),
         Some("gen-symbology-fixtures") => gen_symbology_fixtures(),
         Some("gen-external-manifest") => external::generate(),
+        Some("oracle") => oracle::run(args.collect()),
+        Some("bench") => bench::run(args.collect()),
         Some("rescue-stress") => rescue_stress::run(),
         Some("rotation-sweep") => rotation_sweep::run(),
         Some("sync-version") => {
@@ -141,7 +147,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: xtask <gen-fixtures | gen-external-manifest | corpus-report [--write | --external] | rescue-stress | sync-version [--check] | baseline --bin <p>>"
+                "usage: xtask <gen-fixtures | gen-symbology-fixtures | gen-external-manifest | corpus-report [--write | --external] | oracle [--json <path>] [--corpus-root <abs path>] | bench <prepare | prepare-base | stamp | inspect | gate | run> | rescue-stress | rotation-sweep | sync-version [--check] | baseline --bin <p>>"
             );
             std::process::exit(2);
         }
@@ -290,6 +296,8 @@ struct CategoryStats {
     frontier_held: u32,
     /// Frontier entries that unexpectedly decoded — the LOUD RED state.
     frontier_gained: u32,
+    /// Sum of the ladder-only `trace.total_ms` (no image decoding, no
+    /// scoring) — exploratory context for the `avg ms` column, never a gate.
     total_ms: f64,
 }
 
@@ -300,57 +308,114 @@ struct CorpusRun {
     gained: Vec<String>,
 }
 
+/// `[qr_code "…", ean13 "…"]` — observed groups for a report line, every
+/// text `{:?}`-escaped (decoded text is attacker-controlled, even here).
+fn described(observed: &[(Symbology, &str)]) -> String {
+    let groups: Vec<String> = observed
+        .iter()
+        .map(|(symbology, text)| format!("{} {text:?}", oracle::wire(symbology)))
+        .collect();
+    format!("[{}]", groups.join(", "))
+}
+
 fn run_corpus() -> CorpusRun {
     let root = repo_root();
     let manifest: Corpus =
         toml::from_str(&std::fs::read_to_string(root.join("corpus.toml")).unwrap()).unwrap();
-    let scanner = Scanner::builder().profile(ScanProfile::Full).build();
+    // The oracle's budget-free, score-free scanner: a wall-clock cut point
+    // made this verdict depend on host load (a busy machine cut artistic
+    // fixtures mid-ladder), and decode truth needs no score.
+    let scanner = external::scanner();
 
     let mut stats: BTreeMap<String, CategoryStats> = BTreeMap::new();
     let mut gained: Vec<String> = Vec::new();
     for entry in &manifest.entry {
         let bytes =
             std::fs::read(root.join(&entry.path)).unwrap_or_else(|e| panic!("{}: {e}", entry.path));
-        let report = scanner.scan(ImageInput::encoded(&bytes)).unwrap();
         let stat = stats.entry(entry.category.clone()).or_default();
         stat.total += 1;
-        stat.total_ms += report.trace.total_ms;
-        let got = report.detections.first().map(|d| d.content.text.as_str());
-        if entry.expect.as_deref() == Some("fail") {
-            // Frontier pin. With a known ground truth, "gained" means we finally
-            // reached it; without one, ANY decode of a pinned blind spot is a
-            // gain worth surfacing. Refusing (no decode) is the expected GREEN.
-            let now_passes = match &entry.expected {
-                Some(expected) => got == Some(expected.as_str()),
-                None => got.is_some(),
-            };
-            if now_passes {
-                stat.frontier_gained += 1;
-                gained.push(format!("{} — decoded {got:?}", entry.path));
-            } else {
-                stat.frontier_held += 1;
+        let report = match scanner.scan(ImageInput::encoded(&bytes)) {
+            Ok(report) => report,
+            Err(e) => {
+                stat.wrong_or_missed += 1;
+                println!("MISS {} — scan error {}: {e}", entry.path, e.code());
+                continue;
             }
-        } else {
-            match (&entry.expected, got) {
-                (Some(expected), Some(text)) if text == expected => stat.decoded_ok += 1,
-                (None, None) => stat.decoded_ok += 1, // negative sample stayed negative
-                _ => {
-                    stat.wrong_or_missed += 1;
-                    println!(
-                        "MISS {} — expected {:?}, got {:?}",
-                        entry.path, entry.expected, got
-                    );
-                }
+        };
+        stat.total_ms += report.trace.total_ms;
+        let observed: Vec<(Symbology, &str)> = report
+            .detections
+            .iter()
+            .map(|d| (d.symbology, d.content.text.as_str()))
+            .collect();
+        match entry_state(entry, &observed) {
+            (EntryState::Held, _) => stat.frontier_held += 1,
+            (EntryState::Gained, _) => {
+                stat.frontier_gained += 1;
+                gained.push(format!("{} — decoded {}", entry.path, described(&observed)));
+            }
+            (EntryState::Pass, _) => stat.decoded_ok += 1,
+            (EntryState::Miss, outcome) => {
+                stat.wrong_or_missed += 1;
+                println!(
+                    "MISS {} — {}: expected {:?}, got {}",
+                    entry.path,
+                    outcome.map_or("unlabelled", oracle::Outcome::as_str),
+                    entry.expected,
+                    described(&observed)
+                );
             }
         }
     }
     CorpusRun { stats, gained }
 }
 
+/// Where one `corpus.toml` entry lands in the report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryState {
+    /// Exact truth, or a negative sample that stayed negative.
+    Pass,
+    /// Frontier pin still blind — the expected GREEN.
+    Held,
+    /// Frontier pin now decodes — the LOUD RED "flip expect to pass".
+    Gained,
+    /// Anything else: missed, wrong, extra, partial, mixed, false positive.
+    Miss,
+}
+
+/// The strict verdict of one entry: its COMPLETE detection list judged by
+/// `oracle::judge` against the `corpus.toml` truth (text only, any
+/// symbology), so a wrong or extra symbol next to the expected one is a
+/// miss. Also returns the oracle outcome for the report line (`None` for
+/// an unlabelled frontier pin).
+fn entry_state(
+    entry: &Entry,
+    observed: &[(Symbology, &str)],
+) -> (EntryState, Option<oracle::Outcome>) {
+    let expected = oracle::vendored_expectation(entry.expected.as_deref(), entry.expect.as_deref());
+    let outcome = expected
+        .as_deref()
+        .map(|units| oracle::judge(units, observed));
+    let state = match (entry.expect.as_deref() == Some("fail"), outcome) {
+        // Frontier pin: refusing (no decode) is the expected GREEN. With a
+        // known ground truth, "gained" means we finally reached it exactly;
+        // without one, ANY decode of a pinned blind spot is a gain worth
+        // surfacing. Other output against a known truth is a miss.
+        (true, _) if observed.is_empty() => EntryState::Held,
+        (true, None | Some(oracle::Outcome::Exact)) => EntryState::Gained,
+        (_, Some(oracle::Outcome::Exact | oracle::Outcome::NegativeHeld)) => EntryState::Pass,
+        _ => EntryState::Miss,
+    };
+    (state, outcome)
+}
+
 fn corpus_report(write_readme: bool) {
     let CorpusRun { stats, gained } = run_corpus();
-    let mut table =
-        String::from("| category | pass | total | rate | avg ms |\n|---|---|---|---|---|\n");
+    // pass/total/rate are the strict budget-free verdict; `avg ms` is the
+    // mean ladder-only `trace.total_ms`, exploratory and never a gate.
+    let mut table = String::from(
+        "| category | pass | total | rate | avg ms (ladder-only trace.total_ms, exploratory, not a gate) |\n|---|---|---|---|---|\n",
+    );
     for (category, s) in &stats {
         let avg = s.total_ms / f64::from(s.total);
         if s.frontier_held + s.frontier_gained > 0 {
@@ -429,4 +494,95 @@ fn baseline(bin: &str) {
     let out_path = root.join("docs/baseline-v02.json");
     std::fs::write(&out_path, payload).unwrap();
     println!("baseline written to {}", out_path.display());
+}
+
+// ------------------------------------------------------------------ tests
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qrcode_ai_scanner::Symbology::{Ean13, QrCode};
+
+    fn entry(expected: Option<&str>, expect: Option<&str>) -> Entry {
+        Entry {
+            path: String::from("fixtures/x.png"),
+            category: String::from("clean"),
+            expected: expected.map(str::to_owned),
+            expect: expect.map(str::to_owned),
+        }
+    }
+
+    /// The complete list is judged: `[E, W]` passed first-detection judging
+    /// whenever E came first — it is now a miss (`extra`).
+    #[test]
+    fn truth_rows_pass_only_on_the_exact_set() {
+        let truth = entry(Some("E"), None);
+        let state = |observed: &[(Symbology, &str)]| entry_state(&truth, observed).0;
+        assert_eq!(state(&[(QrCode, "E")]), EntryState::Pass);
+        assert_eq!(
+            state(&[(Ean13, "E")]),
+            EntryState::Pass,
+            "text-only truth accepts any symbology"
+        );
+        assert_eq!(state(&[(QrCode, "E"), (QrCode, "W")]), EntryState::Miss);
+        assert_eq!(state(&[(QrCode, "W")]), EntryState::Miss);
+        assert_eq!(state(&[]), EntryState::Miss);
+        assert_eq!(
+            entry_state(&truth, &[(QrCode, "E"), (QrCode, "W")]).1,
+            Some(oracle::Outcome::Extra)
+        );
+    }
+
+    /// corpus.toml truth is text-only (any symbology), but ONE unit: the
+    /// same text under a second symbology is extra output — a miss.
+    #[test]
+    fn a_text_only_truth_is_met_once() {
+        use qrcode_ai_scanner::Symbology::MicroQrCode;
+        let truth = entry(Some("E"), None);
+        assert_eq!(
+            entry_state(&truth, &[(QrCode, "E"), (MicroQrCode, "E")]),
+            (EntryState::Miss, Some(oracle::Outcome::Extra))
+        );
+        assert_eq!(
+            entry_state(&truth, &[(MicroQrCode, "E")]).0,
+            EntryState::Pass
+        );
+    }
+
+    #[test]
+    fn negative_rows_stay_negative() {
+        let negative = entry(None, None);
+        assert_eq!(entry_state(&negative, &[]).0, EntryState::Pass);
+        assert_eq!(
+            entry_state(&negative, &[(QrCode, "W")]),
+            (EntryState::Miss, Some(oracle::Outcome::FalsePositive))
+        );
+    }
+
+    /// Frontier pins keep held / capability-gained; a known truth must be
+    /// reached exactly to count as gained, any other output is a miss.
+    #[test]
+    fn frontier_rows_hold_or_gain() {
+        let unlabelled = entry(None, Some("fail"));
+        assert_eq!(entry_state(&unlabelled, &[]), (EntryState::Held, None));
+        assert_eq!(
+            entry_state(&unlabelled, &[(QrCode, "X")]),
+            (EntryState::Gained, None)
+        );
+        let labelled = entry(Some("E"), Some("fail"));
+        assert_eq!(entry_state(&labelled, &[]).0, EntryState::Held);
+        assert_eq!(
+            entry_state(&labelled, &[(QrCode, "E")]).0,
+            EntryState::Gained
+        );
+        assert_eq!(entry_state(&labelled, &[(QrCode, "W")]).0, EntryState::Miss);
+    }
+
+    #[test]
+    fn report_lines_escape_decoded_text() {
+        assert_eq!(
+            described(&[(QrCode, "a\u{1b}[31m")]),
+            "[qr_code \"a\\u{1b}[31m\"]"
+        );
+    }
 }

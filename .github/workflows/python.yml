@@ -4,6 +4,14 @@ name: python
 # tag, build wheels for the common platforms + sdist and publish to PyPI via
 # trusted publishing (OIDC — no token). The crate is excluded from the cargo
 # workspace, so the core `ci` workflow doesn't cover it; this does.
+#
+# Publishing is tag-only: `release` runs for refs/tags/v* alone. A
+# workflow_dispatch from a branch builds every wheel + the sdist and inspects
+# them (`inspect`), then stops. PyPI's trusted publisher is bound to this
+# file and the `release` environment (RELEASING.md § Publishing). `release`
+# reads back exactly what it uploads: one wheel per row of the wheels matrix
+# and the sdist, nothing else. The jobs whose outputs ship pin maturin-action
+# by commit and use no sccache on a tag.
 
 on:
   push:
@@ -15,28 +23,60 @@ on:
 permissions:
   contents: read
 
+env:
+  # The toolchain CI tests (ci.yml RUST_TOOLCHAIN; RELEASING.md § toolchain),
+  # handed to maturin-action, which installs it (inside the manylinux
+  # container too). maturin pinned exact: the version PR CI already resolved.
+  RUST_TOOLCHAIN: "1.97.0"
+  MATURIN_VERSION: v1.15.0
+
 defaults:
   run:
     working-directory: crates/qrcode-ai-scanner-py
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - uses: PyO3/maturin-action@v1
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           working-directory: crates/qrcode-ai-scanner-py
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+          maturin-version: ${{ env.MATURIN_VERSION }}
           command: build
-          args: --release --out dist
+          args: --release --locked --out dist
           sccache: "true"
-      - name: install + pytest
+      # Install the wheel just built BY PATH: resolving the name against
+      # --find-links worked only while the local wheel's platform tag outranked
+      # the registry's.
+      - name: install the wheel just built + pytest
         run: |
-          pip install --find-links dist "qrcode-ai-scanner[test]"
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [ "${#wheels[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one wheel in dist/, found: ${wheels[*]}"
+            exit 1
+          fi
+          pip install "${wheels[0]}[test]"
           pytest python/tests -q
+      # The sdist on every PR too: its file set and its PEP 639 license files
+      # are judged here, not first at the tag.
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          working-directory: crates/qrcode-ai-scanner-py
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          command: sdist
+          args: --out dist
+      # the wheel and the sdist read back: the AGPL text where PEP 639 puts it,
+      # METADATA version + license expression, the type stubs, the exact wheel
+      # file set, only git-tracked files in the sdist
+      - name: inspect the wheel and the sdist
+        run: python3 ../../scripts/package-inspect.py archive dist/*.whl dist/*.tar.gz --strict --quiet
 
   wheels:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
@@ -45,57 +85,133 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { runner: ubuntu-latest, target: x86_64, manylinux: auto }
-          - { runner: ubuntu-latest, target: aarch64, manylinux: auto }
-          - { runner: ubuntu-latest, target: x86_64, manylinux: musllinux_1_2 }
+          - { runner: ubuntu-24.04, target: x86_64, manylinux: auto }
+          - { runner: ubuntu-24.04, target: aarch64, manylinux: auto }
+          - { runner: ubuntu-24.04, target: x86_64, manylinux: musllinux_1_2 }
           # Intel-mac wheel cross-compiled on the Apple-Silicon runner — the
           # macos-13 (Intel) runner is being retired by GitHub and stalled the job.
           - { runner: macos-latest, target: x86_64, manylinux: "" }
           - { runner: macos-latest, target: aarch64, manylinux: "" }
           - { runner: windows-latest, target: x64, manylinux: "" }
     steps:
-      - uses: actions/checkout@v4
-      - uses: PyO3/maturin-action@v1
+      - uses: actions/checkout@v7
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           working-directory: crates/qrcode-ai-scanner-py
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+          maturin-version: ${{ env.MATURIN_VERSION }}
           target: ${{ matrix.platform.target }}
           manylinux: ${{ matrix.platform.manylinux }}
-          args: --release --out dist
-          sccache: "true"
-      - uses: actions/upload-artifact@v4
+          args: --release --locked --out dist
+          # No compiler cache on a tag: the wheels that ship build from the
+          # tag alone, never from objects a branch run cached.
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.platform.runner }}-${{ matrix.platform.target }}-${{ matrix.platform.manylinux }}
           path: crates/qrcode-ai-scanner-py/dist
+          if-no-files-found: error
 
   sdist:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: PyO3/maturin-action@v1
+      - uses: actions/checkout@v7
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           working-directory: crates/qrcode-ai-scanner-py
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+          maturin-version: ${{ env.MATURIN_VERSION }}
           command: sdist
           args: --out dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-sdist
           path: crates/qrcode-ai-scanner-py/dist
+          if-no-files-found: error
 
-  release:
-    name: publish to PyPI
+  # Every archive PyPI would receive, read back before anything publishes —
+  # on a branch dispatch too: the AGPL text in each wheel's
+  # .dist-info/licenses/ and at the sdist root (PEP 639), the METADATA version
+  # and license expression, the type stubs, the exact file sets.
+  inspect:
+    name: inspect wheels + sdist
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    needs: [test, wheels, sdist]
-    runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      id-token: write # trusted publishing (OIDC) — no PyPI token needed
+    needs: [wheels, sdist]
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: .
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: wheels-*
           path: dist
           merge-multiple: true
+      - run: python3 scripts/package-inspect.py archive dist/* --release-set --strict --quiet
+      # The sdist as pip uses it where no wheel fits: a PEP 517 build in an
+      # isolated environment, whose wheel must carry the AGPL text like the
+      # ones built above. Pinned like every other maturin leg: the maturin of
+      # MATURIN_VERSION (a build constraint, in both of pip's spellings: pip
+      # >= 26.2 reads only PIP_BUILD_CONSTRAINT, pip < 25.3 only
+      # PIP_CONSTRAINT), proved by the wheel's own Generator line, and the
+      # sdist's shipped Cargo.lock (--locked). The pyproject's floor,
+      # maturin 1.9.3, is not exercised here.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-10
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: build a wheel from the sdist + inspect it
+        env:
+          MATURIN_PEP517_ARGS: --locked
+          PIP_CONSTRAINT: ${{ runner.temp }}/maturin-constraint.txt
+          PIP_BUILD_CONSTRAINT: ${{ runner.temp }}/maturin-constraint.txt
+        run: |
+          echo "maturin==${MATURIN_VERSION#v}" > "$PIP_BUILD_CONSTRAINT"
+          python -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/from-sdist" dist/*.tar.gz
+          unzip -p "$RUNNER_TEMP"/from-sdist/*.whl '*.dist-info/WHEEL' | grep -Fx "Generator: maturin (${MATURIN_VERSION#v})"
+          python scripts/package-inspect.py archive "$RUNNER_TEMP"/from-sdist/*.whl --strict --quiet
+
+  release:
+    name: publish to PyPI
+    # refs/tags/v* only: a workflow_dispatch from a branch builds and
+    # inspects above, and stops before the registry.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, inspect]
+    runs-on: ubuntu-24.04
+    environment: release
+    # One publish per tag at a time: a dispatch on the tag waits for the
+    # tag-push run instead of racing it.
+    concurrency:
+      group: publish-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write # trusted publishing (OIDC) — no PyPI token needed
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The tag must name the version being published, and the CHANGELOG
+      # must carry its dated section (skip-existing would otherwise turn a
+      # forgotten bump into a silent non-release).
+      - run: python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      # What PyPI receives, read back here and not only in `inspect`: any job
+      # of the run can add an artifact named wheels-*. Exactly one wheel per
+      # row of the wheels matrix and the sdist, each passing its inspection.
+      - name: re-inspect the exact set about to be uploaded
+        run: python3 scripts/package-inspect.py archive dist/* --release-set --strict --quiet
       - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
           packages-dir: dist

@@ -13,22 +13,29 @@ on:
   workflow_dispatch:
     inputs:
       toolchain:
-        description: "rust toolchain to probe"
-        default: "stable"
+        description: "rust toolchain to probe (empty: the pinned RUST_TOOLCHAIN)"
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  # The toolchain CI tests (ci.yml RUST_TOOLCHAIN; RELEASING.md § toolchain).
+  RUST_TOOLCHAIN: "1.97.0"
 
 jobs:
   build-no-cache:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ inputs.toolchain }}
+          toolchain: ${{ inputs.toolchain || env.RUST_TOOLCHAIN }}
       - name: serialized uncached release build under the OOM guard
         run: |
           rustc --version --verbose
           df -h / && free -m
           ulimit -v 12582912
-          RUST_BACKTRACE=full cargo build --release -p xtask -j 1
+          RUST_BACKTRACE=full cargo build --release --locked -p xtask -j 1
           echo "BUILD OK — cache poisoning confirmed by elimination"

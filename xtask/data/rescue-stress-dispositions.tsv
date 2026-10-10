@@ -1,0 +1,165 @@
+# rescue-stress dispositions: the wrong outputs the gate tolerates, and its pins.
+#
+# Compiled into `cargo run -p xtask -- rescue-stress`. Every published
+# detection of a grid cell is one output; an output that is not the cell's
+# truth needs a row here, or the run fails (open). A row holds only while its
+# exact output occurs (pass, cell, label, kind, path, symbology, text_sha256,
+# text_len and engines); a row whose output no longer occurs fails the run
+# too (stale). Delete a row in the same change that clears its output. Every
+# row carries a public reason. A release qualifies only with no rows left.
+#
+# Pins, one of each per pass (uncapped, capped, dual), before the column
+# header: `floor` is the exact strict_correct (cells that publish exactly
+# their truth, as qr_code); `engine_panics` is the exact sum of
+# report.trace.engine_panics; `caught_panics` is the exact count the process
+# panic hook sees, which also covers the score-probe panics that
+# report.trace.engine_panics drops. Every pin fails in either direction (a
+# strict_correct above its floor too) and moves only together with its cause.
+#
+# Columns are tab-separated. kind: qr_wrong (a wrong QR, no truth output in
+# the cell), qr_extra (a wrong QR beside the truth), rescue_qr (a wrong QR
+# from the S5 rescue), non_qr (any other symbology). path: rescue when the
+# engines include the rescue, else engine. Only the dual pass may hold a
+# rescue-path row: the uncapped and capped passes fail on any rescue-path
+# wrong output. text_sha256 and text_len (UTF-8 bytes) identify the published
+# text.
+floor	uncapped	605
+floor	capped	605
+floor	dual	346
+engine_panics	uncapped	0
+engine_panics	capped	0
+engine_panics	dual	0
+caught_panics	uncapped	8
+caught_panics	capped	0
+caught_panics	dual	2
+pass	cell	label	kind	path	symbology	text_sha256	text_len	engines	reason
+uncapped	0056	0056_v2-m-p100-square-gray-corner_adjacent-o5	qr_extra	engine	qr_code	ff10304f1af23606ede1e2d8abcdc94c229047a61458d809d8bbd53ede1f6598	13	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	0778	0778_v6-m-p100-square-dark-off_finder-o15	qr_extra	engine	qr_code	690c197164b3bafc3a2b94834a9607edbec7b32bb77e33c115f7a3e03fbc90a7	58	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	0810	0810_v6-m-p100-square-gray-off_finder-o15	qr_extra	engine	qr_code	690c197164b3bafc3a2b94834a9607edbec7b32bb77e33c115f7a3e03fbc90a7	58	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	0825	0825_v6-m-p100-square-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	690c197164b3bafc3a2b94834a9607edbec7b32bb77e33c115f7a3e03fbc90a7	58	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	0857	0857_v6-m-p100-disc-dark-corner_adjacent-o10	qr_wrong	engine	qr_code	690c197164b3bafc3a2b94834a9607edbec7b32bb77e33c115f7a3e03fbc90a7	58	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	0889	0889_v6-m-p100-disc-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	690c197164b3bafc3a2b94834a9607edbec7b32bb77e33c115f7a3e03fbc90a7	58	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	0953	0953_v6-m-p60-square-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	2070df23e0d957590bc67a03d7a244173059dd2a2ad4a8d5a01a3e6eed013fec	32	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	0985	0985_v6-m-p60-disc-dark-corner_adjacent-o10	qr_wrong	engine	qr_code	2070df23e0d957590bc67a03d7a244173059dd2a2ad4a8d5a01a3e6eed013fec	32	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	1017	1017_v6-m-p60-disc-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	2070df23e0d957590bc67a03d7a244173059dd2a2ad4a8d5a01a3e6eed013fec	32	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	1026	1026_v6-q-p100-square-dark-center-o15	qr_extra	engine	qr_code	7504363e5dff1f0f151b4f8692142b4bafeb26c2b8157344300a577826359467	44	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	1081	1081_v6-q-p100-square-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	7504363e5dff1f0f151b4f8692142b4bafeb26c2b8157344300a577826359467	44	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	1113	1113_v6-q-p100-disc-dark-corner_adjacent-o10	qr_wrong	engine	qr_code	7504363e5dff1f0f151b4f8692142b4bafeb26c2b8157344300a577826359467	44	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	1145	1145_v6-q-p100-disc-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	7504363e5dff1f0f151b4f8692142b4bafeb26c2b8157344300a577826359467	44	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	1209	1209_v6-q-p60-square-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	71c480df93d6ae2f1efad1447c66c9525e316218cf51fc8d9ed832f2daf18b73	26	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	1241	1241_v6-q-p60-disc-dark-corner_adjacent-o10	qr_wrong	engine	qr_code	71c480df93d6ae2f1efad1447c66c9525e316218cf51fc8d9ed832f2daf18b73	26	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	1273	1273_v6-q-p60-disc-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	71c480df93d6ae2f1efad1447c66c9525e316218cf51fc8d9ed832f2daf18b73	26	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	1369	1369_v6-h-p100-disc-dark-corner_adjacent-o10	qr_wrong	engine	qr_code	270670bb64a4547b748092719837616dee178fffc8f40f030f1290b83aa13582	28	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	1401	1401_v6-h-p100-disc-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	270670bb64a4547b748092719837616dee178fffc8f40f030f1290b83aa13582	28	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	1443	1443_v6-h-p60-square-gray-center-o20	qr_extra	engine	qr_code	f69f9b70d1c9a5442258ca76f8b0a7a45fcb4e31c36141b6357ec591328b0624	22	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	1497	1497_v6-h-p60-disc-dark-corner_adjacent-o10	qr_wrong	engine	qr_code	f69f9b70d1c9a5442258ca76f8b0a7a45fcb4e31c36141b6357ec591328b0624	22	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	1529	1529_v6-h-p60-disc-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	f69f9b70d1c9a5442258ca76f8b0a7a45fcb4e31c36141b6357ec591328b0624	22	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	1594	1594_v10-m-p100-square-gray-corner_adjacent-o15	qr_extra	engine	qr_code	d46e4565c372fbbbfdfa5372679bb752e3b38d0404b5d255773e6f3c9a5f926c	124	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	1754	1754_v10-m-p60-disc-dark-corner_adjacent-o15	non_qr	engine	upc_e	5fa5c528e1122ced3e56fcd24f0ca894549cace31500e90d45f24a8712f48d9c	8	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	1786	1786_v10-m-p60-disc-gray-corner_adjacent-o15	non_qr	engine	upc_e	5fa5c528e1122ced3e56fcd24f0ca894549cace31500e90d45f24a8712f48d9c	8	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	1850	1850_v10-q-p100-square-gray-corner_adjacent-o15	qr_wrong	engine	qr_code	16149df82b2c44a4a9a357e27b2f4ebc104ff94b2e27903c4de5f47be36f724b	81	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	1882	1882_v10-q-p100-disc-dark-corner_adjacent-o15	qr_wrong	engine	qr_code	16149df82b2c44a4a9a357e27b2f4ebc104ff94b2e27903c4de5f47be36f724b	81	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	1978	1978_v10-q-p60-square-gray-corner_adjacent-o15	qr_wrong	engine	qr_code	2378d314a98e2394fec97b780aa58704a667b7dba1769473c494f4ab3f67e236	52	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	2010	2010_v10-q-p60-disc-dark-corner_adjacent-o15	qr_wrong	engine	qr_code	2378d314a98e2394fec97b780aa58704a667b7dba1769473c494f4ab3f67e236	52	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	2064	2064_v10-h-p100-square-dark-on_finder-o5	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2065	2065_v10-h-p100-square-dark-on_finder-o10	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2066	2066_v10-h-p100-square-dark-on_finder-o15	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2067	2067_v10-h-p100-square-dark-on_finder-o20	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2068	2068_v10-h-p100-square-dark-on_finder-o25	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2069	2069_v10-h-p100-square-dark-on_finder-o30	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2070	2070_v10-h-p100-square-dark-on_finder-o35	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2071	2071_v10-h-p100-square-dark-on_finder-o40	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2096	2096_v10-h-p100-square-gray-on_finder-o5	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2097	2097_v10-h-p100-square-gray-on_finder-o10	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2098	2098_v10-h-p100-square-gray-on_finder-o15	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2099	2099_v10-h-p100-square-gray-on_finder-o20	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2100	2100_v10-h-p100-square-gray-on_finder-o25	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2101	2101_v10-h-p100-square-gray-on_finder-o30	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2102	2102_v10-h-p100-square-gray-on_finder-o35	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2103	2103_v10-h-p100-square-gray-on_finder-o40	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2106	2106_v10-h-p100-square-gray-corner_adjacent-o15	qr_wrong	engine	qr_code	00e786249bb2e2c2cacd8276da8fe5cceb00f9525cd85f3843df02b718779dc8	68	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	2128	2128_v10-h-p100-disc-dark-on_finder-o5	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2129	2129_v10-h-p100-disc-dark-on_finder-o10	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2130	2130_v10-h-p100-disc-dark-on_finder-o15	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2131	2131_v10-h-p100-disc-dark-on_finder-o20	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2132	2132_v10-h-p100-disc-dark-on_finder-o25	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2133	2133_v10-h-p100-disc-dark-on_finder-o30	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2134	2134_v10-h-p100-disc-dark-on_finder-o35	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2135	2135_v10-h-p100-disc-dark-on_finder-o40	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2138	2138_v10-h-p100-disc-dark-corner_adjacent-o15	qr_wrong	engine	qr_code	00e786249bb2e2c2cacd8276da8fe5cceb00f9525cd85f3843df02b718779dc8	68	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	2160	2160_v10-h-p100-disc-gray-on_finder-o5	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2161	2161_v10-h-p100-disc-gray-on_finder-o10	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2162	2162_v10-h-p100-disc-gray-on_finder-o15	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2163	2163_v10-h-p100-disc-gray-on_finder-o20	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2164	2164_v10-h-p100-disc-gray-on_finder-o25	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2165	2165_v10-h-p100-disc-gray-on_finder-o30	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2166	2166_v10-h-p100-disc-gray-on_finder-o35	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2167	2167_v10-h-p100-disc-gray-on_finder-o40	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention on the S1 pyramid plane
+uncapped	2234	2234_v10-h-p60-square-gray-corner_adjacent-o15	qr_wrong	engine	qr_code	9e0d2609c19c0f11d19c17f8830bb07d38445a0fb84544c4b12268929da767b7	38	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	2266	2266_v10-h-p60-disc-dark-corner_adjacent-o15	qr_wrong	engine	qr_code	9e0d2609c19c0f11d19c17f8830bb07d38445a0fb84544c4b12268929da767b7	38	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+uncapped	2299	2299_v10-h-p60-disc-gray-corner_adjacent-o20	qr_extra	engine	qr_code	9e0d2609c19c0f11d19c17f8830bb07d38445a0fb84544c4b12268929da767b7	38	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	0056	0056_v2-m-p100-square-gray-corner_adjacent-o5	qr_extra	engine	qr_code	ff10304f1af23606ede1e2d8abcdc94c229047a61458d809d8bbd53ede1f6598	13	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	0825	0825_v6-m-p100-square-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	690c197164b3bafc3a2b94834a9607edbec7b32bb77e33c115f7a3e03fbc90a7	58	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	0857	0857_v6-m-p100-disc-dark-corner_adjacent-o10	qr_wrong	engine	qr_code	690c197164b3bafc3a2b94834a9607edbec7b32bb77e33c115f7a3e03fbc90a7	58	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	0889	0889_v6-m-p100-disc-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	690c197164b3bafc3a2b94834a9607edbec7b32bb77e33c115f7a3e03fbc90a7	58	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	0953	0953_v6-m-p60-square-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	2070df23e0d957590bc67a03d7a244173059dd2a2ad4a8d5a01a3e6eed013fec	32	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	0985	0985_v6-m-p60-disc-dark-corner_adjacent-o10	qr_wrong	engine	qr_code	2070df23e0d957590bc67a03d7a244173059dd2a2ad4a8d5a01a3e6eed013fec	32	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1017	1017_v6-m-p60-disc-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	2070df23e0d957590bc67a03d7a244173059dd2a2ad4a8d5a01a3e6eed013fec	32	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1018	1018_v6-m-p60-disc-gray-corner_adjacent-o15	qr_wrong	engine	qr_code	2070df23e0d957590bc67a03d7a244173059dd2a2ad4a8d5a01a3e6eed013fec	32	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1026	1026_v6-q-p100-square-dark-center-o15	qr_extra	engine	qr_code	7504363e5dff1f0f151b4f8692142b4bafeb26c2b8157344300a577826359467	44	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1081	1081_v6-q-p100-square-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	7504363e5dff1f0f151b4f8692142b4bafeb26c2b8157344300a577826359467	44	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1113	1113_v6-q-p100-disc-dark-corner_adjacent-o10	qr_wrong	engine	qr_code	7504363e5dff1f0f151b4f8692142b4bafeb26c2b8157344300a577826359467	44	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1145	1145_v6-q-p100-disc-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	7504363e5dff1f0f151b4f8692142b4bafeb26c2b8157344300a577826359467	44	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1146	1146_v6-q-p100-disc-gray-corner_adjacent-o15	qr_wrong	engine	qr_code	7504363e5dff1f0f151b4f8692142b4bafeb26c2b8157344300a577826359467	44	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1209	1209_v6-q-p60-square-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	71c480df93d6ae2f1efad1447c66c9525e316218cf51fc8d9ed832f2daf18b73	26	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1241	1241_v6-q-p60-disc-dark-corner_adjacent-o10	qr_wrong	engine	qr_code	71c480df93d6ae2f1efad1447c66c9525e316218cf51fc8d9ed832f2daf18b73	26	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1273	1273_v6-q-p60-disc-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	71c480df93d6ae2f1efad1447c66c9525e316218cf51fc8d9ed832f2daf18b73	26	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1274	1274_v6-q-p60-disc-gray-corner_adjacent-o15	qr_extra	engine	qr_code	71c480df93d6ae2f1efad1447c66c9525e316218cf51fc8d9ed832f2daf18b73	26	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1337	1337_v6-h-p100-square-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	270670bb64a4547b748092719837616dee178fffc8f40f030f1290b83aa13582	28	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1369	1369_v6-h-p100-disc-dark-corner_adjacent-o10	qr_wrong	engine	qr_code	270670bb64a4547b748092719837616dee178fffc8f40f030f1290b83aa13582	28	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1401	1401_v6-h-p100-disc-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	270670bb64a4547b748092719837616dee178fffc8f40f030f1290b83aa13582	28	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1402	1402_v6-h-p100-disc-gray-corner_adjacent-o15	qr_wrong	engine	qr_code	270670bb64a4547b748092719837616dee178fffc8f40f030f1290b83aa13582	28	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1465	1465_v6-h-p60-square-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	f69f9b70d1c9a5442258ca76f8b0a7a45fcb4e31c36141b6357ec591328b0624	22	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1497	1497_v6-h-p60-disc-dark-corner_adjacent-o10	qr_wrong	engine	qr_code	f69f9b70d1c9a5442258ca76f8b0a7a45fcb4e31c36141b6357ec591328b0624	22	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1529	1529_v6-h-p60-disc-gray-corner_adjacent-o10	qr_wrong	engine	qr_code	f69f9b70d1c9a5442258ca76f8b0a7a45fcb4e31c36141b6357ec591328b0624	22	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1594	1594_v10-m-p100-square-gray-corner_adjacent-o15	qr_wrong	engine	qr_code	d46e4565c372fbbbfdfa5372679bb752e3b38d0404b5d255773e6f3c9a5f926c	124	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1835	1835_v10-q-p100-square-gray-off_finder-o20	qr_extra	engine	qr_code	16149df82b2c44a4a9a357e27b2f4ebc104ff94b2e27903c4de5f47be36f724b	81	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1850	1850_v10-q-p100-square-gray-corner_adjacent-o15	qr_wrong	engine	qr_code	16149df82b2c44a4a9a357e27b2f4ebc104ff94b2e27903c4de5f47be36f724b	81	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1867	1867_v10-q-p100-disc-dark-off_finder-o20	qr_extra	engine	qr_code	16149df82b2c44a4a9a357e27b2f4ebc104ff94b2e27903c4de5f47be36f724b	81	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1882	1882_v10-q-p100-disc-dark-corner_adjacent-o15	qr_wrong	engine	qr_code	16149df82b2c44a4a9a357e27b2f4ebc104ff94b2e27903c4de5f47be36f724b	81	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	1978	1978_v10-q-p60-square-gray-corner_adjacent-o15	qr_wrong	engine	qr_code	2378d314a98e2394fec97b780aa58704a667b7dba1769473c494f4ab3f67e236	52	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	2010	2010_v10-q-p60-disc-dark-corner_adjacent-o15	qr_wrong	engine	qr_code	2378d314a98e2394fec97b780aa58704a667b7dba1769473c494f4ab3f67e236	52	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	2106	2106_v10-h-p100-square-gray-corner_adjacent-o15	qr_extra	engine	qr_code	00e786249bb2e2c2cacd8276da8fe5cceb00f9525cd85f3843df02b718779dc8	68	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	2116	2116_v10-h-p100-disc-dark-center-o25	qr_extra	engine	qr_code	00e786249bb2e2c2cacd8276da8fe5cceb00f9525cd85f3843df02b718779dc8	68	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	2138	2138_v10-h-p100-disc-dark-corner_adjacent-o15	qr_wrong	engine	qr_code	00e786249bb2e2c2cacd8276da8fe5cceb00f9525cd85f3843df02b718779dc8	68	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	2266	2266_v10-h-p60-disc-dark-corner_adjacent-o15	qr_wrong	engine	qr_code	9e0d2609c19c0f11d19c17f8830bb07d38445a0fb84544c4b12268929da767b7	38	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	2284	2284_v10-h-p60-disc-gray-off_finder-o25	qr_extra	engine	qr_code	9e0d2609c19c0f11d19c17f8830bb07d38445a0fb84544c4b12268929da767b7	38	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+capped	2298	2298_v10-h-p60-disc-gray-corner_adjacent-o15	qr_wrong	engine	qr_code	9e0d2609c19c0f11d19c17f8830bb07d38445a0fb84544c4b12268929da767b7	38	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+dual	0056	0056_v2-m-p100-square-gray-corner_adjacent-o5-blot_c21_r18	qr_extra	engine	qr_code	ff10304f1af23606ede1e2d8abcdc94c229047a61458d809d8bbd53ede1f6598	13	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+dual	0825	0825_v6-m-p100-square-gray-corner_adjacent-o10-blot_c22_r19	qr_wrong	engine	qr_code	690c197164b3bafc3a2b94834a9607edbec7b32bb77e33c115f7a3e03fbc90a7	58	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+dual	0953	0953_v6-m-p60-square-gray-corner_adjacent-o10-blot_c22_r2	qr_wrong	engine	qr_code	2070df23e0d957590bc67a03d7a244173059dd2a2ad4a8d5a01a3e6eed013fec	32	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+dual	1017	1017_v6-m-p60-disc-gray-corner_adjacent-o10-blot_c27_r34	qr_wrong	engine	qr_code	2070df23e0d957590bc67a03d7a244173059dd2a2ad4a8d5a01a3e6eed013fec	32	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+dual	1081	1081_v6-q-p100-square-gray-corner_adjacent-o10-blot_c31_r27	qr_wrong	engine	qr_code	7504363e5dff1f0f151b4f8692142b4bafeb26c2b8157344300a577826359467	44	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+dual	1145	1145_v6-q-p100-disc-gray-corner_adjacent-o10-blot_c23_r18	qr_wrong	engine	qr_code	7504363e5dff1f0f151b4f8692142b4bafeb26c2b8157344300a577826359467	44	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+dual	1209	1209_v6-q-p60-square-gray-corner_adjacent-o10-blot_c26_r38	qr_wrong	engine	qr_code	71c480df93d6ae2f1efad1447c66c9525e316218cf51fc8d9ed832f2daf18b73	26	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+dual	1273	1273_v6-q-p60-disc-gray-corner_adjacent-o10-blot_c33_r29	qr_wrong	engine	qr_code	71c480df93d6ae2f1efad1447c66c9525e316218cf51fc8d9ed832f2daf18b73	26	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+dual	1401	1401_v6-h-p100-disc-gray-corner_adjacent-o10-blot_c32_r38	qr_wrong	engine	qr_code	270670bb64a4547b748092719837616dee178fffc8f40f030f1290b83aa13582	28	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+dual	1529	1529_v6-h-p60-disc-gray-corner_adjacent-o10-blot_c35_r21	qr_wrong	engine	qr_code	f69f9b70d1c9a5442258ca76f8b0a7a45fcb4e31c36141b6357ec591328b0624	22	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+dual	1786	1786_v10-m-p60-disc-gray-corner_adjacent-o15-blot_c23_r27	non_qr	engine	upc_e	5fa5c528e1122ced3e56fcd24f0ca894549cace31500e90d45f24a8712f48d9c	8	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
+dual	1850	1850_v10-q-p100-square-gray-corner_adjacent-o15-blot_c46_r39	qr_wrong	engine	qr_code	16149df82b2c44a4a9a357e27b2f4ebc104ff94b2e27903c4de5f47be36f724b	81	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+dual	1978	1978_v10-q-p60-square-gray-corner_adjacent-o15-blot_c42_r32	qr_wrong	engine	qr_code	2378d314a98e2394fec97b780aa58704a667b7dba1769473c494f4ab3f67e236	52	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+dual	2097	2097_v10-h-p100-square-gray-on_finder-o10-blot_c39_r3	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
+dual	2099	2099_v10-h-p100-square-gray-on_finder-o20-blot_c42_r24	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
+dual	2101	2101_v10-h-p100-square-gray-on_finder-o30-blot_c37_r47	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
+dual	2102	2102_v10-h-p100-square-gray-on_finder-o35-blot_c44_r7	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
+dual	2103	2103_v10-h-p100-square-gray-on_finder-o40-blot_c45_r16	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
+dual	2106	2106_v10-h-p100-square-gray-corner_adjacent-o15-blot_c53_r38	qr_wrong	engine	qr_code	00e786249bb2e2c2cacd8276da8fe5cceb00f9525cd85f3843df02b718779dc8	68	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+dual	2160	2160_v10-h-p100-disc-gray-on_finder-o5-blot_c50_r53	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
+dual	2161	2161_v10-h-p100-disc-gray-on_finder-o10-blot_c39_r12	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
+dual	2162	2162_v10-h-p100-disc-gray-on_finder-o15-blot_c48_r20	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
+dual	2164	2164_v10-h-p100-disc-gray-on_finder-o25-blot_c37_r43	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
+dual	2165	2165_v10-h-p100-disc-gray-on_finder-o30-blot_c48_r54	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
+dual	2167	2167_v10-h-p100-disc-gray-on_finder-o40-blot_c54_r21	non_qr	engine	data_bar	d6baeeae632da385de770e77b15c979d3639c43c06811e756b5f4828a67c2902	14	rxing	rxing 1D invention in the QR modules (the cell renders no 1D symbol)
+dual	2234	2234_v10-h-p60-square-gray-corner_adjacent-o15-blot_c42_r35	qr_wrong	engine	qr_code	9e0d2609c19c0f11d19c17f8830bb07d38445a0fb84544c4b12268929da767b7	38	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+dual	2299	2299_v10-h-p60-disc-gray-corner_adjacent-o20-blot_c53_r29	qr_extra	engine	qr_code	9e0d2609c19c0f11d19c17f8830bb07d38445a0fb84544c4b12268929da767b7	38	rxing	rxing ZXing-lineage read published as BYTE_SEGMENTS
+dual	9000	9000_s5-v2m-solved	rescue_qr	rescue	qr_code	6dc004ac0f046ef2c3612dce1f4d06759e2bf5213115b1a27ea0b2ae9268273b	26	rescue	S5 erasure rescue corrected a margin-0 block onto a different payload (a constructed case: 14 grayed EC codewords plus two confident errors)

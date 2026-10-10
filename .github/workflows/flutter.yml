@@ -5,8 +5,10 @@ name: flutter
 # runs on every push/PR; the native build jobs + pub.dev publish are tag-gated.
 #
 # pub.dev publish uses OIDC automated publishing (no token) — configure it on the
-# package admin page first (bind this repo + tag pattern `v{{version}}`). Unlike
-# npm/PyPI there is NO skip-existing: bump the pubspec version before tagging.
+# package admin page first (bind this repo + tag pattern `v{{version}}` + the
+# `pub` environment). Unlike npm/PyPI there is NO skip-existing: bump the
+# pubspec version before tagging. Publishing is tag-push-only; every other run
+# stops at the builds.
 #
 # This workflow takes no untrusted event input into any run: step (github.ref /
 # github.event_name are used only in if: conditions), so it is injection-safe.
@@ -27,15 +29,30 @@ defaults:
 
 env:
   CARGO_TERM_COLOR: always
+  # The toolchain CI tests (ci.yml RUST_TOOLCHAIN; RELEASING.md § toolchain),
+  # for every plain cargo call here. The one exception is cargokit: `flutter
+  # build` compiles the crate through `rustup run <channel> cargo`, and
+  # cargokit only knows the stable / beta / nightly channels
+  # (cargokit/build_tool/lib/src/options.dart), so the device builds below
+  # use the moving stable — as does every consuming app's build. pub.dev
+  # ships the sources, not those binaries.
+  RUST_TOOLCHAIN: "1.97.0"
 
 jobs:
   # Host gate: analyze + the report.dart contract tests, plus a FRB regen-drift
   # check so a change to rust/src/api/*.rs without re-running `generate` fails CI.
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # flutter_rust_bridge_codegen formats the file it generates with rustfmt,
+      # and the pinned toolchain installs with the minimal profile: without the
+      # component the drift check below compares unformatted output and fails
+      # on layout alone (the runner's preinstalled stable carried it).
+      - run: rustup component add rustfmt --toolchain "$RUST_TOOLCHAIN"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bindings/flutter/rust
@@ -43,6 +60,12 @@ jobs:
         with:
           channel: stable
       - run: flutter pub get
+      # What pub.dev would receive (`pub publish --dry-run`), read back on
+      # every PR: the AGPL text, the file set, no stray file. BLOCKED (the
+      # crate's path dependency outside the package) is reported, not failed.
+      - name: inspect the pub.dev package
+        working-directory: .
+        run: python3 scripts/package-inspect.py flutter --strict --quiet
       - run: flutter analyze
       - name: report.dart contract tests (host)
         run: flutter test
@@ -58,11 +81,12 @@ jobs:
 
   build-android:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
       - uses: Swatinem/rust-cache@v2
         with:
@@ -85,9 +109,10 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: macos-15 # Xcode 16, Apple silicon
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
       - uses: Swatinem/rust-cache@v2
         with:
@@ -103,18 +128,39 @@ jobs:
 
   publish:
     name: publish to pub.dev
-    if: startsWith(github.ref, 'refs/tags/')
+    # A pushed v* tag only. pub.dev accepts automated publishing solely from
+    # the push of a tag matching the configured pattern, so a dispatch could
+    # not publish anyway — and must not try.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [test, build-android, build-ios]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # v0.5.0 post-mortem: without the token exchange below, `pub publish` falls
     # back to INTERACTIVE auth and hangs on stdin forever (the job sat 2 h and
     # was hand-cancelled). Cap the whole job well under the 6 h runner default.
     timeout-minutes: 15
-    environment: pub.dev
+    environment: pub
+    concurrency:
+      group: publish-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: false
+    # The one privileged job on floating tools: the Flutter and Dart SDKs come
+    # from the stable channel, and `flutter pub get` resolves without a
+    # lockfile. A named exception in scripts/check-publish-guards.py, keyed to
+    # exactly those three steps, while the job is dormant (pub.dev's first
+    # upload is manual and the package's crate still depends on a path outside
+    # it); it ends before the pub.dev trusted publisher is configured
+    # (RELEASING.md § Publishing).
     permissions:
+      contents: read
       id-token: write # OIDC — pub.dev automated publishing, no token
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The tag must name the version being published, and the CHANGELOG
+      # must carry its dated section.
+      - name: the tag names the version being published
+        working-directory: .
+        run: python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet
       # The OIDC→pub.dev temporary-credential exchange. subosito/flutter-action
       # does NOT perform it; dart-lang/setup-dart does (its documented
       # publishing support). Order matters: exchange first, then the Flutter
@@ -125,12 +171,21 @@ jobs:
       # publishing — a setting that exists only once the package exists. The
       # first `flutter pub publish` is a manual operator act (Google account),
       # then enable automated publishing (repo supernovae-st/qrcode-ai-scanner,
-      # tag pattern v{{version}}, environment pub.dev) and every later tag
-      # publishes hands-free.
-      - uses: dart-lang/setup-dart@e51d8e571e22473a2ddebf0ef8a2123f0ab2c02c # v1.7.1
+      # tag pattern v{{version}}, required environment `pub`) and every later
+      # tag publishes hands-free.
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
       - uses: subosito/flutter-action@e938fdf56512cc96ef2f93601a5a40bde3801046 # v2.19.0
         with:
           channel: stable
       - run: flutter pub get
+      # The package about to be uploaded, read back first (`pub publish
+      # --dry-run`, which runs no package code). --release-set is the stricter
+      # publish mode: unlike flutter › test, a BLOCKED package (the crate's
+      # path dependency still leaves the package) or a git ls-files fallback
+      # (pub printed no tree) fails here, so an unbuildable or unparsed package
+      # is never uploaded.
+      - name: inspect the pub.dev package about to be uploaded
+        working-directory: .
+        run: python3 scripts/package-inspect.py flutter --strict --quiet --release-set
       - name: publish (OIDC)
         run: flutter pub publish --force

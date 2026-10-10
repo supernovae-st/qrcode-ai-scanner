@@ -5,44 +5,66 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only token: nothing here writes to the repo or publishes.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # The one Rust toolchain, pinned, never @stable: every build, test and
+  # publish leg in every workflow names this same version (the lint job
+  # checks it), so an upstream lint or codegen change lands on a deliberate
+  # bump, not on a random Tuesday (the repo's probe wrote that down after the
+  # 1.96 runner deaths). MSRV (1.88) and fuzzing (a dated nightly) are the
+  # named exceptions. RELEASING.md § toolchain has the why.
+  RUST_TOOLCHAIN: "1.97.0"
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      # One Rust toolchain across every workflow (*.yml and *.yaml): every
+      # RUST_TOOLCHAIN assignment, at any level, holds the same exact x.y.z;
+      # no script assigns one; every leg names its toolchain through
+      # RUST_TOOLCHAIN (fuzzing: FUZZ_TOOLCHAIN, a dated nightly), read from
+      # the parsed YAML, flow mappings included; the one literal is the MSRV
+      # leg, at the rust-version the root manifest declares; and no
+      # rust-toolchain file overrides them (scripts/check-publish-guards.py).
+      - name: one Rust toolchain across every workflow
+        run: |
+          python3 scripts/check-publish-guards.py --toolchains
+      # The publishing-job policy (scripts/check-publish-guards.py): a static
+      # lint holding every job that publishes or holds a write permission to
+      # the tag guard, its environment, minimal permissions, its inspection
+      # job, pinned code and the versions gate first; no workflow reads a
+      # secret. Its mutated-copy scenarios, for both policies, run first.
+      - run: python3 scripts/check-publish-guards.py --self-test
+      - run: python3 scripts/check-publish-guards.py
       - uses: dtolnay/rust-toolchain@master
         with:
-          # épinglé, jamais @stable · une lint qui arrive en amont doit casser
-          # sur un bump délibéré, pas un mardi. Le probe de ce repo l'avait
-          # écrit noir sur blanc après les morts de runner de 1.96.
-          toolchain: "1.97.0"
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --all-features
+      - run: cargo clippy --workspace --all-targets --all-features --locked
 
   test:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          # épinglé, jamais @stable · une lint qui arrive en amont doit casser
-          # sur un bump délibéré, pas un mardi. Le probe de ce repo l'avait
-          # écrit noir sur blanc après les morts de runner de 1.96.
-          toolchain: "1.97.0"
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       - run: python3 scripts/check-type-parity.py
-      - run: cargo nextest run --workspace
-      - run: cargo test --doc --workspace
+      - run: cargo nextest run --workspace --locked
+      - run: cargo test --doc --workspace --locked
 
   # MSRV floor — every manifest says rust-version 1.88 and jitpack.yml PINS
   # 1.88.0; stable-only CI lets MSRV rot land silently and break JitPack at
@@ -50,9 +72,9 @@ jobs:
   # (This job's first run proved the previously-declared 1.87 was fiction —
   # the code uses let-chains, stabilized in 1.88.)
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
       # --locked: the gate tests the COMMITTED dependency graph — without it
@@ -62,76 +84,229 @@ jobs:
       - run: cargo check -p qrcode-ai-scanner --all-features --locked
 
   wasm-shape:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          # épinglé, jamais @stable · une lint qui arrive en amont doit casser
-          # sur un bump délibéré, pas un mardi. Le probe de ce repo l'avait
-          # écrit noir sur blanc après les morts de runner de 1.96.
-          toolchain: "1.97.0"
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       # rxing needs its wasm_support feature on wasm targets (chrono dep) —
       # the wasm binding crate (phase C) owns that wiring; the core shape
       # check runs rqrr-only to pin "core compiles single-thread, no rayon".
       - run: >
-          cargo check -p qrcode-ai-scanner
+          cargo check -p qrcode-ai-scanner --locked
           --target wasm32-unknown-unknown
           --no-default-features --features engine-rqrr,serde
       # The PUBLISHED wasm crate was previously never built on PRs — breakage
       # only surfaced at tag time (npm-publish.yml). Cheap check here.
       - run: >
-          cargo check -p qrcode-ai-scanner-wasm
+          cargo check -p qrcode-ai-scanner-wasm --locked
           --target wasm32-unknown-unknown
 
-  corpus:
-    runs-on: ubuntu-latest
+  # The npm packages' runtime smokes, on every PR: the Node one ran in no
+  # workflow at all, the wasm one only inside the tag-time publish. Both run
+  # the package as built (release, the publish profile) and assert exact
+  # content with budget-free judgments, so machine load cannot flip them.
+  node-smoke:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: crates/qrcode-ai-scanner-node
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          # épinglé, jamais @stable · une lint qui arrive en amont doit casser
-          # sur un bump délibéré, pas un mardi. Le probe de ce repo l'avait
-          # écrit noir sur blanc après les morts de runner de 1.96.
-          toolchain: "1.97.0"
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      # pnpm pinned exact (RELEASING.md § Toolchain), by a SHA-pinned action
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 10.34.6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile=false
+      - run: pnpm build
+      # test.mjs includes the loader's version check: enforcement on, a
+      # matching and a mismatching platform package, in a node_modules
+      # layout built from the package's `files`.
+      - run: node test.mjs
+      - name: pack + inspect the npm tarballs (LICENSE · file set · loader)
+        working-directory: .
+        run: python3 scripts/package-inspect.py node --strict --quiet
+
+  wasm-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.13.1
+      # the wasm-opt npm-publish.yml uses, checked against the digest of the
+      # .sha256 binaryen publishes with the release
+      - name: binaryen version_130, sha256-verified
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/binaryen-version_130-x86_64-linux.tar.gz"
+          curl -sSfL -o "$archive" https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz
+          echo "0a18362361ad05465118cd8eeb72edaeec89de6894bc283576ef4e07aa3babcc  $archive" | sha256sum -c -
+          tar xzf "$archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-version_130/bin" >> "$GITHUB_PATH"
+      # build · wasm-opt · patch · type sync · test.mjs, exactly as published
+      - run: ./scripts/build-wasm.sh
+      - name: pack + inspect the wasm tarball (LICENSE · file set · types)
+        run: python3 scripts/package-inspect.py wasm --no-build --strict --quiet
+
+  # What the registries would receive, read back on every PR
+  # (scripts/package-inspect.py): every LICENSE copy byte-identical to the
+  # root one, every publish surface on one version, and the .crate of each
+  # published crate (LICENSE · README · version · core pin · tracked files
+  # only · no stray file). The npm tarballs are inspected in their smoke
+  # jobs, the wheel and sdist in python.yml, right after each build.
+  packaging:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # The inspector's own scenarios first: a synthetic crate, wheel, sdist
+      # and npm package per planted secret, key, editor or agent directory,
+      # nested archive or untracked file, each of which must FAIL.
+      - run: python3 scripts/package-inspect.py selftest
+      - run: python3 scripts/package-inspect.py licenses --strict --quiet
+      - run: python3 scripts/package-inspect.py versions --strict --quiet
+      - run: python3 scripts/package-inspect.py crates --strict --quiet
+
+  corpus:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       # set -o pipefail: the default `bash -e {0}` run shell has NO pipefail —
       # `| tee` was swallowing a red corpus-report's exit 1 (gate held by luck).
-      - run: set -o pipefail; cargo run -p xtask -- corpus-report | tee corpus-report.txt
-      # corpus-external/ is not vendored: on CI this exercises the manifest
-      # parse + the loud-skip path (locally, with corpora present, it gates).
-      - run: set -o pipefail; cargo run -p xtask -- corpus-report --external | tee -a corpus-report.txt
-      - uses: actions/upload-artifact@v4
+      - run: set -o pipefail; cargo run --locked -p xtask -- corpus-report | tee corpus-report.txt
+      # corpus-external/ is not vendored (third-party suites + production
+      # assets): on CI this exercises the manifest parse (exit 2 on a broken
+      # corpus-external.tsv) and the loud-skip path, which exits 0 — so a
+      # green step here is NOT the truth gate passing. The skip is reported as
+      # an explicit non-success (warning annotation + job summary); the
+      # external truth is verified locally, corpus present, and carried by
+      # receipts.
+      - name: external corpus · manifest parse only (truth NOT verified in CI)
+        run: |
+          set -o pipefail
+          cargo run --locked -p xtask -- corpus-report --external | tee -a corpus-report.txt
+          if [ -d corpus-external ]; then
+            echo "### external corpus truth: gated on this runner (corpus-external/ present)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            msg="external truth NOT VERIFIED in CI; verified by local receipts"
+            echo "::warning title=external corpus truth::$msg (corpus-external/ is not vendored: only the manifest parse ran)"
+            printf '### external corpus truth: NOT VERIFIED\n\n%s — corpus-external/ is not vendored, so only the manifest parse and the skip path ran.\n' "$msg" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v7
         with:
           name: corpus-report
           path: corpus-report.txt
 
   deny:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Workspace graph — the hard gate. advisories · bans · licenses · sources
       # (bans + sources are enforced by the [bans]/[sources] policy in deny.toml).
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      # Pinned by commit, not the floating @v2: this Docker action bakes in the
+      # binary its Dockerfile names (v2.1.1 → ENV deny_version="0.20.2"), and
+      # the excluded-tree scan below must run that SAME version. 0.20.0 moved
+      # the graph options (--manifest-path, --config, --all-features, …) to
+      # the root command (upstream CHANGELOG, PR #881); the old
+      # `check --config` form has been a usage error ever since.
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1 · cargo-deny 0.20.2
         with:
           command: check advisories bans licenses sources
       # The py · uniffi · flutter trees are workspace-EXCLUDED (foreign
       # toolchains: pyo3 · uniffi · flutter_rust_bridge) and ship their OWN
       # lockfiles the workspace scan never sees. Scan each against the same root
-      # policy (--config deny.toml). Report-only / non-gating: their upstream
-      # graphs carry advisories we surface LOUDLY (::warning annotation + full
-      # log) but never blanket-ignore in deny.toml, and never block the pipeline
-      # on foreign-toolchain upstream churn. Triage findings; fix or escalate.
-      - uses: taiki-e/install-action@cargo-deny
-      - name: cargo-deny · excluded binding trees (report-only)
+      # policy (--config deny.toml). FINDINGS stay report-only: their upstream
+      # graphs carry advisories we surface LOUDLY (::warning annotation + job
+      # summary table + full log) but never blanket-ignore in deny.toml, and
+      # never block the pipeline on foreign-toolchain upstream churn. Triage
+      # findings; fix or escalate. A TOOL or USAGE error is not a finding: it
+      # fails the step (the unpinned loop printed "found issues" over a dead
+      # CLI and stayed green, so these graphs went unchecked).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      # The verdict comes from the stdout one-liner ("advisories ok, bans
+      # FAILED, …"), printed only once the checks RAN: the exit code alone is
+      # ambiguous — findings set a bitset (advisories 1 · bans 2 · licenses 4 ·
+      # sources 8) that overlaps a tool error (1) and a clap usage error (2).
+      # --color never: cargo-deny reads CARGO_TERM_COLOR, set to always above.
+      - name: cargo-deny · excluded binding trees (findings report-only, tool errors fail)
         run: |
+          set -uo pipefail
+          want="cargo-deny 0.20.2"
+          got=$(cargo deny --version)
+          if [ "$got" != "$want" ]; then
+            echo "::error::expected $want (the workspace action's pin), got: $got"
+            exit 1
+          fi
+          {
+            echo "### cargo-deny · excluded binding trees ($got, findings report-only)"
+            echo
+            echo '| tree | advisories | bans | licenses | sources | exit |'
+            echo '|---|---|---|---|---|---|'
+          } >> "$GITHUB_STEP_SUMMARY"
+          tool_errors=0
           for m in crates/qrcode-ai-scanner-py \
                    crates/qrcode-ai-scanner-uniffi \
                    bindings/flutter/rust; do
             echo "::group::cargo-deny $m"
-            cargo deny --manifest-path "$m/Cargo.toml" check --config deny.toml \
-              || echo "::warning file=$m/Cargo.toml::cargo-deny found issues in $m — triage (report, don't blanket-ignore)"
+            rc=0
+            cargo deny --log-level warn --color never \
+              --manifest-path "$m/Cargo.toml" --config deny.toml --all-features \
+              check advisories bans licenses sources > deny-verdict.txt || rc=$?
+            cat deny-verdict.txt
             echo "::endgroup::"
+            verdict=$(grep -E '^advisories (ok|FAILED), bans (ok|FAILED), licenses (ok|FAILED), sources (ok|FAILED)$' deny-verdict.txt || true)
+            if [ -z "$verdict" ]; then
+              echo "::error file=$m/Cargo.toml::cargo-deny never completed its checks on $m (exit $rc) — a tool or usage error, not a finding"
+              echo "| \`$m\` | — | — | — | — | $rc · tool error |" >> "$GITHUB_STEP_SUMMARY"
+              tool_errors=$((tool_errors + 1))
+              continue
+            fi
+            row="| \`$m\` |"
+            bits=0
+            for pair in advisories:1 bans:2 licenses:4 sources:8; do
+              if [[ "$verdict" == *"${pair%:*} FAILED"* ]]; then
+                bits=$((bits | ${pair#*:}))
+                row="$row **FAILED** |"
+              else
+                row="$row ok |"
+              fi
+            done
+            echo "$row $rc |" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$rc" -ne "$bits" ]; then
+              echo "::error file=$m/Cargo.toml::cargo-deny exited $rc but its own summary reads \"$verdict\" — no trustworthy verdict"
+              tool_errors=$((tool_errors + 1))
+            elif [ "$rc" -ne 0 ]; then
+              echo "::warning file=$m/Cargo.toml::cargo-deny findings in $m ($verdict) — report-only: triage, fix or escalate, never blanket-ignore"
+            fi
           done
+          if [ "$tool_errors" -gt 0 ]; then
+            echo "::error::cargo-deny could not judge $tool_errors excluded tree(s)"
+            exit 1
+          fi

@@ -47,6 +47,23 @@ fn scanner(alpha_background: AlphaBackground) -> Scanner {
         .build()
 }
 
+/// The Full profile minus its wall-clock budget. A score judgment the budget
+/// cannot complete is ABSENT and a cut envelope sweep is dropped whole, so a
+/// test pinning either would hinge on how loaded the machine is — those run
+/// unbudgeted (`envelope_absent_when_the_budget_cannot_carry_it` pins the
+/// budget seam itself).
+fn unbudgeted_full() -> ScanConfig {
+    let mut config = ScanConfig::full();
+    config.budget_ms = None;
+    config
+}
+
+fn unbudgeted_scanner() -> Scanner {
+    Scanner::builder()
+        .profile(ScanProfile::Custom(unbudgeted_full()))
+        .build()
+}
+
 const URL: &str = "https://qrcode-ai.com/alpha";
 
 /// Brief test 1 — dark modules on a canvas-style transparent background
@@ -60,7 +77,7 @@ fn dark_on_transparent_scores_like_flattened_white() {
     let transparent = qr_rgba(&luma, [0, 0, 0, 255], [0, 0, 0, 0]);
     let flattened = qr_rgba(&luma, [0, 0, 0, 255], [255, 255, 255, 255]);
 
-    let scanner = Scanner::default();
+    let scanner = unbudgeted_scanner();
     let bytes = png(&transparent);
     let report = scanner.scan(ImageInput::encoded(&bytes)).unwrap();
     let baseline = scanner
@@ -157,7 +174,7 @@ fn semi_transparent_modules_composite_and_decode() {
 #[test]
 fn exporter_invariance_under_alpha_rgb() {
     let luma = qr_luma(URL);
-    let scanner = Scanner::default();
+    let scanner = unbudgeted_scanner();
     let exports = [
         [0, 0, 0, 0],       // canvas: black under alpha
         [255, 255, 255, 0], // editor: white under alpha
@@ -194,7 +211,7 @@ fn envelope_reads_light_only_for_a_dark_design() {
     let transparent = qr_rgba(&luma, [0, 0, 0, 255], [0, 0, 0, 0]);
     let bytes = png(&transparent);
 
-    let report = Scanner::default()
+    let report = unbudgeted_scanner()
         .scan(ImageInput::encoded(&bytes))
         .unwrap();
     let envelope = report
@@ -225,7 +242,7 @@ fn envelope_is_skippable_like_any_check() {
     let transparent = qr_rgba(&luma, [0, 0, 0, 255], [0, 0, 0, 0]);
     let bytes = png(&transparent);
 
-    let mut config = ScanConfig::full();
+    let mut config = unbudgeted_full();
     config.score_skip_checks = vec![ScoreCheck::AlphaEnvelope];
     let report = Scanner::builder()
         .profile(ScanProfile::Custom(config))
@@ -309,7 +326,7 @@ fn auto_fallback_rescues_a_mis_called_mean() {
     }
     let bytes = png(&img);
 
-    let report = Scanner::default()
+    let report = unbudgeted_scanner()
         .scan(ImageInput::encoded(&bytes))
         .unwrap();
     let alpha = report.alpha.as_ref().unwrap();
@@ -368,7 +385,7 @@ fn palette_probes_answer_per_color_verdicts() {
     let transparent = qr_rgba(&luma, [0, 0, 0, 255], [0, 0, 0, 0]);
     let bytes = png(&transparent);
 
-    let mut config = ScanConfig::full();
+    let mut config = unbudgeted_full();
     config.alpha_palette = vec![
         AlphaBackground::palette_color("#f3f4f6").unwrap(),
         AlphaBackground::palette_color("black").unwrap(),
@@ -430,7 +447,7 @@ fn envelope_downscales_large_transparent_artwork() {
     let transparent = qr_rgba(&luma, [0, 0, 0, 255], [0, 0, 0, 0]);
     let bytes = png(&transparent);
 
-    let report = Scanner::default()
+    let report = unbudgeted_scanner()
         .scan(ImageInput::encoded(&bytes))
         .unwrap();
     assert_eq!(report.detections[0].content.text, URL);
@@ -513,7 +530,7 @@ fn raw_rgba8_input_flattens_identically() {
     let transparent = qr_rgba(&luma, [0, 0, 0, 255], [0, 0, 0, 0]);
     let bytes = png(&transparent);
 
-    let scanner = Scanner::default();
+    let scanner = unbudgeted_scanner();
     let from_png = scanner.scan(ImageInput::encoded(&bytes)).unwrap();
     let from_raw = scanner
         .scan(ImageInput::rgba8(

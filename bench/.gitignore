@@ -1,0 +1,4 @@
+# Bench runs and generated worker crates stay local: receipts carry payload
+# hashes of private gallery images (README « Receipts »).
+/out/
+/work/

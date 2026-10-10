@@ -292,10 +292,13 @@ mod tests {
         v
     }
 
+    // The score-asserting scans run budget-free (Some(0) = unbounded): a
+    // judgment the wall-clock budget cannot complete is absent (score: null),
+    // so under the profile budget a loaded machine would flip them.
     #[test]
     fn scan_clean_fixture_decodes_to_envelope_with_text() {
         let v = assert_envelope(
-            &scan(clean_qr(), "full".into(), None, None, None, None, None, None, None, None).unwrap(),
+            &scan(clean_qr(), "full".into(), None, None, Some(0), None, None, None, None, None).unwrap(),
         );
         let dets = v["detections"].as_array().unwrap();
         assert_eq!(dets.len(), 1, "single-QR fixture → exactly one detection");
@@ -528,7 +531,7 @@ mod tests {
                 "full".into(),
                 None,
                 None,
-                None,
+                Some(0),
                 Some(vec!["perspective".into(), "rotation".into()]),
                 None,
                 None,
@@ -575,7 +578,7 @@ mod tests {
                 "full".into(),
                 None,
                 None,
-                None,
+                Some(0),
                 None,
                 Some(vec!["uec".into(), "iso15415".into()]),
                 None,

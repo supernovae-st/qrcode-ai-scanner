@@ -1,7 +1,6 @@
 name: crates-publish
 
-# Publishes the Rust lib + CLI to crates.io on a release tag. Requires the
-# CARGO_REGISTRY_TOKEN repo secret.
+# Publishes the Rust lib + CLI to crates.io on a release tag.
 #
 # This pipeline was MISSING through v0.4.0 and v0.5.0: the README's first
 # install surface (`cargo add qrcode-ai-scanner`) silently served 0.3.0 while
@@ -11,25 +10,96 @@ name: crates-publish
 # `cargo publish` is idempotent-hostile (re-publishing an existing version is
 # a hard error), so each crate is gated on a registry existence probe — a
 # re-run tag or a partial failure resumes cleanly instead of going red.
+#
+# Publishing is tag-only: `publish` runs for refs/tags/v* alone. Any other
+# run — a workflow_dispatch from a branch included — runs `package`: the exact
+# .crate files, each built from its own archive and read back by
+# scripts/package-inspect.py, then stops. Publishing authenticates through
+# crates.io trusted publishing (GitHub OIDC → a 30-minute token, revoked when
+# the job ends): no long-lived token in the repo. Each crate binds this
+# workflow file and the `crates-io` environment on crates.io first
+# (RELEASING.md § Publishing).
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
+  # The toolchain CI tests (ci.yml RUST_TOOLCHAIN; RELEASING.md § toolchain).
+  RUST_TOOLCHAIN: "1.97.0"
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  package:
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-10
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # cargo package --locked for both crates, each verified by a build from
+      # its own archive, then the archives read back: LICENSE · README ·
+      # version · the cli's core pin · no stray files.
+      - name: package + inspect the two .crate files
+        run: python3 scripts/package-inspect.py crates --verify --strict --quiet
+
+  publish:
+    needs: package
+    # refs/tags/v* only: no other ref reaches the registry.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: crates-io
+    # One publish per tag at a time: a dispatch on the tag waits for the
+    # tag-push run instead of racing its existence probes.
+    concurrency:
+      group: publish-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write # crates.io trusted publishing (OIDC)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The tag must name the version being published, and the CHANGELOG
+      # must carry its dated section: a forgotten bump otherwise turns the
+      # skip-if-live probe below into a silent non-release.
+      - run: python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet
+      # This job can mint a crates.io token: its actions are pinned by commit,
+      # nothing is installed, and the toolchain comes from rustup itself, at
+      # the pinned version.
+      - name: Rust ${{ env.RUST_TOOLCHAIN }} through rustup
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          cargo --version
+      # The archives this job uploads, packed here (`cargo package --locked
+      # --no-verify`: no build, no build script) and read back before the
+      # crates.io token is minted, then kept aside: `cargo publish` packs
+      # them again from this same checkout with this same cargo, and each
+      # upload is compared with its inspected archive, byte for byte.
+      - name: package + inspect the two .crate files about to be uploaded
+        run: |
+          python3 scripts/package-inspect.py crates --strict --quiet
+          mkdir -p "$RUNNER_TEMP/inspected"
+          cp target/package/*.crate "$RUNNER_TEMP/inspected/"
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        id: auth
+      # --no-verify: `package` built each crate from its own archive at this
+      # very commit; a verify build here would run every dependency's build
+      # script next to the registry token. cargo packs reproducibly, and the
+      # cli's packaged lockfile pins the core by the checksum of the core
+      # archive inspected above, so each upload must be that archive: one
+      # that is not stops the job before the next crate.
       - name: publish lib then cli (skip versions already live)
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
           set -euo pipefail
           ws=$(grep -m1 -E '^version' Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
@@ -40,7 +110,23 @@ jobs:
           for crate in qrcode-ai-scanner qrcode-ai-scanner-cli; do
             if live "$crate" "$ws"; then
               echo "$crate $ws already on crates.io — skip"
+              # It must be the archive inspected here: the sparse index records
+              # each version's cksum (sha256 of the .crate). A mismatch means
+              # another publisher (e.g. an old ref's token job) uploaded it.
+              path="${crate:0:2}/${crate:2:2}/$crate"
+              index=$(curl -sSL -H "User-Agent: qrcode-ai-scanner-ci (release gate)" "https://index.crates.io/$path" || true)
+              cksum_live=$(printf '%s' "$index" | grep -F "\"vers\":\"$ws\"" | sed -nE 's/.*"cksum":"([0-9a-f]{64})".*/\1/p' | head -n1 || true)
+              cksum_local=$(sha256sum "$RUNNER_TEMP/inspected/$crate-$ws.crate" | cut -d' ' -f1)
+              if [ "$cksum_live" != "$cksum_local" ]; then
+                echo "::error::$crate $ws on crates.io ($cksum_live) is not the archive inspected here ($cksum_local): yank or align"
+                exit 1
+              fi
+              echo "$crate $ws on crates.io matches the inspected archive"
             else
-              cargo publish -p "$crate" --locked
+              cargo publish -p "$crate" --locked --no-verify
+              if ! cmp "target/package/$crate-$ws.crate" "$RUNNER_TEMP/inspected/$crate-$ws.crate"; then
+                echo "::error::$crate $ws went up, but not as the archive inspected above: compare the two, yank if needed"
+                exit 1
+              fi
             fi
           done

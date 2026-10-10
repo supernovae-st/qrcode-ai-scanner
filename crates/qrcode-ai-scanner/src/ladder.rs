@@ -685,7 +685,24 @@ impl Run<'_> {
                 break;
             }
             tried += 1;
-            if let Some(rescued) = crate::rescue::attempt(luma, candidate) {
+            // Reports retain original-space corners. Rescue samples the
+            // capped working plane, including its bounded inverted view.
+            let mut sampling = candidate.clone();
+            if (luma.width(), luma.height()) != self.orig {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "dimensions bounded by Limits::max_dimension — exact in f32"
+                )]
+                let (fx, fy) = (
+                    luma.width() as f32 / self.orig.0 as f32,
+                    luma.height() as f32 / self.orig.1 as f32,
+                );
+                for corner in &mut sampling.corners {
+                    corner.x *= fx;
+                    corner.y *= fy;
+                }
+            }
+            if let Some(rescued) = crate::rescue::attempt(luma, &sampling) {
                 found += 1;
                 self.absorb(
                     vec![RawDetection {
