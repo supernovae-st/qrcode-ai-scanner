@@ -717,7 +717,7 @@ mod tests {
 
     #[test]
     fn located_designators_decide_their_bytes_and_the_label() {
-        // P1-P15: a decoder label only when its family holds every governing
+        // Each pin: a decoder label only when its family holds every governing
         // interpretation and its decoder reproduces the text; else `eci`;
         // `unknown` only when a governed byte failed
         let pins: [Pin; 15] = [
@@ -865,7 +865,7 @@ mod tests {
 
     #[test]
     fn a_designator_governing_no_byte_never_decides_the_label() {
-        // Z1-Z8: an empty span neither decodes nor affects the label
+        // Each case: an empty span neither decodes nor affects the label
         let cases: [Pin; 8] = [
             (b"", &[(999, 0)], "", Charset::Utf8),
             (b"caf\xC3\xA9", &[(26, 0), (999, 5)], "café", Charset::Utf8),
