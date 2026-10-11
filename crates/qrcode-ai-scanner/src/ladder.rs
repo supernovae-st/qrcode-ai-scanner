@@ -2598,6 +2598,333 @@ mod ladder_mutant_kills {
         }
     }
 
+    /// v3-M, ECI 4 then byte A1: rxing's port signals the designator.
+    fn eci4_a1() -> LumaImage {
+        crate::rescue::test_symbols::from_segments(
+            qrcode::Version::Normal(3),
+            qrcode::EcLevel::M,
+            |b| {
+                b.push_eci_designator(4)?;
+                b.push_byte_data(&[0xA1])
+            },
+        )
+    }
+
+    #[test]
+    fn an_unverified_re_read_spends_one_re_read_and_moves_on() {
+        // 921:68: the port read's hint two modules off the symbol — nothing
+        // verifies there: one re-read is spent and the read stays as read
+        let luma = eci4_a1();
+        let dims = (luma.width(), luma.height());
+        let port: Vec<RawDetection> = engine::decode_filtered(&luma, engine::FormatFilter::All)
+            .detections
+            .into_iter()
+            .filter(|d| d.engine == EngineKind::Rxing)
+            .collect();
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, dims);
+        let mut reads = reads_of(&run, port, 0, dims);
+        let Some((_, Some(hint))) = reads.first_mut() else {
+            panic!("the port's read is a re-read candidate");
+        };
+        for point in &mut hint.points {
+            point.x += 12.0;
+            point.y += 12.0;
+        }
+        let mut refusals = Vec::new();
+        run.reread(&luma, &mut reads, &mut refusals);
+        assert_eq!(run.rereads, 1);
+        assert!(refusals.is_empty());
+        assert_eq!(reads[0].0.key.eci, EciEvidence::Signalled);
+        assert!(!reads[0].0.parsed);
+    }
+
+    #[test]
+    fn a_located_re_read_is_not_repeated_for_its_negative_margin() {
+        // 911:23: ECI 4 then A1 at v1-M, five codewords corrected — one past
+        // the reserve, ⌊(10 − 2)/2⌋ − 5 = −1. The declarations re-read
+        // locates the designator and measures that word: one re-read, the
+        // margin measured once
+        let data = crate::rescue::test_symbols::stream("0111 00000100 0100 00000001 10100001 0000");
+        let luma = crate::rescue::test_symbols::from_corrupted_codewords(
+            qrcode::Version::Normal(1),
+            qrcode::EcLevel::M,
+            &data,
+            &[6, 8, 10, 12, 14],
+        );
+        let dims = (luma.width(), luma.height());
+        let port: Vec<RawDetection> = engine::decode_filtered(&luma, engine::FormatFilter::All)
+            .detections
+            .into_iter()
+            .filter(|d| d.engine == EngineKind::Rxing)
+            .collect();
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, dims);
+        let mut reads = reads_of(&run, port, 0, dims);
+        assert!(
+            matches!(&reads[..], [(_, Some(hint))] if hint.declarations),
+            "{reads:?}"
+        );
+        let mut refusals = Vec::new();
+        run.reread(&luma, &mut reads, &mut refusals);
+        assert_eq!(run.rereads, 1);
+        assert!(refusals.is_empty());
+        let (read, _) = &reads[0];
+        assert_eq!(read.key.eci, eci_mark(4, 0));
+        assert_eq!(read.margin, Margin::Known(-1));
+        assert!(run.margin_rereads.is_empty(), "no margin re-read");
+    }
+
+    #[test]
+    fn a_margin_re_read_that_refuses_changes_nothing() {
+        // 913:46: the port's read of the ECI-above-the-register symbol,
+        // carried by a parse of its content where it lies, is re-read for its
+        // margin only — at v1-M the stream it samples refuses, and a margin
+        // re-read changes nothing: no read removed, no refusal recorded
+        let luma = eci_above_the_register_abc();
+        let dims = (luma.width(), luma.height());
+        let port: Vec<RawDetection> = engine::decode_filtered(&luma, engine::FormatFilter::All)
+            .detections
+            .into_iter()
+            .filter(|d| d.engine == EngineKind::Rxing)
+            .collect();
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, dims);
+        let mut reads = reads_of(&run, port, 0, dims);
+        assert!(
+            matches!(&reads[..], [(read, Some(hint))] if hint.declarations
+                && read.key.eci == EciEvidence::Signalled),
+            "{reads:?}"
+        );
+        let mut parse = Read::new(
+            Symbology::QrCode,
+            ContentKey {
+                raw: b"abc".to_vec(),
+                eci: eci_mark(3, 0),
+                fnc1: Fnc1::None,
+            },
+            Some(EngineKind::Rqrr),
+            Rank {
+                source: source::RQRR,
+                ..Rank::default()
+            },
+        )
+        .at(reads[0].0.location);
+        parse.parsed = true;
+        reads.push((parse, None));
+        let mut refusals = Vec::new();
+        run.reread(&luma, &mut reads, &mut refusals);
+        assert_eq!(run.rereads, 1, "its margin re-read");
+        assert_eq!(run.margin_rereads.len(), 1);
+        assert!(refusals.is_empty(), "{refusals:?}");
+        assert_eq!(reads.len(), 2, "nothing removed");
+        assert_eq!(reads[0].0.key.eci, EciEvidence::Signalled);
+    }
+
+    #[test]
+    fn a_re_read_learns_from_its_own_content_only() {
+        // 943:62 · 958:66: a parse of other bytes where the port read lies
+        // carries nothing, and a margin measured for other bytes measures
+        // nothing — each content is asked about on its own
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, (400, 400));
+        let at = square_at(100.0);
+        let key = |raw: &[u8], eci| ContentKey {
+            raw: raw.to_vec(),
+            eci,
+            fnc1: Fnc1::None,
+        };
+        let port = Read::new(
+            Symbology::QrCode,
+            key(b"abc", EciEvidence::Signalled),
+            Some(EngineKind::Rxing),
+            Rank::default(),
+        )
+        .at(Some(at));
+        let declarations = LocateHint {
+            points: at,
+            frame: crate::engine::locate::Frame::OuterCorners,
+            inverted: false,
+            ec: EcLevel::L,
+            versions: 1..=40,
+            modifier: Some(2),
+            declarations: true,
+        };
+        let mut other = Read::new(
+            Symbology::QrCode,
+            key(b"xyz", eci_mark(4, 0)),
+            Some(EngineKind::Rqrr),
+            Rank {
+                source: source::RQRR,
+                ..Rank::default()
+            },
+        )
+        .at(Some(at));
+        other.parsed = true;
+        other.margin = Margin::Known(0);
+        let reads = vec![(port.clone(), Some(declarations.clone())), (other, None)];
+        assert_eq!(
+            run.reread_hint(&port, &declarations, &reads),
+            Some(declarations.clone())
+        );
+        // a margin re-read: another content's earlier one leaves it to run
+        let margin = LocateHint {
+            versions: crate::engine::locate::MARGIN_VERSIONS,
+            modifier: Some(1),
+            declarations: false,
+            ..declarations
+        };
+        let plain = Read::new(
+            Symbology::QrCode,
+            key(b"abc", EciEvidence::NoEci),
+            Some(EngineKind::Rxing),
+            Rank::default(),
+        )
+        .at(Some(at));
+        run.margin_rereads
+            .push((Symbology::QrCode, key(b"xyz", EciEvidence::NoEci)));
+        let alone = vec![(plain.clone(), Some(margin.clone()))];
+        assert_eq!(
+            run.reread_hint(&plain, &margin, &alone),
+            Some(margin.clone())
+        );
+        // its own content's: none
+        run.margin_rereads
+            .push((Symbology::QrCode, key(b"abc", EciEvidence::NoEci)));
+        assert_eq!(run.reread_hint(&plain, &margin, &alone), None);
+    }
+
+    // ---- unparsed_qr ----
+
+    #[test]
+    fn an_unparsed_qr_read_is_an_engine_read_of_a_qr_code_no_parse_read() {
+        // 715: what keeps an attempt's candidates re-derived
+        let read = |symbology, engine, parsed| {
+            let key = ContentKey {
+                raw: b"abc".to_vec(),
+                eci: EciEvidence::NoEci,
+                fnc1: Fnc1::None,
+            };
+            let mut read = Read::new(symbology, key, engine, Rank::default());
+            read.parsed = parsed;
+            read
+        };
+        assert!(unparsed_qr(&read(
+            Symbology::QrCode,
+            Some(EngineKind::Rxing),
+            false
+        )));
+        assert!(unparsed_qr(&read(
+            Symbology::QrCode,
+            Some(EngineKind::Rqrr),
+            false
+        )));
+        assert!(
+            !unparsed_qr(&read(Symbology::QrCode, Some(EngineKind::Rxing), true)),
+            "parsed"
+        );
+        assert!(
+            !unparsed_qr(&read(Symbology::QrCode, None, false)),
+            "no engine"
+        );
+        assert!(
+            !unparsed_qr(&read(
+                Symbology::MicroQrCode,
+                Some(EngineKind::Rxing),
+                false
+            )),
+            "another symbology"
+        );
+    }
+
+    // ---- LadderOutcome::fold_fallback ----
+
+    #[test]
+    fn a_folded_fallback_walk_adds_its_time_and_keeps_either_cut() {
+        // 659:29: the two walks' times add up — whichever found the content
+        let outcome = |total_ms, cut| LadderOutcome {
+            merged: Vec::new(),
+            contents: Vec::new(),
+            store: ReadStore::default(),
+            rereads: 0,
+            trace: PipelineTrace {
+                stages: Vec::new(),
+                engine_panics: 1,
+                total_ms,
+                budget_exhausted: Some(cut),
+            },
+        };
+        let mut first = outcome(1.5, false);
+        assert!(!first.fold_fallback(outcome(2.25, true)), "nothing found");
+        assert_eq!(first.trace.total_ms, 3.75);
+        assert_eq!(first.trace.engine_panics, 2);
+        assert_eq!(first.trace.budget_exhausted, Some(true));
+        let mut cut = outcome(4.0, true);
+        cut.fold_fallback(outcome(0.5, false));
+        assert_eq!(cut.trace.total_ms, 4.5);
+        assert_eq!(cut.trace.budget_exhausted, Some(true));
+    }
+
+    // ---- Run::collect_attempt ----
+
+    #[test]
+    fn an_attempt_s_refusals_and_candidates_are_placed_in_original_space() {
+        // 1099:17 · 1105:60 · 1110:21 · 1111:21: the ECI 26 GS1 symbol seen
+        // by an inverting attempt at half the original size — rxing's port
+        // read is unparsed, rqrr's grid a candidate. The attempt's own
+        // unparsed QR read has the candidate re-derived (no read stands yet):
+        // its parse lies at the grid's corners in original space, stamped
+        // with the attempt's photometry, and lends them to the detection; a
+        // refusal of the attempt is recorded at its place in original space
+        let luma = eci26_gs1();
+        let dims = (luma.width(), luma.height());
+        let mut outcome = engine::decode_filtered(&luma, engine::FormatFilter::All);
+        let [candidate] = &outcome.rescue[..] else {
+            panic!("rqrr's grid: {:?}", outcome.rescue);
+        };
+        let grid = candidate.corners;
+        let elsewhere = [
+            Point { x: 1.0, y: 2.0 },
+            Point { x: 3.0, y: 2.0 },
+            Point { x: 3.0, y: 4.0 },
+            Point { x: 1.0, y: 4.0 },
+        ];
+        let zzz = ContentKey {
+            raw: b"zzz".to_vec(),
+            eci: EciEvidence::Signalled,
+            fnc1: Fnc1::None,
+        };
+        outcome.refused.push(Refusal {
+            port: Some(zzz.clone()),
+            rqrr: None,
+            place: Some(elsewhere),
+        });
+        let doubled = |corners: [Point; 4]| {
+            corners.map(|p| Point {
+                x: p.x * 2.0,
+                y: p.y * 2.0,
+            })
+        };
+        let cancel = CancelToken::new();
+        let mut run = fresh_run(&cancel, (dims.0 * 2, dims.1 * 2));
+        run.collect_attempt(&luma, outcome, true);
+        let places: Vec<_> = run
+            .store
+            .seed(0)
+            .refusals
+            .into_iter()
+            .filter(|refusal| refusal.port.as_ref() == Some(&zzz))
+            .map(|refusal| refusal.place)
+            .collect();
+        assert_eq!(places, [Some(doubled(elsewhere))]);
+        let found = run.store.reconcile();
+        let [detection] = &found[..] else {
+            panic!("one detection: {found:?}");
+        };
+        assert_eq!(detection.key.eci, eci_mark(26, 0), "the candidate's parse");
+        assert_eq!(detection.geometry.corners, Some((doubled(grid), true)));
+    }
+
     // ---- Run::collect_rescue ----
 
     #[test]
