@@ -644,10 +644,12 @@ impl LadderOutcome {
     }
 
     /// Fold a second walk (the alpha fallback) in: both walks stay in the
-    /// trace, its detections replace these only when it found some. It
-    /// started from this walk's refusals and protection ([`run_seeded`]) and
-    /// applied them place by place, so whatever it publishes already stands
-    /// against them. Returns whether the fallback found a detection.
+    /// trace — their stages, panics and time, and the cut of either (the
+    /// report is partial when the deadline prevented a planned unit of one
+    /// of them) — and its detections replace these only when it found some.
+    /// It started from this walk's refusals and protection ([`run_seeded`])
+    /// and applied them place by place, so whatever it publishes already
+    /// stands against them. Returns whether the fallback found a detection.
     pub(crate) fn fold_fallback(&mut self, fallback: LadderOutcome) -> bool {
         self.trace.stages.extend(fallback.trace.stages);
         self.trace.engine_panics = self
@@ -655,6 +657,10 @@ impl LadderOutcome {
             .engine_panics
             .saturating_add(fallback.trace.engine_panics);
         self.trace.total_ms += fallback.trace.total_ms;
+        self.trace.budget_exhausted = Some(
+            self.trace.budget_exhausted == Some(true)
+                || fallback.trace.budget_exhausted == Some(true),
+        );
         let found = !fallback.merged.is_empty();
         if found {
             self.merged = fallback.merged;
@@ -2979,6 +2985,43 @@ mod ladder_mutant_kills {
         assert!(first.fold_fallback(second), "and the fold keeps it");
         assert_eq!(first.merged.len(), 1);
         assert_eq!(first.contents[0].0, signalled);
+    }
+
+    #[test]
+    fn a_walk_the_deadline_cut_leaves_the_folded_trace_partial() {
+        // a walk whose deadline already passed plans an attempt it cannot
+        // run (no wall clock decides it): folded with another walk, the
+        // trace says the report is partial, whichever of the two was cut
+        let cancel = CancelToken::new();
+        let blank = LumaImage::new(vec![255u8; 64 * 64], 64, 64);
+        let walk = |late: bool| {
+            let mut run = if late {
+                late_run(&cancel, (64, 64))
+            } else {
+                fresh_run(&cancel, (64, 64))
+            };
+            let mut stages = Vec::new();
+            let attempts = vec![Attempt::plain(|| blank.clone())];
+            run.stage("direct", attempts, engine::FormatFilter::All, &mut stages)
+                .unwrap();
+            run.finish(stages, Instant::now()).unwrap()
+        };
+        for (first_cut, second_cut) in [(false, true), (true, false), (false, false), (true, true)]
+        {
+            let mut first = walk(first_cut);
+            let second = walk(second_cut);
+            assert_eq!(
+                (first.trace.budget_exhausted, second.trace.budget_exhausted),
+                (Some(first_cut), Some(second_cut))
+            );
+            assert!(!first.fold_fallback(second), "a blank plane: nothing found");
+            assert_eq!(
+                first.trace.budget_exhausted,
+                Some(first_cut || second_cut),
+                "first walk cut {first_cut}, second walk cut {second_cut}"
+            );
+            assert_eq!(first.trace.stages.len(), 2, "both walks stay in the trace");
+        }
     }
 
     // ---- deep_attempts ----

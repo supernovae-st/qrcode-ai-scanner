@@ -141,17 +141,17 @@ impl Scanner {
         // stream the first walk refused stays refused in the second: it
         // starts from the first walk's refusals and parsed contents.
         let mut fallback_used = false;
-        // Every planned unit the deadline prevented after the first walk —
-        // the second walk's, the judgment's, the envelope's — leaves the
-        // report partial (`trace.budget_exhausted`).
+        // Every planned unit the deadline prevents after the walks — the
+        // judgment's, the envelope's — leaves the report partial
+        // (`trace.budget_exhausted`); the walks' own cuts are in the trace.
         let mut cut = false;
         if outcome.merged.is_empty()
             && let Some(context) = &mut alpha_context
             && let Some((alt_planes, alt_background)) = context.opposite_planes()
         {
+            // the fold carries the second walk's cut into the trace
             let alt_outcome =
                 ladder::run_seeded(&alt_planes, &self.config, cancel, deadline, outcome.seed())?;
-            cut |= alt_outcome.trace.budget_exhausted == Some(true);
             if outcome.fold_fallback(alt_outcome) {
                 planes = alt_planes;
                 context.adopt_background(alt_background);
