@@ -22,7 +22,12 @@ export type ScanProfile = "full" | "fast" | "frame";
 export interface ScanOptions {
   /** Default: "full". */
   profile?: ScanProfile;
-  /** Cancels a QUEUED task; a RUNNING scan completes within its profile/budgetMs bound. */
+  /**
+   * Cancels a QUEUED task. A RUNNING scan is not interrupted: once its image
+   * is decoded, its profile/budgetMs budget stops planned work at attempt
+   * granularity, and the bounded work spec/02-profiles.md § Budget semantics
+   * lists may finish past it.
+   */
   signal?: AbortSignal;
   /**
    * Max accepted width/height in px (default 10000). Server deployments
