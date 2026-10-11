@@ -526,6 +526,11 @@ pub(crate) struct Build {
     /// `*RUSTFLAGS*`, `CARGO_PROFILE_*`, `RUSTC` and the rustc wrappers,
     /// name → sha256 of the value (a value can carry a path).
     pub(crate) env: BTreeMap<String, String>,
+    /// The package cargo built the artifact from lies under the stamped
+    /// source (a stamp refuses a build that does not); `false` in a
+    /// manifest stamped before this record.
+    #[serde(default)]
+    pub(crate) inside_source: bool,
 }
 
 /// A WASM package's build beyond its module: the binaryen that optimized
@@ -539,6 +544,11 @@ pub(crate) struct WasmBuild {
     pub(crate) rustflags: Option<String>,
     pub(crate) script_sha256: Option<String>,
     pub(crate) env: BTreeMap<String, String>,
+    /// The package directory lies under the stamped source (a stamp
+    /// refuses one that does not); `false` in a manifest stamped before
+    /// this record.
+    #[serde(default)]
+    pub(crate) inside_source: bool,
 }
 
 /// The command with every argument that holds a path cut to its last
@@ -681,14 +691,7 @@ pub(crate) fn units_of(
         else {
             continue;
         };
-        let produced = message["filenames"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .chain(std::iter::once(&message["executable"]))
-            .filter_map(|f| f.as_str())
-            .any(|f| std::fs::canonicalize(f).is_ok_and(|f| f == artifact));
-        let role = if produced {
+        let role = if produces(&message, &artifact) {
             String::from("artifact")
         } else if ROLES.contains(&package.as_str()) && message["target"]["kind"][0] == "lib" {
             package.clone()
@@ -732,9 +735,45 @@ pub(crate) fn units_of(
     Ok(units)
 }
 
+/// Whether a `compiler-artifact` message names `artifact` (canonical)
+/// among the files it produced.
+fn produces(message: &serde_json::Value, artifact: &Path) -> bool {
+    message["filenames"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(std::iter::once(&message["executable"]))
+        .filter_map(|f| f.as_str())
+        .any(|f| std::fs::canonicalize(f).is_ok_and(|f| f == artifact))
+}
+
+/// The package manifest (`manifest_path`) cargo reports for the unit that
+/// produced `artifact`.
+fn package_manifest(stream: &str, artifact: &Path) -> Option<PathBuf> {
+    let artifact = std::fs::canonicalize(artifact).ok()?;
+    stream
+        .lines()
+        .filter(|l| l.starts_with('{'))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|m| m["reason"] == "compiler-artifact")
+        .find(|m| produces(m, &artifact))
+        .and_then(|m| m["manifest_path"].as_str().map(PathBuf::from))
+}
+
+/// Whether `path` lies under `dir`, both resolved.
+fn within(path: &Path, dir: &Path) -> bool {
+    match (std::fs::canonicalize(path), std::fs::canonicalize(dir)) {
+        (Ok(path), Ok(dir)) => path.starts_with(dir),
+        _ => false,
+    }
+}
+
 /// Run `command` (a cargo build) and stamp the artifact it produced: the
 /// profile, overrides and features come from the build itself — its
-/// arguments and cargo's JSON messages — never from a declaration.
+/// arguments and cargo's JSON messages — never from a declaration. The
+/// artifact's package must lie under `source`, the source the manifest
+/// names: a base archive sits outside any git tree, so nothing else ties a
+/// build to it.
 pub(crate) fn stamp_build(
     artifact: &Path,
     source: &Path,
@@ -756,11 +795,13 @@ pub(crate) fn stamp_build(
     if !out.status.success() {
         return Err(format!("the build failed ({})", out.status));
     }
-    let units = units_of(
-        &String::from_utf8_lossy(&out.stdout),
-        artifact,
-        &checkout_of,
-    )?;
+    let stream = String::from_utf8_lossy(&out.stdout);
+    let units = units_of(&stream, artifact, &checkout_of)?;
+    if !package_manifest(&stream, artifact).is_some_and(|manifest| within(&manifest, source)) {
+        return Err(String::from(
+            "the artifact's package lies outside --source: the manifest would name a source the build did not read",
+        ));
+    }
     let mut manifest = stamp(
         artifact,
         source,
@@ -771,6 +812,7 @@ pub(crate) fn stamp_build(
         command: redacted(command),
         units,
         env: build_env(std::env::vars_os()),
+        inside_source: true,
     });
     Ok(manifest)
 }
@@ -807,7 +849,8 @@ pub(crate) fn script_recipe(script: &str) -> (Vec<String>, Option<String>) {
 
 /// Run `command` (the WASM build script) and stamp the package it built in
 /// `package`: the module's facts, the toolchain, `wasm-opt --version` from
-/// `wasm_opt` (on the build's PATH), and the script's recipe.
+/// `wasm_opt` (on the build's PATH), and the script's recipe. The package
+/// must lie under `source`, the source the manifest names.
 pub(crate) fn stamp_wasm(
     package: &Path,
     source: &Path,
@@ -824,6 +867,11 @@ pub(crate) fn stamp_wasm(
         .map_err(|e| format!("the build: {}", e.kind()))?;
     if !status.success() {
         return Err(format!("the build failed ({status})"));
+    }
+    if !within(package, source) {
+        return Err(String::from(
+            "the package lies outside --source: the manifest would name a source the build did not read",
+        ));
     }
     let module = super::run::binary_of(package)?;
     let mut manifest = stamp(&module, source, &[], &[String::from("default")])?;
@@ -842,6 +890,7 @@ pub(crate) fn stamp_wasm(
         rustflags,
         script_sha256: script.as_deref().map(external::sha256_bytes),
         env: build_env(std::env::vars_os()),
+        inside_source: true,
     });
     Ok(manifest)
 }
@@ -1359,6 +1408,7 @@ mod tests {
                 .map(|role| ((*role).to_owned(), unit(role, *role == "rxing")))
                 .collect(),
             env: BTreeMap::new(),
+            inside_source: true,
         }
     }
 
@@ -1473,6 +1523,7 @@ mod tests {
         let message = |id: &str, kind: &str, overflow: bool, file: &str| {
             serde_json::json!({
                 "reason": "compiler-artifact", "package_id": id,
+                "manifest_path": dir.join("src").join("Cargo.toml"),
                 "target": {"kind": [kind], "name": "x"},
                 "profile": {"opt_level": "3", "debuginfo": 0, "debug_assertions": false, "overflow_checks": overflow, "test": false},
                 "features": ["default"], "filenames": [file], "executable": null, "fresh": true,
@@ -1691,6 +1742,7 @@ mod tests {
             rustflags: Some(String::from("-C target-feature=+simd128")),
             script_sha256: None,
             env: BTreeMap::new(),
+            inside_source: true,
         });
         m
     }
@@ -1827,6 +1879,73 @@ mod tests {
             Some("-C target-feature=+simd128")
         );
         assert_eq!(built.command, vec!["sh", "…/build-wasm.sh"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stamp names the source the build read: the package manifest cargo
+    /// reports for the unit that produced the artifact, and a WASM package
+    /// directory, lie under `--source`, or the stamp is refused — the base
+    /// archive is extracted outside any git tree, so nothing else ties a
+    /// build to it.
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn a_stamp_refuses_a_build_outside_its_source() {
+        let dir = std::env::temp_dir().join(format!("qrscan-bench-outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let source = dir.join("v0.9.0");
+        let elsewhere = dir.join("tree");
+        for root in [&source, &elsewhere] {
+            let package = root.join("crates/qrcode-ai-scanner-node");
+            std::fs::create_dir_all(&package).expect("dir");
+            std::fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("manifest");
+            std::fs::write(package.join("Cargo.toml"), "[package]\n").expect("package");
+        }
+        let artifact = dir.join("addon.node");
+        std::fs::write(&artifact, b"bin").expect("artifact");
+        let cargo = |root: &Path| -> Vec<String> {
+            let message = serde_json::json!({
+                "reason": "compiler-artifact",
+                "package_id": "path+file:///x/crates/qrcode-ai-scanner-node#0.9.0",
+                "manifest_path": root.join("crates/qrcode-ai-scanner-node/Cargo.toml"),
+                "target": {"kind": ["cdylib"], "name": "x"},
+                "profile": {"opt_level": "3", "debuginfo": 0, "debug_assertions": false, "overflow_checks": false, "test": false},
+                "features": [], "filenames": [artifact.to_str().expect("utf-8")], "executable": null, "fresh": true,
+            });
+            let script = dir.join("fake-cargo.sh");
+            std::fs::write(&script, format!("#!/bin/sh\ncat <<'EOF'\n{message}\nEOF\n"))
+                .expect("script");
+            ["sh", script.to_str().expect("utf-8"), "build", "--release"]
+                .map(String::from)
+                .to_vec()
+        };
+        assert!(stamp_build(&artifact, &source, &cargo(&source)).is_ok());
+        assert!(
+            stamp_build(&artifact, &source, &cargo(&elsewhere))
+                .is_err_and(|e| e.contains("--source")),
+            "a build of another tree stamped with the archive as its source"
+        );
+        let wasm = |package: &Path| -> Result<Manifest, String> {
+            std::fs::create_dir_all(package).expect("package");
+            let script = dir.join("build-wasm.sh");
+            std::fs::write(
+                &script,
+                format!(
+                    "printf '\\000asm\\001\\000\\000\\000' > {}/w_bg.wasm\n",
+                    package.display()
+                ),
+            )
+            .expect("script");
+            let command = vec![
+                String::from("sh"),
+                script.to_str().expect("utf-8").to_owned(),
+            ];
+            stamp_wasm(package, &source, &command, "true")
+        };
+        assert!(wasm(&source.join("pkg")).is_ok());
+        assert!(
+            wasm(&elsewhere.join("pkg")).is_err_and(|e| e.contains("--source")),
+            "a package built in another tree"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

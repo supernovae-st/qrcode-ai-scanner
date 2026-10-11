@@ -1069,7 +1069,8 @@ fn scanner_unit(stamp: &manifest::Manifest) -> ScannerUnit<'_> {
 /// Why a base artifact is not the v0.9.0 release: the library worker and
 /// the CLI link the registry 0.9.0 scanner, the CLI comes from the
 /// published crate (its sha256 pin), the Node addon and the WASM package
-/// from the `git archive` of the release commit.
+/// from the `git archive` of the release commit — which sits outside any
+/// git tree, so their build record must say the build happened inside it.
 fn base_source(runtime: Runtime, stamp: &manifest::Manifest) -> Vec<String> {
     let base = super::BASE_VERSION;
     let id = &stamp.source;
@@ -1084,6 +1085,16 @@ fn base_source(runtime: Runtime, stamp: &manifest::Manifest) -> Vec<String> {
             "built from {} {}, not the v{base} release",
             id.kind,
             short(&id.sha)
+        ));
+    }
+    let outside = match runtime {
+        Runtime::Node => stamp.build.as_ref().is_some_and(|b| !b.inside_source),
+        Runtime::Wasm => stamp.wasm_build.as_ref().is_some_and(|w| !w.inside_source),
+        Runtime::Lib | Runtime::Cli => false,
+    };
+    if outside {
+        found.push(String::from(
+            "its manifest does not record a build inside its source — stamp it again",
         ));
     }
     if matches!(runtime, Runtime::Lib | Runtime::Cli) {
@@ -4112,6 +4123,7 @@ mod tests {
                 command: Vec::new(),
                 units: BTreeMap::from([(String::from("qrcode-ai-scanner"), unit(s))]),
                 env: BTreeMap::new(),
+                inside_source: true,
             }),
             wasm_build: None,
         }
@@ -4212,6 +4224,50 @@ mod tests {
             Vec::<String>::new(),
             "a manifest without a build record is left to the manifest findings"
         );
+    }
+
+    /// The Node and WASM bases come from an archive outside any git tree:
+    /// their build record must say the build happened inside the stamped
+    /// source, as every stamp now records; one stamped before that record
+    /// is refused. A candidate is tied to the measured tree instead.
+    #[test]
+    fn a_node_or_wasm_base_records_a_build_inside_its_source() {
+        let archive = ("archive", super::super::BASE_COMMIT, "clean");
+        let refused = vec![String::from(
+            "source: base: its manifest does not record a build inside its source — stamp it again",
+        )];
+        let mut node = stamped(archive, Some(("0.9.0", "path", None)));
+        assert!(identity_of((Runtime::Node, Variant::Base), &node, None).is_empty());
+        if let Some(build) = node.build.as_mut() {
+            build.inside_source = false;
+        }
+        assert_eq!(
+            identity_of((Runtime::Node, Variant::Base), &node, None),
+            refused
+        );
+        let mut wasm = stamped(archive, None);
+        wasm.wasm_build = Some(manifest::WasmBuild {
+            command: Vec::new(),
+            wasm_opt: None,
+            wasm_opt_flags: Vec::new(),
+            rustflags: None,
+            script_sha256: None,
+            env: BTreeMap::new(),
+            inside_source: true,
+        });
+        assert!(identity_of((Runtime::Wasm, Variant::Base), &wasm, None).is_empty());
+        if let Some(build) = wasm.wasm_build.as_mut() {
+            build.inside_source = false;
+        }
+        assert_eq!(
+            identity_of((Runtime::Wasm, Variant::Base), &wasm, None),
+            refused
+        );
+        let mut candidate = stamped(("git", "c0ffee", "clean"), Some(("0.9.0", "path", None)));
+        if let Some(build) = candidate.build.as_mut() {
+            build.inside_source = false;
+        }
+        assert!(identity_of((Runtime::Node, Variant::Candidate), &candidate, None).is_empty());
     }
 
     /// Swapped, mislabelled and dirty sides are refused by name: library

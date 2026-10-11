@@ -44,7 +44,12 @@ release — the library worker and the CLI link `qrcode-ai-scanner` 0.9.0
 from crates.io (the unit cargo reported, with its package source), the
 CLI is the published crate (its sha256 pinned to the checksum crates.io
 lists), the Node addon and the WASM package are built from the `git
-archive` of the release commit. Every candidate artifact must come from
+archive` of the release commit. That archive is extracted outside any git
+tree, so a stamp ties a build to its `--source` instead: it refuses an
+artifact whose package manifest, as cargo reports it for the unit that
+produced the artifact, or a WASM package directory, lies outside that
+source, and a gated run refuses a Node or WASM base whose manifest does
+not record a build inside its source. Every candidate artifact must come from
 the measured tree at the commit the run records, with a clean source — a
 library worker from its generated crate and a scanner unit built from that
 tree. Every source must be unchanged since the harness wrote or extracted
