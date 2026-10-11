@@ -2103,4 +2103,170 @@ mod tests {
         let reads = [upce(0, raw, 512), upce(1, raw, 552), upce(2, raw, 1024)];
         assert_eq!(every_order(&reads, &[]).len(), 1);
     }
+
+    #[test]
+    fn a_fold_unites_the_parse_keeps_eight_places_and_waits_only_if_both_wait() {
+        // one read parsed and one not, identical otherwise: the stream was
+        // parsed, whichever folds in
+        let unparsed = read(0, A1, NoEci, X, L);
+        let mut parsed_too = read(1, A1, NoEci, X, L);
+        parsed_too.parsed = true;
+        let mut folded = unparsed.clone();
+        folded.fold(parsed_too.clone());
+        assert!(folded.parsed);
+        let mut folded = parsed_too;
+        folded.fold(unparsed);
+        assert!(folded.parsed);
+        // a read that needs no confirmation clears the wait; two that wait,
+        // wait
+        let mut waiting = upce(0, b"04917052", 512);
+        let mut settled = upce(1, b"04917052", 512);
+        settled.needs_confirmation = false;
+        waiting.fold(settled);
+        assert!(!waiting.needs_confirmation);
+        let mut waiting = upce(0, b"04917052", 512);
+        waiting.fold(upce(1, b"04917052", 640));
+        assert!(waiting.needs_confirmation);
+        // nine symbols, 200 px apart: the first eight places are kept
+        let mut many = read(0, A1, NoEci, X, Some(0.0));
+        for (n, x) in (1u32..).zip([200.0, 400.0, 600.0, 800.0, 1000.0, 1200.0, 1400.0, 1600.0]) {
+            many.fold(read(n, A1, NoEci, X, Some(x)));
+        }
+        assert_eq!(many.places.len(), MAX_PLACES);
+        assert_eq!(many.places.last().map(|place| place[0].x), Some(1400.0));
+    }
+
+    #[test]
+    fn a_refused_stream_remembers_eight_symbols_then_withholds_anywhere() {
+        let mut refused = Refused::new(port(b"abc", Some(0.0)), 0);
+        // a second symbol: both remembered, a read elsewhere is not held
+        refused.again(Some(square_at(200.0)), 1);
+        assert_eq!(refused.places.as_ref().map(Vec::len), Some(2));
+        assert!(refused.holds(square_at(200.0)) && !refused.holds(square_at(400.0)));
+        for (attempt, x) in (2u32..).zip([400.0, 600.0, 800.0, 1000.0, 1200.0, 1400.0]) {
+            refused.again(Some(square_at(x)), attempt);
+        }
+        assert_eq!(refused.places.as_ref().map(Vec::len), Some(MAX_PLACES));
+        assert!(!refused.holds(square_at(1600.0)));
+        // a ninth symbol: refused at more than it remembers, anywhere
+        refused.again(Some(square_at(1600.0)), 8);
+        assert!(refused.places.is_none());
+        assert!(refused.holds(square_at(5000.0)));
+        assert_eq!(refused.attempt, 8);
+    }
+
+    #[test]
+    fn rqrr_s_part_is_withheld_only_by_rqrr_s_own_bytes() {
+        // a refusal naming another content where an rqrr read lies: no part
+        // of that read is withheld, whichever name the refusal carries
+        for refusal in [
+            port(b"xyz", L),
+            Refusal {
+                port: None,
+                rqrr: Some(b"xyz".to_vec()),
+                place: L.map(square_at),
+            },
+        ] {
+            let store = store_with(read(0, A1, Unobserved, Q, L), refusal.clone());
+            assert_eq!(
+                published(&store),
+                [(A1.to_vec(), vec![Rqrr])],
+                "{refusal:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_margin_counts_for_a_standing_read_of_the_same_content_within_the_reserve() {
+        let asked = read(9, A1, NoEci, X, L);
+        let measured = |read: Read| store([read], &[]).has_margin(&asked);
+        assert!(measured(margin(read(0, A1, NoEci, Q, L), 0)));
+        // another content within the reserve, the same one past it or not
+        // measured at all: no margin to rely on
+        assert!(!measured(margin(read(0, E_ACUTE, NoEci, Q, L), 0)));
+        assert!(!measured(margin(read(0, A1, eci4(), Q, L), 0)));
+        assert!(!measured(margin(read(0, A1, NoEci, Q, L), -1)));
+        assert!(!measured(read(0, A1, NoEci, Q, L)));
+        // a read the refusals withhold does not stand
+        let withheld = store_with(margin(read(0, A1, Signalled, Q, L), 0), port(A1, L));
+        assert!(!withheld.has_margin(&read(9, A1, Signalled, X, L)));
+    }
+
+    #[test]
+    fn an_unparsed_qr_read_is_a_standing_qr_code_engine_read_no_parse_read() {
+        let unparsed = |read: Read| store([read], &[]).unparsed_qr();
+        assert!(unparsed(read(0, A1, NoEci, X, L)));
+        assert!(unparsed(read(0, A1, NoEci, Q, L)));
+        assert!(!unparsed(parsed(read(0, A1, NoEci, X, L))), "parsed");
+        let mut bare = read(0, A1, NoEci, C, L);
+        bare.parsed = false;
+        assert!(!unparsed(bare), "no engine");
+        let mut micro = read(0, A1, NoEci, X, L);
+        micro.symbology = Symbology::MicroQrCode;
+        assert!(!unparsed(micro), "another symbology");
+        assert!(!ReadStore::default().unparsed_qr());
+        let withheld = store_with(read(0, A1, Signalled, X, L), port(A1, L));
+        assert!(!withheld.unparsed_qr(), "withheld");
+    }
+
+    #[test]
+    fn a_read_of_unknown_evidence_joins_only_a_detection_of_its_fnc1_position() {
+        // a located GS1 detection at L and an rqrr read of its bytes there:
+        // unobserved evidence agrees, FNC1 none does not — two detections
+        let gs1 = fnc1(parsed(read(0, A1, eci4(), X, L)), Fnc1::First);
+        let found = every_order(&[gs1.clone(), read(1, A1, Unobserved, Q, L)], &[]);
+        assert_eq!(engines(&found), [vec![Rxing], vec![Rqrr]]);
+        // a position unknown, a located account it does not agree with: the
+        // same
+        let declared = fnc1(read(1, A1, NoEci, Q, L), Fnc1::Unobserved);
+        let found = every_order(&[gs1, declared], &[]);
+        assert_eq!(engines(&found), [vec![Rxing], vec![Rqrr]]);
+    }
+
+    #[test]
+    fn reads_forming_a_detection_of_one_identity_form_one() {
+        // reconciled as given: identical reads would fold in a store first
+        // signalled reads of one position, no located detection: one
+        let found = reconcile(vec![
+            read(0, A1, Signalled, X, L),
+            read(1, A1, Signalled, Q, L),
+        ]);
+        assert_eq!(engines(&found), [vec![Rxing, Rqrr]]);
+        // of two positions: two
+        let found = reconcile(vec![
+            read(0, A1, Signalled, X, L),
+            fnc1(read(1, A1, Signalled, Q, L), Fnc1::First),
+        ]);
+        assert_eq!(engines(&found), [vec![Rxing], vec![Rqrr]]);
+        // unobserved reads with nothing formed before them: one per identity
+        let found = reconcile(vec![
+            read(0, A1, Unobserved, Q, L),
+            read(1, A1, Unobserved, X, L),
+        ]);
+        assert_eq!(engines(&found), [vec![Rqrr, Rxing]]);
+    }
+
+    #[test]
+    fn a_detection_s_engine_reading_is_its_reads_one_reading() {
+        // reconciled as given: identical reads would fold in a store first
+        let with = |n, engine, reading| engine_reading(read(n, YAMADA, NoEci, engine, L), reading);
+        let found = reconcile(vec![
+            with(0, X, EngineReading::ShiftJis),
+            with(1, Q, EngineReading::ShiftJis),
+        ]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].engine_reading, EngineReading::ShiftJis);
+        let found = reconcile(vec![
+            with(0, X, EngineReading::ShiftJis),
+            with(1, Q, EngineReading::Gb18030),
+        ]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].engine_reading, EngineReading::None);
+        // a read without one says nothing either way
+        let found = reconcile(vec![
+            with(0, X, EngineReading::None),
+            with(1, Q, EngineReading::Gb18030),
+        ]);
+        assert_eq!(found[0].engine_reading, EngineReading::Gb18030);
+    }
 }
