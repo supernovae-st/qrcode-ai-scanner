@@ -301,7 +301,7 @@ fn content_lines(content: &DecodedContent) -> Vec<String> {
             None => {}
         }
         if content.charset.is_lossy() {
-            line.push_str(" · no verified text (raw: --json)");
+            line.push_str(" · no verified text (raw: in the JSON report, run without --pretty)");
         }
         lines.push(line);
     }

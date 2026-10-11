@@ -579,7 +579,7 @@ fn pretty_names_the_charset_and_the_declarations() {
     assert_line(&lines, "content   \u{FFFD}");
     assert_line(
         &lines,
-        "charset   unknown · ECI 999@0 · no verified text (raw: --json)",
+        "charset   unknown · ECI 999@0 · no verified text (raw: in the JSON report, run without --pretty)",
     );
     // FNC1 in second position
     let lines = pretty_lines(&symbol_png("fnc1-second", |b| {
