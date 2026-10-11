@@ -8,7 +8,11 @@ and a baseline failure (exit 4) would have read green too. This gate reads
 every shard's outcomes.json and judges them together. It FAILS when:
 
   * a shard directory or its outcomes.json is missing or unreadable (the
-    shard died, timed out before its upload, or never started testing);
+    shard died, timed out before its upload, or never started testing) —
+    unless cargo-mutants' own mutants.json, the list of the mutants that
+    shard was given, is empty and its recorded exit code is 0: that shard
+    had nothing to test (fewer mutants than shards), and the report names
+    it empty, never a problem;
   * a shard did not finish (no `end_time`: killed mid-run, partial verdict);
   * a baseline did not pass (the unmutated suite is already red, so no
     mutant verdict means anything — cargo-mutants exit 4);
@@ -28,6 +32,18 @@ sibling. An anchor that drifts goes stale in the SAFE direction — the mutant
 resurfaces undispositioned, the report names the stale entry it probably
 was, and a human re-anchors it. Stale entries are listed, never failed.
 
+An `equivalent` entry can also be anchored by an exclusion in the
+cargo-mutants policy (`--exclusions .cargo/mutants.toml`): the run never
+generates it, and the entry records why the exclusion exists. With the
+policy given, such an entry is listed as excluded and documented, not
+stale — when an `exclude_re` pattern matches its name, no shard tested it,
+no undispositioned mutant came back with its file and mutation elsewhere,
+and the checkout still holds it (the anchored line, and the operator a
+`replace OP with …` or `delete OP` mutation names at its column). Stale
+stays for an entry the run reports caught or unviable, and for one whose
+code moved or is gone; an excluded entry of another category stays stale
+too: only an equivalent may be documented by an exclusion.
+
   category            covers            meaning
   equivalent          MISSED            no deterministic test can tell it apart
   timeout-structural  TIMEOUT           it can only show up as a hang; the
@@ -36,12 +52,13 @@ was, and a human re-anchors it. Stale entries are listed, never failed.
                                         excused
 
 Usage:
-  check-mutants-outcome.py --dispositions FILE [--markdown FILE] DIR...
+  check-mutants-outcome.py --dispositions FILE [--exclusions FILE] [--markdown FILE] DIR...
   check-mutants-outcome.py --self-test
 
-Each DIR is a cargo-mutants output directory (holding outcomes.json) or a
-directory holding one as mutants.out/ — the deep-checks artifact layout,
-next to the shard's mutants-exit-code.txt.
+Each DIR is a cargo-mutants output directory (holding outcomes.json, or
+only mutants.json for a shard given no mutant) or a directory holding one
+as mutants.out/ — the deep-checks artifact layout, next to the shard's
+mutants-exit-code.txt, which an empty shard must also carry, reading 0.
 
 Exit 0 green · 1 red · 2 cannot judge (usage, a malformed dispositions file,
 an outcomes.json shape this script does not know). Stdlib only, Python ≥ 3.11.
@@ -66,7 +83,11 @@ except ModuleNotFoundError:  # Python < 3.11
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DISPOSITIONS = ROOT / ".cargo" / "mutants-dispositions.toml"
+POLICY = ROOT / ".cargo" / "mutants.toml"
 EXIT_CODE_FILE = "mutants-exit-code.txt"
+# cargo-mutants writes the mutants a shard was given here before any build;
+# an empty list is its own record that the shard had nothing to test.
+MUTANTS_LIST = "mutants.json"
 
 # The outcomes each category may excuse. A timeout-structural entry that
 # comes back MISSED is a hang that stopped hanging — a survivor, not a catch.
@@ -101,6 +122,10 @@ VERDICT_EXIT_CODES = frozenset({0, 2, 3})
 
 NAME_RE = re.compile(r"^(?P<file>[^:]+):(?P<line>\d+):(?P<column>\d+): (?P<mutation>.+)$")
 FIELDS = {"file": str, "line": int, "column": int, "mutation": str, "category": str, "reason": str}
+# A mutation that names the operator it changes at its column:
+# `replace + with * in f`, `delete ! in f`. A replaced body
+# (`replace f -> T with v`) or a deleted match arm names none.
+OPERATOR_RE = re.compile(r"^(?:replace|delete) (?P<op>\S+)(?: with \S+)? in ")
 
 
 class Unjudgeable(Exception):
@@ -134,6 +159,8 @@ class Shard:
     counts: dict[str, int] = dataclasses.field(default_factory=lambda: dict.fromkeys(COLUMNS, 0))
     outcomes: dict[Key, str] = dataclasses.field(default_factory=dict)
     problems: list[str] = dataclasses.field(default_factory=list)
+    # cargo-mutants gave it no mutant (an empty mutants.json, exit 0)
+    empty: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -150,10 +177,40 @@ class Verdict:
     covered: dict[Key, Disposition]
     findings: list[Finding]
     stale: list[tuple[Disposition, str]]
+    # equivalents the policy also excludes, with the matching pattern
+    excluded: list[tuple[Disposition, str]] = dataclasses.field(default_factory=list)
 
     @property
     def green(self) -> bool:
         return not self.findings and not any(s.problems for s in self.shards)
+
+
+@dataclasses.dataclass(frozen=True)
+class Exclusions:
+    """The `exclude_re` patterns of a cargo-mutants policy, and the checkout
+    they apply to (the directory holding its `.cargo/`)."""
+
+    patterns: tuple[str, ...]
+    root: pathlib.Path
+
+    def matching(self, key: Key) -> str | None:
+        """The first pattern that drops this mutant from a run — searched,
+        like cargo-mutants, unanchored in its `file:line:col: mutation` name."""
+        return next((p for p in self.patterns if re.search(p, str(key))), None)
+
+    def holds(self, key: Key) -> bool:
+        """Whether the checkout still holds the anchored mutation: the file
+        has the line, and a mutation that names an operator finds it at the
+        column (1-based characters, as cargo-mutants prints them). A
+        replaced body or a deleted match arm is checked by its line only."""
+        try:
+            lines = (self.root / key.file).read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            return False
+        if not 1 <= key.line <= len(lines):
+            return False
+        operator = OPERATOR_RE.match(key.mutation)
+        return operator is None or lines[key.line - 1][key.column - 1 :].startswith(operator["op"])
 
 
 # ─────────────────────────── inputs ───────────────────────────
@@ -195,6 +252,34 @@ def load_dispositions(path: pathlib.Path) -> dict[Key, Disposition]:
     return out
 
 
+def load_exclusions(path: pathlib.Path) -> Exclusions:
+    """The `exclude_re` list of a cargo-mutants policy file; the checkout it
+    applies to is the directory holding the file's `.cargo/`."""
+    try:
+        doc = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        raise Unjudgeable(f"{path}: {e}") from e
+    patterns = doc.get("exclude_re", [])
+    if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
+        raise Unjudgeable(f"{path}: `exclude_re` must be an array of strings")
+    for pattern in patterns:
+        try:
+            re.compile(pattern)
+        except re.error as e:
+            raise Unjudgeable(f"{path}: exclude_re {pattern!r}: {e}") from e
+    return Exclusions(tuple(patterns), path.resolve().parent.parent)
+
+
+def mutant_listing(path: pathlib.Path) -> list | None:
+    """cargo-mutants' list of the mutants a shard was given, or None when it
+    is absent, unreadable or not a list."""
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    return doc if isinstance(doc, list) else None
+
+
 def mutant_key(mutant: object) -> Key:
     name = mutant.get("name") if isinstance(mutant, dict) else None
     match = NAME_RE.match(name) if isinstance(name, str) else None
@@ -209,7 +294,8 @@ def load_shard(label: str) -> Shard:
     if not root.is_dir():
         shard.problems.append("no artifact — the shard died, timed out before its upload, or never ran")
         return shard
-    out = root if (root / "outcomes.json").is_file() else root / "mutants.out"
+    own = any((root / name).is_file() for name in ("outcomes.json", MUTANTS_LIST))
+    out = root if own else root / "mutants.out"
     marker = root / EXIT_CODE_FILE
     if marker.is_file():
         text = marker.read_text(encoding="utf-8", errors="replace").strip()
@@ -226,7 +312,7 @@ def load_shard(label: str) -> Shard:
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        shard.problems.append("no outcomes.json — cargo-mutants never started testing")
+        empty_or_problem(shard, mutant_listing(out / MUTANTS_LIST), artifact=out != root)
         return shard
     except (OSError, UnicodeDecodeError, ValueError) as e:
         shard.problems.append(f"unreadable outcomes.json ({e})")
@@ -266,10 +352,29 @@ def load_shard(label: str) -> Shard:
     return shard
 
 
+def empty_or_problem(shard: Shard, listing: list | None, *, artifact: bool) -> None:
+    """A shard without outcomes.json: empty when cargo-mutants listed no
+    mutant for it and exited 0 (it returns before any build), a problem
+    otherwise. In the artifact layout the recorded exit code is required:
+    without it nothing shows that cargo-mutants finished."""
+    if listing != []:
+        shard.problems.append("no outcomes.json — cargo-mutants never started testing")
+    elif shard.exit_code == 0 or (shard.exit_code is None and not artifact):
+        shard.empty, shard.baseline = True, "none"
+    elif shard.exit_code is None:
+        shard.problems.append(f"{MUTANTS_LIST} lists no mutant, but no {EXIT_CODE_FILE} shows that cargo-mutants finished")
+    elif shard.exit_code in VERDICT_EXIT_CODES:
+        meaning = EXIT_MEANINGS[shard.exit_code]
+        shard.problems.append(f"{MUTANTS_LIST} lists no mutant, yet cargo-mutants exited {shard.exit_code} ({meaning})")
+    # any other exit code is already a problem: a tool-level failure
+
+
 # ─────────────────────────── the gate ───────────────────────────
 
 
-def judge(shards: list[Shard], dispositions: dict[Key, Disposition]) -> Verdict:
+def judge(
+    shards: list[Shard], dispositions: dict[Key, Disposition], exclusions: Exclusions | None = None
+) -> Verdict:
     seen: dict[Key, tuple[str, str]] = {}
     for shard in shards:
         for key, bucket in shard.outcomes.items():
@@ -290,22 +395,49 @@ def judge(shards: list[Shard], dispositions: dict[Key, Disposition]) -> Verdict:
         else:
             covered[key] = disposition
     fates = {"caught": "now CAUGHT — delete the entry", "unviable": "now UNVIABLE"}
-    stale = [
-        (d, fates[seen[k][0]] if k in seen else "not generated by these shards (excluded, moved or removed)")
-        for k, d in sorted(dispositions.items())
-        if k not in seen or seen[k][0] in fates
-    ]
-    return Verdict(shards, covered, findings, stale)
+    # entry → the undispositioned mutant it most likely became
+    drifted = {k: f.key for f in findings for k in drift_candidates(f.key, dispositions, seen)}
+    stale: list[tuple[Disposition, str]] = []
+    excluded: list[tuple[Disposition, str]] = []
+    for key, disposition in sorted(dispositions.items()):
+        if key in seen:
+            if seen[key][0] in fates:
+                stale.append((disposition, fates[seen[key][0]]))
+            continue
+        if exclusions is None:
+            stale.append((disposition, "not generated by these shards (excluded, moved or removed)"))
+            continue
+        pattern = exclusions.matching(key)
+        if pattern is None:
+            stale.append((disposition, "not generated and not excluded — its code moved or is gone"))
+        elif disposition.category != "equivalent":
+            why = f"excluded by {pattern!r}, but only an equivalent may be: this `{disposition.category}` mutant goes unmeasured"
+            stale.append((disposition, why))
+        elif key in drifted:
+            moved = drifted[key]
+            why = f"excluded, but the same mutation came back undispositioned at {moved.line}:{moved.column} — re-anchor the exclusion and the entry"
+            stale.append((disposition, why))
+        elif not exclusions.holds(key):
+            stale.append((disposition, "excluded, but the checkout no longer holds it there — its code moved or is gone"))
+        else:
+            excluded.append((disposition, pattern))
+    return Verdict(shards, covered, findings, stale, excluded)
 
 
-def drift_hint(key: Key, dispositions: dict[Key, Disposition], seen: dict[Key, tuple[str, str]]) -> str:
-    """Same file + mutation text on an anchor that matched nothing here: most
-    likely that entry, moved by an edit above it. Never applied, only named."""
-    moved = sorted(
+def drift_candidates(key: Key, dispositions: dict[Key, Disposition], seen: dict[Key, tuple[str, str]]) -> list[Key]:
+    """Entries on the same file + mutation text whose anchor matched nothing
+    here: most likely the entry `key` was, moved by an edit above it."""
+    return sorted(
         d.key
         for d in dispositions.values()
         if d.key.file == key.file and d.key.mutation == key.mutation and d.key not in seen
     )
+
+
+def drift_hint(key: Key, dispositions: dict[Key, Disposition], seen: dict[Key, tuple[str, str]]) -> str:
+    """The stale entry an undispositioned mutant probably was. Never applied,
+    only named."""
+    moved = drift_candidates(key, dispositions, seen)
     if not moved:
         return "no disposition"
     anchors = ", ".join(f"{k.line}:{k.column}" for k in moved)
@@ -341,12 +473,18 @@ def render_text(verdict: Verdict) -> str:
     totals = "".join(f"{sum(s.counts[c] for s in verdict.shards):>10}" for c in COLUMNS)
     lines.append(f"  {'total':<{width}}  {'':<8}{totals}")
     lines.append(f"dispositioned {len(verdict.covered)}: {category_counts(verdict)}")
+    empty = [s.label for s in verdict.shards if s.empty]
+    if empty:
+        lines.append(f"empty shards {len(empty)} (cargo-mutants listed no mutant, exit 0): {', '.join(empty)}")
     for s in verdict.shards:
         for problem in s.problems:
             lines.append(f"SHARD PROBLEM  {s.label}: {problem}")
     for f in verdict.findings:
         lines.append(f"UNDISPOSITIONED {f.outcome.upper():<7} {f.key}  [{f.shard}]")
         lines.append(f"    {f.why}")
+    if verdict.excluded:
+        lines.append(f"excluded and documented {len(verdict.excluded)} (equivalents the policy also excludes, never generated):")
+        lines.extend(f"  {d.category:<18} {d.key} — exclude_re {p!r}" for d, p in verdict.excluded)
     if verdict.stale:
         lines.append(f"stale dispositions {len(verdict.stale)} (listed, never failed):")
         lines.extend(f"  {d.category:<18} {d.key} — {fate}" for d, fate in verdict.stale)
@@ -370,6 +508,9 @@ def render_markdown(verdict: Verdict) -> str:
     totals = " | ".join(f"**{sum(s.counts[c] for s in verdict.shards)}**" for c in COLUMNS)
     lines.append(f"| **total** | | {totals} | |")
     lines += ["", f"Dispositioned: {len(verdict.covered)} — {category_counts(verdict)}."]
+    empty = [md(s.label) for s in verdict.shards if s.empty]
+    if empty:
+        lines += ["", f"Empty shards ({len(empty)}, cargo-mutants listed no mutant, exit 0): {', '.join(empty)}."]
     problems = [(s.label, p) for s in verdict.shards for p in s.problems]
     if problems:
         lines += ["", "**Shard problems**", ""] + [f"- {md(label)}: {p}" for label, p in problems]
@@ -378,6 +519,11 @@ def render_markdown(verdict: Verdict) -> str:
         lines += ["| outcome | mutant | shard | note |", "|---|---|---|---|"]
         for f in verdict.findings:
             lines.append(f"| {f.outcome.upper()} | {md(f.key)} | {md(f.shard)} | {f.why} |")
+    if verdict.excluded:
+        lines += ["", f"<details><summary>Excluded and documented ({len(verdict.excluded)})</summary>", ""]
+        lines += ["| category | anchor | exclude_re |", "|---|---|---|"]
+        lines += [f"| {d.category} | {md(d.key)} | {md(p)} |" for d, p in verdict.excluded]
+        lines += ["", "</details>"]
     if verdict.stale:
         lines += ["", f"<details><summary>Stale dispositions ({len(verdict.stale)})</summary>", ""]
         lines += ["| category | anchor | fate |", "|---|---|---|"]
@@ -407,23 +553,29 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__.split("\n", 1)[0], epilog="Exit 0 green · 1 red · 2 cannot judge."
     )
     parser.add_argument("--dispositions", type=pathlib.Path, help="the versioned dispositions file")
+    parser.add_argument(
+        "--exclusions",
+        type=pathlib.Path,
+        help="the cargo-mutants policy (.cargo/mutants.toml): an equivalent it also excludes is excluded and documented",
+    )
     parser.add_argument("--markdown", type=pathlib.Path, help="append a Markdown report (e.g. $GITHUB_STEP_SUMMARY)")
     parser.add_argument("--self-test", action="store_true", help="run the built-in scenarios, then exit")
     parser.add_argument("dirs", nargs="*", metavar="DIR", help="one cargo-mutants output directory per shard")
     args = parser.parse_args(argv)
     if args.self_test:
-        if args.dirs or args.dispositions or args.markdown:
+        if args.dirs or args.dispositions or args.exclusions or args.markdown:
             parser.error("--self-test takes no other argument")
         return self_test()
     if args.dispositions is None or not args.dirs:
         parser.error("--dispositions and at least one DIR are required")
     try:
         dispositions = load_dispositions(args.dispositions)
+        exclusions = load_exclusions(args.exclusions) if args.exclusions else None
         shards = [load_shard(d) for d in args.dirs]
     except Unjudgeable as e:
         print(f"cannot judge: {e}", file=sys.stderr)
         return 2
-    verdict = judge(shards, dispositions)
+    verdict = judge(shards, dispositions, exclusions)
     print(render_text(verdict))
     if os.environ.get("GITHUB_ACTIONS") == "true" and not verdict.green:
         print(render_annotations(verdict))
@@ -499,6 +651,32 @@ def _shard(base: pathlib.Path, name: str, mutants: list[tuple[str, str]], *, bas
     if exit_code is not None:
         (base / name / EXIT_CODE_FILE).write_text(f"{exit_code}\n", encoding="utf-8")
     return str(base / name)
+
+
+def _empty_shard(base: pathlib.Path, name: str, *, exit_code: int | None = 0, listing: str = "[]") -> str:
+    """A shard as deep-checks uploads it when cargo-mutants was given no
+    mutant: mutants.json, debug.log, no outcomes.json (it returns before the
+    baseline)."""
+    out = base / name / "mutants.out"
+    out.mkdir(parents=True)
+    (out / MUTANTS_LIST).write_text(listing, encoding="utf-8")
+    (out / "debug.log").write_text("WARN cargo_mutants::lab: No mutants found under the active filters\n", encoding="utf-8")
+    if exit_code is not None:
+        (base / name / EXIT_CODE_FILE).write_text(f"{exit_code}\n", encoding="utf-8")
+    return str(base / name)
+
+
+def _checkout(base: pathlib.Path, name: str, policy: list[str], sources: dict[str, dict[int, str]]) -> str:
+    """A checkout holding a policy (`.cargo/mutants.toml`) and source files
+    whose given lines are set (the others filler); returns the policy path."""
+    root = base / name
+    (root / ".cargo").mkdir(parents=True)
+    (root / ".cargo" / "mutants.toml").write_text(f"exclude_re = {json.dumps(policy)}\n", encoding="utf-8")
+    for file, lines in sources.items():
+        text = [lines.get(n, "// filler") for n in range(1, max(lines) + 1)]
+        (root / file).parent.mkdir(parents=True, exist_ok=True)
+        (root / file).write_text("\n".join(text) + "\n", encoding="utf-8")
+    return str(root / ".cargo" / "mutants.toml")
 
 
 def _run(argv: list[str]) -> tuple[int, str]:
@@ -588,6 +766,100 @@ def self_test() -> int:
             bad.write_text(text, encoding="utf-8")
             expect(f"malformed dispositions: {name}", ["--dispositions", str(bad), green], 2, needle)
         expect("usage without shard dirs", d, 2, "at least one DIR")
+
+        # A shard cargo-mutants gave no mutant (fewer mutants than shards):
+        # its own empty mutants.json and exit 0 prove it, nothing else does.
+        expect("a shard given no mutant is empty, not a problem", d + [green, _empty_shard(base, "empty")], 0,
+               "VERDICT PASS", "empty shards 1", absent=("SHARD PROBLEM",))
+        plain = base / "plain-empty"
+        plain.mkdir()
+        (plain / MUTANTS_LIST).write_text("[]", encoding="utf-8")
+        expect("a plain output directory given no mutant is empty", d + [green, str(plain)], 0, "empty shards 1")
+        expect("an empty list without a recorded exit code fails",
+               d + [_empty_shard(base, "empty-unrecorded", exit_code=None)], 1,
+               "lists no mutant, but no mutants-exit-code.txt")
+        expect("an empty list with a verdict exit code fails", d + [_empty_shard(base, "empty-exit-2", exit_code=2)], 1,
+               "lists no mutant, yet cargo-mutants exited 2")
+        expect("an empty list with a tool-level exit code fails",
+               d + [_empty_shard(base, "empty-exit-70", exit_code=70)], 1, "exited 70 (internal error)")
+        given = json.dumps([{"name": "crates/x.rs:1:1: replace f -> bool with true"}])
+        expect("a shard given mutants that never tested them fails", d + [_empty_shard(base, "untested", listing=given)],
+               1, "no outcomes.json — cargo-mutants never started testing", absent=("empty shards",))
+        expect("an unreadable mutants.json proves nothing", d + [_empty_shard(base, "torn", listing="[")], 1,
+               "no outcomes.json", absent=("empty shards",))
+
+        # An equivalent the policy also excludes is never generated: excluded
+        # and documented while the checkout still holds it, stale otherwise.
+        bitstream = "crates/qrcode-ai-scanner/src/rescue/bitstream.rs"
+        sources = {
+            GS1: {227: "    while cut > 0 && !s.is_char_boundary(cut) {"},
+            bitstream: {144: " " * 52 + "| (v % split)"},
+            "crates/qrcode-ai-scanner/src/input.rs": {120: "    if width > MAX {"},
+        }
+        policy = [
+            r"gs1\.rs:227:15: replace > with >= in split_head",
+            r"bitstream\.rs:144:53: replace \| with \^ in parse",
+            r"input\.rs:120:14: replace > with >= in validate_dims",
+        ]
+        held = _checkout(base, "checkout", policy, sources)
+        quiet = _shard(base, "quiet", [(HANG, "Timeout"), (DEBT, "MissedMutant")], exit_code=3)
+        expect("an excluded equivalent is documented, not stale", d + ["--exclusions", held, quiet], 0,
+               "VERDICT PASS", "excluded and documented 2", absent=("stale dispositions",))
+        report = base / "excluded.md"
+        _run(d + ["--exclusions", held, "--markdown", str(report), quiet])
+        md_text = report.read_text(encoding="utf-8") if report.exists() else ""
+        if "Excluded and documented (2)" not in md_text or "Stale dispositions" in md_text:
+            failures.append(f"markdown report: excluded block missing or stale block present\n{md_text}")
+        ran += 1
+        expect("without the policy the same entries stay stale", d + [quiet], 0,
+               "stale dispositions 2", absent=("excluded and documented",))
+        moved = {**sources, GS1: {227: "    while cut != 0 && !s.is_char_boundary(cut) {"}}
+        gone = _checkout(base, "edited", policy, moved)
+        expect("an excluded equivalent whose code changed stays stale", d + ["--exclusions", gone, quiet], 0,
+               "excluded and documented 1", "the checkout no longer holds it there")
+        partial = _checkout(base, "unexcluded", policy[:1] + policy[2:], sources)
+        expect("an equivalent no exclusion matches stays stale", d + ["--exclusions", partial, quiet], 0,
+               "bitstream.rs:144:53: replace | with ^ in parse — not generated and not excluded")
+        unmeasured = _shard(base, "unmeasured", [(EQUIVALENT, "MissedMutant"), (HANG, "Timeout")], exit_code=3)
+        expect("only an equivalent may be documented by an exclusion", d + ["--exclusions", held, unmeasured], 0,
+               "but only an equivalent may be: this `debt` mutant goes unmeasured")
+        drifted = _shard(base, "drifted-out", [(EQUIVALENT.replace(":227:15:", ":231:15:"), "MissedMutant")])
+        expect("an excluded equivalent that came back elsewhere stays stale", d + ["--exclusions", held, drifted], 1,
+               "came back undispositioned at 231:15", "probably the stale entry at 227:15")
+        killed = _shard(base, "killed", [(EQUIVALENT, "CaughtMutant")])
+        expect("an entry the run reports caught stays stale", d + ["--exclusions", held, killed], 0,
+               "split_head — now CAUGHT")
+        for name, text, needle in (
+            ("not a list", 'exclude_re = "x"\n', "must be an array of strings"),
+            ("bad pattern", 'exclude_re = ["("]\n', "exclude_re '('"),
+        ):
+            bad = base / f"policy-{name.replace(' ', '-')}.toml"
+            bad.write_text(text, encoding="utf-8")
+            expect(f"malformed policy: {name}", d + ["--exclusions", str(bad), green], 2, needle)
+
+        # The versioned policy drops both shapes of the cfg(fuzzing) bridge —
+        # a function replaced and an operator inside one — and nothing else.
+        if POLICY.is_file():
+            versioned = load_exclusions(POLICY)
+            core = "crates/qrcode-ai-scanner/src"
+            bridge = [
+                f"{core}/lib.rs:70:9: replace fuzzing::classify_text with ()",
+                f"{core}/rescue/mod.rs:474:9: replace fuzz_api::parse_bitstream with ()",
+                f"{core}/rescue/mod.rs:489:32: replace + with * in fuzz_api::parse_bitstream",
+                f"{core}/rescue/mod.rs:494:38: replace == with != in fuzz_api::parse_bitstream",
+                f"{core}/rescue/mod.rs:499:45: replace % with / in fuzz_api::parse_bitstream",
+                f"{core}/lib.rs:86:17: delete ! in fuzzing::correct_block",
+            ]
+            outside = [
+                f"{core}/rescue/bitstream.rs:299:32: replace + with * in parse",
+                f"{core}/rescue/mod.rs:120:9: replace == with != in rescue_candidates",
+                f"{core}/payload.rs:40:5: replace classify -> Payload with Default::default()",
+            ]
+            kept = [n for n in bridge if versioned.matching(mutant_key({"name": n})) is None]
+            dropped = [n for n in outside if versioned.matching(mutant_key({"name": n})) is not None]
+            if kept or dropped:
+                failures.append(f"versioned policy: bridge mutants kept {kept}, others dropped {dropped}")
+            ran += 1
 
         # The versioned file judges its own anchors green — each replayed as the
         # outcome its category covers — and an injected miss red against it.
