@@ -71,15 +71,15 @@ const CORPUS_DIR: &str = "corpus-external";
 /// symlink at the repo root would show up as an untracked file.
 const CORPUS_ENV: &str = "QRSCAN_EXTERNAL_CORPUS";
 
-/// zxing's own `mustPassCount` at rotation 0° (`QRCodeBlackBoxNTestCase`) —
-/// printed as exploratory context next to our any-based per-suite match
-/// counts.
+/// zxing's own `mustPassCount` at rotation 0° — the first `addTest` of each
+/// `QRCodeBlackBoxNTestCase` (zxing master; 157 in all) — printed as
+/// exploratory context next to our any-based per-suite match counts.
 const ZXING_REF: [(&str, u32); 6] = [
     ("zxing-blackbox/qrcode-1", 17),
-    ("zxing-blackbox/qrcode-2", 31),
+    ("zxing-blackbox/qrcode-2", 32),
     ("zxing-blackbox/qrcode-3", 38),
     ("zxing-blackbox/qrcode-4", 36),
-    ("zxing-blackbox/qrcode-5", 16),
+    ("zxing-blackbox/qrcode-5", 19),
     ("zxing-blackbox/qrcode-6", 15),
 ];
 
@@ -781,6 +781,30 @@ mod tests {
                 "manifest lost suite {suite}"
             );
         }
+    }
+
+    /// The printed reference is what the constant claims: zxing's own 0°
+    /// thresholds, the first `addTest` of each `QRCodeBlackBoxNTestCase`,
+    /// suites 1 to 6 in order — the figures and the sum the README states.
+    #[test]
+    fn the_zxing_reference_is_zxings_own_0_degree_thresholds() {
+        let suites: Vec<&str> = ZXING_REF.iter().map(|&(suite, _)| suite).collect();
+        let expected: Vec<String> = (1..=6)
+            .map(|n| format!("zxing-blackbox/qrcode-{n}"))
+            .collect();
+        assert_eq!(suites, expected);
+        let thresholds: Vec<String> = ZXING_REF.iter().map(|&(_, n)| n.to_string()).collect();
+        assert_eq!(thresholds.join(" · "), "17 · 32 · 38 · 36 · 19 · 15");
+        let sum: u32 = ZXING_REF.iter().map(|&(_, n)| n).sum();
+        assert_eq!(sum, 157);
+        let readme = std::fs::read_to_string(crate::repo_root().join("README.md")).expect("README");
+        assert!(
+            readme.contains(&format!(
+                "thresholds {} (`QRCodeBlackBox1…6TestCase`, {sum} in all)",
+                thresholds.join(" · ")
+            )),
+            "the README states the thresholds and their sum as the gate prints them"
+        );
     }
 
     #[test]
