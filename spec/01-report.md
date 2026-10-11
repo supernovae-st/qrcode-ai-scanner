@@ -85,7 +85,10 @@ Semantics that bite:
 - `engines: ["rescue"]` means BOTH decoders failed and the
   errors-and-erasures stage recovered the stream (07-pipeline.md §S5).
   The content passed an RS syndrome re-check — but treat any accompanying
-  `low_correction_margin` hint as the distrust signal it is.
+  `low_correction_margin` hint as the distrust signal it is: with `rescue`
+  among the engines, `score.uec` and that hint carry the errors-only count
+  of the stream, which errors alone need not correct — a distrust marker,
+  typically margin 0, not errors corrected (04-score.md § Synthetic UEC).
 - `corners`/`meta.version`/`ec_level`/`mask` come from `rqrr`: from its
   decode, from a grid it detected but could not decode that the scanner
   error-corrected itself (FNC1, Hanzi and structured-append symbols;
@@ -460,6 +463,14 @@ counter, to know what was found.
   "iso15415":    Iso15415Report | null
 }
 ```
+
+`uec.worst_block_errors` is the number of errors the worst block corrects
+errors-only, of its `worst_block_capacity` parity codewords — except for a
+detection whose `engines` include `rescue`, where it is the errors-only
+count of its stream: a distrust marker, typically margin 0, not errors
+corrected. The margin does not subtract the ISO/IEC 18004 Annex B reserve,
+so on version 1, v2-L and v3-L a block with errors reads above ISO's UEC
+(04-score.md § Synthetic UEC).
 
 `score` evaluates the PRIMARY detection, `detections[0]`: QR family
 first, then the detection whose earliest read came first (07-pipeline.md

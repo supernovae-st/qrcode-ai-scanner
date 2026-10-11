@@ -110,8 +110,11 @@ progress.
 | measured UEC margin `m` < 0.5 | value ≤ **round(40 + 120·m)** — continuous: 0.5 → 100 · 0.25 → 70 · 0.0 → 40 |
 
 The margin cap reads the measured margin (§ Synthetic UEC), published or
-skipped: a consumed Reed-Solomon budget is invisible to the stress axes,
-and a decode at the RS limit is never a pass.
+skipped: a consumed Reed-Solomon budget is invisible to the stress axes.
+Where a symbol reserves no misdecode-protection codewords, a decode at the
+RS limit caps at 40 and is never a pass; on version 1, v2-L and v3-L an
+errors-only decode at the acceptance limit caps at 47 to 91 instead
+(§ Synthetic UEC, the Annex B reserve).
 
 ### Grade bands
 
@@ -123,7 +126,8 @@ and a decode at the RS limit is never a pass.
 ISO 15415 *Unused Error Correction* computed from the geometry engine's own
 sampled bitstream: zigzag replay → unmask → ISO 18004 §8.6 de-interleave →
 per-block RS syndromes → Berlekamp-Massey degree = EXACT corrected-error
-count `t`. `margin = 1 − 2t/d` over the worst block.
+count `t`. `margin = 1 − 2t/d` over the worst block, `d` its parity
+codewords.
 
 The stream measured is that of the orientation the decode verified — for a
 symbol decoded mirrored, the transposed grid, with that orientation's
@@ -132,15 +136,52 @@ reads the same margin as its upright twin. A margin is measured only when every 
 of that stream error-corrects errors-only (`2t ≤ d`, every error located
 inside the block) under the detection's version, EC level and mask:
 otherwise there is no `uec` section, no margin cap and no margin hint —
-absent, never a guess. A stream the S5 rescue recovered (`engines:
-["rescue"]`) needed erasures, so it keeps its errors-only count, typically
-margin 0.
+absent, never a guess. A detection whose `engines` include `rescue` is
+measured without that check: S5 corrects with erasures, so errors alone
+need not correct its stream, and `t` is the errors-only count as read. Its
+`worst_block_errors` — and the `errors` of its `low_correction_margin`
+hint — is then a distrust marker, typically margin 0
+(`examples/rescued-occluded.json` reads 11 of 22), not a count of
+corrected errors.
 
 Bands (ISO): `a` ≥0.62 · `b` ≥0.50 · `c` ≥0.37 · `d` ≥0.25 · `f` <0.25.
 
-`margin = 0` means the worst block consumed its ENTIRE correction budget —
-the Reed-Solomon miscorrection signature → the `low_correction_margin`
-hint fires and the content should be treated as unverified.
+**The Annex B reserve.** ISO/IEC 15415 and 18004 measure this parameter
+against `d − p`, where `p` is the misdecode-protection count of ISO/IEC
+18004 Annex B (Table 9): 3 on v1-L, 2 on v1-M and v2-L, 1 on v1-Q, v1-H
+and v3-L, 0 on every other version and EC level. The margin does not
+subtract `p`, and neither does `iso15415.unused_error_correction`, which
+repeats it: where `p` is 0 the two agree, and on those six shapes a block
+with errors reads above ISO's value. The acceptance subtracts `p`
+(07-pipeline.md § Acceptance), so at its limit for a word corrected
+errors-only — ⌊(d − p)/2⌋ errors in the block, where ISO reads 0, grade
+`f` — the published numbers are:
+
+| Shape | `d` | `p` | Errors at the limit | `margin` | `grade` | Cap |
+|---|---|---|---|---|---|---|
+| v1-L | 7 | 3 | 2 | 3/7 ≈ 0.43 | `c` | 91 |
+| v1-M, v2-L | 10 | 2 | 4 | 1/5 | `f` | 64 |
+| v1-Q | 13 | 1 | 6 | 1/13 ≈ 0.077 | `f` | 49 |
+| v3-L | 15 | 1 | 7 | 1/15 ≈ 0.067 | `f` | 48 |
+| v1-H | 17 | 1 | 8 | 1/17 ≈ 0.059 | `f` | 47 |
+
+On these shapes neither the cap of 40 nor `low_correction_margin` marks an
+errors-only decode at the acceptance limit. A stream that error-corrects
+errors-only reaches margin 0 there only on v1-M and v2-L, at 5 errors: a
+word past the reserve, published only when another read of its content
+keeps a margin of zero or more (the detection measures the stream of its
+earliest read that carries one, 07-pipeline.md property 6). On v1-L, v1-Q,
+v1-H and v3-L `d` is odd, and `2t ≤ d` leaves a parity codeword unspent.
+Otherwise the hint comes there only from a rescued read — never on v1-L,
+whose detections carry no stream that counts more than 3 errors (margin
+1/7 or more).
+
+A published `margin` of 0 raises `low_correction_margin` (06-hints.md):
+treat the content as unverified. On a stream that error-corrects
+errors-only it means the worst block's errors spent every parity codeword
+(`2t = d`) — the Reed-Solomon miscorrection signature and, where `p` is 0,
+the acceptance limit itself; on a rescued read it is the distrust marker
+above.
 
 ## ISO 15415-informed grade card (`score.iso15415`)
 
@@ -155,7 +196,7 @@ by `score_skip_checks: ["uec"]` still counts, so a skip never moves it.
 | `modulation` | robust min (p5) of per-module 2·\|R−GT\|/SC | a ≥0.50 · b ≥0.40 · c ≥0.30 · d ≥0.20 |
 | `axial_nonuniformity` | \|X̄−Ȳ\|/mean of axis pitches | a ≤0.06 · b ≤0.08 · c ≤0.10 · d ≤0.12 |
 | `fixed_pattern_damage` | worst finder integrity; quiet-zone violation caps at `d` | a ≥0.95 · b ≥0.90 · c ≥0.80 · d ≥0.70 |
-| `unused_error_correction` | the UEC margin (above) | ISO UEC bands |
+| `unused_error_correction` | the UEC margin (above; `p` not subtracted) | ISO UEC bands |
 
 ## The honesty line (do not oversell)
 

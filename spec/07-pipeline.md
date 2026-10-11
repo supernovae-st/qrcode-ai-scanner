@@ -249,9 +249,11 @@ protects reads it agrees with and keeps re-derivation running.
    negative margin only on v1-L (more than 2 errors), v1-M and v2-L (more
    than 4). A margin of zero or more does not prove the correction right:
    a word miscorrected within the reserve is admitted (when the score
-   measures that stream, a block that spent its whole correction capacity
-   raises `low_correction_margin`, 06-hints.md). The grid of an `rqrr`
-   read with a negative margin is offered to S5 like an undecoded grid.
+   measures that stream, a block whose errors spent all its parity
+   codewords raises `low_correction_margin`, 06-hints.md — which on
+   version 1, v2-L and v3-L no errors-only correction within the reserve
+   does, 04-score.md § Synthetic UEC). The grid of an `rqrr` read with a
+   negative margin is offered to S5 like an undecoded grid.
 2. **Independent confirmation.** A read of UPC-E, DataBar, DataBar
    Expanded, or PDF417 at error-correction level 0, 1 or none waits until
    a read of the same symbology and bytes was made on a plane whose
