@@ -51,8 +51,107 @@
 # line they had moved to, and those whose code is gone or changed into new
 # mutants. Bits::take's `|`→`^` moved from debt to equivalent (bit-disjoint
 # operands). Now 21 equivalent · 3 timeout-structural · 54 debt.
+# Extended and re-anchored (2026-10-11) on the tree of the commit that carries
+# this paragraph, against deep-checks run 38105646991 (tree 960b9c3). Of the
+# survivors that run reported in the content, re-read, reconciliation and
+# engine code, tests on rendered symbols or constructed reads now kill every
+# one they can tell apart; the rest are argued here — bit-disjoint `|`
+# (format and version words, ECI designators), bounds no walk reaches, loops
+# only a hang shows — and two debt entries name the crafted grids that would
+# kill them. Pruned: the debt
+# the new tests kill, whose code had moved (alpha.rs content_stats and
+# envelope, ladder.rs fold_fallback, lib.rs build_report, report.rs
+# StressAxis::from_name), and count_bits, which that run reports caught; the
+# two wall-clock equivalents and three score debt entries moved with their
+# code. Mutants of code the all-features run never compiles (the cfg(fuzzing)
+# bridge, the Binarized::black of builds without rxing) are no disposition's:
+# they belong to the exclusions of .cargo/mutants.toml. Now 31 equivalent · 9
+# timeout-structural · 43 debt.
 
 # ── equivalent ──────────────────────────────────────────────────────────────
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 305
+column = 41
+mutation = "replace < with <= in Binarized<'a>::black"
+category = "equivalent"
+reason = """\
+  `y <= height` differs only at y = height, where rxing 0.9.1's BitMatrix::get returns false: \
+  for x < width the offset height · row_size + x / word lies at or past the end of its bits — \
+  the false the original's short-circuit gives"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 465
+column = 34
+mutation = "replace | with ^ in Grid<'a>::format_words"
+category = "equivalent"
+reason = """\
+  `(first << 1) | u16::from(dark)`: first << 1 has bit 0 clear and the module is 0 or 1, so |, ^ \
+  and + agree for every input (as in Bits::take)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 469
+column = 36
+mutation = "replace | with ^ in Grid<'a>::format_words"
+category = "equivalent"
+reason = """\
+  `(second << 1) | u16::from(dark)`: second << 1 has bit 0 clear and the module is 0 or 1, so |, \
+  ^ and + agree for every input (as in Bits::take)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 472
+column = 36
+mutation = "replace | with ^ in Grid<'a>::format_words"
+category = "equivalent"
+reason = """\
+  `(second << 1) | u16::from(dark)`: second << 1 has bit 0 clear and the module is 0 or 1, so |, \
+  ^ and + agree for every input (as in Bits::take)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 539
+column = 37
+mutation = "replace | with ^ in decode_format"
+category = "equivalent"
+reason = """\
+  `(data << 10) | bch_remainder(data << 10, 0x537)`: the remainder of the degree-10 generator is \
+  below 2^10 and data << 10 holds bits 10-14 only — bit-disjoint, so |, ^ and + agree"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 557
+column = 40
+mutation = "replace | with ^ in decode_version"
+category = "equivalent"
+reason = """\
+  `(version << 12) | bch_remainder(version << 12, 0x1F25)`: the remainder of the degree-12 \
+  generator is below 2^12 and version << 12 holds bits 12-17 only — bit-disjoint"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/reconcile.rs"
+line = 220
+column = 43
+mutation = "replace < with <= in Read::fold"
+category = "equivalent"
+reason = """\
+  `<=` differs from `<` only when the two reads of a fold share a rank, and no walk collects two: \
+  every read is ranked (attempt, source, index) — the attempt from next_attempt() for each \
+  collected attempt, the rescue stage and the end-of-walk pass, the index distinct per read. \
+  Only a hand-built tie, which the fold leaves unspecified, could tell them apart"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/rxing_engine.rs"
+line = 383
+column = 14
+mutation = "replace match guard n >= 4 with true in location"
+category = "equivalent"
+reason = """\
+  with the guard always true, 0-2 points reach the four-corner arm, whose `at(i)?` returns None \
+  at the first point missing — what `_ => None` returns; three points keep their own arm"""
 
 [[mutant]]
 file = "crates/qrcode-ai-scanner/src/gs1.rs"
@@ -66,27 +165,27 @@ reason = """\
 
 [[mutant]]
 file = "crates/qrcode-ai-scanner/src/ladder.rs"
-line = 1003
+line = 1025
 column = 49
 mutation = "replace * with / in Run<'_>::rescue_stage"
 category = "equivalent"
 reason = """\
   stage-scope seconds -> ms `* 1_000.0` -> `/`: a smaller but positive wall-clock `ms`, a field \
   outside the determinism contract; only a machine-speed lower bound could see it, which the \
-  crate forbids — untestable rather than strictly equivalent, .cargo/mutants.toml ladder.rs \
-  1003:49"""
+  crate forbids — untestable rather than strictly equivalent, argued in .cargo/mutants.toml \
+  (anchored there at 1003:49 before code above it grew)"""
 
 [[mutant]]
 file = "crates/qrcode-ai-scanner/src/ladder.rs"
-line = 1183
+line = 1205
 column = 49
 mutation = "replace * with / in Run<'_>::stage"
 category = "equivalent"
 reason = """\
   stage-scope seconds -> ms `* 1_000.0` -> `/`: a smaller but positive wall-clock `ms`, a field \
   outside the determinism contract; only a machine-speed lower bound could see it, which the \
-  crate forbids — untestable rather than strictly equivalent, .cargo/mutants.toml ladder.rs \
-  1183:49"""
+  crate forbids — untestable rather than strictly equivalent, argued in .cargo/mutants.toml \
+  (anchored there at 1183:49 before code above it grew)"""
 
 [[mutant]]
 file = "crates/qrcode-ai-scanner/src/lib.rs"
@@ -160,6 +259,26 @@ reason = """\
   double_byte) has bit-disjoint operands: split is 0xC0 or 0x60, so v % split < 0x100 fills bits \
   0-7 only while (v / split) << 8 leaves them clear; |, ^ and + agree for every input — \
   .cargo/mutants.toml bitstream.rs 342:42"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/rescue/bitstream.rs"
+line = 363
+column = 29
+mutation = "replace | with ^ in eci_designator"
+category = "equivalent"
+reason = """\
+  the two-codeword designator `(first & 0x3F) << 8 | bits.take(8)?`: take(8) < 0x100 fills bits \
+  0-7 only, the shifted prefix bits 8-13 — bit-disjoint, so |, ^ and + agree for every input"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/rescue/bitstream.rs"
+line = 365
+column = 30
+mutation = "replace | with ^ in eci_designator"
+category = "equivalent"
+reason = """\
+  the three-codeword designator `(first & 0x1F) << 16 | bits.take(16)?`: take(16) < 0x10000 \
+  fills bits 0-15 only, the shifted prefix bits 16-20 — bit-disjoint, so |, ^ and + agree"""
 
 [[mutant]]
 file = "crates/qrcode-ai-scanner/src/score/structural.rs"
@@ -277,6 +396,60 @@ reason = """\
 # ── timeout-structural ──────────────────────────────────────────────────────
 
 [[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/content.rs"
+line = 246
+column = 15
+mutation = "replace += with *= in has_pair"
+category = "timeout-structural"
+reason = """\
+  `i *= 1` never moves past a single-byte character, so the walk spins on the first one it \
+  reaches; an input that reaches none returns as before — only a hang tells them apart (TIMEOUT \
+  in run 38105646991)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 529
+column = 15
+mutation = "replace ^= with &= in bch_remainder"
+category = "timeout-structural"
+reason = """\
+  `value &= generator << (top - degree)` keeps bit `top`, set in both operands, so the leading \
+  bit never drops and the loop spins on every value of the generator's degree or more — every \
+  format and version word the decoding computes (TIMEOUT in run 38105646991)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 529
+column = 15
+mutation = "replace ^= with |= in bch_remainder"
+category = "timeout-structural"
+reason = """\
+  `value |= generator << (top - degree)` keeps bit `top` set, so the leading bit never drops and \
+  the loop spins on every value of the generator's degree or more (TIMEOUT in run 38105646991)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 529
+column = 28
+mutation = "replace << with >> in bch_remainder"
+category = "timeout-structural"
+reason = """\
+  `generator >> (top - degree)` puts its leading bit below `top` once top > degree, so bit `top` \
+  never clears: the loop spins on every format word of data 2 or more and every version word \
+  (TIMEOUT in run 38105646991)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 529
+column = 36
+mutation = "replace - with / in bch_remainder"
+category = "timeout-structural"
+reason = """\
+  `generator << (top / degree)` shifts by 1 for every top below twice the degree, so the leading \
+  bit XORed sits at degree + 1 and never clears a higher one: format words of data 4 or more \
+  (bit 12 and up) and every version word (bit 14 and up) spin (TIMEOUT in run 38105646991)"""
+
+[[mutant]]
 file = "crates/qrcode-ai-scanner/src/gs1.rs"
 line = 228
 column = 13
@@ -285,6 +458,17 @@ category = "timeout-structural"
 reason = """\
   `cut /= 1` freezes the char-boundary down-walk into a spin on multi-byte input — documented \
   caught-by-timeout in .cargo/mutants.toml; TIMEOUT in run 37262272113"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/ladder.rs"
+line = 887
+column = 19
+mutation = "replace += with *= in Run<'_>::reread"
+category = "timeout-structural"
+reason = """\
+  `i *= 1` keeps the index on a read the re-read skips (no hint, no re-read left, withheld, or \
+  nothing left to learn), so the loop visits it forever — the first such read hangs the walk \
+  (TIMEOUT in run 38105646991)"""
 
 [[mutant]]
 file = "crates/qrcode-ai-scanner/src/matrix/zigzag.rs"
@@ -310,20 +494,29 @@ reason = """\
 #    not equivalence) ────────────────────────────────────────────────────────
 
 [[mutant]]
-file = "crates/qrcode-ai-scanner/src/alpha.rs"
-line = 80
-column = 48
-mutation = "replace / with % in content_stats"
+file = "crates/qrcode-ai-scanner/src/engine/rqrr_engine.rs"
+line = 111
+column = 13
+mutation = "delete match arm (EciEvidence::Unobserved, Some(ec)) in decode"
 category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
+reason = """\
+  recorded 2026-10-11 (run 38105646991): the arm hands a re-read hint to an rqrr read whose grid \
+  decided nothing — no orientation verifies, or both verify differently. No fixture reaches it: \
+  rqrr decodes a word the scanner's bounded RS refuses only by a miscorrection past ⌊npar/2⌋. \
+  Killed by a test whose grid is such a decode (or a crafted grid both orientations verify) \
+  and which pins that read's GridBounds hint at its measured version"""
 
 [[mutant]]
-file = "crates/qrcode-ai-scanner/src/alpha.rs"
-line = 291
-column = 26
-mutation = "replace != with == in AlphaContext::envelope"
+file = "crates/qrcode-ai-scanner/src/engine/rqrr_engine.rs"
+line = 244
+column = 39
+mutation = "replace == with != in rescue_input"
 category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
+reason = """\
+  recorded 2026-10-11 (run 38105646991): differs only when an undecodable grid parses malformed \
+  as sampled and its transpose verifies, which no natural symbol does — only a crafted grid \
+  verifies both ways. Killed by a test on such grids: a transpose verifying to another result \
+  leaves the candidate ambiguous, one verifying to the same malformed stream lets it stand"""
 
 [[mutant]]
 file = "crates/qrcode-ai-scanner/src/gs1.rs"
@@ -470,36 +663,6 @@ category = "debt"
 reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
 
 [[mutant]]
-file = "crates/qrcode-ai-scanner/src/ladder.rs"
-line = 657
-column = 29
-mutation = "replace += with *= in LadderOutcome::fold_fallback"
-category = "debt"
-reason = """\
-  surviving mutant recorded at 1c38d7c (run 37262272113) in Scanner::scan_cancellable (lib.rs \
-  142:36); the statement `total_ms += fallback.trace.total_ms` moved verbatim into \
-  LadderOutcome::fold_fallback, where it still survives (local run); to be killed by a test"""
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/ladder.rs"
-line = 657
-column = 29
-mutation = "replace += with -= in LadderOutcome::fold_fallback"
-category = "debt"
-reason = """\
-  surviving mutant recorded at 1c38d7c (run 37262272113) in Scanner::scan_cancellable (lib.rs \
-  142:36); the statement `total_ms += fallback.trace.total_ms` moved verbatim into \
-  LadderOutcome::fold_fallback, where it still survives (local run); to be killed by a test"""
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/lib.rs"
-line = 376
-column = 38
-mutation = "replace < with <= in build_report"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
 file = "crates/qrcode-ai-scanner/src/matrix/zigzag.rs"
 line = 125
 column = 24
@@ -512,62 +675,6 @@ file = "crates/qrcode-ai-scanner/src/matrix/zigzag.rs"
 line = 125
 column = 24
 mutation = "replace * with / in unmask_to_codewords"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/report.rs"
-line = 364
-column = 9
-mutation = "replace StressAxis::from_name -> Option<Self> with None"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/report.rs"
-line = 365
-column = 13
-mutation = "delete match arm \"resolution\" in StressAxis::from_name"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/report.rs"
-line = 366
-column = 13
-mutation = "delete match arm \"blur\" in StressAxis::from_name"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/report.rs"
-line = 367
-column = 13
-mutation = "delete match arm \"contrast\" in StressAxis::from_name"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/report.rs"
-line = 368
-column = 13
-mutation = "delete match arm \"perspective\" in StressAxis::from_name"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/report.rs"
-line = 369
-column = 13
-mutation = "delete match arm \"rotation\" in StressAxis::from_name"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/report.rs"
-line = 370
-column = 13
-mutation = "delete match arm \"lighting\" in StressAxis::from_name"
 category = "debt"
 reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
 
@@ -588,14 +695,6 @@ category = "debt"
 reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
 
 [[mutant]]
-file = "crates/qrcode-ai-scanner/src/rescue/bitstream.rs"
-line = 78
-column = 9
-mutation = "delete match arm 27..= 40 in count_bits"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
 file = "crates/qrcode-ai-scanner/src/rescue/mod.rs"
 line = 250
 column = 43
@@ -605,27 +704,38 @@ reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed b
 
 [[mutant]]
 file = "crates/qrcode-ai-scanner/src/score/mod.rs"
-line = 451
+line = 482
 column = 32
 mutation = "delete - in run_lighting"
 category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
+reason = """\
+  surviving mutant recorded at 1c38d7c (run 37262272113), re-anchored 2026-10-11 from 451:32 \
+  where the code moved: the fifth lighting cell turns underexposure into a second +60. Killed \
+  by a test on a symbol that fails only underexposure (light modules near black): its lighting \
+  set fails at the −60 cell"""
 
 [[mutant]]
 file = "crates/qrcode-ai-scanner/src/score/mod.rs"
-line = 502
+line = 533
 column = 61
 mutation = "replace - with / in run_axes"
 category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
+reason = """\
+  surviving mutant recorded at 1c38d7c (run 37262272113), re-anchored 2026-10-11 from 502:61 \
+  where the code moved: a knee past the first cell refines at the knee itself instead of the \
+  midpoint with the cell before. Killed by a test pinning the refined label of such a knee on \
+  the blur, contrast, tilt or rotation ramp (a blur knee at 1.5 refines at 1.25)"""
 
 [[mutant]]
 file = "crates/qrcode-ai-scanner/src/score/mod.rs"
-line = 513
+line = 544
 column = 44
 mutation = "replace - with / in run_axes"
 category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
+reason = """\
+  surviving mutant recorded at 1c38d7c (run 37262272113), re-anchored 2026-10-11 from 513:44 \
+  where the code moved: a resolution knee past the first cell refines at the knee itself. \
+  Killed by a test pinning the refined label of such a knee (a 179 px knee refines at 217 px)"""
 
 [[mutant]]
 file = "crates/qrcode-ai-scanner/src/score/warp.rs"
