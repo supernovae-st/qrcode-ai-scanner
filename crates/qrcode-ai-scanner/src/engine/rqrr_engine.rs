@@ -1195,6 +1195,42 @@ mod tests {
     }
 
     #[test]
+    fn orientation_is_decided_for_at_most_four_reads_past_the_reserve_per_pass() {
+        // The same bound on the other rescue input: six "abc" symbols at
+        // v1-M, five codewords corrected — one past the Annex B reserve
+        // (⌊(10 − 2)/2⌋ − 5 = −1). Each is published and each is a rescue
+        // input; the first four carry their decided orientation, the rest
+        // stay as sampled, and a caller that discards candidates decides none
+        let data = test_symbols::stream("0100 00000011 01100001 01100010 01100011 0000");
+        let symbol = test_symbols::codeword_colors(
+            qrcode::Version::Normal(1),
+            qrcode::EcLevel::M,
+            &data,
+            &[6, 8, 10, 12, 14],
+        );
+        let luma = test_symbols::row(&vec![symbol; 6]);
+        let pass = decode(&luma, true);
+        assert_eq!(pass.found.len(), 6, "rqrr decodes every grid");
+        assert!(
+            pass.found
+                .iter()
+                .all(|read| read.raw == b"abc" && read.margin == Margin::Known(-1)),
+            "{:?}",
+            pass.found
+        );
+        assert_eq!(pass.rescue.len(), 6);
+        let decided = pass
+            .rescue
+            .iter()
+            .filter(|candidate| candidate.rederived.is_some())
+            .count();
+        assert_eq!(decided, crate::rescue::MAX_CANDIDATES);
+        let discarded = decode(&luma, false);
+        assert_eq!(discarded.rescue.len(), 6);
+        assert!(discarded.rescue.iter().all(|c| c.rederived.is_none()));
+    }
+
+    #[test]
     fn a_malformed_designator_decode_is_refused() {
         // rqrr reads a 111xxxxx designator as one byte and returns "abc";
         // the verified stream violates ISO 18004 Table 4: no detection, no

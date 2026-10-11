@@ -430,7 +430,7 @@ fn locate_hint(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_precision_loss)]
 
-    use super::{MetaKey, MetaValue, Reader, decode, observe, reader};
+    use super::{MetaKey, MetaValue, Reader, decode, location, observe, reader};
     use crate::engine::FormatFilter;
     use crate::engine::content::{EciEvidence, EciMark, Fnc1, Segments};
     use crate::input::LumaImage;
@@ -534,6 +534,48 @@ mod tests {
                 .iter()
                 .any(|d| d.symbology == Symbology::QrCode && d.raw == b"only-qr")
         );
+    }
+
+    #[test]
+    fn three_finder_centres_complete_to_a_parallelogram() {
+        // the general reader's finder centres a, b, c gain the fourth corner
+        // a + c − b; the port's four corners pass as they are; fewer points
+        // locate nothing
+        let at = |x, y| rxing::Point { x, y };
+        let corner = |x, y| crate::report::Point { x, y };
+        assert_eq!(
+            location(&[at(10.0, 20.0), at(50.0, 20.0), at(50.0, 70.0)]),
+            Some([
+                corner(10.0, 20.0),
+                corner(50.0, 20.0),
+                corner(50.0, 70.0),
+                corner(10.0, 70.0),
+            ])
+        );
+        let four = [at(1.0, 2.0), at(9.0, 2.0), at(9.0, 8.0), at(1.0, 8.0)];
+        assert_eq!(location(&four), Some(four.map(|p| corner(p.x, p.y))));
+        assert_eq!(location(&four[..2]), None);
+        assert_eq!(location(&[]), None);
+    }
+
+    #[test]
+    fn a_plain_read_of_double_byte_bytes_is_re_read_for_its_segments() {
+        // no indicator (]Q1) over Shift JIS bytes: the Kanji segments are
+        // what a re-read finds — on every version, at every EC level (not
+        // just the margin re-read of L and M)
+        for ec in [qrcode::EcLevel::M, qrcode::EcLevel::H] {
+            let luma = test_symbols::from_segments(qrcode::Version::Normal(2), ec, |b| {
+                b.push_kanji_data(&[0x93, 0xFA, 0x96, 0x7B])
+            });
+            let found = decode(&luma, FormatFilter::All);
+            let read = qr(&found);
+            assert_eq!(read.raw, [0x93, 0xFA, 0x96, 0x7B], "{ec:?}");
+            let hint = read.locate.as_ref().expect("a declarations re-read");
+            assert!(
+                hint.declarations && hint.versions == (1..=40) && hint.modifier == Some(1),
+                "{ec:?}: {hint:?}"
+            );
+        }
     }
 
     /// The QR-family detection of a clean render.
