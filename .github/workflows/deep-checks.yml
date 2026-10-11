@@ -30,6 +30,16 @@ jobs:
   # 55 min. Add shards if the wall returns, never a longer wall (that just
   # delays the report a week).
   #
+  # Round-robin, not slice: slice sharding hands each shard a contiguous run
+  # of the mutant list, so survivor- and timeout-dense code lands on a few
+  # shards. Measured on run 38105646991 (2990 mutants, slice): the slowest
+  # shard spent 79.2 min in cargo-mutants, 6 min under the 85-min wall
+  # (shard 37: 22 survivors, each a full suite; median 31.4 min), and the
+  # last shard was empty (36 per shard filled shards 0-83). Its per-mutant
+  # costs replayed round-robin (mutant i to shard i % 85) put the slowest
+  # shard at 45.4 min (median 33.2), and every shard gets 35 or 36 mutants
+  # while there are at least 85.
+  #
   # The timeout lives on the WORK STEP, not the job: a job-level timeout
   # kills the upload-artifact step too — `if: always()` cannot save it —
   # and a timed-out shard then reports NOTHING (shards 0+5 vanished from
@@ -181,7 +191,7 @@ jobs:
         run: |
           ulimit -v 6291456
           status=0
-          cargo mutants -p qrcode-ai-scanner --in-place --cargo-arg=--locked --shard ${{ matrix.shard }}/85 --minimum-test-timeout 120 -- --all-features || status=$?
+          cargo mutants -p qrcode-ai-scanner --in-place --cargo-arg=--locked --sharding round-robin --shard ${{ matrix.shard }}/85 --minimum-test-timeout 120 -- --all-features || status=$?
           echo "$status" > mutants-exit-code.txt
           case "$status" in
             0|2|3)
@@ -208,8 +218,11 @@ jobs:
   # unfinished shard, a baseline failure, a tool-level exit code, or any
   # MISSED / TIMEOUT mutant without a covering entry in
   # .cargo/mutants-dispositions.toml fails this job, and with it the run.
-  # Entries are exact line:col anchors — drift resurfaces a mutant, it never
-  # hides one. `!cancelled()`, not `always()`: red shards still get judged,
+  # A shard cargo-mutants gave no mutant (an empty mutants.json, exit 0) is
+  # reported empty, not failed. Entries are exact line:col anchors — drift
+  # resurfaces a mutant, it never hides one; an equivalent that
+  # .cargo/mutants.toml also excludes is listed as excluded and documented,
+  # not stale. `!cancelled()`, not `always()`: red shards still get judged,
   # a cancelled run has nothing to judge.
   mutants-summary:
     needs: mutants
@@ -231,6 +244,7 @@ jobs:
         run: >
           python3 scripts/check-mutants-outcome.py
           --dispositions .cargo/mutants-dispositions.toml
+          --exclusions .cargo/mutants.toml
           --markdown "$GITHUB_STEP_SUMMARY"
           mutants-shards/mutants-report-shard-{0..84}
 
