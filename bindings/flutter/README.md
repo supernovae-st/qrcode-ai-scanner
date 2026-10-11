@@ -48,9 +48,10 @@ The return type [`ScanReport`](lib/report.dart) is fully typed (detections, a
 typed `Payload` sealed class, `Score` with ISO 15415 / UEC grade cards, hints,
 trace, versions). Unknown enum values and payload kinds decode to `unknown` /
 catch-all variants — never a throw (the contract is additively forward-compatible).
-`Charset` is the exception: a newer wire value decodes to `Charset.unrecognized`
-(a complete reading), while `Charset.unknown` is the wire's lossy value — test
-`content.charset.isLossy` and then use `content.raw`, the payload's bytes.
+`Charset` and `Fnc1Position` are the exceptions: a newer wire value decodes to
+`unrecognized`. `Charset.unrecognized` is a complete reading, while
+`Charset.unknown` is the wire's lossy value — test `content.charset.isLossy`
+and then use `content.raw`, the payload's bytes.
 `content.eci` and `content.fnc1` are null when none was observed or the
 symbology does not report it — not proof that the symbol declares none.
 
