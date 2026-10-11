@@ -838,4 +838,24 @@ mod tests {
         // empty stream is a valid empty payload (terminator-only semantics)
         assert_eq!(parse(&[], 1).unwrap().bytes, Vec::<u8>::new());
     }
+
+    #[test]
+    fn take_reads_its_widest_field_up_to_the_last_bit() {
+        // 24 bits is the widest read, and a read may end on the last bit:
+        // three codewords, MSB-first, taken whole
+        let mut bits = Bits {
+            bytes: &[0xAB, 0xCD, 0xEF],
+            cursor: 0,
+        };
+        assert_eq!(bits.take(24), Some(0x00AB_CDEF));
+        assert_eq!(bits.remaining(), 0);
+        assert_eq!(bits.take(1), None);
+        // wider than 24 is refused even with the bits there, and reads nothing
+        let mut wide = Bits {
+            bytes: &[0xFF; 4],
+            cursor: 0,
+        };
+        assert_eq!(wide.take(25), None);
+        assert_eq!(wide.remaining(), 32);
+    }
 }
