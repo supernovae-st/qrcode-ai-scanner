@@ -31,10 +31,12 @@ use super::run::{
 };
 use super::stats::{self, McNemar, Shift, Verdict};
 
-/// Benchmark-harness identifier, bumped with any method change.
-pub(crate) const BENCH_ID: &str = "qrscan-bench/v4";
-/// The protocol version the method implements.
-pub(crate) const PROTOCOL: &str = "qrscan-oracle/v1.5";
+/// The method a run implements — the one `bench/README.md` states — by a
+/// public label of its own, named under `bench` in the JSON output and in
+/// the Markdown title; bumped with any method change (v5: run-time inputs
+/// read from copies, images hashed again at each segment's end, a base
+/// build tied to its source).
+pub(crate) const BENCH_ID: &str = "qrscan-bench/v5";
 /// δ table: fractions, and the size δ in basis points (sizes are exact
 /// integers, so their verdict is too).
 pub(crate) const DELTA_P50: f64 = 0.05;
@@ -1919,7 +1921,7 @@ fn markdown_head(
     excluded: &BTreeMap<String, u64>,
 ) -> String {
     let f = &m.facts;
-    let mut md = format!("# Benchmark receipt — {BENCH_ID} ({PROTOCOL})\n\n");
+    let mut md = format!("# Benchmark run — {BENCH_ID}\n\n");
     if m.options.dry_run {
         md.push_str("**EXPLORATORY — dry run: the host gate was recorded, not enforced (only the host floor and the resource caps were). These numbers are not a baseline and carry no verdict; the run exits 3.**\n\n");
     }
@@ -2277,7 +2279,6 @@ pub(crate) fn write(m: &Measurement, out: &Path) -> Result<i32, String> {
     }
     let receipt = json!({
         "bench": BENCH_ID,
-        "protocol": PROTOCOL,
         "mode": if exploratory { "dry-run" } else { "gated" },
         "exploratory": exploratory,
         "status": state,
@@ -3180,6 +3181,37 @@ mod tests {
             receipt["prescreen"].is_null(),
             "no pre-screen in a gated run"
         );
+    }
+
+    /// One public label names the method a run implements: the bench id,
+    /// under `bench` in the JSON output and in the Markdown title — no
+    /// second numbering beside it.
+    #[test]
+    fn a_run_names_its_method_by_the_bench_id_alone() {
+        let m = measurement(&complete_scope(), 10, vec![segment(10, 10.0, 1.0)]);
+        let dir = std::env::temp_dir().join(format!("qrscan-bench-method-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        write(&m, &dir).expect("written");
+        let read = |extension: &str| {
+            let path = std::fs::read_dir(&dir)
+                .expect("the run directory")
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .find(|p| p.extension().is_some_and(|e| e == extension))
+                .expect("written");
+            std::fs::read_to_string(path).expect("read")
+        };
+        let json: Value = serde_json::from_str(&read("json")).expect("json");
+        let md = read("md");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(json["bench"], json!("qrscan-bench/v5"));
+        assert!(json.get("protocol").is_none(), "one label names the method");
+        assert!(
+            md.starts_with("# Benchmark run — qrscan-bench/v5\n"),
+            "{md}"
+        );
+        assert!(!format!("{json}{md}").contains("qrscan-oracle"));
     }
 
     /// Every metric of the frozen scope a run did not measure is declared,

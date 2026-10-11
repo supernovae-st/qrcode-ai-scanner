@@ -3,9 +3,9 @@
 `xtask bench …` measures what the correctness oracle does not: outer-call
 latency, memory, allocations, throughput and WASM cost of the scanner,
 **base** (the published 0.9.0) versus **candidate** (this tree), by the
-method this file states (every run's JSON output names it under
-`protocol`). Correctness stays with `xtask oracle`; the bench only records
-whether outputs agree.
+method this file states — `qrscan-bench/v5`, which every run's JSON output
+names under `bench`. Correctness stays with `xtask oracle`; the bench only
+records whether outputs agree.
 
 Everything here is deterministic — no RNG, no resampling. Timing depends on
 the host, which is why a timing run is gated on a calm host (below) and a

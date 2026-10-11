@@ -1,6 +1,6 @@
 //! `xtask bench` — outer-call latency, memory, allocations, throughput and
 //! WASM cost of the scanner, base (the published 0.9.0) versus candidate
-//! (this tree), by the pinned benchmark protocol `qrscan-oracle/v1.5`: the
+//! (this tree), by the benchmark method `qrscan-bench/v5`: the
 //! oracle's sets, four runtimes and four modes, the environment, the method
 //! and host gate, and the receipts, as `bench/README.md` states them.
 //! Correctness belongs to `xtask oracle`; the bench only records whether
