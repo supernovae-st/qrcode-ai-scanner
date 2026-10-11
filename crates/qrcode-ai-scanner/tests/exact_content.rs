@@ -123,6 +123,19 @@ fn stream_colors(
     bits: &str,
     corrupt: &[usize],
 ) -> (Vec<qrcode::Color>, usize) {
+    let (mut data_codewords, mut ec_codewords) = stream_codewords(version, ec, bits);
+    for &index in corrupt {
+        match index.checked_sub(data_codewords.len()) {
+            None => data_codewords[index] ^= 0xFF,
+            Some(parity) => ec_codewords[parity] ^= 0xFF,
+        }
+    }
+    codeword_colors(version, ec, &data_codewords, &ec_codewords)
+}
+
+/// The data and EC codewords (in block order) of a symbol whose data is
+/// the given MSB-first bit string, padded as [`stream_colors`] pads it.
+fn stream_codewords(version: Version, ec: EcLevel, bits: &str) -> (Vec<u8>, Vec<u8>) {
     let clean: Vec<u8> = bits.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
     let mut data: Vec<u8> = clean
         .chunks(8)
@@ -139,17 +152,20 @@ fn stream_colors(
     while data.len() < capacity {
         data.push(pads.next().unwrap());
     }
-    let (mut data_codewords, mut ec_codewords) =
-        qrcode::ec::construct_codewords(&data, version, ec).unwrap();
-    for &index in corrupt {
-        match index.checked_sub(data_codewords.len()) {
-            None => data_codewords[index] ^= 0xFF,
-            Some(parity) => ec_codewords[parity] ^= 0xFF,
-        }
-    }
+    qrcode::ec::construct_codewords(&data, version, ec).unwrap()
+}
+
+/// The module colors of a symbol drawn from its data and EC codewords as
+/// given (the encoder's placement and best mask), and its width.
+fn codeword_colors(
+    version: Version,
+    ec: EcLevel,
+    data: &[u8],
+    parity: &[u8],
+) -> (Vec<qrcode::Color>, usize) {
     let mut canvas = qrcode::canvas::Canvas::new(version, ec);
     canvas.draw_all_functional_patterns();
-    canvas.draw_data(&data_codewords, &ec_codewords);
+    canvas.draw_data(data, parity);
     let colors = canvas.apply_best_mask().into_colors();
     (colors, usize::try_from(version.width()).unwrap())
 }
@@ -204,6 +220,24 @@ impl Stream {
             s = s.bits(u32::from(b), 8);
         }
         s
+    }
+
+    /// Decimal digits in numeric mode: three digits per 10 bits, a
+    /// remainder of two in 7, of one in 4 (ISO/IEC 18004 §7.4.3).
+    fn numeric(self, digits: &str) -> Self {
+        let mut s = self
+            .bits(0b0001, 4)
+            .bits(u32::try_from(digits.len()).unwrap(), 10);
+        for group in digits.as_bytes().chunks(3) {
+            let value: u32 = std::str::from_utf8(group).unwrap().parse().unwrap();
+            s = s.bits(value, [0, 4, 7, 10][group.len()]);
+        }
+        s
+    }
+
+    /// The FNC1-in-first-position indicator (GS1).
+    fn fnc1_first(self) -> Self {
+        self.bits(0b0101, 4)
     }
 
     /// Shift JIS pairs in Kanji mode (ISO/IEC 18004 §7.4.6).
@@ -1333,6 +1367,143 @@ fn a19_a_mirrored_low_contrast_declaration_rqrr_alone_reads_is_located() {
     let d = one(&report);
     assert_content(d, A1, "A19");
     assert_eq!(d.engines, vec![EngineKind::Rqrr], "A19");
+}
+
+/// [`assert_refused`], and under the fast profile too.
+#[track_caller]
+fn assert_refused_by_every_profile(name: &str, png: &[u8]) {
+    assert_refused(name, png);
+    let report = scan_with(png, ScanProfile::Fast, None);
+    assert!(
+        report.detections.is_empty(),
+        "{name} (fast): {:?} (trace {:?})",
+        summary(&report),
+        report.trace.stages
+    );
+}
+
+/// FNC1 in first position, then a GS1 element string in numeric mode.
+fn fnc1_numeric(digits: &str) -> String {
+    Stream::default().fnc1_first().numeric(digits).end()
+}
+
+#[test]
+fn symbols_rqrr_cannot_decode_publish_nothing_past_the_annex_b_reserve() {
+    // FNC1 and Hanzi streams: rqrr detects the grid but cannot decode it, so
+    // rxing's port read is the only engine read, and the scanner's
+    // re-derivation of rqrr's grid measures the word's margin. Five
+    // corrected errors at v1-M (⌊(10 − 2)/2⌋ − 5 = −1) and three at v1-L
+    // (⌊(7 − 3)/2⌋ − 3 = −1) spend the misdecode-protection reserve: nothing
+    // is published, whichever profile reads the symbol. One error fewer
+    // keeps a margin of zero, and the content reads.
+    // name, EC level, data bits, the codewords whose corruption leaves the
+    // word one error past the reserve, the content and its GTIN, if any
+    type Row<'a> = (
+        &'a str,
+        EcLevel,
+        &'a str,
+        &'a [usize],
+        &'a str,
+        Option<&'a str>,
+    );
+    let gtin = fnc1_numeric(GS1_GTIN);
+    let abc = format!("0101 {BYTE_ABC}");
+    let hanzi = Stream::default().hanzi(&ZHONGWEN_GB).end();
+    let abc_first = r#"{"text":"abc","raw":"YWJj","charset":"utf8","fnc1":"first"}"#;
+    let v1m = [6, 8, 10, 12, 14];
+    let rows: [Row<'_>; 4] = [
+        (
+            "v1-M FNC1 GTIN",
+            EcLevel::M,
+            gtin.as_str(),
+            &v1m,
+            r#"{"text":"0109506000134352","raw":"MDEwOTUwNjAwMDEzNDM1Mg==","charset":"utf8","fnc1":"first"}"#,
+            Some("09506000134352"),
+        ),
+        (
+            "v1-M FNC1 abc",
+            EcLevel::M,
+            abc.as_str(),
+            &v1m,
+            abc_first,
+            None,
+        ),
+        (
+            "v1-M Hanzi",
+            EcLevel::M,
+            hanzi.as_str(),
+            &v1m,
+            r#"{"text":"中文","raw":"1tDOxA==","charset":"gb18030"}"#,
+            None,
+        ),
+        (
+            "v1-L FNC1 abc",
+            EcLevel::L,
+            abc.as_str(),
+            &[10, 12, 14],
+            abc_first,
+            None,
+        ),
+    ];
+    for (name, ec, bits, corrupt, expected, gtin14) in rows {
+        let render = |corrupt: &[usize]| {
+            let (colors, width) = stream_colors(Version::Normal(1), ec, bits, corrupt);
+            png_modules(&colors, width, Version::Normal(1), false)
+        };
+        assert_refused_by_every_profile(&format!("{name}, margin −1"), &render(corrupt));
+        let twin = render(&corrupt[..corrupt.len() - 1]);
+        for (profile, report) in [("frame", scan_content(&twin)), ("walk", scan_walk(&twin))] {
+            let ctx = format!("{name}, margin 0 ({profile})");
+            let d = one(&report);
+            assert_content(d, expected, &ctx);
+            assert_eq!(d.engines, vec![EngineKind::Rxing], "{ctx}");
+            if gtin14.is_some() {
+                assert_gs1(d, true, gtin14);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_word_corrected_onto_another_gs1_content_publishes_nothing() {
+    // Two GS1 symbols whose GTINs differ in their last two digits, both
+    // check digits valid: the first symbol's codewords moved toward the
+    // second's until the second lies three corrections away — at v1-L one
+    // past the reserve, ⌊(7 − 3)/2⌋ − 3 = −1 — and the first further. Every
+    // errors-only decoder reads the second GTIN, which no symbol carried:
+    // nothing is published.
+    let (version, ec) = (Version::Normal(1), EcLevel::L);
+    let codewords = |digits: &str| {
+        let (data, parity) = stream_codewords(version, ec, &fnc1_numeric(digits));
+        (data.len(), [data, parity].concat())
+    };
+    let (data_len, carried) = codewords(GS1_GTIN);
+    let (_, other) = codewords("0109506000134369");
+    let differ: Vec<usize> = (0..carried.len())
+        .filter(|&i| carried[i] != other[i])
+        .collect();
+    // three of them keep the carried values: the word lies three codewords
+    // from the other content, and more than three from the carried one
+    let moved = &differ[..differ.len() - 3];
+    assert!(moved.len() > 3, "{differ:?}");
+    let mut word = carried.clone();
+    for &i in moved {
+        word[i] = other[i];
+    }
+    let png = |word: &[u8]| {
+        let (colors, width) = codeword_colors(version, ec, &word[..data_len], &word[data_len..]);
+        png_modules(&colors, width, version, false)
+    };
+    assert_refused_by_every_profile("corrected onto another GTIN", &png(&word));
+    // control: the other content's own symbol reads as that GTIN
+    let report = scan_content(&png(&other));
+    let d = one(&report);
+    assert_content(
+        d,
+        r#"{"text":"0109506000134369","raw":"MDEwOTUwNjAwMDEzNDM2OQ==","charset":"utf8","fnc1":"first"}"#,
+        "the other GTIN",
+    );
+    assert_gs1(d, true, Some("09506000134369"));
 }
 
 // ------------------------------------- J · rqrr Kanji 5949-5951 (c3)

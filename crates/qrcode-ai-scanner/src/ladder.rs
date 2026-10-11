@@ -807,10 +807,10 @@ impl Run<'_> {
     /// Re-derive grids rqrr detected but did not decode (plain RS, no luma
     /// sampling — or the re-derivation the engine pass already chose their
     /// orientation with): a stream that parses is a candidate parse — its
-    /// declarations, FNC1 position, segments and geometry, no engine; one
-    /// proven malformed is a refusal at the grid's place. At most
-    /// `MAX_RESCUE_CANDIDATES`, in the order given (original-space corners,
-    /// photometry stamped).
+    /// declarations, FNC1 position, segments, geometry and the correction
+    /// margin of the word it corrected, no engine; one proven malformed is a
+    /// refusal at the grid's place. At most `MAX_RESCUE_CANDIDATES`, in the
+    /// order given (original-space corners, photometry stamped).
     fn rederive(candidates: &[RescueCandidate], attempt: u32) -> (Vec<Read>, Vec<Refusal>) {
         let mut reads = Vec::new();
         let mut refusals = Vec::new();
@@ -825,7 +825,7 @@ impl Run<'_> {
                 )
             });
             match derived {
-                Rederived::Parsed { parsed, .. } => {
+                Rederived::Parsed { parsed, margin } => {
                     let key = ContentKey {
                         raw: parsed.bytes,
                         eci: EciEvidence::from_marks(parsed.eci),
@@ -840,6 +840,10 @@ impl Run<'_> {
                         Read::new(Symbology::QrCode, key, None, rank).at(Some(candidate.corners));
                     read.segments = Segments::Observed(parsed.segments);
                     read.parsed = true;
+                    // the scanner error-corrected this word itself: the
+                    // acceptance weighs its margin like any read's (an
+                    // FNC1 or Hanzi symbol has no other measured word)
+                    read.margin = Margin::Known(margin);
                     read.geometry = candidate_geometry(candidate);
                     reads.push(read);
                 }
@@ -855,7 +859,7 @@ impl Run<'_> {
     /// The re-read (07-pipeline property 6): each read with a hint is
     /// sampled at its engine's corners in the attempt image, while the scan
     /// has re-reads left — unless a recorded refusal withholds it (it is
-    /// withheld anyway) or [`Run::needs_reread`] finds nothing to learn. A
+    /// withheld anyway) or [`Run::reread_hint`] finds nothing to learn. A
     /// located parse records its word's margin and, for a declarations
     /// re-read, upgrades the read (declarations, segments — never its bytes,
     /// engines or geometry); a declarations re-read that refuses removes it
@@ -869,11 +873,11 @@ impl Run<'_> {
     ) {
         let mut i = 0;
         while let Some((read, hint)) = reads.get(i) {
-            let Some(hint) = hint.clone().filter(|hint| {
-                self.rereads < MAX_REREADS
-                    && !self.store.withheld(read)
-                    && self.needs_reread(read, hint, reads)
-            }) else {
+            let Some(hint) = hint
+                .as_ref()
+                .filter(|_| self.rereads < MAX_REREADS && !self.store.withheld(read))
+                .and_then(|hint| self.reread_hint(read, hint, reads))
+            else {
                 i += 1;
                 continue;
             };
@@ -913,32 +917,44 @@ impl Run<'_> {
         }
     }
 
-    /// Whether a read's re-read can still learn something: a declarations
+    /// The re-read a read can still learn from, if any: its declarations
     /// re-read unless a parsed read or candidate parse of the attempt
-    /// carries the read where it lies; a margin re-read once per content,
-    /// while no read of that content — the attempt's or the walk's — has a
-    /// known margin of zero or more.
-    fn needs_reread(
+    /// carries the read where it lies; otherwise — or once such a parse
+    /// carries it — the margin re-read of a port read at EC level L or M
+    /// ([`LocateHint::for_margin`]), once per content, while no read of that
+    /// content — the attempt's or the walk's — has a known margin of zero or
+    /// more. The parse that carries the declarations may have corrected its
+    /// own word past the Annex B reserve (rqrr's sampling of the grid): the
+    /// port read's word, sampled at its own corners, can still keep the
+    /// content.
+    fn reread_hint(
         &self,
         read: &Read,
         hint: &LocateHint,
         reads: &[(Read, Option<LocateHint>)],
-    ) -> bool {
+    ) -> Option<LocateHint> {
         let content =
             |other: &Read| other.symbology == read.symbology && other.key.agrees(&read.key);
-        if hint.declarations {
-            return !reads.iter().any(|(other, _)| {
+        let hint = if hint.declarations {
+            let carried = reads.iter().any(|(other, _)| {
                 other.parsed && content(other) && inside(read.location, other.location)
             });
-        }
-        !self
+            if !carried {
+                return Some(hint.clone());
+            }
+            hint.for_margin()?
+        } else {
+            hint.clone()
+        };
+        let measured = self
             .margin_rereads
             .iter()
             .any(|(symbology, key)| *symbology == read.symbology && key.agrees(&read.key))
-            && !reads
+            || reads
                 .iter()
                 .any(|(other, _)| content(other) && other.margin.within_reserve())
-            && !self.store.has_margin(read)
+            || self.store.has_margin(read);
+        (!measured).then_some(hint)
     }
 
     /// S5 — try the collected rescue candidates when the walk published
@@ -2487,6 +2503,8 @@ mod ladder_mutant_kills {
             let mut parse =
                 Read::new(Symbology::QrCode, key, Some(EngineKind::Rqrr), rank).at(place);
             parse.parsed = true;
+            // a parse measures its own word: v3-M, no error, ⌊26/2⌋ = 13
+            parse.margin = Margin::Known(13);
             (parse, None)
         };
         let cancel = CancelToken::new();
@@ -2504,6 +2522,74 @@ mod ladder_mutant_kills {
         run.reread(&luma, &mut reads, &mut refusals);
         assert_eq!(run.rereads, 0, "the parse where it lies carries it");
         assert!(refusals.is_empty());
+    }
+
+    /// v1-M: FNC1 in first position, then the GTIN element string
+    /// 0109506000134352 in numeric mode, its data codewords at `corrupt`
+    /// inverted after the RS parity was computed.
+    fn fnc1_gtin_v1m(corrupt: &[usize]) -> LumaImage {
+        let data = crate::rescue::test_symbols::stream(
+            "0101 0001 0000010000 0000001010 1110110110 1001011000 0000001101 0110110011 0010 0000",
+        );
+        crate::rescue::test_symbols::from_corrupted_codewords(
+            qrcode::Version::Normal(1),
+            qrcode::EcLevel::M,
+            &data,
+            corrupt,
+        )
+    }
+
+    #[test]
+    fn a_port_read_its_candidate_carries_is_still_re_read_for_its_margin() {
+        // rqrr cannot decode FNC1: its grid is re-derived (a candidate parse)
+        // that carries the port read's declarations and measures its own
+        // word. Five corrected errors at v1-M leave that word one error past
+        // the reserve (⌊(10 − 2)/2⌋ − 5 = −1): no read of the content keeps a
+        // margin of zero or more, so the port read is still re-read at its
+        // corners, for its margin only, once. Four errors leave the candidate
+        // a margin of zero: no re-read is spent.
+        for (corrupt, margin, rereads) in [
+            (&[6, 8, 10, 12, 14][..], -1, 1),
+            (&[6, 8, 10, 12][..], 0, 0),
+        ] {
+            let luma = fnc1_gtin_v1m(corrupt);
+            let dims = (luma.width(), luma.height());
+            let outcome = engine::decode_filtered(&luma, engine::FormatFilter::All);
+            let (parses, refusals) = Run::rederive(&outcome.rescue, 0);
+            assert!(refusals.is_empty(), "{refusals:?}");
+            let [parse] = &parses[..] else {
+                panic!("one candidate parse: {parses:?}");
+            };
+            assert_eq!(parse.margin, Margin::Known(margin), "{corrupt:?}");
+            let cancel = CancelToken::new();
+            let mut run = fresh_run(&cancel, dims);
+            let mut reads = reads_of(&run, outcome.detections, 0, dims);
+            let [(port, Some(hint))] = &reads[..] else {
+                panic!("the port's read alone: {reads:?}");
+            };
+            assert!(
+                hint.declarations && port.key.fnc1 == Fnc1::First,
+                "{hint:?}"
+            );
+            let before = port.clone();
+            reads.push((parse.clone(), None));
+            let mut refused = Vec::new();
+            run.reread(&luma, &mut reads, &mut refused);
+            assert!(refused.is_empty(), "{refused:?}");
+            assert_eq!(run.rereads, rereads, "{corrupt:?}");
+            let (port, _) = &reads[0];
+            let measured = if rereads == 1 {
+                Margin::Known(-1)
+            } else {
+                Margin::Unknown
+            };
+            assert_eq!(port.margin, measured, "{corrupt:?}");
+            assert_eq!(
+                (&port.key, port.parsed, &port.segments),
+                (&before.key, before.parsed, &before.segments),
+                "a margin re-read changes nothing else"
+            );
+        }
     }
 
     // ---- Run::collect_rescue ----
