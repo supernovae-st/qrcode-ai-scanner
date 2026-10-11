@@ -1,11 +1,11 @@
 //! Errors-and-erasures Reed-Solomon correction over the QR field —
 //! Forney 1965 (DOI 10.1109/TIT.1965.1053825), ISO/IEC 18004 Annex B.
 //!
-//! The capacity law: `e + 2t ≤ d − p` (e erasures at known positions cost
-//! HALF an unknown error t). The decode engines treat every corrupted
-//! codeword as a full-price error and give up at `t > ⌊(d−p)/2⌋`; marking
-//! the logo-occluded / low-confidence codewords as erasures is what makes
-//! the artistic-QR rescue stage recover past that wall.
+//! `correct` applies `e + 2t ≤ d` (d = npar, e < d): e erasures at known
+//! positions cost HALF an unknown error t. The engines correct up to ⌊d/2⌋
+//! errors; the acceptance needs `e + 2t ≤ d − p` (`super::margin`, Annex B's
+//! p), a block corrected with erasures `e + 2t ≤ d − p − 2` (`ERASURE_SPARE`,
+//! `erasure_budget`): marked erasures reach past ⌊d/2⌋ on all but v1-L blocks.
 //!
 //! Convention (matches `matrix::gf256::syndromes`): the block is a polynomial
 //! with `block[len−1−j]` as the `x^j` coefficient — "power position" j
