@@ -4692,10 +4692,14 @@ mod tests {
 
     /// With a fake package: a Node driver whose parent goes away mid-scan
     /// — a synchronous 20 s scan that blocks its main thread — leaves
-    /// within about 50 ms.
+    /// within about 50 ms. The shell leaves only once the scan has begun
+    /// (the fake package marks it): a driver keeps the parent it sees when
+    /// it starts, so a shell gone before a slow Node start would leave it
+    /// no parent to lose.
     #[test]
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn node_drivers_leave_when_their_parent_does() {
+        use std::io::Write as _;
         if !Command::new("node")
             .arg("--version")
             .output()
@@ -4715,9 +4719,11 @@ mod tests {
         put("qrcode-ai-scanner_bg.wasm", b"\0asm\x01\0\0\0");
         put(
             "qrcode-ai-scanner.js",
-            b"export function initSync() { return { memory: { buffer: { byteLength: 65536 } } }; }\n\
+            b"import { writeFileSync } from 'node:fs';\n\
+              export function initSync() { return { memory: { buffer: { byteLength: 65536 } } }; }\n\
               export function version() { return '0.0.0-test'; }\n\
               export function scan_image(bytes, profile, max_dimension, max_pixels, budget_ms) {\n\
+                writeFileSync(new URL('scanning', import.meta.url), '');\n\
                 const end = Date.now() + 20000; while (Date.now() < end) {}\n\
                 return { trace: { total_ms: 1, engine_panics: 0, stages: [] }, score: null, detections: [] };\n\
               }\n",
@@ -4726,17 +4732,32 @@ mod tests {
         let mut shell = Command::new("sh")
             .args([
                 "-c",
-                "printf 'scan\\tfull\\tdefault\\t0\\t%s\\n' \"$2\" | node \"$0\" serve \"$1\" & echo \"driver $!\"; sleep 1",
+                "printf 'scan\\tfull\\tdefault\\t0\\t%s\\n' \"$2\" | node \"$0\" serve \"$1\" & echo \"driver $!\"; read -r go",
                 script("bench-wasm.mjs").to_str().expect("utf-8"),
                 dir.to_str().expect("utf-8"),
                 dir.join("image.bin").to_str().expect("utf-8"),
             ])
             .env_remove(super::super::worker::PARENT_ENV)
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("shell");
         let driver = proc::tests::read_pid(shell.stdout.take().expect("stdout"), "driver ");
+        let started = std::time::Instant::now();
+        while !dir.join("scanning").exists() {
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "the driver never started its scan"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        shell
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(b"go\n")
+            .expect("the shell reads its go");
         assert!(shell.wait().expect("the shell exits").success());
         assert!(
             proc::tests::gone_within(driver, Duration::from_secs(1)),
