@@ -824,7 +824,8 @@ pub enum PlateColor {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct StageTrace {
-    /// Stage name (stable identifiers: `pyramid` · `direct` · `enhance` · `deep`).
+    /// Stage name (stable identifiers: `pyramid` · `direct` · `enhance` ·
+    /// `deep` · `rescue`).
     pub stage: String,
     /// Number of transform attempts executed in this stage.
     pub transforms_tried: u32,
