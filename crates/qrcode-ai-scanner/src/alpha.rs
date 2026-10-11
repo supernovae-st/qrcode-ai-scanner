@@ -11,12 +11,10 @@
 //! never interpolation. Everything here is integer, pass-bounded and
 //! deterministic — same input, same bytes, same report.
 
-use web_time::Instant;
-
 use crate::engine::content::ContentKey;
 use crate::error::Result;
 use crate::input::{LumaImage, bt601};
-use crate::ladder::{AlphaBackground, CancelToken};
+use crate::ladder::AlphaBackground;
 use crate::report::{
     AlphaEnvelope, AlphaMode, AlphaPaletteProbe, AlphaPlacement, AlphaProbe, AlphaReport, Symbology,
 };
@@ -207,9 +205,10 @@ impl AlphaContext {
     /// probe decodes when one of its reads carries `expected`, the primary
     /// detection's content (07-pipeline property 7), as stress cells do.
     ///
-    /// Every calibration step and probe is admitted by the scan's deadline
-    /// like a score cell: [`Envelope::Cut`] when it refused one, and the
-    /// first step is admitted before any pixel work.
+    /// Every calibration step and probe is admitted by `bound` (the scan's
+    /// deadline) like a score cell: [`Envelope::Cut`] when it refused one,
+    /// and the first step is admitted before any pixel work. `bound` also
+    /// tallies the decoder panics the probes caught.
     ///
     /// # Errors
     /// `QRS-005` when cancellation fires between probes (the scan-wide
@@ -219,10 +218,8 @@ impl AlphaContext {
         expected: &ContentKey,
         symbology: Symbology,
         palette: &[[u8; 3]],
-        cancel: &CancelToken,
-        deadline: Option<Instant>,
+        bound: &mut Bound<'_>,
     ) -> Result<Envelope> {
-        let mut bound = Bound::new(cancel, deadline);
         if !bound.admit()? {
             return Ok(Envelope::Cut);
         }
@@ -264,7 +261,7 @@ impl AlphaContext {
             self.background[1],
             self.background[2],
         ));
-        let cell = match CellProbe::calibrate_admitted(&base, expected, symbology, &mut bound)? {
+        let cell = match CellProbe::calibrate_admitted(&base, expected, symbology, bound)? {
             Calibrated::Class(cell) => cell,
             Calibrated::Undecodable => return Ok(Envelope::Undecodable),
             Calibrated::Interrupted => return Ok(Envelope::Cut),
@@ -274,7 +271,12 @@ impl AlphaContext {
             if !bound.admit()? {
                 return Ok(None);
             }
-            Ok(Some(crate::score::cell_passes(&over(bg), expected, cell)))
+            Ok(Some(crate::score::cell_passes(
+                &over(bg),
+                expected,
+                cell,
+                bound,
+            )))
         };
 
         let mut probes: Vec<(u8, bool)> = Vec::with_capacity(ENVELOPE_RUNGS.len() + 4);
@@ -398,6 +400,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use crate::ladder::CancelToken;
+    use web_time::Instant;
 
     #[test]
     fn composite_is_exact_at_the_anchors() {
@@ -596,7 +600,12 @@ mod tests {
         .unwrap();
         let key = walked.contents[0].0.clone();
         let envelope = |key: &ContentKey, deadline| {
-            context.envelope(key, Symbology::QrCode, &[], &cancel, deadline)
+            context.envelope(
+                key,
+                Symbology::QrCode,
+                &[],
+                &mut Bound::new(&cancel, deadline),
+            )
         };
         assert!(matches!(
             envelope(&key, None).unwrap(),

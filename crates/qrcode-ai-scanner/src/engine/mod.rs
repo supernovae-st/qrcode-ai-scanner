@@ -217,6 +217,28 @@ fn run_engine<T>(panics: &mut u8, engine: impl FnOnce() -> T) -> Option<T> {
     outcome
 }
 
+#[cfg(all(test, feature = "engine-rxing"))]
+thread_local! {
+    /// Test-only: while `Some`, the rxing pass of every single-symbology
+    /// decode (score cells, envelope probes) panics inside the engine
+    /// boundary — the real catch-and-tally path, no decoder bug needed —
+    /// and the injected panics are counted here.
+    pub(crate) static PROBE_PANICS: std::cell::Cell<Option<u32>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Test-only: the injected panic of [`PROBE_PANICS`].
+#[cfg(all(test, feature = "engine-rxing"))]
+fn inject_probe_panic(filter: FormatFilter) {
+    if !matches!(filter, FormatFilter::Only(_)) {
+        return;
+    }
+    if let Some(count) = PROBE_PANICS.with(std::cell::Cell::get) {
+        PROBE_PANICS.with(|injected| injected.set(Some(count + 1)));
+        panic!("injected decoder panic");
+    }
+}
+
 /// Which symbologies a decode pass tries — the cost lever: every extra
 /// format family is another detector walking the image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,7 +266,11 @@ pub(crate) fn decode_filtered(luma: &LumaImage, filter: FormatFilter) -> EngineO
     let mut outcome = EngineOutcome::default();
 
     #[cfg(feature = "engine-rxing")]
-    if let Some(found) = run_engine(&mut outcome.panics, || rxing_engine::decode(luma, filter)) {
+    if let Some(found) = run_engine(&mut outcome.panics, || {
+        #[cfg(test)]
+        inject_probe_panic(filter);
+        rxing_engine::decode(luma, filter)
+    }) {
         outcome.detections.extend(found);
     }
 

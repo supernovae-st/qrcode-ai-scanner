@@ -141,10 +141,6 @@ impl Scanner {
         // stream the first walk refused stays refused in the second: it
         // starts from the first walk's refusals and parsed contents.
         let mut fallback_used = false;
-        // Every planned unit the deadline prevents after the walks — the
-        // judgment's, the envelope's — leaves the report partial
-        // (`trace.budget_exhausted`); the walks' own cuts are in the trace.
-        let mut cut = false;
         if outcome.merged.is_empty()
             && let Some(context) = &mut alpha_context
             && let Some((alt_planes, alt_background)) = context.opposite_planes()
@@ -160,7 +156,9 @@ impl Scanner {
         }
         // Score the primary (first) detection when the profile asks for it;
         // its stress cells and envelope probes match its content (aligned
-        // with it in `contents`), never its text.
+        // with it in `contents`), never its text. Each stage runs under its
+        // own bound on the scan's deadline, which also tallies the decoder
+        // panics its decodes caught (`trace.engine_panics`).
         // The scoring stage shares the engine panic posture: a panic in the
         // math path degrades to "no score", never a crash (native unwind;
         // on wasm panics trap regardless — documented limitation). A
@@ -169,8 +167,14 @@ impl Scanner {
             .merged
             .first()
             .zip(outcome.contents.first().map(|(key, _)| key));
+        // Every planned unit the deadline prevents after the walks — the
+        // judgment's, the envelope's — leaves the report partial
+        // (`trace.budget_exhausted`); the walks' own cuts are in the trace.
+        let mut cut = false;
+        let mut probe_panics = 0u8;
         let scored = match (primary, self.config.score_depth) {
             (Some((detection, key)), depth @ (ScoreDepth::Reduced | ScoreDepth::Full)) => {
+                let mut bound = score::Bound::new(cancel, deadline);
                 let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     score::evaluate(
                         &planes.luma,
@@ -179,16 +183,13 @@ impl Scanner {
                         depth,
                         &self.config.score_skip_axes,
                         &self.config.score_skip_checks,
-                        cancel,
-                        deadline,
+                        &mut bound,
                     )
                 }));
+                probe_panics = probe_panics.saturating_add(bound.panics());
+                cut |= bound.cut();
                 match attempt {
-                    Ok(result) => {
-                        let evaluation = result?;
-                        cut |= evaluation.cut;
-                        evaluation.judged
-                    }
+                    Ok(result) => result?,
                     Err(_) => None,
                 }
             }
@@ -207,15 +208,16 @@ impl Scanner {
                         .score_skip_checks
                         .contains(&ScoreCheck::AlphaEnvelope) =>
             {
+                let mut bound = score::Bound::new(cancel, deadline);
                 let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     context.envelope(
                         key,
                         detection.symbology,
                         &self.config.alpha_palette,
-                        cancel,
-                        deadline,
+                        &mut bound,
                     )
                 }));
+                probe_panics = probe_panics.saturating_add(bound.panics());
                 match attempt {
                     Ok(result) => match result? {
                         alpha::Envelope::Measured(envelope) => Some(envelope),
@@ -230,6 +232,7 @@ impl Scanner {
             }
             _ => None,
         };
+        outcome.trace.engine_panics = outcome.trace.engine_panics.saturating_add(probe_panics);
         if cut {
             outcome.trace.budget_exhausted = Some(true);
         }
@@ -484,5 +487,74 @@ mod tests {
             .scan(ImageInput::luma8(&data, 64, 64))
             .expect("default 10_000px / 64MP limits accept a 64px plane");
         assert!(report.detections.is_empty(), "a blank plane carries no QR");
+    }
+
+    /// A transparent v3-M symbol as RGBA: dark modules opaque black, every
+    /// other pixel fully transparent (6 px modules, 4-module margin) — the
+    /// `auto` flatten reads it over white, the Full profile scores it and
+    /// measures its placement envelope. Returns the buffer and its side.
+    fn transparent_symbol() -> (Vec<u8>, u32) {
+        let code = qrcode::QrCode::with_version(
+            b"https://qrc-ai.com/probe",
+            qrcode::Version::Normal(3),
+            qrcode::EcLevel::M,
+        )
+        .unwrap();
+        let width = code.width();
+        let side = (width + 8) * 6;
+        let mut rgba = vec![0u8; side * side * 4];
+        for (i, color) in code.to_colors().iter().enumerate() {
+            if *color == qrcode::Color::Dark {
+                let (mx, my) = (i % width + 4, i / width + 4);
+                for dy in 0..6 {
+                    for dx in 0..6 {
+                        let at = ((my * 6 + dy) * side + mx * 6 + dx) * 4;
+                        rgba[at + 3] = 255;
+                    }
+                }
+            }
+        }
+        (rgba, u32::try_from(side).unwrap())
+    }
+
+    #[cfg(feature = "engine-rxing")]
+    #[test]
+    fn decoder_panics_in_score_cells_and_envelope_probes_reach_the_trace() {
+        use crate::engine::PROBE_PANICS;
+        // the walk reads the symbol with no injected fault; the judgment's
+        // cells and the envelope's probes decode it alone, and each of their
+        // rxing passes panics — caught and tallied at the engine boundary.
+        // The cells are judged as before (rqrr still reads them): only the
+        // count is new
+        let (rgba, side) = transparent_symbol();
+        let mut config = super::ScanConfig::full();
+        config.budget_ms = None;
+        let scanner = Scanner::builder()
+            .profile(super::ScanProfile::Custom(config))
+            .build();
+        let clean = scanner.scan(ImageInput::rgba8(&rgba, side, side)).unwrap();
+        assert_eq!(clean.trace.engine_panics, 0, "no real decoder panic");
+        PROBE_PANICS.with(|injected| injected.set(Some(0)));
+        let report = scanner.scan(ImageInput::rgba8(&rgba, side, side));
+        let injected = PROBE_PANICS
+            .with(|injected| injected.replace(None))
+            .unwrap();
+        let report = report.unwrap();
+        assert!(injected > 0, "the probes decoded");
+        assert_eq!(
+            u32::from(report.trace.engine_panics),
+            injected.min(u32::from(u8::MAX)),
+            "every caught probe panic is counted once"
+        );
+        assert_eq!(report.detections.len(), 1);
+        assert!(report.score.is_some(), "the judgment completes");
+        assert!(
+            report
+                .alpha
+                .as_ref()
+                .is_some_and(|alpha| alpha.envelope.is_some()),
+            "the envelope completes: {:?}",
+            report.alpha
+        );
     }
 }

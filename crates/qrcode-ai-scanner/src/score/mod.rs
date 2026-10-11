@@ -114,10 +114,11 @@ fn cell_decode(img: &LumaImage, symbology: crate::report::Symbology) -> engine::
 
 /// The limits one judgment runs under — the shared scan deadline, the
 /// cancel token and, in tests, a deterministic work quota — plus the work
-/// units it spent. One unit = one probe step: a calibration decode class,
-/// one stress cell, one knee bisection or one envelope probe. Each step is
-/// admitted BEFORE it runs (an in-flight decode is not interruptible), so a
-/// quota cuts exactly where a deadline can, but on the same step every run.
+/// units it spent and the decoder panics its decodes caught. One unit = one
+/// probe step: a calibration decode class, one stress cell, one knee
+/// bisection or one envelope probe. Each step is admitted BEFORE it runs (an
+/// in-flight decode is not interruptible), so a quota cuts exactly where a
+/// deadline can, but on the same step every run.
 pub(crate) struct Bound<'a> {
     cancel: &'a CancelToken,
     deadline: Option<Instant>,
@@ -125,6 +126,9 @@ pub(crate) struct Bound<'a> {
     spent: u32,
     /// A planned step was refused.
     cut: bool,
+    /// Decoder panics the engine boundary caught in this bound's decodes —
+    /// the report counts them in `trace.engine_panics`.
+    panics: u8,
 }
 
 impl<'a> Bound<'a> {
@@ -136,6 +140,7 @@ impl<'a> Bound<'a> {
             quota: None,
             spent: 0,
             cut: false,
+            panics: 0,
         }
     }
 
@@ -176,6 +181,24 @@ impl<'a> Bound<'a> {
     /// a knee bisection of a complete one is missing.
     pub(crate) fn cut(&self) -> bool {
         self.cut
+    }
+
+    /// The decoder panics this bound's decodes caught.
+    pub(crate) fn panics(&self) -> u8 {
+        self.panics
+    }
+
+    /// One decode of a probe step ([`cell_decode`]): its reads, the decoder
+    /// panics it caught added to the tally. How the step is judged does not
+    /// change — a panicking decoder read nothing.
+    fn decode(
+        &mut self,
+        img: &LumaImage,
+        symbology: crate::report::Symbology,
+    ) -> Vec<engine::RawDetection> {
+        let outcome = cell_decode(img, symbology);
+        self.panics = self.panics.saturating_add(outcome.panics);
+        outcome.detections
     }
 }
 
@@ -271,7 +294,7 @@ impl CellProbe {
             rung: None,
             symbology,
         };
-        if cell_passes(base, expected, shallow) {
+        if cell_passes(base, expected, shallow, bound) {
             return Ok(Calibrated::Class(shallow));
         }
         for rung in crate::ladder::DEEP_RUNGS {
@@ -279,7 +302,7 @@ impl CellProbe {
                 return Ok(Calibrated::Interrupted);
             }
             let boosted = rung.apply(base);
-            if detections_match(&cell_decode(&boosted, symbology).detections, expected) {
+            if detections_match(&bound.decode(&boosted, symbology), expected) {
                 return Ok(Calibrated::Class(Self {
                     rung: Some(rung),
                     symbology,
@@ -301,21 +324,25 @@ impl CellProbe {
 /// Probe = direct + otsu + the baseline's deep rung when it needed one —
 /// the margin is measured RELATIVE to the symbol's own decode class, never
 /// with the full ladder's recovery power (that asymmetry is the point).
-pub(crate) fn cell_passes(img: &LumaImage, expected: &ContentKey, probe: CellProbe) -> bool {
-    if detections_match(&cell_decode(img, probe.symbology).detections, expected) {
+/// The decodes run through `bound`, which tallies the decoder panics they
+/// caught.
+pub(crate) fn cell_passes(
+    img: &LumaImage,
+    expected: &ContentKey,
+    probe: CellProbe,
+    bound: &mut Bound<'_>,
+) -> bool {
+    if detections_match(&bound.decode(img, probe.symbology), expected) {
         return true;
     }
     let binarized = transform::otsu_threshold(img);
-    if detections_match(
-        &cell_decode(&binarized, probe.symbology).detections,
-        expected,
-    ) {
+    if detections_match(&bound.decode(&binarized, probe.symbology), expected) {
         return true;
     }
     match probe.rung {
         Some(rung) => {
             let boosted = rung.apply(img);
-            detections_match(&cell_decode(&boosted, probe.symbology).detections, expected)
+            detections_match(&bound.decode(&boosted, probe.symbology), expected)
         }
         None => false,
     }
@@ -359,7 +386,7 @@ fn run_ramp(
             return Ok(None);
         }
         let cell = build(base, i);
-        if !cell_passes(&cell, expected, probe) {
+        if !cell_passes(&cell, expected, probe, bound) {
             return Ok(Some((passed, Some(i))));
         }
         passed += 1;
@@ -409,7 +436,7 @@ fn refine_knee(
         return Ok(None);
     }
     let (cell, label) = refine(base, knee);
-    Ok(Some(if cell_passes(&cell, expected, probe) {
+    Ok(Some(if cell_passes(&cell, expected, probe, bound) {
         cell_label(axis, knee).to_owned()
     } else {
         label
@@ -457,7 +484,7 @@ fn run_lighting(
         if !bound.admit()? {
             return Ok(None);
         }
-        if cell_passes(&lighting_cells[i](base), expected, probe) {
+        if cell_passes(&lighting_cells[i](base), expected, probe, bound) {
             lighting_passed += 1;
         } else if first_failed.is_none() {
             first_failed = Some(i);
@@ -729,27 +756,15 @@ fn compose(
     (score, hints)
 }
 
-/// What scoring the primary published, and whether the deadline cut it.
-#[derive(Debug)]
-pub(crate) struct Evaluation {
-    /// The complete judgment — `None` when no cell is planned or the
-    /// deadline interrupted it.
-    pub judged: Option<(Score, Vec<Hint>)>,
-    /// The deadline prevented a planned step: the judgment's (then absent),
-    /// or a knee bisection's (the score stands, its label is missing).
-    pub cut: bool,
-}
-
-/// Evaluate the score for the primary detection under the scan's shared
-/// deadline, its cells matching `key`, the detection's content. No judgment
-/// when no cell is planned (every axis skipped — an axis-less composite
-/// would be fiction; callers treat it exactly like `ScoreDepth::Off`) and
-/// when the deadline cuts it: absent, never partial. A cancelled token is
-/// `Err(Cancelled)` (`QRS-005`).
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the primary (detection + content), its config and the scan's limits"
-)]
+/// Evaluate the score for the primary detection under `bound` (the scan's
+/// shared deadline), its cells matching `key`, the detection's content. No
+/// judgment when no cell is planned (every axis skipped — an axis-less
+/// composite would be fiction; callers treat it exactly like
+/// `ScoreDepth::Off`) and when the deadline cuts it: absent, never partial.
+/// `bound` then says whether the deadline prevented a planned step — the
+/// judgment's (then absent) or a knee bisection's (the score stands, its
+/// label is missing) — and how many decoder panics the cells caught. A
+/// cancelled token is `Err(Cancelled)` (`QRS-005`).
 pub(crate) fn evaluate(
     luma: &LumaImage,
     detection: &MergedDetection,
@@ -757,18 +772,14 @@ pub(crate) fn evaluate(
     depth: ScoreDepth,
     skip: &[StressAxis],
     skip_checks: &[crate::ladder::ScoreCheck],
-    cancel: &CancelToken,
-    deadline: Option<Instant>,
-) -> Result<Evaluation> {
-    let mut bound = Bound::new(cancel, deadline);
-    let judged = match judge(luma, detection, key, depth, skip, skip_checks, &mut bound)? {
-        Judgment::Complete(score, hints) => Some((score, hints)),
-        Judgment::NoAxes | Judgment::Interrupted => None,
-    };
-    Ok(Evaluation {
-        judged,
-        cut: bound.cut(),
-    })
+    bound: &mut Bound<'_>,
+) -> Result<Option<(Score, Vec<Hint>)>> {
+    Ok(
+        match judge(luma, detection, key, depth, skip, skip_checks, bound)? {
+            Judgment::Complete(score, hints) => Some((score, hints)),
+            Judgment::NoAxes | Judgment::Interrupted => None,
+        },
+    )
 }
 
 /// Judge the primary detection under `bound`: calibration, every planned
@@ -1398,21 +1409,11 @@ mod tests {
         skip: &[StressAxis],
         checks: &[crate::ladder::ScoreCheck],
     ) -> (Score, Vec<Hint>) {
-        let evaluation = evaluate(
-            luma,
-            detection,
-            key,
-            depth,
-            skip,
-            checks,
-            &CancelToken::new(),
-            None,
-        )
-        .unwrap();
-        assert!(!evaluation.cut, "an unbounded judgment is never cut");
-        let (score, hints) = evaluation
-            .judged
-            .expect("an unbounded judgment with axes completes");
+        let cancel = CancelToken::new();
+        let mut bound = Bound::new(&cancel, None);
+        let judged = evaluate(luma, detection, key, depth, skip, checks, &mut bound).unwrap();
+        assert!(!bound.cut(), "an unbounded judgment is never cut");
+        let (score, hints) = judged.expect("an unbounded judgment with axes completes");
         assert_honest_axes(&score.axes, depth);
         (score, hints)
     }
@@ -1910,22 +1911,13 @@ mod tests {
         let (luma, detection, key) = pristine_q_example();
         let cancel = CancelToken::new();
         for depth in [ScoreDepth::Full, ScoreDepth::Reduced] {
-            let outcome = evaluate(
-                &luma,
-                &detection,
-                &key,
-                depth,
-                &[],
-                &[],
-                &cancel,
-                Some(Instant::now()),
-            )
-            .unwrap();
+            let mut expired = Bound::new(&cancel, Some(Instant::now()));
+            let judged = evaluate(&luma, &detection, &key, depth, &[], &[], &mut expired).unwrap();
             assert!(
-                outcome.judged.is_none(),
-                "{depth:?}: an expired deadline must yield no judgment, got {outcome:?}"
+                judged.is_none(),
+                "{depth:?}: an expired deadline must yield no judgment, got {judged:?}"
             );
-            assert!(outcome.cut, "{depth:?}: and says the deadline cut it");
+            assert!(expired.cut(), "{depth:?}: and says the deadline cut it");
             // not even calibration ran: the deadline is checked before every step
             let mut bound = Bound::new(&cancel, Some(Instant::now()));
             let outcome = judge(&luma, &detection, &key, depth, &[], &[], &mut bound).unwrap();
@@ -2075,11 +2067,11 @@ mod tests {
                 "{depth:?}: {outcome:?}"
             );
             assert_eq!(bound.spent(), 0);
-            let outcome =
-                evaluate(&luma, &detection, &key, depth, skip, &[], &cancel, None).unwrap();
+            let mut free = Bound::new(&cancel, None);
+            let judged = evaluate(&luma, &detection, &key, depth, skip, &[], &mut free).unwrap();
             assert!(
-                outcome.judged.is_none() && !outcome.cut,
-                "{depth:?}: nothing planned, nothing cut: {outcome:?}"
+                judged.is_none() && !free.cut(),
+                "{depth:?}: nothing planned, nothing cut: {judged:?}"
             );
         }
     }
@@ -2648,10 +2640,11 @@ mod tests {
                 .filter(|_| detections_match(&cell_decode(img, d.symbology).detections, &key))
                 .count()
         };
+        let cancel = CancelToken::new();
         for side in [358u32, 256, 179, 128, 90] {
             let cell = transform::downscale_to(&base, side);
             let judged = (0..RUNS)
-                .filter(|_| cell_passes(&cell, &key, probe))
+                .filter(|_| cell_passes(&cell, &key, probe, &mut Bound::new(&cancel, None)))
                 .count();
             println!(
                 "{side}px cell ({}x{}): direct {}/{RUNS} · otsu {}/{RUNS} · cell_passes {judged}/{RUNS}",
