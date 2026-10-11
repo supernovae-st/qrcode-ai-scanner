@@ -1637,6 +1637,23 @@ mod tests {
     }
 
     #[test]
+    fn score_checks_parse_from_their_wire_names_only() {
+        // the bindings' and the CLI's `score_skip_checks` seam: every
+        // section from its report field name, nothing from any other
+        // spelling
+        for (name, check) in [
+            ("uec", ScoreCheck::Uec),
+            ("iso15415", ScoreCheck::Iso15415),
+            ("alpha_envelope", ScoreCheck::AlphaEnvelope),
+        ] {
+            assert_eq!(ScoreCheck::from_name(name), Some(check), "{name}");
+        }
+        for name in ["", "UEC", "iso_15415", "alpha-envelope", "envelope"] {
+            assert_eq!(ScoreCheck::from_name(name), None, "{name}");
+        }
+    }
+
+    #[test]
     fn boost_rung_resize_zero_keeps_native_resolution() {
         // resize: 0 means "work at native res" — NOT a 0-px downscale.
         let img = LumaImage::new(vec![128u8; 64 * 32], 64, 32);
