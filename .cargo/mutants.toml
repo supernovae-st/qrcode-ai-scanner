@@ -17,7 +17,12 @@ test_tool = "nextest"
 # assertion-gap signal.
 # (matched against the full mutant line, which starts with the file path —
 # never anchor.) Both bridge layers: lib.rs `fuzzing::` re-exports and the
-# rescue-internal `fuzz_api::` it forwards to.
+# rescue-internal `fuzz_api::` it forwards to. Both mutant shapes, by their
+# function context: a bridge function replaced (`replace fuzz_api::
+# parse_bitstream with ()`) and an operator inside one (`replace + with * in
+# fuzz_api::parse_bitstream`) — the second shape slipped past a
+# `replace fuzz_api::` pattern and nine of them reached the gate in run
+# 38105646991.
 #
 # Below the bridge class: the PROVEN-EQUIVALENT mutants — the 14 of the
 # 2026-07-05 full-file proof runs (argued in commit 63d5895) and the ones
@@ -123,8 +128,8 @@ test_tool = "nextest"
 # hide a real behavioral catch. Line drift stays safe, same direction as the
 # equivalents: it resurfaces in the weekly report.
 exclude_re = [
-    "replace fuzzing::",
-    "replace fuzz_api::",
+    "replace (fuzzing|fuzz_api)::",
+    " in (fuzzing|fuzz_api)::",
     "transform\\.rs:376:87: replace \\+ with \\* in downscale_to",
     "transform\\.rs:379:96: replace \\+ with \\* in downscale_to",
     "transform\\.rs:488:45: replace - with . in windowed_extremum_strided",
