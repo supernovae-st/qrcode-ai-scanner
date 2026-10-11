@@ -306,4 +306,42 @@ mod tests {
         let err = decode_to_luma(&ImageInput::luma8(&[], 0, 4), &Limits::default()).unwrap_err();
         assert_eq!(err.code(), "QRS-001");
     }
+
+    /// Every limit admits its exact value: a side of `max_dimension`, either
+    /// way round, and an image of exactly `max_pixels` pass; one more is
+    /// refused, naming the limit it broke.
+    #[test]
+    fn limits_admit_their_exact_values() {
+        let limits = Limits {
+            max_dimension: 100,
+            max_pixels: 5_000,
+        };
+        assert_eq!(validate_dims(100, 1, &limits).unwrap(), 100);
+        assert_eq!(validate_dims(1, 100, &limits).unwrap(), 100);
+        assert_eq!(validate_dims(50, 100, &limits).unwrap(), 5_000);
+        assert!(matches!(
+            validate_dims(101, 1, &limits),
+            Err(ScanError::DimensionsExceeded {
+                width: 101,
+                height: 1,
+                max_dimension: 100
+            })
+        ));
+        assert!(matches!(
+            validate_dims(1, 101, &limits),
+            Err(ScanError::DimensionsExceeded {
+                width: 1,
+                height: 101,
+                max_dimension: 100
+            })
+        ));
+        assert!(matches!(
+            validate_dims(51, 100, &limits),
+            Err(ScanError::PixelOverflow {
+                width: 51,
+                height: 100,
+                max_pixels: 5_000
+            })
+        ));
+    }
 }
