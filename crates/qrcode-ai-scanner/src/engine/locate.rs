@@ -562,7 +562,12 @@ fn decode_version(word: u32) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_precision_loss)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::cast_precision_loss,
+        clippy::float_cmp
+    )]
 
     use qrcode::bits::Bits;
     use qrcode::canvas::{Canvas, MaskPattern};
@@ -596,6 +601,18 @@ mod tests {
         transposed: bool,
         push: Push,
     ) -> Option<(LumaImage, [Point; 4])> {
+        let (colors, width) = symbol_colors(version, ec, mask, push)?;
+        raster(&colors, width, transposed)
+    }
+
+    /// The module colours of a symbol built from `push` with mask `mask`,
+    /// row by row, and its width.
+    fn symbol_colors(
+        version: i16,
+        ec: qrcode::EcLevel,
+        mask: usize,
+        push: Push,
+    ) -> Option<(Vec<qrcode::Color>, usize)> {
         let symbol = qrcode::Version::Normal(version);
         let mut bits = Bits::new(symbol);
         push(&mut bits).ok()?;
@@ -605,8 +622,16 @@ mod tests {
         canvas.draw_all_functional_patterns();
         canvas.draw_data(&data, &ecc);
         canvas.apply_mask(MASKS[mask]);
-        let colors = canvas.into_colors();
         let width = usize::try_from(symbol.width()).ok()?;
+        Some((canvas.into_colors(), width))
+    }
+
+    /// [`render`]'s raster of module colours.
+    fn raster(
+        colors: &[qrcode::Color],
+        width: usize,
+        transposed: bool,
+    ) -> Option<(LumaImage, [Point; 4])> {
         let side = (width + 2 * QUIET) * SCALE;
         let mut pixels = vec![255u8; side * side];
         for row in 0..width {
@@ -947,5 +972,433 @@ mod tests {
         // rqrr states nothing: only FNC1 none, whatever the declarations
         assert!(agrees(true, Fnc1::None, None) && agrees(false, Fnc1::None, None));
         assert!(!agrees(false, Fnc1::First, None));
+    }
+
+    /// ISO/IEC 18004 Table C.1: the format information as it lies in the
+    /// symbol (XOR 101010000010010), by its five data bits — the EC level
+    /// indicator (M 00 · L 01 · H 10 · Q 11), then the mask pattern
+    /// reference.
+    const FORMAT_INFORMATION: [u16; 32] = [
+        0x5412, 0x5125, 0x5E7C, 0x5B4B, 0x45F9, 0x40CE, 0x4F97, 0x4AA0, // M
+        0x77C4, 0x72F3, 0x7DAA, 0x789D, 0x662F, 0x6318, 0x6C41, 0x6976, // L
+        0x1689, 0x13BE, 0x1CE7, 0x19D0, 0x0762, 0x0255, 0x0D0C, 0x083B, // H
+        0x355F, 0x3068, 0x3F31, 0x3A06, 0x24B4, 0x2183, 0x2EDA, 0x2BED, // Q
+    ];
+
+    /// ISO/IEC 18004 Table D.1: the version information of versions 7-40.
+    const VERSION_INFORMATION: [u32; 34] = [
+        0x07C94, 0x085BC, 0x09A99, 0x0A4D3, 0x0BBF6, 0x0C762, 0x0D847, 0x0E60D, 0x0F928, 0x10B78,
+        0x1145D, 0x12A17, 0x13532, 0x149A6, 0x15683, 0x168C9, 0x177EC, 0x18EC4, 0x191E1, 0x1AFAB,
+        0x1B08E, 0x1CC1A, 0x1D33F, 0x1ED75, 0x1F250, 0x209D5, 0x216F0, 0x228BA, 0x2379F, 0x24B0B,
+        0x2542E, 0x26A64, 0x27541, 0x28C69,
+    ];
+
+    /// The EC level each value of the format information's indicator bits
+    /// states, as the encoder and the report name it.
+    const INDICATED: [(qrcode::EcLevel, EcLevel); 4] = [
+        (qrcode::EcLevel::M, EcLevel::M),
+        (qrcode::EcLevel::L, EcLevel::L),
+        (qrcode::EcLevel::H, EcLevel::H),
+        (qrcode::EcLevel::Q, EcLevel::Q),
+    ];
+
+    /// Every error pattern of `weight` bits within `width` bits.
+    fn errors(width: u32, weight: u32) -> Vec<u32> {
+        (0..1u32 << width)
+            .filter(|e| e.count_ones() == weight)
+            .collect()
+    }
+
+    #[test]
+    fn format_information_decodes_within_three_errors_and_never_past() {
+        let correctable: Vec<u32> = (0..=3).flat_map(|weight| errors(15, weight)).collect();
+        let past = errors(15, 4);
+        for (data, &masked) in (0u32..).zip(&FORMAT_INFORMATION) {
+            let level = INDICATED[usize::try_from(data >> 3).unwrap()].1;
+            let expected = Some((level, u8::try_from(data & 7).unwrap()));
+            let word = masked ^ 0x5412;
+            assert_eq!(
+                (data << 10) | bch_remainder(data << 10, 0x537),
+                u32::from(word),
+                "{data:05b}: the generator's remainder completes the codeword"
+            );
+            for &e in &correctable {
+                let received = word ^ u16::try_from(e).unwrap();
+                assert_eq!(decode_format(received), expected, "{data:05b} ^ {e:015b}");
+            }
+            // minimum distance 7: four errors never decode to this codeword —
+            // to none, or to another one three bits away
+            for &e in &past {
+                let received = word ^ u16::try_from(e).unwrap();
+                assert_ne!(decode_format(received), expected, "{data:05b} ^ {e:015b}");
+            }
+        }
+    }
+
+    #[test]
+    fn version_information_decodes_within_three_errors_and_never_past() {
+        let correctable: Vec<u32> = (0..=3).flat_map(|weight| errors(18, weight)).collect();
+        let past = errors(18, 4);
+        for (version, &word) in (7u32..).zip(&VERSION_INFORMATION) {
+            assert_eq!(
+                (version << 12) | bch_remainder(version << 12, 0x1F25),
+                word,
+                "v{version}: the generator's remainder completes the codeword"
+            );
+            let expected = u8::try_from(version).ok();
+            for &e in &correctable {
+                assert_eq!(decode_version(word ^ e), expected, "v{version} ^ {e:018b}");
+            }
+            // minimum distance 8: four errors leave every codeword at least
+            // four bits away — no version
+            for &e in &past {
+                assert_eq!(decode_version(word ^ e), None, "v{version} ^ {e:018b}");
+            }
+        }
+    }
+
+    #[test]
+    fn each_format_copy_reads_its_table_word_on_its_own() {
+        // version 1 at every EC level and mask, as read and transposed: the
+        // copy around the top-left finder and the one split between the
+        // other two finders each read the Table C.1 word, in both passes
+        for (data, &masked) in FORMAT_INFORMATION.iter().enumerate() {
+            let (ec, level) = INDICATED[data >> 3];
+            let mask = data & 7;
+            for transposed in [false, true] {
+                let (img, points) = render(1, ec, mask, transposed, CASES[0].2).unwrap();
+                let black = Binarized::of(&img);
+                let stated = hint(points, level, 1);
+                for pass in [
+                    Pass::Binarized {
+                        dark_is_black: true,
+                    },
+                    Pass::Luma { dark_is_low: true },
+                ] {
+                    if matches!(pass, Pass::Binarized { .. }) && black.black(0, 0).is_none() {
+                        continue; // no binarized image without rxing
+                    }
+                    let grid = Grid::new(&img, &black, &stated, 1, pass, transposed).unwrap();
+                    assert_eq!(
+                        grid.format_words(),
+                        [masked ^ 0x5412; 2],
+                        "{ec:?} mask {mask} T{transposed} {pass:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn either_version_copy_states_the_version_on_its_own() {
+        // versions 7-40, one copy blanked (all light: eight bits or more from
+        // every version word): the other still states the version; both
+        // blanked, none does
+        for version in 7i16..=40 {
+            let (colors, width) =
+                symbol_colors(version, qrcode::EcLevel::L, 0, CASES[0].2).unwrap();
+            // the 6 × 3 block left of the top-right finder's separator, and
+            // its transpose above the bottom-left one
+            let top_right =
+                |row: usize, column: usize| row < 6 && (width - 11..width - 8).contains(&column);
+            let bottom_left =
+                |row: usize, column: usize| column < 6 && (width - 11..width - 8).contains(&row);
+            let stated = u8::try_from(version).unwrap();
+            for (blank_top_right, blank_bottom_left, expected) in [
+                (true, false, Some(stated)),
+                (false, true, Some(stated)),
+                (true, true, None),
+            ] {
+                let mut modules = colors.clone();
+                for (i, module) in modules.iter_mut().enumerate() {
+                    let (row, column) = (i / width, i % width);
+                    if (blank_top_right && top_right(row, column))
+                        || (blank_bottom_left && bottom_left(row, column))
+                    {
+                        *module = qrcode::Color::Light;
+                    }
+                }
+                let (img, points) = raster(&modules, width, false).unwrap();
+                let black = Binarized::of(&img);
+                let grid = Grid::new(
+                    &img,
+                    &black,
+                    &hint(points, EcLevel::L, 1),
+                    stated,
+                    Pass::Luma { dark_is_low: true },
+                    false,
+                )
+                .unwrap();
+                assert_eq!(
+                    grid.version_word(),
+                    expected,
+                    "v{version}, top right blank {blank_top_right}, bottom left blank \
+                     {blank_bottom_left}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn side_lengths_is_the_quad_s_perimeter() {
+        // sides 3, 4, 3 and 4 in turn, the last one closing on the first point
+        let rectangle = [(0.0, 0.0), (3.0, 0.0), (3.0, 4.0), (0.0, 4.0)];
+        assert_eq!(side_lengths(&rectangle), 14.0);
+        // a rhombus of 3-4-5 sides
+        let rhombus = [(1.0, 1.0), (4.0, 5.0), (4.0, 10.0), (1.0, 6.0)];
+        assert_eq!(side_lengths(&rhombus), 20.0);
+    }
+
+    /// 64 × 64, white with a black 16 × 16 top-left corner and one pixel of
+    /// luma 100 at (50, 50) — one whole word per row of rxing's bit matrix,
+    /// so the bit right of a row's last pixel is the next row's first.
+    fn corner_image() -> LumaImage {
+        let mut pixels = vec![255u8; 64 * 64];
+        for row in 0..16 {
+            pixels[row * 64..row * 64 + 16].fill(0);
+        }
+        pixels[50 * 64 + 50] = 100;
+        LumaImage::new(pixels, 64, 64)
+    }
+
+    /// A grid of `size` modules whose module (column, row) is centred on the
+    /// pixel (column + offset, row + offset) — exact in f32: 64 cells.
+    fn synthetic<'a>(
+        img: &'a LumaImage,
+        black: &'a Binarized<'a>,
+        size: usize,
+        offset: f32,
+        pass: Pass,
+        threshold: f32,
+    ) -> Grid<'a> {
+        Grid {
+            img,
+            black,
+            to_image: Homography([
+                64.0,
+                0.0,
+                offset - 0.5,
+                0.0,
+                64.0,
+                offset - 0.5,
+                0.0,
+                0.0,
+                1.0,
+            ]),
+            size,
+            cells: 64.0,
+            pass,
+            mirrored: false,
+            threshold,
+        }
+    }
+
+    #[cfg(feature = "engine-rxing")]
+    #[test]
+    fn the_binarized_image_answers_within_its_bounds_only() {
+        let img = corner_image();
+        let black = Binarized::of(&img);
+        assert_eq!(black.black(0, 1), Some(true));
+        assert_eq!(black.black(15, 15), Some(true));
+        assert_eq!(black.black(16, 0), Some(false));
+        assert_eq!(black.black(40, 40), Some(false));
+        // past the right edge — where the next row's black pixels lie in the
+        // bit matrix — and past the bottom: white
+        assert_eq!(black.black(64, 0), Some(false));
+        assert_eq!(black.black(70, 0), Some(false));
+        assert_eq!(black.black(0, 64), Some(false));
+    }
+
+    #[cfg(feature = "engine-rxing")]
+    #[test]
+    fn a_binarized_module_is_dark_by_its_polarity_and_off_the_image_light() {
+        let img = corner_image();
+        let black = Binarized::of(&img);
+        // module (column, row) at pixel (column − 1, row − 1); dark(row, column)
+        let grid = |dark_is_black| {
+            synthetic(
+                &img,
+                &black,
+                64,
+                -1.0,
+                Pass::Binarized { dark_is_black },
+                0.0,
+            )
+        };
+        let normal = grid(true);
+        assert!(normal.dark(1, 1), "pixel (0, 0) is black");
+        assert!(normal.dark(6, 6), "pixel (5, 5) is black");
+        assert!(!normal.dark(41, 41), "pixel (40, 40) is white");
+        // left of or above the image: light — never pixel 0's colour
+        assert!(!normal.dark(1, 0), "pixel (−1, 0)");
+        assert!(!normal.dark(0, 1), "pixel (0, −1)");
+        assert!(!normal.dark(0, 0), "pixel (−1, −1)");
+        // the other polarity reads the complement, off the image included
+        let inverted = grid(false);
+        assert!(!inverted.dark(1, 1) && !inverted.dark(6, 6) && inverted.dark(41, 41));
+        assert!(inverted.dark(1, 0) && inverted.dark(0, 1) && inverted.dark(0, 0));
+    }
+
+    #[test]
+    fn a_luma_module_is_dark_strictly_below_the_threshold() {
+        let img = corner_image();
+        let black = Binarized::of(&img);
+        let grid =
+            |dark_is_low| synthetic(&img, &black, 64, -1.0, Pass::Luma { dark_is_low }, 100.0);
+        let low = grid(true);
+        assert!(low.dark(6, 6), "luma 0 is below 100");
+        assert!(!low.dark(51, 51), "luma 100 is not below 100");
+        assert!(!low.dark(41, 41), "luma 255");
+        let high = grid(false);
+        assert!(!high.dark(6, 6) && high.dark(51, 51) && high.dark(41, 41));
+    }
+
+    #[test]
+    fn the_luma_threshold_is_the_midpoint_of_the_2nd_and_98th_percentiles() {
+        // one module per pixel of a `side` × `side` image
+        let midpoint = |pixels: Vec<u8>, side: usize| {
+            let edge = u32::try_from(side).unwrap();
+            let img = LumaImage::new(pixels, edge, edge);
+            let black = Binarized::of(&img);
+            synthetic(
+                &img,
+                &black,
+                side,
+                0.0,
+                Pass::Luma { dark_is_low: true },
+                0.0,
+            )
+            .midpoint()
+        };
+        // 441 samples: the percentiles are the 9th lowest and the 9th highest
+        let mut spread = [
+            vec![10; 9],
+            vec![128; 422],
+            vec![200, 210, 220],
+            vec![230; 7],
+        ]
+        .concat();
+        spread.reverse();
+        assert_eq!(midpoint(spread, 21), Some(110.0));
+        let halves = [vec![100; 220], vec![200; 221]].concat();
+        assert_eq!(midpoint(halves, 21), Some(150.0));
+        // a spread of 16 grey levels is the least that splits
+        let least = [vec![100; 432], vec![116; 9]].concat();
+        assert_eq!(midpoint(least, 21), Some(108.0));
+        let narrow = [vec![100; 432], vec![115; 9]].concat();
+        assert_eq!(midpoint(narrow, 21), None);
+        assert_eq!(midpoint(vec![200; 441], 21), None, "a flat grid");
+        // 16 samples are the fewest that decide; 9 decide nothing
+        let sixteen = [vec![0; 8], vec![255; 8]].concat();
+        assert_eq!(midpoint(sixteen, 4), Some(127.5));
+        let nine = [vec![0; 4], vec![255; 5]].concat();
+        assert_eq!(midpoint(nine, 3), None);
+    }
+
+    #[test]
+    fn a_clean_version_1_symbol_costs_one_probe_and_one_correction() {
+        // version 1 is tried first: the first pass verifies it there
+        for (j, (ec, level)) in INDICATED.into_iter().enumerate() {
+            for mask in [j, j + 4] {
+                let (img, points) = render(1, ec, mask, false, CASES[0].2).unwrap();
+                let (found, spent) = locate_spending(&img, &hint(points, level, 1), b"abc");
+                assert!(
+                    matches!(found, Located::Parsed { version: 1, .. }),
+                    "{ec:?} mask {mask}: {found:?}"
+                );
+                assert_eq!(
+                    spent,
+                    Spent {
+                        format_probes: 1,
+                        rs_attempts: 1
+                    },
+                    "{ec:?} mask {mask}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "engine-rxing")]
+    #[test]
+    fn a_symbol_only_the_luma_pass_reads_is_read_after_both_binarized_passes() {
+        // dark 115 and light 135: the binarizer reads blocks that flat (at
+        // most 24 grey levels) as all light, the luma percentiles still split
+        // (20 ≥ 16). At 4 px per module the quad admits versions 1-16: both
+        // binarized passes probe each as read and transposed — all light,
+        // then all dark, no format word within three bits — before the luma
+        // pass verifies version 1
+        let (img, points) = render(1, qrcode::EcLevel::M, 2, false, CASES[0].2).unwrap();
+        let pixels = img
+            .data()
+            .iter()
+            .map(|&p| if p == 0 { 115 } else { 135 })
+            .collect();
+        let img = LumaImage::new(pixels, img.width(), img.height());
+        let (found, spent) = locate_spending(&img, &hint(points, EcLevel::M, 1), b"abc");
+        assert!(
+            matches!(
+                found,
+                Located::Parsed {
+                    version: 1,
+                    mask: 2,
+                    ..
+                }
+            ),
+            "{found:?}"
+        );
+        assert_eq!(
+            spent,
+            Spent {
+                format_probes: 2 * 2 * 16 + 1,
+                rs_attempts: 1
+            }
+        );
+    }
+
+    #[test]
+    fn a_malformed_stream_is_refused_only_as_the_port_would_read_the_payload() {
+        // v1-M: ECI 1000000 (above the register), then byte "abc" — the
+        // scanner's parser refuses the stream, rxing's port signals a
+        // designator and reads "abc"
+        let data = crate::rescue::test_symbols::stream(
+            "0111 11001111 01000010 01000000 0100 00000011 01100001 01100010 01100011 0000",
+        );
+        let img = crate::rescue::test_symbols::from_codewords(
+            qrcode::Version::Normal(1),
+            qrcode::EcLevel::M,
+            &data,
+        );
+        // the outer corners plus half a pixel: 6 px modules, a 4-module quiet zone
+        let (lo, hi) = (24.5, 25.0 * 6.0 + 0.5);
+        let points = [
+            Point { x: lo, y: lo },
+            Point { x: hi, y: lo },
+            Point { x: hi, y: hi },
+            Point { x: lo, y: hi },
+        ];
+        let port = PortRead {
+            bytes: b"abc".to_vec(),
+            signalled: true,
+            fnc1: Fnc1::None,
+        };
+        assert_eq!(
+            locate(&img, &hint(points, EcLevel::M, 2), b"abc"),
+            Located::Refused { port }
+        );
+        // other bytes, a modifier that states no designator, or none at all
+        // (rqrr): nothing is refused, and nothing verifies
+        assert_eq!(
+            locate(&img, &hint(points, EcLevel::M, 2), b"abd"),
+            Located::Unverified
+        );
+        assert_eq!(
+            locate(&img, &hint(points, EcLevel::M, 1), b"abc"),
+            Located::Unverified
+        );
+        let rqrr = LocateHint {
+            modifier: None,
+            ..hint(points, EcLevel::M, 2)
+        };
+        assert_eq!(locate(&img, &rqrr, b"abc"), Located::Unverified);
     }
 }
