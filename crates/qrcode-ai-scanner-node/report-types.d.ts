@@ -130,10 +130,18 @@ export interface StructuralReport { finder_integrity: [number, number, number]; 
  * block), measured on the stream of the orientation the decode verified,
  * only when every block error-corrects errors-only under the detection's
  * version, EC level and mask (an S5 rescue stream keeps its own count).
+ * ISO measures against d − p: the Annex B reserve p of v1, v2-L and v3-L is
+ * not subtracted, so there a block with errors reads above ISO's margin
+ * (spec/04-score.md § Synthetic UEC).
  */
 export interface UecReport {
   margin: number;
   grade: UecGrade;
+  /**
+   * Errors the worst RS block corrected — or, for a detection whose engines
+   * include "rescue", the errors-only count of its stream: a distrust
+   * marker (typically margin 0), not errors corrected.
+   */
   worst_block_errors: number;
   worst_block_capacity: number;
 }
@@ -199,9 +207,12 @@ export type Hint =
   | { hint: "restore_quiet_zone" }
   | { hint: "reduce_art_texture" }
   /**
-   * The decode consumed the worst RS block's ENTIRE correction budget
-   * (UEC margin 0) — the classic miscorrection signature. Treat the
-   * decoded content as unverified.
+   * The published UEC margin is 0: the worst RS block's errors spent all its
+   * parity — the classic miscorrection signature — or, with "rescue" among
+   * the engines, its errors-only count reached it (a distrust marker, not
+   * errors corrected). Treat the decoded content as unverified. Never raised
+   * by an errors-only decode at the acceptance limit of v1, v2-L or v3-L
+   * (spec/04-score.md § Synthetic UEC).
    */
   | { hint: "low_correction_margin"; errors: number; capacity: number }
   /**

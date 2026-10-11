@@ -518,7 +518,7 @@ pub struct UecReport {
     pub margin: f32,
     /// ISO band for `margin`.
     pub grade: UecGrade,
-    /// Errors corrected in the worst RS block.
+    /// Errors the worst block corrected, or a rescued read's errors-only count.
     pub worst_block_errors: u8,
     /// EC codewords (capacity `d`) of that block.
     pub worst_block_capacity: u8,
@@ -780,12 +780,12 @@ pub enum Hint {
     RestoreQuietZone,
     /// Artistic texture overwhelms module structure.
     ReduceArtTexture,
-    /// The decode sits AT the Reed-Solomon correction limit (UEC margin 0):
-    /// one more error would have been an undetectable miscorrection — and
-    /// the decode itself may already BE one. Treat the content as
+    /// The published UEC margin is 0: the worst RS block's errors spent all
+    /// its parity (on a rescued read, its errors-only count reached it), so
+    /// the decode may already BE a miscorrection. Treat the content as
     /// unverified; confirm out-of-band before acting on it.
     LowCorrectionMargin {
-        /// Errors corrected in the worst RS block.
+        /// Errors the worst block corrected, or a rescued read's errors-only count.
         errors: u8,
         /// EC codeword capacity of that block.
         capacity: u8,

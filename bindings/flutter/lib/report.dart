@@ -549,6 +549,9 @@ class UecReport {
   // 0.0-1.0 (1.0 = pristine) — int truncation read every real margin as 0.
   final double margin;
   final LetterGrade grade;
+  // Errors the worst RS block corrected, of its capacity (parity codewords);
+  // for a detection whose engines include rescue, the errors-only count of
+  // its stream: a distrust marker (typically margin 0), not errors corrected.
   final int worstBlockErrors, worstBlockCapacity;
   const UecReport(
       this.margin, this.grade, this.worstBlockErrors, this.worstBlockCapacity);
