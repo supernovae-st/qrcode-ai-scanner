@@ -162,7 +162,8 @@ impl Scanner {
         // The scoring stage shares the engine panic posture: a panic in the
         // math path degrades to "no score", never a crash (native unwind;
         // on wasm panics trap regardless — documented limitation). A
-        // contained panic is a fault, not a cut: it sets no flag.
+        // contained panic is a fault, not a cut: the judgment is absent
+        // whatever the budget, and no envelope is planned after it.
         let primary = outcome
             .merged
             .first()
@@ -172,6 +173,7 @@ impl Scanner {
         // (`trace.budget_exhausted`); the walks' own cuts are in the trace.
         let mut cut = false;
         let mut probe_panics = 0u8;
+        let mut faulted = false;
         let scored = match (primary, self.config.score_depth) {
             (Some((detection, key)), depth @ (ScoreDepth::Reduced | ScoreDepth::Full)) => {
                 let mut bound = score::Bound::new(cancel, deadline);
@@ -188,21 +190,27 @@ impl Scanner {
                 }));
                 probe_panics = probe_panics.saturating_add(bound.panics());
                 cut |= bound.cut();
-                match attempt {
-                    Ok(result) => result?,
-                    Err(_) => None,
+                if let Ok(result) = attempt {
+                    result?
+                } else {
+                    faulted = true;
+                    None
                 }
             }
             _ => None,
         };
         // The placement envelope — Full depth only (the sweep is a quality-
         // gate diagnostic), skippable through the same seam as every other
-        // report section. Same panic posture as scoring: the sweep shares
-        // the score module's math path, so a panic there degrades to "no
-        // envelope", never a crash out of the public API.
+        // report section, and not planned after a contained fault of the
+        // judgment: reported absent like any envelope not computed, it can
+        // never make that fault read as a cut. Same panic posture as
+        // scoring: the sweep shares the score module's math path, so a panic
+        // there degrades to "no envelope", never a crash out of the public
+        // API.
         let envelope = match (&alpha_context, primary) {
             (Some(context), Some((detection, key)))
-                if self.config.score_depth == ScoreDepth::Full
+                if !faulted
+                    && self.config.score_depth == ScoreDepth::Full
                     && !self
                         .config
                         .score_skip_checks
@@ -556,5 +564,39 @@ mod tests {
             "the envelope completes: {:?}",
             report.alpha
         );
+    }
+
+    #[test]
+    fn a_contained_judgment_fault_plans_no_envelope_and_cuts_nothing() {
+        use crate::score::JUDGMENT_FAULT;
+        // a judgment that faults is absent whatever the budget: no envelope
+        // is planned after it, so no unit the deadline prevents can make the
+        // report read as cut — an absent score with detections and a final
+        // trace stays a fault
+        let (rgba, side) = transparent_symbol();
+        let mut config = super::ScanConfig::full();
+        config.budget_ms = None;
+        let scanner = Scanner::builder()
+            .profile(super::ScanProfile::Custom(config))
+            .build();
+        let whole = scanner.scan(ImageInput::rgba8(&rgba, side, side)).unwrap();
+        assert!(
+            whole.score.is_some()
+                && whole
+                    .alpha
+                    .as_ref()
+                    .is_some_and(|alpha| alpha.envelope.is_some()),
+            "precondition: judged, envelope measured"
+        );
+        JUDGMENT_FAULT.with(|fault| fault.set(true));
+        let faulted = scanner.scan(ImageInput::rgba8(&rgba, side, side));
+        JUDGMENT_FAULT.with(|fault| fault.set(false));
+        let faulted = faulted.unwrap();
+        assert_eq!(faulted.detections, whole.detections);
+        assert!(faulted.score.is_none(), "the fault is contained");
+        let alpha = faulted.alpha.as_ref().expect("the alpha block stays");
+        assert!(alpha.envelope.is_none(), "no envelope after the fault");
+        assert!(faulted.hints.is_empty(), "{:?}", faulted.hints);
+        assert_eq!(faulted.trace.budget_exhausted, Some(false));
     }
 }

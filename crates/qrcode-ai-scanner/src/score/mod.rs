@@ -51,6 +51,10 @@ thread_local! {
     /// Stress bases built on this thread — the witness that a judgment the
     /// deadline refuses at its first step costs nothing.
     static STRESS_BASES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Test-only: while set, a judgment panics in its own computation once
+    /// its first step is admitted — a contained fault with no real panic
+    /// source.
+    pub(crate) static JUDGMENT_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Composite weights per axis (sum = 100). The contract constants of v3.
@@ -806,6 +810,11 @@ pub(crate) fn judge(
     }
     #[cfg(test)]
     STRESS_BASES.with(|built| built.set(built.get() + 1));
+    #[cfg(test)]
+    assert!(
+        !JUDGMENT_FAULT.with(std::cell::Cell::get),
+        "injected judgment fault"
+    );
     let base = transform::downscale_to(luma, STRESS_BASE_SIDE);
     // calibrate the cell probe on the unstressed base (its decode class)
     let probe = match CellProbe::calibrate_admitted(&base, key, detection.symbology, bound)? {
