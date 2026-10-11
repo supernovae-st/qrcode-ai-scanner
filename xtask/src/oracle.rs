@@ -53,7 +53,9 @@
 //! tree (git SHA and clean/dirty, read at run time) and the outcome rule
 //! of each truth kind, holds no timing and no absolute path, and payloads
 //! only as text and raw sha256 + byte length: two runs over the same inputs
-//! are byte-identical.
+//! are byte-identical. The tree state leaves out the files the run itself
+//! writes (`--json`, `--emit-observed`), and an unwalkable corpus is named
+//! as `<corpus root>`, so both claims hold wherever those files go.
 //!
 //! `--observed <jsonl> --decoder <name>` judges another decoder's recorded
 //! outputs on the same hash-verified images, with the same judge,
@@ -1248,7 +1250,14 @@ fn evaluate_external(
     let on_disk: BTreeSet<String> = match external::walk_sorted(dir) {
         Ok(paths) => paths.into_iter().collect(),
         Err(e) => {
-            // an unwalkable corpus cannot be verified: a gate failure
+            // an unwalkable corpus cannot be verified: a gate failure, which
+            // names the root as such, never by its absolute path
+            let root = dir.to_string_lossy();
+            let e = if root.len() > 1 {
+                e.replace(root.as_ref(), "<corpus root>")
+            } else {
+                e
+            };
             integrity.problems.push(format!("corpus walk failed: {e}"));
             return Vec::new();
         }
@@ -1894,12 +1903,23 @@ fn git_stdout(repo: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn source_identity(repo: &Path) -> SourceEcho {
+/// The scanned tree: `HEAD`, and `clean` or `dirty` by `git status` with
+/// the files this run writes (`outputs`: `--json`, `--emit-observed`) left
+/// out, so a report kept inside the checkout never makes the next run's
+/// tree dirty.
+fn source_identity(repo: &Path, outputs: &[&Path]) -> SourceEcho {
     let git_sha = git_stdout(repo, &["rev-parse", "HEAD"])
         .map(|sha| sha.trim().to_owned())
         .filter(|sha| !sha.is_empty())
         .unwrap_or_else(|| String::from("unknown"));
-    let tree = match git_stdout(repo, &["status", "--porcelain"]) {
+    let excluded: Vec<String> = outputs
+        .iter()
+        .filter_map(|path| inside(repo, path))
+        .map(|rel| format!(":(exclude,literal){rel}"))
+        .collect();
+    let mut status = vec!["status", "--porcelain", "--untracked-files=all", "--", "."];
+    status.extend(excluded.iter().map(String::as_str));
+    let tree = match git_stdout(repo, &status) {
         Some(status) if status.trim().is_empty() => "clean",
         Some(_) => "dirty",
         None => "unknown",
@@ -1908,6 +1928,18 @@ fn source_identity(repo: &Path) -> SourceEcho {
         git_sha,
         tree: tree.to_owned(),
     }
+}
+
+/// `path` relative to `repo`, when it lies inside it — both resolved, the
+/// file through its directory (it may not exist yet; a directory that does
+/// not exist yet holds nothing to leave out).
+fn inside(repo: &Path, path: &Path) -> Option<String> {
+    let repo = std::fs::canonicalize(repo).ok()?;
+    let absolute = std::env::current_dir().ok()?.join(path);
+    let dir = std::fs::canonicalize(absolute.parent()?).ok()?;
+    let file = dir.join(absolute.file_name()?);
+    let rel = file.strip_prefix(&repo).ok()?;
+    Some(rel.to_string_lossy().replace('\\', "/"))
 }
 
 #[derive(Serialize)]
@@ -2316,6 +2348,16 @@ struct Args {
     emit_observed: Option<PathBuf>,
 }
 
+impl Args {
+    /// The files this run writes, which its tree state leaves out.
+    fn outputs(&self) -> Vec<&Path> {
+        [self.json.as_deref(), self.emit_observed.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+}
+
 const FLAGS: [&str; 5] = [
     "--json",
     "--corpus-root",
@@ -2558,7 +2600,7 @@ pub(crate) fn run(args: Vec<String>) {
         vendored_entries: corpus.entry.len(),
         ..Integrity::default()
     };
-    let identity = source_identity(&root);
+    let identity = source_identity(&root, &args.outputs());
     let mut receipt = new_receipt(identity, &manifest_text, &vendored_text, integrity);
     if let Some(observed) = &observed {
         receipt.scan = None;
@@ -3242,7 +3284,7 @@ mod tests {
 
     #[test]
     fn source_identity_is_read_from_git_or_unknown() {
-        let here = source_identity(&crate::repo_root());
+        let here = source_identity(&crate::repo_root(), &[]);
         let hex = |s: &str| matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit());
         assert!(here.git_sha == "unknown" || hex(&here.git_sha), "{here:?}");
         assert!(
@@ -3251,13 +3293,61 @@ mod tests {
         );
         let nowhere = std::env::temp_dir().join(format!("qrscan-no-repo-{}", std::process::id()));
         assert_eq!(
-            source_identity(&nowhere),
+            source_identity(&nowhere, &[]),
             SourceEcho {
                 git_sha: String::from("unknown"),
                 tree: String::from("unknown"),
             },
             "git failing is recorded, never fatal"
         );
+    }
+
+    /// The tree state leaves out the files the run itself writes: the JSON
+    /// report and the emitted observations, inside the checkout, keep it
+    /// clean; the same files named by nobody, or any other change, make it
+    /// dirty. A repository without a commit still has a status.
+    #[test]
+    fn the_tree_state_leaves_out_the_files_the_run_writes() {
+        let repo = std::env::temp_dir().join(format!("qrscan-oracle-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(repo.join("out")).expect("repo dir");
+        let init = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["init", "-q"])
+            .output()
+            .expect("git");
+        assert!(init.status.success(), "git init");
+        std::fs::write(repo.join("oracle.json"), "{}").expect("write");
+        std::fs::write(repo.join("out/observed.jsonl"), "").expect("write");
+        let written = [repo.join("oracle.json"), repo.join("out/observed.jsonl")];
+        let written: Vec<&Path> = written.iter().map(PathBuf::as_path).collect();
+        let tree = |outputs: &[&Path]| source_identity(&repo, outputs).tree;
+        assert_eq!(tree(&written), "clean");
+        assert_eq!(tree(&[]), "dirty", "the same files, written by nobody here");
+        std::fs::write(repo.join("out/other.txt"), "x").expect("write");
+        assert_eq!(tree(&written), "dirty", "a change the run did not write");
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// An unwalkable corpus is an integrity problem that names the corpus
+    /// root as such, never by its absolute path.
+    #[test]
+    fn a_walk_failure_names_the_corpus_root_not_its_path() {
+        let dir =
+            std::env::temp_dir().join(format!("qrscan-oracle-unwalkable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let scanner = external::scanner();
+        let mut integrity = Integrity::default();
+        let judged = evaluate_external(&dir, &[], Source::Scan(&scanner), &mut integrity);
+        assert!(judged.is_empty());
+        assert_eq!(integrity.problems.len(), 1, "{:?}", integrity.problems);
+        let problem = &integrity.problems[0];
+        assert!(
+            problem.starts_with("corpus walk failed: <corpus root>: "),
+            "{problem}"
+        );
+        assert!(!problem.contains(&*dir.to_string_lossy()), "{problem}");
     }
 
     /// A throwaway corpus root under the system temp dir, removed on drop —
