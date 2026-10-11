@@ -45,8 +45,11 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   `\\` and a U+FFFD that is part of the text as `\u{fffd}`.
 - **`trace.stages[].detections_found` still counts raw decoder hits** —
   hits the scanner later refuses or holds for confirmation included; a
-  decode refused inside the decoder step (its own grid parses malformed)
-  is not a hit.
+  decode refused inside the decoder step is not a hit — an rqrr decode
+  whose own grid parses malformed, an rxing read a read check refuses (a
+  DataBar text that is not fourteen digits, a `]Q1` read whose bytes are
+  not its text) or whose original bytes cannot be established. The reads
+  of a confirmation decode are not counted either.
 - **QR content without ECI** — unmarked 0x80–0x9F and binary payloads
   become one windows-1252 detection; reads only rxing made publish their
   original bytes (Micro QR `[e9]`: `[c3 a9]` utf8 → `[e9]` `é` latin1;
@@ -199,19 +202,24 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   Annex B reserve is not published** — the scanner now measures a read's
   correction margin on its own received word wherever it error-corrects
   that word itself (the worst block's ⌊(npar − p − f)/2⌋ − e). A content
-  whose every measured margin is negative — errors alone took each word
-  past the reserve, which only happens on versions 1 and 2 at low EC
-  levels — is refused, with its reads of unknown margin: both engines
-  sample the same damaged modules, so two engines agreeing on such a
-  word are no independent evidence. One read keeping a margin of zero or
-  more confirms the content. Port reads at EC level L or M are re-read
-  on versions 1 and 2 to measure their margin. Reads with no measured
-  margin — every Micro QR and rMQR read, and QR Code reads no parse
-  measured — are published as before, and a margin of zero or more does
-  not prove a correction right. Trade-off: a v1/v2 symbol
-  so damaged that every read of it corrects past the reserve now reads
-  as no detection (it was published, with a misdecode risk the
-  standard's reserve exists to bound). On the ZXing blackbox QR sets this
+  whose every measured margin is negative is refused, with its reads of
+  unknown margin: both engines sample the same damaged modules, so two
+  engines agreeing on such a word are no independent evidence. A margin
+  is negative in two cases: errors alone took the word past the reserve,
+  which only happens on versions 1 and 2 at low EC levels, or rqrr
+  decoded a grid that neither orientation error-corrects for the
+  scanner's bounded decoder, which counts as negative at any version and
+  EC level. One read keeping a margin of zero or more confirms the
+  content. Port reads at EC level L or M are re-read on versions 1 and 2
+  to measure their margin. Reads with no measured margin — every Micro
+  QR and rMQR read, and any other QR Code read no parse measured — are
+  published as before, and a margin of zero or more does not prove a
+  correction right. Trade-off: a v1/v2 symbol so damaged
+  that every read of it corrects past the reserve now reads as no
+  detection (it was published, with a misdecode risk the standard's
+  reserve exists to bound), and so, at any version, does a symbol whose
+  only known margin is that of an rqrr decode of a grid that does not
+  verify. On the ZXing blackbox QR sets this
   costs one exact read of 179: `qrcode-4/41.png`, a v2-L symbol rxing
   read with five corrections (margin −1); its `corpus-external.tsv`
   expectation moves from `match` to `blind`.
@@ -332,6 +340,17 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   (driver scripts, the priming fixture, every vendored image), alpha
   images, the budget flag and pairs cut at the same point, and a dry run
   pre-screens the share of A/B disagreements.
+- **Two 0.9.x gates no longer hide failures** — the cargo-deny scan of
+  the binding trees the workspace excludes (Python, UniFFI, Flutter)
+  turned every failure into a warning, and under cargo-deny 0.20 even the
+  usage error of its retired `check --config` form, so those dependency
+  graphs went unchecked while the step stayed green. It now runs the
+  pinned cargo-deny 0.20.2 in its current form, and a tool or usage error
+  fails the step; findings stay report-only, per tree, in the job
+  summary. The weekly mutation shards ran under `continue-on-error`,
+  which read shards exiting with missed or timed-out mutants as a green
+  run; each shard now records cargo-mutants' exit code, and the verdict
+  job of the next entry judges them.
 - **The weekly mutation suite runs in 85 shards, judged against a
   committed dispositions file** — 16 shards no longer finished within the
   job's time limit; the shard count comes from measured per-mutant costs.
