@@ -24,6 +24,16 @@ test_tool = "nextest"
 # `replace fuzz_api::` pattern and nine of them reached the gate in run
 # 38105646991.
 #
+# Same class: the `#[cfg(not(feature = "engine-rxing"))]` stub of
+# `Binarized::black` (engine/locate.rs 308-312, body `None`) is compiled
+# only without engine-rxing — an rqrr-only build — so this all-features run
+# never compiles it and every mutant of it is a structural MISSED. Its
+# pattern covers the stub's lines: its three function-value mutants (`with
+# None`, `with Some(true)`, `with Some(false)`) sit at its body's 310:9,
+# while the compiled engine-rxing `Binarized::black` just above (289-306)
+# shares its name and stays generated. Line drift stays safe: the stub's
+# mutants resurface as MISSED in the weekly report and get re-anchored.
+#
 # Below the bridge class: the PROVEN-EQUIVALENT mutants — the 14 of the
 # 2026-07-05 full-file proof runs (argued in commit 63d5895) and the ones
 # argued with their own entries below; re-derive before touching. Anchored
@@ -130,6 +140,7 @@ test_tool = "nextest"
 exclude_re = [
     "replace (fuzzing|fuzz_api)::",
     " in (fuzzing|fuzz_api)::",
+    "locate\\.rs:3(0[89]|1[0-2]):\\d+: .*Binarized<'a>::black",
     "transform\\.rs:376:87: replace \\+ with \\* in downscale_to",
     "transform\\.rs:379:96: replace \\+ with \\* in downscale_to",
     "transform\\.rs:488:45: replace - with . in windowed_extremum_strided",

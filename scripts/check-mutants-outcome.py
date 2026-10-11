@@ -837,28 +837,37 @@ def self_test() -> int:
             bad.write_text(text, encoding="utf-8")
             expect(f"malformed policy: {name}", d + ["--exclusions", str(bad), green], 2, needle)
 
-        # The versioned policy drops both shapes of the cfg(fuzzing) bridge —
-        # a function replaced and an operator inside one — and nothing else.
+        # The versioned policy drops code this all-features run never
+        # compiles — both shapes of the cfg(fuzzing) bridge (a function
+        # replaced, an operator inside one) and the rqrr-only stub of
+        # Binarized::black — and nothing beside it: not the compiled
+        # Binarized::black.
         if POLICY.is_file():
             versioned = load_exclusions(POLICY)
             core = "crates/qrcode-ai-scanner/src"
-            bridge = [
+            black = "Binarized<'a>::black"
+            excluded = [
                 f"{core}/lib.rs:70:9: replace fuzzing::classify_text with ()",
                 f"{core}/rescue/mod.rs:474:9: replace fuzz_api::parse_bitstream with ()",
                 f"{core}/rescue/mod.rs:489:32: replace + with * in fuzz_api::parse_bitstream",
                 f"{core}/rescue/mod.rs:494:38: replace == with != in fuzz_api::parse_bitstream",
                 f"{core}/rescue/mod.rs:499:45: replace % with / in fuzz_api::parse_bitstream",
                 f"{core}/lib.rs:86:17: delete ! in fuzzing::correct_block",
+                f"{core}/engine/locate.rs:310:9: replace {black} -> Option<bool> with None",
+                f"{core}/engine/locate.rs:310:9: replace {black} -> Option<bool> with Some(true)",
+                f"{core}/engine/locate.rs:310:9: replace {black} -> Option<bool> with Some(false)",
             ]
             outside = [
                 f"{core}/rescue/bitstream.rs:299:32: replace + with * in parse",
                 f"{core}/rescue/mod.rs:120:9: replace == with != in rescue_candidates",
                 f"{core}/payload.rs:40:5: replace classify -> Payload with Default::default()",
+                f"{core}/engine/locate.rs:291:9: replace {black} -> Option<bool> with None",
+                f"{core}/engine/locate.rs:305:24: replace < with <= in {black}",
             ]
-            kept = [n for n in bridge if versioned.matching(mutant_key({"name": n})) is None]
+            kept = [n for n in excluded if versioned.matching(mutant_key({"name": n})) is None]
             dropped = [n for n in outside if versioned.matching(mutant_key({"name": n})) is not None]
             if kept or dropped:
-                failures.append(f"versioned policy: bridge mutants kept {kept}, others dropped {dropped}")
+                failures.append(f"versioned policy: excluded shapes kept {kept}, others dropped {dropped}")
             ran += 1
 
         # The versioned file judges its own anchors green — each replayed as the
