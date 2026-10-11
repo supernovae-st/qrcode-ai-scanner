@@ -469,6 +469,15 @@ mod tests {
     }
 
     #[test]
+    fn content_stats_rounds_the_mean_luma_half_up() {
+        // two opaque px of luma 0 and 1: a mean of 0.5 reads 1; with two
+        // more of luma 0, a mean of 0.25 reads 0
+        assert_eq!(content_stats(&[0, 0, 0, 255, 1, 1, 1, 255]).content_luma, 1);
+        let quarter = [0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 1, 1, 1, 255];
+        assert_eq!(content_stats(&quarter).content_luma, 0);
+    }
+
+    #[test]
     fn content_stats_fully_transparent_is_zero_luma() {
         let rgba = [200u8, 200, 200, 0];
         let stats = content_stats(&rgba);
@@ -623,5 +632,55 @@ mod tests {
             envelope(&other, None).unwrap(),
             Envelope::Undecodable
         ));
+    }
+
+    /// One bisection probe per verdict boundary between neighbouring rungs,
+    /// none between rungs that agree.
+    #[test]
+    fn the_envelope_bisects_each_verdict_boundary_and_no_other_gap() {
+        use crate::input::{ImageInput, Limits};
+        let (rgba, side) = transparent_qr("https://qrcode-ai.com/envelope-bands");
+        let normalized = crate::transform::normalize_with(
+            &ImageInput::rgba8(&rgba, side, side),
+            &Limits::default(),
+            AlphaBackground::Auto,
+        )
+        .unwrap();
+        let context = normalized.alpha.expect("a transparent input");
+        let cancel = CancelToken::new();
+        let walked = crate::ladder::run(
+            &normalized.planes,
+            &crate::ladder::ScanConfig::full(),
+            &cancel,
+            None,
+        )
+        .unwrap();
+        let key = walked.contents[0].0.clone();
+        let Envelope::Measured(envelope) = context
+            .envelope(&key, Symbology::QrCode, &[], &mut Bound::new(&cancel, None))
+            .unwrap()
+        else {
+            panic!("a measured envelope");
+        };
+        let rungs: Vec<&AlphaProbe> = envelope
+            .probes
+            .iter()
+            .filter(|probe| ENVELOPE_RUNGS.contains(&probe.background_luma))
+            .collect();
+        assert_eq!(rungs.len(), ENVELOPE_RUNGS.len());
+        let boundaries: Vec<u8> = rungs
+            .windows(2)
+            .filter(|pair| pair[0].decoded != pair[1].decoded)
+            .map(|pair| u8::midpoint(pair[0].background_luma, pair[1].background_luma))
+            .collect();
+        // black over a black background is no symbol, over white it is one
+        assert!(!boundaries.is_empty(), "{:?}", envelope.probes);
+        let bisections: Vec<u8> = envelope
+            .probes
+            .iter()
+            .map(|probe| probe.background_luma)
+            .filter(|background| !ENVELOPE_RUNGS.contains(background))
+            .collect();
+        assert_eq!(bisections, boundaries, "{:?}", envelope.probes);
     }
 }

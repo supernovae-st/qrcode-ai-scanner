@@ -1360,6 +1360,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stress_axes_parse_from_their_wire_names_only() {
+        // the bindings' string-config seam: every axis from the name the
+        // report writes for it, and nothing from any other spelling
+        for (name, axis) in [
+            ("resolution", StressAxis::Resolution),
+            ("blur", StressAxis::Blur),
+            ("contrast", StressAxis::Contrast),
+            ("perspective", StressAxis::Perspective),
+            ("rotation", StressAxis::Rotation),
+            ("lighting", StressAxis::Lighting),
+        ] {
+            assert_eq!(StressAxis::from_name(name), Some(axis), "{name}");
+            #[cfg(feature = "serde")]
+            assert_eq!(serde_json::to_string(&axis).unwrap(), format!("\"{name}\""));
+        }
+        for name in ["", "Blur", "BLUR", "exposure", "tilt"] {
+            assert_eq!(StressAxis::from_name(name), None, "{name}");
+        }
+    }
+
     #[cfg(feature = "serde")]
     #[test]
     fn schema_snapshot_full() {

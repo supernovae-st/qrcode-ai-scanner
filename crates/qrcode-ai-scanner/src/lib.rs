@@ -554,7 +554,10 @@ mod tests {
             injected.min(u32::from(u8::MAX)),
             "every caught probe panic is counted once"
         );
-        assert_eq!(report.detections.len(), 1);
+        assert_eq!(
+            report.detections, clean.detections,
+            "the walk reads as without the fault: only single-symbology passes panic"
+        );
         assert!(report.score.is_some(), "the judgment completes");
         assert!(
             report
@@ -598,5 +601,41 @@ mod tests {
         assert!(alpha.envelope.is_none(), "no envelope after the fault");
         assert!(faulted.hints.is_empty(), "{:?}", faulted.hints);
         assert_eq!(faulted.trace.budget_exhausted, Some(false));
+    }
+
+    #[test]
+    fn a_background_plate_is_black_from_content_luma_128() {
+        // the plate contrasts with the content: white behind content darker
+        // than mid-grey (luma below 128), black from 128 up — the symbol's
+        // modules here are opaque grey 128
+        let (mut rgba, side) = transparent_symbol();
+        for px in rgba.chunks_exact_mut(4) {
+            if px[3] == 255 {
+                px[..3].fill(128);
+            }
+        }
+        let mut config = super::ScanConfig::full();
+        config.budget_ms = None;
+        let scanner = Scanner::builder()
+            .profile(super::ScanProfile::Custom(config))
+            .build();
+        let report = scanner.scan(ImageInput::rgba8(&rgba, side, side)).unwrap();
+        let alpha = report.alpha.as_ref().expect("a transparent input");
+        assert_eq!(alpha.content_luma, 128);
+        let plates: Vec<_> = report
+            .hints
+            .iter()
+            .filter_map(|hint| match hint {
+                super::Hint::AddBackgroundPlate { color } => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            plates,
+            [super::report::PlateColor::Black],
+            "{:?} {:?}",
+            report.hints,
+            alpha.envelope
+        );
     }
 }
