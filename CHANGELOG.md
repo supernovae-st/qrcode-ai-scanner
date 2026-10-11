@@ -327,9 +327,11 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   content, and a detection whose charset is `unknown`, or whose ECI was
   signalled but not located, meets it as `unread` — a rate of its own,
   never exact and never blocking. Units meet detections through a best
-  matching, and the report states the rule of each truth kind.
+  matching, and the report states the rule of each truth kind. The tree
+  state it records leaves out the files the run writes, and a corpus root
+  it cannot walk is named as such, not by its absolute path.
 - **New: `xtask bench`, a benchmark harness** (`bench/README.md`; its
-  report says `qrscan-bench/v4`) — it compares the published 0.9.0 with
+  report says `qrscan-bench/v5`) — it compares the published 0.9.0 with
   this tree on latency, memory, allocations, throughput and WASM cost.
   Work is each side's share of its own reference walk, and an erroring
   reference walk counts as an error; a gated pair whose sides are not the
@@ -339,7 +341,16 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   its run directory. Its records name every run-time input it read
   (driver scripts, the priming fixture, every vendored image), alpha
   images, the budget flag and pairs cut at the same point, and a dry run
-  pre-screens the share of A/B disagreements.
+  pre-screens the share of A/B disagreements. The library worker records
+  the candidate's `trace.budget_exhausted`; the driver scripts and the
+  fixture run from copies under the run's `artifacts/`, and every image
+  is hashed again after each segment, a change failing the run; a build
+  stamp refuses a build outside its `--source`, and a run refuses a Node
+  or WASM base whose stamp lacks that record; a cut knee bisection is a
+  stated known limit; the report names its method by that label alone.
+- **`corpus-report --external` and `scripts/zxing-blackbox.py` print
+  ZXing's own 0° thresholds as their reference** — 157, where two
+  outdated values gave 153. No verdict changes.
 - **Two 0.9.x gates no longer hide failures** — the cargo-deny scan of
   the binding trees the workspace excludes (Python, UniFFI, Flutter)
   turned every failure into a warning, and under cargo-deny 0.20 even the
@@ -354,9 +365,19 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
 - **The weekly mutation suite runs in 85 shards, judged against a
   committed dispositions file** — 16 shards no longer finished within the
   job's time limit; the shard count comes from measured per-mutant costs.
-  The weekly verdict fails on a baseline failure, an unfinished shard, or
-  a missed or timed-out mutant that `.cargo/mutants-dispositions.toml`
-  does not list as equivalent, as a structural timeout or as test debt.
+  The shards are dealt round-robin: slice shards put survivor-dense code
+  on a few shards (the slowest of 85 took 79.2 min of an 85-min limit,
+  and the last one received no mutant). The weekly verdict fails on a
+  baseline failure, an unfinished shard, or a missed or timed-out mutant
+  that `.cargo/mutants-dispositions.toml` does not list as equivalent, as
+  a structural timeout or as test debt. It accepts a shard cargo-mutants
+  gave no mutant, and lists an equivalent that `.cargo/mutants.toml` also
+  excludes as excluded and documented instead of stale. The fuzzing
+  bridge's operator mutants are excluded like its replaced functions
+  (nine of them had reached the verdict), no mutant is generated in the
+  rqrr-only stub of `Binarized::black`, which an all-features build never
+  compiles, and the two wall-clock exclusions follow their conversions to
+  their current lines.
 
 ## 0.9.0 — 2026-07-20
 
