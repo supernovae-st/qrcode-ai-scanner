@@ -2747,29 +2747,33 @@ fn n5_two_data_matrix_symbols_sharing_their_non_ascii_run() {
     );
 }
 
+/// The `DataBar` fixture's content (`09506000134352`, no FNC1 key).
+const DATABAR_GTIN: &str =
+    r#"{"text":"09506000134352","raw":"MDk1MDYwMDAxMzQzNTI=","charset":"utf8"}"#;
+
+/// The 384 px `DataBar` fixture at twice its size, nearest neighbour.
+fn databar_gtin_twice() -> Vec<u8> {
+    let native = image::load_from_memory(&fixture("symbology/databar-gtin.png"))
+        .unwrap()
+        .to_luma8();
+    encode_png(image::imageops::resize(
+        &native,
+        native.width() * 2,
+        native.height() * 2,
+        image::imageops::FilterType::Nearest,
+    ))
+}
+
 #[test]
 fn n8_a_databar_gtin_has_no_fnc1_key() {
     // ]e0: the position is not reported (DataBar's text is the AI-less
     // GTIN). A DataBar read waits for one at an independent scale: scanned
     // at twice its size, the 512 px pyramid and the 768 px plane both read
     // it.
-    let native = image::load_from_memory(&fixture("symbology/databar-gtin.png"))
-        .unwrap()
-        .to_luma8();
-    let twice = image::imageops::resize(
-        &native,
-        native.width() * 2,
-        native.height() * 2,
-        image::imageops::FilterType::Nearest,
-    );
-    let report = scan_content(&encode_png(twice));
+    let report = scan_content(&databar_gtin_twice());
     let d = one(&report);
     assert_eq!(d.symbology, Symbology::DataBar);
-    assert_content(
-        d,
-        r#"{"text":"09506000134352","raw":"MDk1MDYwMDAxMzQzNTI=","charset":"utf8"}"#,
-        "DataBar",
-    );
+    assert_content(d, DATABAR_GTIN, "DataBar");
     // the payload 0.9 gave it: DataBar is no retail GTIN carrier, and its
     // AI-less digits are no GS1 element string
     assert_eq!(payload(d), wire(r#"{"kind":"text"}"#));
@@ -2778,6 +2782,31 @@ fn n8_a_databar_gtin_has_no_fnc1_key() {
     // (that reader can underflow): a lone DataBar below 640 px is refused
     let report = scan_content(&fixture("symbology/databar-gtin.png"));
     assert!(report.detections.is_empty(), "{:?}", summary(&report));
+}
+
+#[test]
+fn n8b_a_lone_small_databar_is_refused_in_every_profile() {
+    // The refusal is the walk's, not the frame profile's: fast's enhanced
+    // planes and full's deep grid are no plane of another scale (S3 reads
+    // at the engine-capped size, S4 only the QR family), so the native
+    // 384 px symbol publishes nothing there either, while twice its size
+    // each profile reads its fourteen digits.
+    for profile in [ScanProfile::Full, ScanProfile::Fast, ScanProfile::Frame] {
+        let report = scan_with(
+            &fixture("symbology/databar-gtin.png"),
+            profile.clone(),
+            None,
+        );
+        assert!(
+            report.detections.is_empty(),
+            "{profile:?}: {:?}",
+            summary(&report)
+        );
+        let report = scan_with(&databar_gtin_twice(), profile.clone(), None);
+        let d = one(&report);
+        assert_eq!(d.symbology, Symbology::DataBar, "{profile:?}");
+        assert_content(d, DATABAR_GTIN, &format!("{profile:?}"));
+    }
 }
 
 // ------------------------------------------------------------ R · re-read
