@@ -37,9 +37,12 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   interrupted the judgment of a decoded QR (0.9 printed a deflated value,
   exit 0); every-axis-skipped and internal-fault cases name their cause
   (exit 2). `--pretty` says why a score is missing and when the budget
-  cut the scan, prints `charset` and `fnc1` lines, and shows controls and
-  spoofing characters as `\u{…}`, a backslash as `\\` and a U+FFFD that
-  is part of the text as `\u{fffd}`.
+  cut the scan (`budget … exhausted — not final` where no score line
+  says it: the frame profile, or every stress axis skipped), prints
+  `charset` and `fnc1` lines (a content with no verified text ends its
+  charset line with `(raw: in the JSON report, run without --pretty)`),
+  and shows controls and spoofing characters as `\u{…}`, a backslash as
+  `\\` and a U+FFFD that is part of the text as `\u{fffd}`.
 - **`trace.stages[].detections_found` still counts raw decoder hits** —
   hits the scanner later refuses or holds for confirmation included; a
   decode refused inside the decoder step (its own grid parses malformed)
@@ -209,6 +212,16 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   costs one exact read of 179: `qrcode-4/41.png`, a v2-L symbol rxing
   read with five corrections (margin −1); its `corpus-external.tsv`
   expectation moves from `match` to `blind`.
+- **A content measured only on a re-derived grid meets the same margin
+  rule** — a QR content whose only measured correction margin came from
+  re-deriving a grid rqrr detects but cannot decode (FNC1 in either
+  position, Hanzi, structured append) is now refused when that margin is
+  negative, as the acceptance rules require: such an FNC1 symbol
+  corrected one error past the ISO/IEC 18004 Annex B reserve (v1-M with
+  five errors, v1-L with three) was published, possibly as another valid
+  GTIN. A port read the re-derived grid carries is still re-read at its
+  own corners for its margin (versions 1 and 2, EC level L or M), and
+  one read with a margin of zero or more admits the content.
 - **Barcodes the readers invent from noise need a second, independent
   read** — UPC-E, DataBar, DataBar Expanded and PDF417 at EC level 0, 1
   or none are published only once a read of the same symbology and bytes
@@ -228,6 +241,26 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   DataBar in an image whose longest side is under 640 px is refused,
   until the core crate requires rxing 0.9.3 or later and its
   confirmation decode can run.
+- **rMQR symbols are scored by probes that read rMQR** — the score cells
+  and placement-envelope probes of a Rectangular Micro QR (rMQR) symbol
+  decode in a pass restricted to rMQR, and that pass ran no reader
+  (rxing 0.9.1's multi-use dispatcher has no rMQR arm), so from 0.9.0 on
+  a clean rMQR scored 0 on every axis. The pass now runs the zxing-cpp
+  port reader for rMQR alone.
+- **Decoder panics caught inside score stress cells and
+  placement-envelope probes are counted** in `trace.engine_panics`; how
+  a cell is judged does not change.
+- **After a contained internal fault of the score computation, the
+  placement envelope is not computed** — it is reported absent, like any
+  envelope that was not computed, so the fault does not read as a budget
+  cut: `qrscan --score-only` exits 2 for it, not 3, unless the budget had
+  already cut part of that judgment.
+- **The Python and WASM bindings publish every `f32` report field as the
+  decimal the JSON report prints** (`alpha.coverage` 0.612, not
+  0.6119999885559082) — the core serializes those fields as the `f64`
+  nearest to their shortest decimal. The JSON text keeps its digits; a
+  value between 1e-6 and 1e-5, or from 1e13, is now spelled in exponent
+  form (the same number).
 
 ### Upgrade notes
 
@@ -251,9 +284,30 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   publishing jobs failed partway because the unpinned napi CLI range
   (`^3.7.1`) resolved to 3.7.3, which rejects `--use-napi-cross` on macOS
   and Windows hosts and on musl targets. The flag is now set per build
-  target (Linux gnu only), musl targets build through zig (`-x` with
-  setup-zig and cargo-zigbuild, the napi-rs template's recipe), and
+  target (Linux gnu only), musl targets build through Zig and
+  cargo-zigbuild (`-x`, the napi-rs template's recipe), and
   `@napi-rs/cli` is pinned at `3.7.3`.
+- **npm publishing hands `npm publish` absolute tarball paths** — npm
+  reads a relative `dir/file.tgz` as a GitHub repository (the wasm
+  operand `npm-wasm/<file>.tgz` names `github.com/npm-wasm/…`), so both
+  publishing jobs spell every operand as an absolute path, the same in
+  the in-job record. An `operand-proof` job, which both need, parses
+  every operand with the publishers' npm before any token exists, and
+  after each upload the registry's integrity must match the inspected
+  tarball.
+- **No build cache is restored on a tag in the jobs whose archives are
+  published** — the musl build installs Zig 0.14.1 from ziglang.org
+  against its published sha256, with an empty global cache, rather than
+  through `mlugg/setup-zig`, which restores the compiler from the
+  Actions cache on a tag too, where a cache hit skips its signature
+  check. `check-publish-guards.py` refuses a cache-capable step on tag
+  runs in every job whose artifacts a publishing job downloads.
+- **RELEASING.md names what older tags can still publish** — the tags
+  v0.5.0 to v0.9.0 can still publish to PyPI through OIDC on a dispatch
+  (the owner's option: required reviewers on the `release` environment),
+  and three wheel build images are pulled by a mutable tag (an accepted
+  residual; maturin-action takes a digest through its `container`
+  input).
 - **New: `xtask oracle`, a correctness oracle that judges contents, not
   texts** (its report says `qrscan-oracle/v2`) — a `corpus.toml` entry
   may carry its bytes and declarations (`raw_hex`, `eci`, `fnc1`; 31
