@@ -255,6 +255,85 @@ fn pretty_says_why_a_score_is_missing() {
     assert!(!text.lines().any(|l| l.starts_with("budget")), "{text}");
 }
 
+/// A transparent v3-M symbol — dark modules opaque black, every other pixel
+/// fully transparent — rendered to a temp PNG: the `auto` flatten reads it
+/// over white, and the full profile measures its placement envelope.
+fn transparent_png(name: &str) -> PathBuf {
+    let code = qrcode::QrCode::with_version(
+        b"https://qrc-ai.com/cut",
+        qrcode::Version::Normal(3),
+        qrcode::EcLevel::M,
+    )
+    .unwrap();
+    let width = code.width();
+    let side = u32::try_from((width + 8) * 6).unwrap();
+    let mut img = image::RgbaImage::from_pixel(side, side, image::Rgba([0, 0, 0, 0]));
+    for (i, color) in code.to_colors().iter().enumerate() {
+        if *color == qrcode::Color::Dark {
+            let mx = u32::try_from(i % width + 4).unwrap();
+            let my = u32::try_from(i / width + 4).unwrap();
+            for dy in 0..6 {
+                for dx in 0..6 {
+                    img.put_pixel(mx * 6 + dx, my * 6 + dy, image::Rgba([0, 0, 0, 255]));
+                }
+            }
+        }
+    }
+    let path = std::env::temp_dir().join(format!("qrscan-cli-transparent-{name}.png"));
+    img.save(&path).unwrap();
+    path
+}
+
+/// `--pretty` says a cut report is not final whatever else it prints — here
+/// no score is computed (every axis skipped), and a 1 ms budget cuts the
+/// placement envelope that runs after the decode. Unbounded, the envelope
+/// is measured and no budget line is printed.
+#[test]
+fn pretty_says_a_cut_report_is_not_final_when_no_score_is_computed() {
+    let path = transparent_png("envelope");
+    let pretty = |budget: &str| -> Vec<String> {
+        let out = qrscan()
+            .arg(&path)
+            .args([
+                "--pretty",
+                "--budget-ms",
+                budget,
+                "--score-skip-axes",
+                "resolution,blur,contrast,perspective,rotation,lighting",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    };
+    let whole = pretty("0");
+    assert_line(&whole, "score     not computed (every stress axis skipped)");
+    assert!(
+        whole.iter().any(|l| l.starts_with("  placement")),
+        "{whole:#?}"
+    );
+    assert!(!whole.iter().any(|l| l.starts_with("budget")), "{whole:#?}");
+    let cut = pretty("1");
+    assert_line(&cut, "score     not computed (every stress axis skipped)");
+    // the envelope runs after the decode: 1 ms cuts it, unless the whole
+    // scan fit the budget (its probes are then listed)
+    if !cut.iter().any(|l| l.starts_with("  placement")) {
+        assert_line(
+            &cut,
+            "budget    1 ms exhausted — not final (--budget-ms 0 = unbounded)",
+        );
+    }
+}
+
 /// Every JSON report carries the flag; an unbounded scan is final, found or
 /// not.
 #[test]

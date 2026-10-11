@@ -209,6 +209,19 @@ fn not_found_line(report: &ScanReport, config: &ScanConfig) -> String {
     }
 }
 
+/// The `--pretty` line of a report the budget cut that no other line says
+/// is partial: detections, and no score because the configuration computes
+/// none — the not-found, not-judged and budget lines say it themselves.
+fn cut_line(report: &ScanReport, config: &ScanConfig) -> Option<String> {
+    let said = report.detections.is_empty() || report.score.is_some() || config.computes_score();
+    (cut(report) && !said).then(|| {
+        let budget = config
+            .budget_ms
+            .map_or_else(|| "the budget".to_owned(), |ms| format!("{ms} ms"));
+        format!("budget    {budget} exhausted — not final (--budget-ms 0 = unbounded)")
+    })
+}
+
 /// The `--pretty` line of a complete score whose report the budget cut.
 fn budget_line(report: &ScanReport, config: &ScanConfig) -> Option<String> {
     (report.score.is_some() && cut(report)).then(|| {
@@ -385,6 +398,9 @@ fn render_pretty(report: &ScanReport, config: &ScanConfig) {
     }
     if let Some(line) = missing_score_line(report, config) {
         println!("{line}");
+    }
+    if let Some(line) = cut_line(report, config) {
+        println!("{}", th.warn(&line));
     }
     if let Some(score) = &report.score {
         let grade = format!("{:?}", score.grade);
@@ -803,5 +819,33 @@ mod tests {
         );
         assert_eq!(budget_line(&report(true, true, false), &full), None);
         assert_eq!(budget_line(&report(true, false, true), &full), None);
+    }
+
+    #[test]
+    fn pretty_says_a_cut_once_whatever_else_it_prints() {
+        // no score planned: the missing-score line names the configuration,
+        // so the cut needs a line of its own
+        assert_eq!(
+            cut_line(&report(true, false, true), &ScanConfig::frame()).as_deref(),
+            Some("budget    80 ms exhausted — not final (--budget-ms 0 = unbounded)")
+        );
+        assert_eq!(
+            cut_line(&report(true, false, true), &every_axis_skipped()).as_deref(),
+            Some("budget    4000 ms exhausted — not final (--budget-ms 0 = unbounded)")
+        );
+        // the not-found, not-judged and budget lines say it themselves, and a
+        // final report has nothing to say
+        let full = ScanConfig::full();
+        for (detected, scored) in [(false, false), (true, false), (true, true)] {
+            assert_eq!(
+                cut_line(&report(detected, scored, true), &full),
+                None,
+                "detected {detected}, scored {scored}"
+            );
+        }
+        assert_eq!(
+            cut_line(&report(true, false, false), &ScanConfig::frame()),
+            None
+        );
     }
 }
