@@ -71,7 +71,9 @@ Normative properties:
      decides (a malformed one refuses the read); when both error-correct to
      the same result, that result stands; when both error-correct with
      different results, nothing is decided (the read keeps `rqrr`'s bytes
-     with its declarations unobserved, and is never refused for it);
+     with its declarations unobserved, and is never refused for it); when
+     neither error-corrects, nothing is decided either, and the read counts
+     as a negative correction margin (§ Acceptance);
    - grids `rqrr` detected but did not decode (FNC1, Hanzi,
      structured-append and damaged symbols), as sampled or else transposed
      (a grid that parses malformed one way while the other way
@@ -239,13 +241,17 @@ protects reads it agrees with and keeps re-derivation running.
    word, when the scanner error-corrected that word itself (the `rqrr`
    grid, the re-read, S5): the least, over its blocks, of
    ⌊(npar − p − f)/2⌋ − e, with p from ISO/IEC 18004 Table 9, f erasures
-   and e errors. A content — the reads of its symbology whose accounts
-   agree — is refused when at least one of its reads has a known margin
-   and every known margin is negative; its reads of unknown margin share
-   the refusal. One read with a margin of zero or more admits the content.
-   Only QR Code (Model 2) reads ever have a known margin, so this rule
-   never refuses a content without one: every Micro QR, rMQR and non-QR
-   content, and a QR Code content no parse measured. Errors alone reach a
+   and e errors. An `rqrr` read whose grid neither orientation
+   error-corrects has a known margin too, a negative one, at any version
+   and EC level: the scanner's bounded decoder refuses the word `rqrr`
+   took (`rqrr`'s correction has no degree bound). A content — the reads
+   of its symbology whose accounts agree — is refused when at least one of
+   its reads has a known margin and every known margin is negative; its
+   reads of unknown margin share the refusal. One read with a margin of
+   zero or more admits the content. Only QR Code (Model 2) reads ever have
+   a known margin, so this rule never refuses a content without one: every
+   Micro QR, rMQR and non-QR content, and a QR Code content with neither a
+   measured word nor an unverified `rqrr` grid. Errors alone reach a
    negative margin only on v1-L (more than 2 errors), v1-M and v2-L (more
    than 4). A margin of zero or more does not prove the correction right:
    a word miscorrected within the reserve is admitted (when the score

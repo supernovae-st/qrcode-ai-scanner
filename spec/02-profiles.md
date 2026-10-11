@@ -44,10 +44,14 @@ reading "NO" on valid product output is the documented trap.
   CLI `--budget-ms` · Node `budgetMs` ·
   WASM `budget_ms` (positional arg #5 of `scan_image`, #5 of `scan_frame`) ·
   Python `budget_ms` kwarg · Kotlin/Swift (UniFFI) `budget_ms`.
-- `0` = **unbounded** (WASM: any value at most 0) — NOT a zero-millisecond
-  budget. The other bindings take an unsigned integer. An unset
-  `budget_ms` keeps the profile default (`full` 4000 · `fast` 800 · `frame`
-  80 ms): reproducible reports need `0` (Rust: `budget_ms: None`).
+- `0` = **unbounded** (WASM: any value that is not above 0, NaN included)
+  — NOT a zero-millisecond budget. WASM truncates a fractional budget to
+  whole milliseconds, so a value strictly between 0 and 1 IS a
+  zero-millisecond budget: the deadline has passed before the first stage,
+  which does not run (`trace.budget_exhausted: true`). The other bindings
+  take an unsigned integer. An unset `budget_ms` keeps the profile default
+  (`full` 4000 · `fast` 800 · `frame` 80 ms): reproducible reports need `0`
+  (Rust: `budget_ms: None`).
 - A planned unit the deadline prevents does not run: a ladder attempt or
   stage (including a stage the walk continues to because every QR Code
   read so far only signals an ECI it could not locate — 07-pipeline.md
@@ -80,6 +84,10 @@ reading "NO" on valid product output is the documented trap.
   cancellation is checked before it and before every confirmation decode.
   A judgment whose every planned cell ran also completes its structural,
   UEC and ISO measurements (no decode) without waiting on the deadline.
+  When a transparent input's first `auto` walk publishes nothing, the
+  opposite background's plane is built — composited at full resolution,
+  then downscaled to `max_engine_side` — before the second walk's first
+  gate checks the deadline, so that work also runs past an expired one.
 
 ## Anti-DoS limits (validated BEFORE decode)
 
@@ -99,11 +107,14 @@ Server guidance: lower `maxDimension`/`maxPixels` for untrusted uploads
 ## Cancellation
 
 - Rust: `scan_cancellable(&CancelToken)` — checked between attempts/cells.
-- Node: `AbortSignal` rejects QUEUED tasks only; a RUNNING scan completes
-  within its budget once its image is decoded (in-flight cancel is NOT
-  wired — by design at ≤4 s budgets).
+- Node: `AbortSignal` rejects QUEUED tasks only; a RUNNING scan is not
+  interrupted (in-flight cancel is NOT wired — by design at ≤4 s budgets):
+  once its image is decoded, the budget stops its planned work at attempt
+  granularity, and the work § Budget semantics lets run past the deadline
+  still finishes.
 - WASM: synchronous on the calling thread — the budget bounds the scan
-  once the image is decoded; the input limits bound the decode.
+  once the image is decoded, as for Node; the input limits bound the
+  decode.
 - Python / Kotlin / Swift: synchronous like WASM — `budget_ms` bounds the
   scan once the image is decoded, the input limits the decode (Python
   releases the GIL for the scan's duration; mobile callers keep the scan

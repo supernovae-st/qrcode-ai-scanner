@@ -417,9 +417,11 @@ so identity there is only as exact as the engine.
     "ms":               number,  // wall-clock (NOT deterministic)
     "detections_found": number   // RAW engine hits, PRE-merge (rxing+rqrr on one symbol = 2),
                                  // before the re-read, refusals of other reads and
-                                 // reconciliation — it includes hits the scanner refuses
-                                 // or holds for confirmation; a decode refused inside the
-                                 // decoder step (its own grid parses malformed) is not a hit
+                                 // reconciliation — it includes hits the scanner later
+                                 // refuses or holds for confirmation. Not hits: a decode
+                                 // refused inside the decoder step (its own grid parses
+                                 // malformed, or a read check refuses it — 07-pipeline.md
+                                 // property 6) and the reads of a confirmation decode
   }],
   "engine_panics":    number,    // third-party decoder panics caught + isolated
   "total_ms":         number,    // wall clock of the ladder walk(s) only
@@ -433,9 +435,15 @@ Stage names are stable identifiers. A stage that found something still
 completes (consensus within the stage is preserved); the ladder stops at
 stage boundaries, except while every QR Code read so far only signals an
 ECI it could not locate (07-pipeline.md property 2). `detections_found`
-includes hits the scanner refuses or holds for confirmation, so a stage can
-count hits with no published detection — read `detections`, not this
-counter, to know what was found.
+includes hits the scanner refuses after collecting them or holds for
+confirmation, so a stage can count hits with no published detection —
+read `detections`, not this counter, to know what was found. It leaves out
+what the decoder step itself refuses: an `rqrr` decode whose grid parses
+malformed, and an `rxing` read a read check refuses (a DataBar text that
+is not fourteen digits, a `]Q1` read whose bytes are not its text —
+07-pipeline.md property 6) or whose original bytes the adapter cannot
+establish; a confirmation decode's reads are counted nowhere
+(07-pipeline.md § Acceptance).
 
 ## Versions
 

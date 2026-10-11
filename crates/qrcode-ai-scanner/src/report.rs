@@ -834,10 +834,10 @@ pub struct StageTrace {
     pub ms: f64,
     /// Reads this stage's engine adapters delivered — raw hits before
     /// folding, the re-read, vetoes and reconciliation (an rxing + rqrr
-    /// double read counts 2); a decode the rqrr adapter refuses because its
-    /// own grid parses malformed is not delivered; candidate re-derivations
-    /// and re-reads never count. It includes hits the scanner refuses or
-    /// holds for confirmation: read `detections`, not this counter.
+    /// double read counts 2); a decode an adapter refuses (an rqrr grid that
+    /// parses malformed, an rxing read a read check refuses) is not delivered;
+    /// candidate re-derivations, re-reads and confirmation decodes never count.
+    /// It includes hits the scanner later refuses or holds: read `detections`.
     pub detections_found: u32,
 }
 
