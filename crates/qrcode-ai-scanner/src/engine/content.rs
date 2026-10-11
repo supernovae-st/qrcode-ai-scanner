@@ -1114,6 +1114,117 @@ mod tests {
     }
 
     #[test]
+    fn the_decode_table_is_spec_01_s() {
+        use encoding_rs as e;
+        // spec/01 § ECI decode table, every row with a character set; every
+        // other assignment number has none (899 binary, 0 and 2 CP437, 14,
+        // 19, 170 …)
+        let table: [(&[u32], EciSet); 29] = [
+            (&[1, 3], EciSet::Latin1),
+            (&[4], EciSet::Whatwg(e::ISO_8859_2)),
+            (&[5], EciSet::Whatwg(e::ISO_8859_3)),
+            (&[6], EciSet::Whatwg(e::ISO_8859_4)),
+            (&[7], EciSet::Whatwg(e::ISO_8859_5)),
+            (&[8], EciSet::Whatwg(e::ISO_8859_6)),
+            (&[9], EciSet::Whatwg(e::ISO_8859_7)),
+            (&[10], EciSet::Whatwg(e::ISO_8859_8)),
+            (&[11], EciSet::Iso8859_9),
+            (&[12], EciSet::Whatwg(e::ISO_8859_10)),
+            (&[13], EciSet::Iso8859_11),
+            (&[15], EciSet::Whatwg(e::ISO_8859_13)),
+            (&[16], EciSet::Whatwg(e::ISO_8859_14)),
+            (&[17], EciSet::Whatwg(e::ISO_8859_15)),
+            (&[18], EciSet::Whatwg(e::ISO_8859_16)),
+            (&[20], EciSet::Whatwg(e::SHIFT_JIS)),
+            (&[21], EciSet::Whatwg(e::WINDOWS_1250)),
+            (&[22], EciSet::Whatwg(e::WINDOWS_1251)),
+            (&[23], EciSet::Whatwg(e::WINDOWS_1252)),
+            (&[24], EciSet::Whatwg(e::WINDOWS_1256)),
+            (&[25], EciSet::Whatwg(e::UTF_16BE)),
+            (&[26], EciSet::Whatwg(e::UTF_8)),
+            (&[27], EciSet::Ascii),
+            (&[28], EciSet::Whatwg(e::BIG5)),
+            (&[29, 31, 32], EciSet::Whatwg(e::GB18030)),
+            (&[30], EciSet::Whatwg(e::EUC_KR)),
+            (&[33], EciSet::Whatwg(e::UTF_16LE)),
+            (&[34], EciSet::Utf32 { big_endian: true }),
+            (&[35], EciSet::Utf32 { big_endian: false }),
+        ];
+        for value in (0..=1000).chain([999_999]) {
+            let expected = table
+                .iter()
+                .find(|(values, _)| values.contains(&value))
+                .map(|&(_, set)| set);
+            assert_eq!(eci_set(value), expected, "ECI {value}");
+        }
+        // and each designator's bytes read in its own set: a probe no other
+        // single-byte set of the table reads alike (Python's codecs as the
+        // oracle), the label `eci` — no decoder label's family holds them
+        for (value, probe, text) in [
+            (5, &[0xA1][..], "\u{126}"),
+            (6, &[0xA2], "\u{138}"),
+            (8, &[0xAC], "\u{60C}"),
+            (10, &[0xAA], "\u{D7}"),
+            (12, &[0xA2], "\u{112}"),
+            (15, &[0xA1], "\u{201D}"),
+            (16, &[0xA1], "\u{1E02}"),
+            (17, &[0xA4, 0xA1], "\u{20AC}\u{A1}"),
+            (18, &[0xA2], "\u{105}"),
+        ] {
+            let reading = qr(probe, &located(&[(value, 0)]));
+            assert_eq!(pair(&reading), (text, Charset::Eci), "ECI {value}");
+        }
+    }
+
+    #[test]
+    fn a_gb18030_four_byte_sequence_is_no_pair() {
+        // 81 30 81 30 is U+0080: a well-formed gb18030 reading without a byte
+        // pair, so not the complete double-byte decoding rule 1e chooses
+        let four = [0x41, 0x81, 0x30, 0x81, 0x30];
+        assert!(!has_pair(&four, encoding_rs::GB18030));
+        assert_eq!(EngineReading::of(&four, "A\u{80}"), EngineReading::None);
+        // a pair after a four-byte sequence still counts
+        let then_pair = [0x41, 0x41, 0x81, 0x30, 0x81, 0x30, 0xB0, 0xA1];
+        assert!(has_pair(&then_pair, encoding_rs::GB18030));
+        assert_eq!(
+            EngineReading::of(&then_pair, "AA\u{80}啊"),
+            EngineReading::Gb18030
+        );
+    }
+
+    #[test]
+    fn the_runs_outside_the_spans_are_maximal_and_never_empty() {
+        let span = |start, end| DoubleByteSpan {
+            mode: DoubleByteMode::Kanji,
+            start,
+            end,
+        };
+        let raw = b"abcdefgh";
+        let runs = |spans: &[DoubleByteSpan]| -> Vec<Vec<u8>> {
+            outside_runs(raw, spans)
+                .into_iter()
+                .map(<[u8]>::to_vec)
+                .collect()
+        };
+        assert_eq!(runs(&[]), [b"abcdefgh".to_vec()]);
+        assert_eq!(
+            runs(&[span(1, 3), span(5, 7)]),
+            [b"a".to_vec(), b"de".to_vec(), b"h".to_vec()]
+        );
+        // adjacent spans, and spans at either end, leave no empty run
+        assert!(runs(&[span(0, 2), span(2, 4), span(4, 8)]).is_empty());
+        assert_eq!(runs(&[span(0, 4)]), [b"efgh".to_vec()]);
+        assert_eq!(runs(&[span(4, 8)]), [b"abcd".to_vec()]);
+        // a trailing run of UTF-8 after Kanji: rule 1d, as a leading one is
+        let mut trailing = [0x8E, 0x52, 0x93, 0x63].to_vec();
+        trailing.extend_from_slice("é".as_bytes());
+        assert_eq!(
+            pair(&parsed(&trailing, &[(DoubleByteMode::Kanji, 0, 4)])),
+            ("山田\u{FFFD}\u{FFFD}", Charset::Unknown)
+        );
+    }
+
+    #[test]
     fn evidence_lattice() {
         let none = EciEvidence::NoEci;
         let eci4 = located(&[(4, 0)]);
