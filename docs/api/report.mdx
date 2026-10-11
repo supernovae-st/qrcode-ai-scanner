@@ -60,8 +60,11 @@ Machine-readable mirrors — load these directly in tools and agents:
   Per-stage execution trace (`pyramid`·`direct`·`enhance`·`deep`·`rescue`)
   — why the scan succeeded or came back empty. `detections_found` counts
   the reads the engines delivered, before reconciliation; it includes hits
-  the scanner refuses or holds for confirmation — read `detections`, not
-  the counter. `total_ms` is the wall clock of the ladder walk(s) only.
+  the scanner later refuses or holds for confirmation, but not a decode an
+  engine adapter refuses itself (a grid that parses malformed, a read a
+  read check refuses) nor a confirmation decode's reads — read
+  `detections`, not the counter. `total_ms` is the wall clock of the ladder
+  walk(s) only.
   `budget_exhausted` (score_contract ≥ 5) says whether the report is
   final: `false` = every planned unit ran, the report is the unbounded
   one (wall clock aside); `true` = the wall-clock budget cut planned work

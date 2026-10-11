@@ -58,14 +58,16 @@ workflows, CI bots) consuming the scanner.
 8. `meta`/`corners` are measured or `null` — never fabricated.
 9. Some reads are refused rather than published: a malformed QR stream, a
    QR Code content whose every measured correction went past ISO/IEC
-   18004's misdecode reserve, and a UPC-E, DataBar or low-EC PDF417 read
-   no independent read confirmed. This narrows wrong reads without ruling
-   them out: reads with no measured margin (Micro QR, rMQR, QR Code reads
-   no parse measured) are published as read, and a correction inside the
-   reserve can still be wrong — treat `low_correction_margin` as failure,
-   and its absence as no proof: on version 1, v2-L and v3-L an errors-only
-   correction at the reserve's limit reads a UEC margin above 0 and raises
-   no hint (spec/04 § Synthetic UEC).
+   18004's misdecode reserve (an `rqrr` decode of a grid the scanner
+   cannot error-correct counts as one, at any version), and a UPC-E,
+   DataBar or low-EC PDF417 read no independent read confirmed. This
+   narrows wrong reads without ruling them out: reads with no measured
+   margin (Micro QR, rMQR, other QR Code reads no parse measured) are
+   published as read, and a correction inside the reserve can still be
+   wrong — treat `low_correction_margin` as failure, and its absence as no
+   proof: on version 1, v2-L and v3-L an errors-only correction at the
+   reserve's limit reads a UEC margin above 0 and raises no hint (spec/04
+   § Synthetic UEC).
 
 ## The regenerate loop
 

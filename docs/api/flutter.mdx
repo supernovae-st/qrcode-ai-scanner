@@ -41,8 +41,9 @@ Unlike the Kotlin/Swift bindings (which return a JSON string), Flutter ships a
 **typed** [`ScanReport`](/api/report) — sealed `Payload`/`Hint`, `Score` with the
 ISO 15415 / UEC grade cards. Unknown enum values and payload kinds decode to
 `unknown` / catch-all variants, never a throw (additively forward-compatible) —
-except `Charset`, whose newer wire values decode to `Charset.unrecognized`, a
-complete reading: `Charset.unknown` is the wire's own lossy value, so test
+except `Charset` and `Fnc1Position`, whose newer wire values decode to
+`unrecognized`. `Charset.unrecognized` is still a complete reading:
+`Charset.unknown` is the wire's own lossy value, so test
 `d.content.charset.isLossy` (then use `d.content.raw`, the payload's bytes).
 `d.content.eci` and `d.content.fnc1` are null when none was observed or the
 symbology does not report it — not proof that the symbol declares none;

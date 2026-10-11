@@ -33,8 +33,10 @@ const sync = scanSync(buffer, { profile: "fast" }); // scripts only
 
 <Warning>
 `signal` rejects tasks still QUEUED on the pool (and pre-aborted signals
-reject immediately with `AbortError`). A RUNNING scan is not interrupted —
-it completes within its `profile`/`budgetMs` bound. Budget is the real
+reject immediately with `AbortError`). A RUNNING scan is not interrupted:
+once its image is decoded, its `profile`/`budgetMs` budget stops planned
+work at attempt granularity, and the bounded work `spec/02-profiles.md`
+§ Budget semantics lists may finish past it. Budget is the real
 latency control — and a report it cut says so: `trace.budget_exhausted`
 is `true`, empty detections are then not final, and a `null` score beside
 a detection means "not judged", never 0. `budgetMs: 0` is unbounded and

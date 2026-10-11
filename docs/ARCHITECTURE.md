@@ -51,14 +51,16 @@ skips them by design — see the root `Cargo.toml` comment):
    Text is never an identity.
 7. **Refuse what the evidence contradicts**: a malformed stream is
    refused whichever engine reads it; a QR Code content whose every
-   measured correction margin is negative (past the Annex B reserve) and
-   an invention-prone barcode read no independent read confirmed are not
-   published (spec/07 § Acceptance). Reads with no measured margin — every
-   Micro QR and rMQR read, a QR Code read no parse measured — are
-   published as read, and a correction inside the reserve can still be
-   wrong (`low_correction_margin` flags a measured block whose errors spent
-   all its parity — which no errors-only correction inside the reserve
-   does on version 1, v2-L and v3-L, spec/04 § Synthetic UEC).
+   measured correction margin is negative (past the Annex B reserve, or an
+   `rqrr` decode of a grid the scanner cannot error-correct, at any
+   version) and an invention-prone barcode read no independent read
+   confirmed are not published (spec/07 § Acceptance). Reads with no
+   measured margin — every Micro QR and rMQR read, any other QR Code read
+   no parse measured — are published as read, and a correction inside the
+   reserve can still be wrong (`low_correction_margin` flags a measured
+   block whose errors spent all its parity — which no errors-only
+   correction inside the reserve does on version 1, v2-L and v3-L, spec/04
+   § Synthetic UEC).
 
 ## Decode pipeline
 

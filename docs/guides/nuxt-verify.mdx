@@ -39,7 +39,9 @@ const onVerify = async () => {
 
   // FULL profile: the blob/dot template class (an editor OUTPUT) only
   // decodes in the deep stage — `fast` would read NO on valid output.
-  // 1500 ms bounds the UI thread.
+  // 1500 ms bounds the scan once the PNG is decoded and normalized, at
+  // attempt granularity: the decode, the normalization and the work spec/02
+  // § Budget semantics lets run past the deadline all block the UI thread too.
   const report = scan_image(bytes, "full", undefined, undefined, 1500);
   const cut = report.trace.budget_exhausted === true;
 

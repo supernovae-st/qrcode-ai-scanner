@@ -73,12 +73,14 @@ read once (other symbologies carry their decoding engine's reading):
 settle a stage, stop S5 or be published:
 
 - **Correction margin.** A QR Code content whose every measured margin is
-  negative — corrected past the ISO/IEC 18004 Annex B reserve, which only
-  happens on versions 1 and 2 at low EC levels — is refused; one read
-  with a margin of zero or more admits it. A content with no measured
-  margin — every Micro QR and rMQR read, a QR Code read no parse
-  measured — is published as read, and a margin of zero or more does not
-  prove the correction right.
+  negative is refused; one read with a margin of zero or more admits it.
+  A margin is negative in two cases: errors alone corrected the word past
+  the ISO/IEC 18004 Annex B reserve, which only happens on versions 1 and
+  2 at low EC levels, or `rqrr` decoded a grid that neither orientation
+  error-corrects for the scanner — at any version and EC level. A content
+  with no measured margin — every Micro QR and rMQR read, any other QR
+  Code read no parse measured — is published as read, and a margin of
+  zero or more does not prove the correction right.
 - **Independent confirmation.** UPC-E, DataBar, DataBar Expanded and
   PDF417 at EC level 0, 1 or none — the symbologies a reader can invent
   from noise — wait for a second read of the same symbology and bytes
