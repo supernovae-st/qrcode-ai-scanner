@@ -816,4 +816,49 @@ mod tests {
         // A budget exactly on a boundary is kept as-is.
         assert_eq!(split_head("é0", 2), ("é", "0"));
     }
+
+    #[test]
+    fn element_string_one_short_of_its_predefined_length_is_truncated() {
+        // the AI's length and the value's add up to the predefined total:
+        // one character short of it is truncated, for a two-digit AI and a
+        // four-digit one alike
+        for (data, ai, total) in [("010950600013435", "01", 16), ("310300019", "3103", 10)] {
+            let parsed = parse_element_string(data);
+            let truncated = format!(
+                "AI {ai}: truncated — predefined length is {total} incl. AI (GenSpecs 7.8.4)"
+            );
+            assert!(
+                parsed.issues.contains(&truncated),
+                "{data}: {:?}",
+                parsed.issues
+            );
+        }
+    }
+
+    #[test]
+    fn digital_link_reads_every_qualifier_in_its_place() {
+        // all three key qualifiers, CPV first: each takes the segment after
+        // its own, 22 at rank 0 is in order, the third one is still read,
+        // and a query key that is not all digits is no AI attribute
+        let dl = parse_digital_link(
+            "https://id.gs1.org/01/09506000134352/22/CPV1/10/LOT1/21/SER1?src=mail&17=261231",
+        )
+        .expect("DL-shaped");
+        assert_eq!(dl.issues, Vec::<String>::new());
+        let pairs: Vec<(&str, &str)> = dl
+            .elements
+            .iter()
+            .map(|e| (e.ai.as_str(), e.value.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("01", "09506000134352"),
+                ("22", "CPV1"),
+                ("10", "LOT1"),
+                ("21", "SER1"),
+                ("17", "261231"),
+            ]
+        );
+    }
 }
