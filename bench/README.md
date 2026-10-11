@@ -209,7 +209,16 @@ Known limits of what a report shows — reported, never judged:
   spends time `total_ms` does not cover (the walk comparison still sees a
   truncated retry), and a lighting set that 0.9.0 cuts right after a
   failing cell, with every remaining cell failing, keeps its passed count
-  — that one cut is invisible in the judgment.
+  — that one cut is invisible in the judgment;
+- a budget that cuts a knee bisection leaves the score complete and drops
+  only that axis's `refined_failed_at`, which the judgment signature does
+  not carry — the composite, the contract weights and each axis's cells
+  passed of planned stay as the reference's — so the truncation test
+  cannot see it; the candidate's `trace.budget_exhausted` reports the cut
+  (counted per side). Seeing it would take a per-axis refined marker
+  (present or absent) in the three signature builders — the library
+  worker, the CLI report parser and the Node and WASM drivers — and a
+  worker protocol bump.
 
 ## Resource caps
 

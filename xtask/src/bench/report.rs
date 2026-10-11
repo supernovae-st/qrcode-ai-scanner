@@ -1745,6 +1745,7 @@ fn known_limits() -> Value {
         "same_cut": "pairs both variants cut at the same share of their own reference walks carry no speed verdict; budget_bound.same_cut counts them per class",
         "lost_decodes": "a decode the budget costs one side only is an A/B disagreement exclusion, outside the McNemar tests; the status line names it, and a dry run's pre-screen reports its share per set",
         "prescreen": "dry runs: per budgeted mode and set, the images whose A/B outputs disagree between the variants or across one variant's repetitions, as a share of the set's images; above 10 % a gated run of that mode would end partial — information to re-scope the mode before any gated timing, never a gated decision",
+        "knee_bisection": "a budget that cuts a knee bisection leaves the score complete and drops only that axis's refined_failed_at, which the judgment signature does not carry, so the truncation test cannot see it; the candidate's trace.budget_exhausted reports the cut (counted per side); seeing it would take a per-axis refined marker in the three signature builders (library worker, CLI report parser, Node and WASM drivers) and a worker protocol bump",
     })
 }
 
@@ -3811,6 +3812,26 @@ mod tests {
             tables.budget.contains("| 12 (6 same cut) |"),
             "{}",
             tables.budget
+        );
+    }
+
+    /// A budget that cuts a knee bisection drops only `refined_failed_at`,
+    /// which no judgment signature carries: a known limit, stated in the
+    /// method of every run and in `bench/README.md`.
+    #[test]
+    fn a_cut_knee_bisection_is_a_known_limit() {
+        let limits = known_limits();
+        let text = limits["knee_bisection"].as_str().unwrap_or_default();
+        assert!(
+            text.contains("refined_failed_at")
+                && text.contains("the truncation test cannot see it"),
+            "{limits}"
+        );
+        let readme =
+            std::fs::read_to_string(crate::repo_root().join("bench/README.md")).expect("README");
+        assert!(
+            readme.contains("cuts a knee bisection"),
+            "the README lists it under Known limits"
         );
     }
 
