@@ -69,7 +69,9 @@ Seven things this library ships together:
    computed from the stream of the orientation the decoder verified, via
    RS syndromes + Berlekamp-Massey, only when it error-corrects. The real
    "how close to failure is this code" number; below 0.5 it caps the
-   score.
+   score. ISO's misdecode reserve is not subtracted, so on version 1, v2-L
+   and v3-L a block with errors reads above ISO's value (spec/04
+   § Synthetic UEC).
 4. **An ISO 15415-informed grade card** (`score.iso15415`) · Symbol
    Contrast, Modulation, Axial Nonuniformity, Fixed Pattern Damage and UEC,
    each `{value, grade}` in the ISO bands, with `overall` = lowest
@@ -103,11 +105,14 @@ Seven things this library ships together:
    reading. Detections are the distinct contents the scanner can tell
    apart, never keyed on text. A read the evidence contradicts is refused:
    a malformed stream, a QR Code content whose every measured correction
-   went past the standard's misdecode reserve, an unconfirmed barcode a
-   reader could invent from noise. Reads the scanner cannot measure (Micro
-   QR, rMQR, QR Code reads no parse measured) are published as read, and a
-   correction inside the reserve can still be wrong: when the score
-   measures the stream, a fully spent block raises `low_correction_margin`.
+   went past the standard's misdecode reserve (an `rqrr` decode of a grid
+   the scanner cannot error-correct counts as one, at any version), an
+   unconfirmed barcode a reader could invent from noise. Reads the scanner
+   cannot measure (Micro QR, rMQR, other QR Code reads no parse measured)
+   are published as read, and a correction inside the reserve can still be
+   wrong: when the score measures the stream, a block whose errors spent
+   all its parity raises `low_correction_margin` — which no errors-only
+   correction inside the reserve does on version 1, v2-L and v3-L.
 
 Plus machine-actionable **hints** (`raise_error_correction`,
 `fix_finder_pattern`, `low_correction_margin`, …) · the feedback loop for
