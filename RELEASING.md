@@ -84,10 +84,21 @@ for wf in ci python flutter mobile; do
 done   # four lines of "success", or no tag
 ```
 
-npm-publish runs on no pull request: its builds, its inspections and
-`operand-proof` (npm must read every `npm publish` operand as a file, §
-Publishing) first run on the tag, unless the owner dispatches it on the
-release branch before tagging, which publishes nothing.
+The two publishing workflows, `crates-publish.yml` and `npm-publish.yml`,
+run on no branch push and no pull request, so the loop above never sees
+them: their own jobs — crates-publish's packaging, each `.crate` built from
+its archive and read back; npm-publish's platform builds, tarball
+inspections and `operand-proof` (npm must read every `npm publish` operand
+as a file, § Publishing) — first run on the tag, unless the owner
+dispatches them on the release branch. A dispatch from a branch builds and
+inspects every archive, then stops before the registry: it publishes
+nothing. Recommended, as the owner's step before the tag (not part of the
+gate above): one successful dispatch of each on the release branch.
+
+```bash
+gh workflow run crates-publish.yml --ref "$(git branch --show-current)"
+gh workflow run npm-publish.yml --ref "$(git branch --show-current)"
+```
 
 ## 5 · Tag + push the tag
 
