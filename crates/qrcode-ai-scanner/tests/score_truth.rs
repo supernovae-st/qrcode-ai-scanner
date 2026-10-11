@@ -192,6 +192,50 @@ fn a_rescue_only_decode_is_still_judged_whole() {
     );
 }
 
+/// A clean rMQR is judged by probes that read rMQR. They decode the scored
+/// symbology alone, and a pass restricted to rMQR used to run no reader
+/// (rxing 0.9.1's multi-use dispatcher has no rMQR arm): every cell failed
+/// and the clean fixture scored 0. Unbudgeted, the clean symbol survives
+/// the gentlest resolution, blur and contrast cells, and the Micro QR
+/// controls keep their 97.
+#[test]
+fn a_clean_rmqr_is_judged_by_probes_that_read_it() {
+    let report = scan(&fixture("symbology/rmqr-url-kanji.png"), unbudgeted_full());
+    let detection = report.detections.first().expect("the rMQR decodes");
+    assert_eq!(
+        detection.symbology,
+        qrcode_ai_scanner::Symbology::RectangularMicroQrCode
+    );
+    let score = report.score.as_ref().expect("an unbounded scan judges");
+    assert_honest(score);
+    assert_eq!(score.weights_run, 100);
+    for axis in score.axes.iter().filter(|a| {
+        matches!(
+            a.axis,
+            StressAxis::Resolution | StressAxis::Blur | StressAxis::Contrast
+        )
+    }) {
+        assert_ne!(
+            axis.failed_at.as_deref(),
+            Some(cell_labels(axis.axis)[0]),
+            "a clean symbol survives the gentlest cell: {axis:?}"
+        );
+    }
+    assert!(score.value >= 50, "{score:?}");
+    for rel in [
+        "symbology/microqr.png",
+        "symbology/microqr-kanji-yamada.png",
+    ] {
+        let control = scan(&fixture(rel), unbudgeted_full());
+        assert_eq!(
+            control.score.as_ref().map(|s| s.value),
+            Some(97),
+            "{rel}: {:?}",
+            control.score
+        );
+    }
+}
+
 /// Where a wall-clock cut lands depends on the machine, so the one
 /// timing-independent truth is the SHAPE of what ships: under any budget a
 /// scan reports either no score — and no score hints — or exactly the

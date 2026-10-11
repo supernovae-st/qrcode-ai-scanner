@@ -126,17 +126,44 @@ pub(super) fn decode(luma: &LumaImage, filter: super::FormatFilter) -> Vec<RawDe
         ..Default::default()
     };
 
-    let Ok(results) = rxing::helpers::detect_multiple_in_luma_with_hints(
-        luma.data().to_vec(),
-        luma.width(),
-        luma.height(),
-        &mut hints,
-    ) else {
+    let found = if filter == super::FormatFilter::Only(Symbology::RectangularMicroQrCode) {
+        decode_rmqr(luma, &mut hints)
+    } else {
+        rxing::helpers::detect_multiple_in_luma_with_hints(
+            luma.data().to_vec(),
+            luma.width(),
+            luma.height(),
+            &mut hints,
+        )
+    };
+    let Ok(results) = found else {
         // NotFound and friends — a miss, not an error.
         return Vec::new();
     };
 
     results.iter().filter_map(observe).collect()
+}
+
+/// The pass of an rMQR-only filter (score cells, envelope probes): the
+/// helper's reader stack — the multiple-barcode reader over a hybrid
+/// binarizer, `TryHarder` on — with the format dispatcher that sends rMQR
+/// to the zxing-cpp port, the reader the unrestricted passes read rMQR
+/// with. The multi-use dispatcher behind the helper has no rMQR arm in
+/// rxing 0.9.1: restricted to that format it ran no reader at all, and
+/// every cell of an rMQR read as failed. Restricted the same way, this
+/// dispatcher runs the port alone, for rMQR alone: no other reader, no
+/// other symbology.
+fn decode_rmqr(
+    luma: &LumaImage,
+    hints: &mut rxing::DecodeHints,
+) -> rxing::common::Result<Vec<rxing::RXingResult>> {
+    use rxing::multi::MultipleBarcodeReader as _;
+    hints.TryHarder = hints.TryHarder.or(Some(true));
+    let source =
+        rxing::Luma8LuminanceSource::new(luma.data().to_vec(), luma.width(), luma.height());
+    let mut image = rxing::BinaryBitmap::new(rxing::common::HybridBinarizer::new(source));
+    rxing::multi::GenericMultipleBarcodeReader::new(rxing::MultiFormatReader::default())
+        .decode_multiple_with_hints(&mut image, hints)
 }
 
 /// Which rxing QR reader produced a result — it decides what
@@ -1177,6 +1204,41 @@ mod tests {
         assert_eq!(super::parse_ec("Z"), None);
         assert_eq!(super::parse_ec(""), None);
         assert_eq!(super::parse_ec("l"), None, "case-sensitive: only uppercase");
+    }
+
+    /// A committed fixture as a luma plane.
+    fn fixture(rel: &str) -> LumaImage {
+        let path = format!("{}/../../fixtures/{rel}", env!("CARGO_MANIFEST_DIR"));
+        let img = image::open(&path).unwrap().to_luma8();
+        let (w, h) = (img.width(), img.height());
+        LumaImage::new(img.into_raw(), w, h)
+    }
+
+    #[test]
+    fn an_rmqr_only_pass_reads_rmqr_and_nothing_else() {
+        // The score cells and envelope probes of an rMQR symbol decode that
+        // symbology alone. rxing 0.9.1's multi-use dispatcher has no rMQR
+        // arm, so a pass restricted to it ran no reader at all and every
+        // cell failed: the pass reads the committed rMQR fixture — the
+        // content the unrestricted pass reads — and nothing of another
+        // symbology.
+        let rmqr = fixture("symbology/rmqr-url-kanji.png");
+        let only = FormatFilter::Only(Symbology::RectangularMicroQrCode);
+        let found = decode(&rmqr, only);
+        let [d] = &found[..] else {
+            panic!("one rMQR read: {found:?}");
+        };
+        assert_eq!(d.symbology, Symbology::RectangularMicroQrCode);
+        assert_eq!(d.raw, b"https://qrc-ai.com/\x93\xfa\x96\x7b");
+        let all = decode(&rmqr, FormatFilter::All);
+        assert!(
+            all.iter()
+                .any(|a| a.symbology == d.symbology && a.raw == d.raw),
+            "{all:?}"
+        );
+        for rel in ["symbology/microqr.png", "clean/gen_v2_l.png"] {
+            assert!(decode(&fixture(rel), only).is_empty(), "{rel}");
+        }
     }
 
     #[test]
