@@ -271,7 +271,7 @@ export interface AlphaReport {
   background: string;
   /** The declared flatten found nothing; the opposite background rescued the scan (auto only). */
   fallback_used: boolean;
-  /** Full profile only; null when skipped, budget-exhausted, or nothing decoded. */
+  /** Full profile only; null when skipped, budget-exhausted, nothing decoded, or after a contained fault of the score computation. */
   envelope: AlphaEnvelope | null;
 }
 

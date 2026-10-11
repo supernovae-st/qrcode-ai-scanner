@@ -28,7 +28,8 @@ tagged (`"hint"` discriminator). Parse leniently — new hints may appear.
   axis skipped, a judgment the budget interrupted (`trace.budget_exhausted:
   true`) or a contained fault. The two alpha hints ride with the placement
   envelope (Full profile, transparent inputs), which runs whether or not the
-  score did.
+  score did, except after a contained fault of the score computation: the
+  envelope is then absent, and so are both alpha hints.
 - A skipped `uec` check (04-score.md § Skipping checks) withholds the two
   margin-driven hints — `low_correction_margin` and the UEC path of
   `raise_error_correction` — while the measured margin still caps the

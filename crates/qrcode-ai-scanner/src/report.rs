@@ -751,7 +751,8 @@ pub struct AlphaReport {
     pub fallback_used: bool,
     /// The placement envelope — Full profile only; `None` when skipped
     /// (`score_skip_checks: ["alpha_envelope"]`), cut by the budget
-    /// (`trace.budget_exhausted`), or when no probe class reads the design.
+    /// (`trace.budget_exhausted`), when no probe class reads the design, or
+    /// after a contained fault of the score computation.
     pub envelope: Option<AlphaEnvelope>,
 }
 

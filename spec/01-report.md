@@ -510,7 +510,8 @@ score · UEC · ISO) sees the flattened image.
                             // a zero-detection scan (both walks in trace)
   "envelope": {             // Full profile only; null when skipped
                             // (score_skip_checks: ["alpha_envelope"]),
-                            // budget-exhausted, or nothing decoded
+                            // budget-exhausted, nothing decoded, or after
+                            // a contained fault of the score computation
     "probes": [             // ordered by luma: 5 fixed rungs (0·64·128·192·255)
       { "background_luma": 0,   "decoded": false },   // + one bisection probe
       { "background_luma": 255, "decoded": true }     //   per verdict boundary
