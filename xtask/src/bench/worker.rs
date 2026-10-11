@@ -449,15 +449,28 @@ pub fn alpha_state(report: &ScanReport) -> &'static str {
 }
 
 /// The build's `trace.budget_exhausted`: `1`, `0`, or `-` when the trace
-/// has no such field. Read from the trace's `Debug` form — the one way a
-/// single source builds against a scanner with the field and one without;
-/// the trace carries stage names and numbers, never decoded text.
+/// has no such field (0.9.0) or does not know. Read from the trace's
+/// `Debug` form — the one way a single source builds against a scanner
+/// with the field and one without; the trace carries stage names and
+/// numbers, never decoded text.
 pub fn budget_exhausted(report: &ScanReport) -> &'static str {
-    let trace = format!("{:?}", report.trace);
-    match trace.split("budget_exhausted: ").nth(1) {
-        Some(rest) if rest.starts_with("true") => "1",
-        Some(rest) if rest.starts_with("false") => "0",
-        _ => "-",
+    budget_flag(&format!("{:?}", report.trace))
+}
+
+/// [`budget_exhausted`] over a trace's `Debug` text: this tree prints an
+/// `Option<bool>` (`Some(true)`, `Some(false)`, `None`), a bare `bool`
+/// reads the same.
+pub fn budget_flag(trace: &str) -> &'static str {
+    let Some(rest) = trace.split("budget_exhausted: ").nth(1) else {
+        return "-";
+    };
+    let value = rest.strip_prefix("Some(").unwrap_or(rest);
+    if value.starts_with("true") {
+        "1"
+    } else if value.starts_with("false") {
+        "0"
+    } else {
+        "-"
     }
 }
 
@@ -805,9 +818,9 @@ mod tests {
             "{reply}"
         );
         assert_eq!(fields[11], "-", "an opaque image flattens nothing");
-        assert!(
-            matches!(fields[12], "-" | "0" | "1"),
-            "the build's budget flag, or none: {reply}"
+        assert_eq!(
+            fields[12], "0",
+            "this tree's flag on an unbounded call: final, never unknown: {reply}"
         );
         let text = hex(b"bench");
         assert_eq!(fields[13..].to_vec(), vec!["1", "qr_code", text.as_str()]);
@@ -857,6 +870,52 @@ mod tests {
             "{reply}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// This tree's trace holds `budget_exhausted: Some(false)` after an
+    /// unbounded scan; the lib worker records it as `0`.
+    #[test]
+    fn an_unbounded_scan_of_this_tree_records_its_budget_flag() {
+        let scanner = scanner_for("full", "unbounded").expect("scanner");
+        let report = scanner
+            .scan(ImageInput::encoded(&qr_png("budget")))
+            .expect("scan");
+        assert_eq!(report.trace.budget_exhausted, Some(false));
+        assert_eq!(budget_exhausted(&report), "0");
+    }
+
+    /// Every shape a trace prints its flag in: this tree's `Option<bool>`,
+    /// a bare `bool`, an unknown `None`, and the 0.9.0 trace without one.
+    #[test]
+    fn the_budget_flag_reads_every_trace_shape() {
+        for (trace, flag) in [
+            (
+                "PipelineTrace { total_ms: 1.5, budget_exhausted: Some(true) }",
+                "1",
+            ),
+            (
+                "PipelineTrace { total_ms: 1.5, budget_exhausted: Some(false) }",
+                "0",
+            ),
+            (
+                "PipelineTrace { total_ms: 1.5, budget_exhausted: true }",
+                "1",
+            ),
+            (
+                "PipelineTrace { total_ms: 1.5, budget_exhausted: false }",
+                "0",
+            ),
+            (
+                "PipelineTrace { total_ms: 1.5, budget_exhausted: None }",
+                "-",
+            ),
+            (
+                "PipelineTrace { stages: [], engine_panics: 0, total_ms: 1.5 }",
+                "-",
+            ),
+        ] {
+            assert_eq!(budget_flag(trace), flag, "{trace}");
+        }
     }
 
     /// A QR whose light modules and quiet zone are fully transparent: the
