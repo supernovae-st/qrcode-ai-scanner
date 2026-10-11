@@ -1061,4 +1061,33 @@ mod tests {
             [50, 60, 60, 60, 45]
         );
     }
+
+    /// Raw RGBA flattens only when both hold, a flattening mode and a
+    /// transparent pixel: an opaque frame under `auto` and a transparent
+    /// one under `none` take the drop-the-alpha loop (no alpha context, the
+    /// luma of their straight RGB); the same transparent frame under
+    /// `white` flattens.
+    #[test]
+    fn raw_rgba_flattens_only_transparency_under_a_flattening_mode() {
+        let scan = |data: &[u8], mode| {
+            normalize_with(&ImageInput::rgba8(data, 2, 1), &Limits::default(), mode).unwrap()
+        };
+        let straight = [bt601(10, 20, 30), bt601(200, 100, 50)];
+        let opaque = scan(&[10, 20, 30, 255, 200, 100, 50, 255], AlphaBackground::Auto);
+        assert!(
+            opaque.alpha.is_none(),
+            "an opaque frame keeps no alpha context"
+        );
+        assert_eq!(opaque.planes.luma.data(), straight);
+        let transparent = [10, 20, 30, 0, 200, 100, 50, 255];
+        let kept = scan(&transparent, AlphaBackground::None);
+        assert!(kept.alpha.is_none(), "`none` never flattens");
+        assert_eq!(kept.planes.luma.data(), straight);
+        let flattened = scan(&transparent, AlphaBackground::White);
+        assert!(
+            flattened.alpha.is_some(),
+            "`white` flattens a transparent frame"
+        );
+        assert_eq!(flattened.planes.luma.data(), [255, straight[1]]);
+    }
 }
