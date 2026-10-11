@@ -82,11 +82,14 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   `low_correction_margin` only speaks at margin zero. The measured UEC
   margin now caps the value on a continuous slope below the healthy
   half-budget: 0.5 → 100 (no cap) · 0.25 (ISO D) → 70 · 0.0 (ISO F) → 40,
-  the finder-damage floor, so a decode at the RS limit scores at most 40.
-  The cap applies only where UEC measures (decodes that carry the raw
-  stream, the rqrr path); rxing-path artistic decodes report `uec: null`
-  and keep their prior scores — read a null margin as unmeasured, never
-  as healthy.
+  the finder-damage floor, so a decode at the RS limit scores at most 40
+  where the symbol reserves no misdecode-protection codewords. On
+  version 1, v2-L and v3-L, which reserve them, the margin does not
+  subtract them: an errors-only decode at the acceptance limit reads above
+  0 and caps at 47 to 91 (spec/04 § Synthetic UEC). The cap applies only
+  where UEC measures (decodes that carry the raw stream, the rqrr path);
+  rxing-path artistic decodes report `uec: null` and keep their prior
+  scores — read a null margin as unmeasured, never as healthy.
 - **Releases publish from a version tag only, through trusted publishing,
   and upload exactly what they inspected** — crates.io and npm now
   publish through GitHub OIDC trusted publishing (no workflow reads a

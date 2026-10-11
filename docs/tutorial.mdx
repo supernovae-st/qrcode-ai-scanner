@@ -200,8 +200,11 @@ beside a detection means "not judged", never 0. `budget_ms: 0` (CLI
            AND (retail) payload.conformant === true
     ```
 
-    And always reject on a `low_correction_margin` hint — it means the decode
-    sat at the Reed-Solomon limit (miscorrection risk).
+    And always reject on a `low_correction_margin` hint — the worst block's
+    errors spent all its Reed-Solomon parity, or a rescued read's
+    errors-only count reached it (miscorrection risk). On version 1, v2-L
+    and v3-L an errors-only decode at the acceptance limit raises no hint;
+    the `uec.grade` gate above rejects it.
   </Accordion>
 </AccordionGroup>
 

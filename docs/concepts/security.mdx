@@ -28,9 +28,12 @@ and fuzzed.
 - The CLI `--pretty` path strips terminal escapes AND Unicode bidi/
   zero-width spoofing characters before echoing content. JSON output is
   serde-escaped by construction.
-- `low_correction_margin` is the **content-distrust signal**: the decode
-  sat at the Reed-Solomon limit and may be a miscorrection — verify
-  out-of-band before acting on it.
+- `low_correction_margin` is the **content-distrust signal**: the worst
+  block's errors spent all its Reed-Solomon parity (or a rescued read's
+  errors-only count reached it), so the decode may be a miscorrection —
+  verify out-of-band before acting on it. Its absence is no proof on
+  version 1, v2-L and v3-L, where an errors-only decode at the acceptance
+  limit does not raise it.
 
 ## Determinism
 

@@ -12,9 +12,9 @@
 //!
 //! `UEC = 1 − 2t/d` per block (no erasures in camera/image scanning),
 //! worst block wins. ISO grade bands A ≥0.62 · B ≥0.50 · C ≥0.37 ·
-//! D ≥0.25 · F. Known limit (documented, deliberate): the ISO `p`
-//! correction (misdecode-protection codewords on the very low versions)
-//! is not subtracted — margins on v1-v2 read marginally optimistic.
+//! D ≥0.25 · F. Known limit (documented, deliberate): ISO measures against
+//! `d − p`; the Annex B reserve `p` of v1, v2-L and v3-L is not subtracted,
+//! so a block with errors there reads above ISO's margin (spec/04-score.md).
 //!
 //! The stream measured is the one of the orientation the decode verified,
 //! under that orientation's version, EC level and mask. A margin is read

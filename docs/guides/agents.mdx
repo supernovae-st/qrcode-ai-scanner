@@ -62,7 +62,10 @@ workflows, CI bots) consuming the scanner.
    no independent read confirmed. This narrows wrong reads without ruling
    them out: reads with no measured margin (Micro QR, rMQR, QR Code reads
    no parse measured) are published as read, and a correction inside the
-   reserve can still be wrong — treat `low_correction_margin` as failure.
+   reserve can still be wrong — treat `low_correction_margin` as failure,
+   and its absence as no proof: on version 1, v2-L and v3-L an errors-only
+   correction at the reserve's limit reads a UEC margin above 0 and raises
+   no hint (spec/04 § Synthetic UEC).
 
 ## The regenerate loop
 
@@ -91,7 +94,7 @@ agent can drive generation parameters from the report alone.
 | web display | decoded + score ≥ 60 |
 | print / packaging | score ≥ 80 AND uec.grade ∈ `{a, b}` AND no hints |
 | retail GS1 | the above AND `payload.conformant === true` |
-| ANY content you act on | reject if `low_correction_margin` present |
+| ANY content you act on | reject if `low_correction_margin` present (its absence is no proof on v1, v2-L and v3-L — invariant 9) |
 
 ## CLI patterns for tool use
 

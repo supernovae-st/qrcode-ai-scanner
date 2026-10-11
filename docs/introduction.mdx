@@ -44,8 +44,10 @@ artifacts off one Rust core.
    a real *margin* measure, not "did it decode" — and a whole judgment or
    none: a budget never ships a partial score.
 3. **Synthetic UEC** — the ISO 15415 Unused Error Correction margin from
-   RS syndromes (exact corrected-error counts). It catches real
-   Reed-Solomon *miscorrections* and flags them.
+   RS syndromes (exact corrected-error counts; ISO's misdecode reserve is
+   not subtracted, so on version 1, v2-L and v3-L a block with errors reads
+   above ISO's value). It catches real Reed-Solomon *miscorrections* and
+   flags them.
 4. **An ISO 15415-informed grade card** — Symbol Contrast, Modulation,
    Axial Nonuniformity, Fixed Pattern Damage, UEC; honest by construction
    (hardware-only parameters reported absent, never faked).
@@ -63,7 +65,9 @@ artifacts off one Rust core.
    standard's misdecode reserve. Reads the scanner cannot measure (Micro
    QR, rMQR, QR Code reads no parse measured) are published as read, and a
    correction inside the reserve can still be wrong: when the score
-   measures the stream, a fully spent block raises `low_correction_margin`.
+   measures the stream, a block whose errors spent all its parity raises
+   `low_correction_margin` — which no errors-only correction inside the
+   reserve does on version 1, v2-L and v3-L.
 
 And it reads **every mainstream symbology**, not just QR: Micro QR · rMQR
 · Data Matrix · Aztec · PDF417 · MaxiCode · EAN-13/8 · UPC-A/E ·

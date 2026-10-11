@@ -167,7 +167,13 @@ Machine-readable mirrors — load these directly in tools and agents:
 
 Trimmed from the golden
 [`spec/examples/rescued-occluded.json`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/examples/rescued-occluded.json),
-scanned unbounded (`--budget-ms 0`), so the report is final.
+scanned unbounded (`--budget-ms 0`), so the report is final. Its `uec` is
+not a count of corrected errors: with `rescue` among the engines,
+`worst_block_errors: 11` is the errors-only count of the stream the rescue
+corrected with erasures — 11 of 22, margin 0 — a distrust marker, which
+its `low_correction_margin` hint repeats
+([`spec/04-score.md`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/04-score.md)
+§ Synthetic UEC).
 
 The full field-by-field normative reference is
 [`spec/01-report.md`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/01-report.md).

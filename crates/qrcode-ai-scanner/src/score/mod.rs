@@ -78,7 +78,7 @@ const QUIET_ZONE_CAP: u8 = 60;
 /// zero warning (at EC=H the raise-EC hint can never fire). Below the
 /// half-budget line the margin caps the value CONTINUOUSLY: 0.5 → 100
 /// (no-op seam) · 0.25 (ISO D) → 70 · 0.0 (ISO F, at the RS limit) → 40,
-/// the finder-damage floor — a decode at the limit is never a pass.
+/// the finder-damage floor; at ISO's limit v1, v2-L, v3-L cap at 47-91 (spec/04).
 const UEC_HEALTHY_MARGIN: f32 = 0.5;
 const UEC_ZERO_MARGIN_CAP: u8 = 40;
 

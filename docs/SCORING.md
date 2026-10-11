@@ -54,7 +54,7 @@ codes erode the *grid-estimation* margin first.
 |---|---|---|
 | finder integrity < 0.5 (worst of 3) | score ≤ 40 | #1 documented AI-art killer |
 | quiet zone violated | score ≤ 60 | breaks locators in the wild |
-| measured UEC margin `m` < 0.5 | score ≤ round(40 + 120·m) — 0.5 → 100 · 0.25 → 70 · 0.0 → 40 | a consumed RS budget is invisible to the stress axes; a decode at the RS limit is never a pass |
+| measured UEC margin `m` < 0.5 | score ≤ round(40 + 120·m) — 0.5 → 100 · 0.25 → 70 · 0.0 → 40 | a consumed RS budget is invisible to the stress axes; a decode at the RS limit caps at 40, but on v1, v2-L and v3-L an errors-only decode at the acceptance limit caps at 47 to 91 (known limits below) |
 
 Finder integrity = 1:1:3:1:1 pattern match in module space (0.0-1.0 per
 corner, local threshold). Quiet zone = 2-module outer ring ≥80% lighter
@@ -66,7 +66,8 @@ geometry ⇒ `structural: null`, no cap.
 The ISO 15415 *Unused Error Correction* computed from rqrr's own sampled
 bitstream: zigzag replay → unmask → ISO 18004 §8.6 de-interleave →
 per-block RS syndromes → Berlekamp-Massey degree = exact corrected-error
-count `t`. `margin = 1 − 2t/d` (worst block) · grades A ≥0.62 · B ≥0.50 ·
+count `t`. `margin = 1 − 2t/d` (worst block, `d` its parity codewords;
+ISO uses `d − p`, see the known limits) · grades A ≥0.62 · B ≥0.50 ·
 C ≥0.37 · D ≥0.25 · F below.
 
 The stream is the one of the orientation the decode verified (a mirrored
@@ -74,7 +75,9 @@ symbol is measured transposed, with that orientation's EC level and mask),
 and a margin is read only when every block of it error-corrects errors-only
 under that format. A stream that does not has no `uec`, no cap and no
 margin hint — absent, never a guess. A stream the S5 rescue recovered
-needed erasures, so it keeps its errors-only count (typically margin 0).
+needed erasures, so it keeps its errors-only count: with `rescue` among
+the engines, `worst_block_errors` (and the hint's `errors`) is a distrust
+marker, typically margin 0, not a count of corrected errors.
 
 The margin caps the value whether or not `uec` is published: skipping the
 `uec` check (`score_skip_checks`) withholds `score.uec`, the ISO
@@ -82,8 +85,13 @@ The margin caps the value whether or not `uec` is published: skipping the
 `value`, `grade` and the ISO `overall` never move.
 
 Known limits (deliberate, documented): the ISO `p` misdecode-protection
-codewords of the very low versions are not subtracted (v1-v2 margins read
-marginally optimistic); margins reflect the *digital image*, not a print.
+codewords are not subtracted. The six shapes that reserve them — v1 at
+every EC level, v2-L and v3-L — read above ISO's margin once a block holds
+an error: for an errors-only decode at the acceptance limit, where ISO
+reads 0 (grade F), the margin reads 0.059 (v1-H) to 0.43 (v1-L) and caps
+the score at 47 to 91 instead of 40, and `low_correction_margin` does not
+fire (the table is in [`spec/04-score.md`](../spec/04-score.md)
+§ Synthetic UEC). Margins reflect the *digital image*, not a print.
 
 ## Hints
 
@@ -94,11 +102,13 @@ loop: `fix_finder_pattern{corner}` · `restore_quiet_zone` ·
 `raise_error_correction{current}` (the score before the margin cap &lt;70
 **or** a published UEC grade D/F, when EC < H) ·
 `low_correction_margin{errors,capacity}` (the published UEC margin exactly 0:
-the worst block consumed its entire correction budget — the miscorrection
-signature; caught live on the zxing blackbox corpus where rqrr returned
-"photography" for a "photograph" ground truth at 12/24 errors. Consumers
-should treat the decoded content as unverified). Score hints come only with
-a completed judgment.
+the worst block's errors spent all its parity — the miscorrection
+signature, caught live on the zxing blackbox corpus where rqrr returned
+"photography" for a "photograph" ground truth at 12/24 errors — or, with
+`rescue` among the engines, the distrust marker above; never for an
+errors-only decode at the acceptance limit of v1, v2-L or v3-L. Consumers
+should treat the decoded content as unverified). Score hints come only
+with a completed judgment.
 
 ## ISO/IEC 15415 mapping — and what we honestly claim
 
@@ -114,7 +124,7 @@ withheld by a skipped `uec` check still counts).
 
 | ISO 15415 parameter | This scanner | Fidelity |
 |---|---|---|
-| Unused Error Correction | `iso15415.unused_error_correction` (= `score.uec` margin) — same bands (A ≥62% · B ≥50 · C ≥37 · D ≥25) | **algorithmically equivalent** (RS syndromes, exact `t`) |
+| Unused Error Correction | `iso15415.unused_error_correction` (= `score.uec` margin) — same bands (A ≥62% · B ≥50 · C ≥37 · D ≥25) | **equivalent except the Annex B reserve `p`** (RS syndromes, exact `t`; divides by `d`, not ISO's `d − p`, so v1, v2-L and v3-L read higher — known limits above) |
 | Symbol Contrast | `iso15415.symbol_contrast` — `(R₉₈−R₂)/255` over module means; A ≥70% · B ≥55 · C ≥40 · D ≥20 | measured on uncalibrated luma (percentiles, not reflectance extremes) |
 | Modulation | `iso15415.modulation` — robust min of per-module `2·\|R−GT\|/SC`; A ≥0.50 · B ≥0.40 · C ≥0.30 · D ≥0.20 | simplified (no notional-UEC iteration) |
 | Axial Nonuniformity | `iso15415.axial_nonuniformity` — `\|X̄−Ȳ\|/mean` from corners; A ≤0.06 · B ≤0.08 · C ≤0.10 · D ≤0.12 | measured; photo perspective reads as ANU (ISO assumes flat capture) |

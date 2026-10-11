@@ -67,7 +67,9 @@ decode had to correct. The stream is the one of the orientation the decode
 verified (a mirrored code is measured mirrored-back, and reads the same
 margin as its upright twin), and a margin is read only when every block
 error-corrects errors-only — otherwise there is no `uec`, no cap and no
-margin hint. A stream the rescue stage recovered keeps its own count.
+margin hint. A stream the rescue stage recovered keeps its own
+errors-only count: with `rescue` among the engines, `worst_block_errors`
+is a distrust marker (typically margin 0), not the errors it corrected.
 Skipping the `uec` check withholds the section and its two hints, never
 the cap: the value does not move.
 
@@ -76,12 +78,25 @@ the cap: the value does not move.
          "worst_block_errors": 2, "worst_block_capacity": 22 }
 ```
 
-`margin = 1 − 2t/d` over the worst block. **Margin 0 is special**: the
-block consumed its entire correction budget — the classic signature of a
+`margin = 1 − 2t/d` over the worst block (`d` its parity codewords).
+**Margin 0 is special**: the block's errors spent all its parity (on a
+rescued read, the distrust marker above) — the classic signature of a
 *miscorrection* (a decode that LOOKS valid but may be wrong). The
 `low_correction_margin` hint fires; treat the content as unverified.
 This caught a real rqrr miscorrection on the public zxing corpus
 ("photography" vs ground-truth "photograph").
+
+<Note>
+ISO 15415 measures this parameter against `d − p`, where `p` codewords
+are reserved against misdecodes on version 1, v2-L and v3-L. The margin
+does not subtract them, so on those symbols a block with errors reads
+above ISO's value: for an errors-only decode at the acceptance limit,
+where ISO reads 0, it reads 0.059 to 0.43, caps the score at 47 to 91
+instead of 40 and raises no `low_correction_margin` — there, no hint is no
+proof. The table:
+[`spec/04-score.md`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/04-score.md)
+§ Synthetic UEC.
+</Note>
 
 ## The ISO 15415-informed grade card (`score.iso15415`)
 
@@ -109,8 +124,9 @@ still counts):
 **The honesty line.** A *certified* ISO 15415 grade requires calibrated
 optics (45° illumination, stated wavelength, defined aperture) and
 ISO/IEC 15426-2 hardware conformance — properties of a verifier device.
-This card is **standards-based diagnostics**: same algorithms, same
-bands, uncalibrated capture. Parameters that need the hardware (Grid
+This card is **standards-based diagnostics**: same bands, algorithms
+approximated in software (the UEC omits the misdecode reserve `p`,
+above), uncalibrated capture. Parameters that need the hardware (Grid
 Nonuniformity, Reflectance Margin) are reported absent, never faked.
 If a customer needs a certificate, they need a hardware verifier — this
 scanner tells them *what to fix first*.

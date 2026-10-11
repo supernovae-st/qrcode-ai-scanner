@@ -56,8 +56,9 @@ skips them by design — see the root `Cargo.toml` comment):
    published (spec/07 § Acceptance). Reads with no measured margin — every
    Micro QR and rMQR read, a QR Code read no parse measured — are
    published as read, and a correction inside the reserve can still be
-   wrong (`low_correction_margin` flags a fully spent block the score
-   measured).
+   wrong (`low_correction_margin` flags a measured block whose errors spent
+   all its parity — which no errors-only correction inside the reserve
+   does on version 1, v2-L and v3-L, spec/04 § Synthetic UEC).
 
 ## Decode pipeline
 

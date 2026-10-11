@@ -82,8 +82,11 @@ valid design on the clock of the user's device.
     `payload.issues` verbatim — each cites its violated GS1 rule.
   </Card>
   <Card title="Honest failure on miscorrections" icon="shield-halved">
-    A `low_correction_margin` hint means the decode sat AT the RS limit —
-    show "decodes, but unreliable — regenerate", not a pass.
+    A `low_correction_margin` hint means the worst RS block's errors spent
+    all its parity (on a rescued read, a distrust marker) — show "decodes,
+    but unreliable — regenerate", not a pass. No hint is no proof on
+    version 1, v2-L and v3-L: an errors-only decode at their acceptance
+    limit raises none.
   </Card>
   <Card title="Design guidance" icon="wand-magic-sparkles">
     Map hints to copy: `fix_finder_pattern` → "clear the art off the
