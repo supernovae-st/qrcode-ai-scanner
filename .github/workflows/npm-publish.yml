@@ -50,8 +50,9 @@ jobs:
       matrix:
         # --use-napi-cross is Linux-gnu-only (napi CLI >=3.7.3 hard-errors on
         # mac/windows hosts AND on musl targets); darwin/windows rows build
-        # natively, musl rides zig (-x + setup-zig + cargo-zigbuild, the
-        # official napi-rs template recipe).
+        # natively, musl rides zig (-x + cargo-zigbuild, the official napi-rs
+        # template recipe, with Zig from ziglang.org, sha256-verified below,
+        # where the template uses setup-zig).
         settings:
           - { host: macos-latest, target: aarch64-apple-darwin, cross: "" }
           - { host: macos-latest, target: x86_64-apple-darwin, cross: "" }
