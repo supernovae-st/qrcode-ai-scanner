@@ -104,7 +104,13 @@ prepare` generated for that side.
   161, vendored 41). A gated run refuses (exit 2) inputs off those pins —
   either manifest's sha256, a set's listed count, or a set measured whole
   whose selection is not the frozen set; a dry run records them, and a run
-  off its pins never ends `completed`.
+  off its pins never ends `completed`. What a run reads while it measures
+  is what it hashed: it runs copies of the Node and WASM driver scripts
+  (side by side, as the WASM driver imports the Node one) and primes with
+  a copy of the fixture, both made under `artifacts/` and held to the
+  hashes of its selection; and every image is hashed again when a segment
+  ends — one that changed or went missing fails that segment and stops the
+  run.
 
 ## Method
 
@@ -355,7 +361,8 @@ Exit codes: 0 completed — every segment, thread count and WASM cost of the
 declared frozen scope measured with both variants, nothing regressed, no
 set row caught by the exclusion rule · 1 a regression (latency,
 truncation, lost judgments, work, memory, size, cold start), or a failure
-(resource or protocol) · 2 usage, configuration, an unfit pair, inputs off
+(resource or protocol, or an image changed during the run) · 2 usage,
+configuration, an unfit pair, inputs off
 their pins, a worker of another protocol, or an `--out` that already
 holds something · 3 refused by the host lock, the gate or the host floor,
 `partial`, or an exploratory dry run (never a pass). A run is `partial`
@@ -383,6 +390,8 @@ the frozen scope the run did not measure — and the status detail),
 reference walks, warm-ups, timed calls — with its slot, walk and
 truncation facts) and `images.jsonl` (per-image summaries and pair status),
 plus `artifacts/` — the copies the run executed, hashed in the receipt.
+Its `drivers/` and `fixture/` hold the driver scripts and the fixture the
+run ran and primed with, each the file whose sha256 its inputs record.
 Every receipt file is created new and its sha256 printed.
 
 Decoded text never leaves memory: workers send it as hex over their pipe

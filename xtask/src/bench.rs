@@ -777,7 +777,8 @@ fn context<'a>(
             .map(|a| (a.key, a.path.clone()))
             .collect(),
         deadline,
-        fixture: repo().join(run::FIXTURE),
+        drivers: measurement.drivers.clone(),
+        fixture: measurement.fixture.clone(),
         stopped: std::cell::RefCell::new(None),
     }
 }
@@ -949,9 +950,10 @@ fn measure(args: Vec<String>) -> i32 {
     };
     let prepared = run::select(&options).and_then(|(images, inputs)| {
         let artifacts = run::snapshot(&options)?;
-        Ok((images, inputs, artifacts))
+        let copies = run::copy_inputs(&options.out, &inputs)?;
+        Ok((images, inputs, (artifacts, copies)))
     });
-    let (images, inputs, artifacts) = match prepared {
+    let (images, inputs, (artifacts, (drivers, fixture))) = match prepared {
         Ok(prepared) => prepared,
         Err(e) => {
             claim.release();
@@ -977,6 +979,8 @@ fn measure(args: Vec<String>) -> i32 {
         inputs,
         facts,
         artifacts,
+        drivers,
+        fixture,
     };
     measurement.refused = admit(&mut measurement, &gate, deadline);
     if measurement.refused.is_none() {
@@ -1076,13 +1080,17 @@ fn admit(
     None
 }
 
-/// Segments (runtime × mode), then throughput, then the WASM cost.
+/// Segments (runtime × mode), then throughput, then the WASM cost. Every
+/// image is hashed again after each segment and after the throughput
+/// passes: a change fails the run and stops it.
 fn measure_all(measurement: &mut run::Measurement, gate: &gate::Gate, deadline: Instant) {
     let ctx = context(measurement, gate, deadline);
     let mut segments = Vec::new();
     for &runtime in &ctx.options.runtimes {
         for &mode in &ctx.options.modes {
-            segments.push(run::run_segment(&ctx, runtime, mode));
+            let mut segment = run::run_segment(&ctx, runtime, mode);
+            run::settle(&mut segment, &run::changed_images(ctx.images), &ctx.stopped);
+            segments.push(segment);
         }
     }
     let mut throughput = Vec::new();
@@ -1092,6 +1100,17 @@ fn measure_all(measurement: &mut run::Measurement, gate: &gate::Gate, deadline: 
             Ok(mut runs) => throughput.append(&mut runs),
             Err(e) => failures.push(format!("throughput {}: {e}", mode.as_str())),
         }
+    }
+    // a run a segment already stopped has a changed set it names there
+    let changed = if ctx.stopped.borrow().is_none() && !throughput.is_empty() {
+        run::changed_images(ctx.images)
+    } else {
+        Vec::new()
+    };
+    if !changed.is_empty() {
+        let why = format!("inputs changed during throughput: {}", changed.join(", "));
+        failures.push(why.clone());
+        *ctx.stopped.borrow_mut() = Some(why);
     }
     let wasm = if ctx.options.runtimes.contains(&run::Runtime::Wasm) {
         run::run_wasm_cost(&ctx)

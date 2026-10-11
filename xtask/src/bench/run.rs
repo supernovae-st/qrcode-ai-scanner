@@ -682,6 +682,62 @@ pub(crate) fn select(options: &Options) -> Result<(Vec<Image>, Inputs), String> 
     Ok((images, inputs))
 }
 
+/// Copy the run-time inputs a run executes and reads under
+/// `<out>/artifacts/`, each held to the hash its selection recorded: the
+/// driver scripts side by side in `drivers/` (the WASM driver imports the
+/// Node one by a relative path), the fixture in `fixture/`. Returns the
+/// drivers' directory and the fixture the run uses (the repository's when
+/// no runtime reads it).
+pub(crate) fn copy_inputs(out: &Path, inputs: &Inputs) -> Result<(PathBuf, PathBuf), String> {
+    let artifacts = out.join("artifacts");
+    let drivers = artifacts.join("drivers");
+    for (name, sha256) in &inputs.drivers {
+        let copied = copy_file(&script(name), &drivers.join(name), name)?;
+        if copied.sha256 != *sha256 {
+            return Err(format!("scripts/{name} changed after the run selected it"));
+        }
+    }
+    let Some(file) = &inputs.fixture else {
+        return Ok((drivers, crate::repo_root().join(FIXTURE)));
+    };
+    let name = Path::new(&file.path)
+        .file_name()
+        .ok_or_else(|| format!("{}: no file name", file.path))?;
+    let fixture = artifacts.join("fixture").join(name);
+    let copied = copy_file(&crate::repo_root().join(&file.path), &fixture, &file.path)?;
+    if copied.sha256 != file.sha256 {
+        return Err(format!("{} changed after the run selected it", file.path));
+    }
+    Ok((drivers, fixture))
+}
+
+/// The selected images whose file no longer hashes to what the selection
+/// read, as `path: why` — a segment's workers read every image by path,
+/// so a file changed under a run shows when the segment ends.
+pub(crate) fn changed_images(images: &[Image]) -> Vec<String> {
+    images
+        .iter()
+        .filter_map(|image| match std::fs::read(&image.abs) {
+            Ok(bytes) if external::sha256_bytes(&bytes) == image.sha256 => None,
+            Ok(_) => Some(format!("{}: sha256 changed", image.path)),
+            Err(e) => Some(format!("{}: {}", image.path, e.kind())),
+        })
+        .collect()
+}
+
+/// The end of a segment: an image `changed` under it fails the segment and
+/// stops the run — nothing measured after the change measures the selected
+/// set. Nothing changed: the segment stays as it ended.
+pub(crate) fn settle(segment: &mut Segment, changed: &[String], stopped: &RefCell<Option<String>>) {
+    if changed.is_empty() {
+        return;
+    }
+    let why = format!("inputs changed during the segment: {}", changed.join(", "));
+    segment.outcome = Outcome::Failed;
+    segment.note = Some(why.clone());
+    *stopped.borrow_mut() = Some(why);
+}
+
 fn verify(image: &mut Image) -> Result<(), String> {
     let path = image.abs.to_str().unwrap_or_default();
     if path.is_empty() || path.contains(['\t', '\n', '\r']) {
@@ -1813,8 +1869,11 @@ pub(crate) struct Context<'a> {
     pub(crate) images: &'a [Image],
     pub(crate) artifacts: BTreeMap<(Runtime, Variant), PathBuf>,
     pub(crate) deadline: Instant,
+    /// The directory of the Node and WASM driver scripts the run executes.
+    pub(crate) drivers: PathBuf,
     pub(crate) fixture: PathBuf,
-    /// Set once a dry run's host floor stopped the run: no later phase starts.
+    /// Set once the run must stop — a dry run's host floor crossed, or an
+    /// image changed under a segment: no later phase starts.
     pub(crate) stopped: RefCell<Option<String>>,
 }
 
@@ -1882,7 +1941,7 @@ impl Context<'_> {
                     "bench-wasm.mjs"
                 };
                 let mut node = Command::new(&self.options.node);
-                node.arg(script(name)).arg("serve").arg(path);
+                node.arg(self.drivers.join(name)).arg("serve").arg(path);
                 node
             }
         }
@@ -2652,7 +2711,9 @@ fn wasm_tool(
     command: &str,
 ) -> Result<(Vec<String>, proc::Finished), String> {
     let mut node = Command::new(&ctx.options.node);
-    node.arg(script("bench-wasm.mjs")).arg(command).args(args);
+    node.arg(ctx.drivers.join("bench-wasm.mjs"))
+        .arg(command)
+        .args(args);
     let done = proc::run_once(&mut node, ctx.options.caps(WALL_FLOOR))?;
     let text = String::from_utf8_lossy(&done.stdout).into_owned();
     let line = text.lines().last().unwrap_or_default().to_owned();
@@ -2869,6 +2930,10 @@ pub(crate) struct Measurement {
     pub(crate) inputs: Inputs,
     pub(crate) facts: Facts,
     pub(crate) artifacts: Vec<Artifact>,
+    /// The copies of the run-time inputs it executes and reads
+    /// ([`copy_inputs`]): the drivers' directory and the fixture.
+    pub(crate) drivers: PathBuf,
+    pub(crate) fixture: PathBuf,
     pub(crate) hellos: BTreeMap<(Runtime, Variant), Hello>,
     pub(crate) parity: Vec<Parity>,
     pub(crate) threshold: f64,
@@ -2881,7 +2946,7 @@ pub(crate) struct Measurement {
     pub(crate) refused: Option<Refusal>,
     /// A failure outside the segments (throughput, wasm cost).
     pub(crate) failures: Vec<String>,
-    /// Set when a dry run's host floor stopped the run.
+    /// Set when the run stopped: a dry run's host floor, or a changed image.
     pub(crate) stopped: Option<String>,
 }
 
@@ -3636,6 +3701,7 @@ mod tests {
                 images: &images,
                 artifacts: options.artifacts.clone(),
                 deadline: Instant::now(),
+                drivers: PathBuf::from("/nonexistent/drivers"),
                 fixture: PathBuf::from("/nonexistent/fixture.png"),
                 stopped: RefCell::new(None),
             };
@@ -3714,6 +3780,7 @@ mod tests {
             images: &images,
             artifacts: options.artifacts.clone(),
             deadline: Instant::now(),
+            drivers: PathBuf::from("/nonexistent/drivers"),
             fixture: PathBuf::from("/nonexistent/fixture.png"),
             stopped: RefCell::new(None),
         };
@@ -3807,6 +3874,7 @@ mod tests {
             images: &images,
             artifacts: options.artifacts.clone(),
             deadline: Instant::now(),
+            drivers: PathBuf::from("/nonexistent/drivers"),
             fixture: PathBuf::from("/nonexistent/fixture.png"),
             stopped: RefCell::new(None),
         };
@@ -3889,6 +3957,135 @@ mod tests {
                 .any(|l| l.ends_with("a stop fell inside the call — discarded, repeated")),
             "{rest:?}"
         );
+    }
+
+    /// The driver scripts and the fixture run from copies under
+    /// `<out>/artifacts/`, each held to the hash the selection recorded:
+    /// the WASM driver beside the Node one it imports, the Node command
+    /// starting the copy; an input changed after its selection is refused.
+    #[test]
+    fn drivers_and_the_fixture_run_from_their_copies() {
+        let out = std::env::temp_dir().join(format!("qrscan-bench-copies-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).expect("out");
+        let options = opts(&[
+            "--out",
+            "/nonexistent/out",
+            "--sets",
+            "vendored",
+            "--node-base",
+            "/p",
+            "--wasm-base",
+            "/p",
+        ])
+        .expect("options");
+        let (images, inputs) = select(&options).expect("selected");
+        let (drivers, fixture) = copy_inputs(&out, &inputs).expect("copied");
+        assert_eq!(drivers, out.join("artifacts").join("drivers"));
+        assert_eq!(inputs.drivers.len(), 2);
+        for (name, sha256) in &inputs.drivers {
+            let copy = std::fs::read(drivers.join(name)).expect("a copy");
+            assert_eq!(&external::sha256_bytes(&copy), sha256, "{name}");
+        }
+        let recorded = inputs.fixture.as_ref().expect("the fixture");
+        assert!(
+            fixture.starts_with(out.join("artifacts")),
+            "{}",
+            fixture.display()
+        );
+        let copy = std::fs::read(&fixture).expect("the fixture's copy");
+        assert_eq!(external::sha256_bytes(&copy), recorded.sha256);
+        let gate = Gate::scripted(&[]);
+        let ctx = Context {
+            options: &options,
+            gate: &gate,
+            images: &images,
+            artifacts: options.artifacts.clone(),
+            deadline: Instant::now(),
+            drivers: drivers.clone(),
+            fixture,
+            stopped: RefCell::new(None),
+        };
+        let command = ctx.command(Runtime::Node, Path::new("/p"));
+        let script = drivers.join("bench-node.mjs");
+        assert_eq!(command.get_args().next(), Some(script.as_os_str()));
+        let mut changed = inputs.clone();
+        changed.drivers.insert("bench-node.mjs", String::from("ff"));
+        let again = out.join("again");
+        std::fs::create_dir_all(&again).expect("again");
+        assert!(
+            copy_inputs(&again, &changed).is_err_and(|e| e.contains("bench-node.mjs")),
+            "a script that changed after selection"
+        );
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// Every image is hashed again when a segment ends: a file changed or
+    /// gone since its selection fails that segment and stops the run; an
+    /// unchanged set leaves the segment as it was.
+    #[test]
+    fn an_image_changed_under_a_segment_fails_and_stops_the_run() {
+        let dir = std::env::temp_dir().join(format!("qrscan-bench-changed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let mut images: Vec<Image> = ["a", "b", "c"]
+            .iter()
+            .map(|name| {
+                let abs = dir.join(format!("{name}.png"));
+                std::fs::write(&abs, name.as_bytes()).expect("image");
+                Image {
+                    set: Set::Vendored,
+                    group: String::from("vendored/clean"),
+                    path: format!("fixtures/{name}.png"),
+                    abs,
+                    sha256: String::new(),
+                    bytes: 0,
+                }
+            })
+            .collect();
+        for image in &mut images {
+            verify(image).expect("selected");
+        }
+        let segment = || Segment {
+            runtime: Runtime::Lib,
+            mode: Mode::Frame,
+            outcome: Outcome::Measured,
+            note: None,
+            attempts: 1,
+            readings: Vec::new(),
+            references: BTreeMap::new(),
+            samples: BTreeMap::new(),
+            failures: Vec::new(),
+            processes: BTreeMap::new(),
+        };
+        let stopped = RefCell::new(None);
+        let mut kept = segment();
+        settle(&mut kept, &changed_images(&images), &stopped);
+        assert_eq!(
+            (kept.outcome, kept.note.as_deref()),
+            (Outcome::Measured, None)
+        );
+        assert!(stopped.borrow().is_none());
+        std::fs::write(dir.join("b.png"), b"other bytes").expect("change");
+        std::fs::remove_file(dir.join("c.png")).expect("remove");
+        let changed = changed_images(&images);
+        assert_eq!(
+            changed,
+            vec![
+                String::from("fixtures/b.png: sha256 changed"),
+                String::from("fixtures/c.png: entity not found"),
+            ]
+        );
+        let mut failed = segment();
+        settle(&mut failed, &changed, &stopped);
+        let why = "inputs changed during the segment: fixtures/b.png: sha256 changed, \
+                   fixtures/c.png: entity not found";
+        assert_eq!(
+            (failed.outcome, failed.note.as_deref()),
+            (Outcome::Failed, Some(why))
+        );
+        assert_eq!(stopped.borrow().as_deref(), Some(why));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The inputs are checked against their pins — both manifests, each
