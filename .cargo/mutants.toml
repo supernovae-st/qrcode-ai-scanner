@@ -81,11 +81,11 @@ test_tool = "nextest"
 #   Both replace `* 1_000.0` with `/ 1_000.0` in a stage-scope seconds→ms
 #   conversion (`started.elapsed().as_secs_f64() * 1_000.0`). They shrink the
 #   reported `ms` by 1e6 to a smaller-but-still-positive value.
-#   1003:49  Run::rescue_stage `ms`  ·  1183:49  Run::stage `ms`
+#   1025:49  Run::rescue_stage `ms`  ·  1205:49  Run::stage `ms`
 #   The three KILLABLE siblings are caught (ladder_mutant_kills): the `+ 1000`
 #   inflations blow past the `stage.ms <= total_ms` sub-interval invariant
-#   (1183 `+`, and the rescue unit's `rescue.ms < 100`), and the TOTAL-scope
-#   `/ 1000` (1441:59, in Run::finish) drops total below a real stage's ms.
+#   (1205 `+`, and the rescue unit's `rescue.ms < 100`), and the TOTAL-scope
+#   `/ 1000` (1463:59, in Run::finish) drops total below a real stage's ms.
 #   A STAGE-scope `/` has no machine-independent distinguisher: `ms` is a
 #   documented wall-clock field, explicitly excluded from the determinism
 #   contract (lib.rs §Deterministic + the determinism tests skip it), and
@@ -154,8 +154,8 @@ exclude_re = [
     "zigzag\\.rs:66:23: replace % with \\+ in mask_bit",
     "zigzag\\.rs:67:37: replace % with \\+ in mask_bit",
     "lib\\.rs:102:9: replace Scanner::builder -> ScannerBuilder with Default::default\\(\\)",
-    "ladder\\.rs:1003:49: replace \\* with / in Run",
-    "ladder\\.rs:1183:49: replace \\* with / in Run",
+    "ladder\\.rs:1025:49: replace \\* with / in Run",
+    "ladder\\.rs:1205:49: replace \\* with / in Run",
     "gs1\\.rs:227:15: replace > with >= in split_head",
     "bitstream\\.rs:342:42: replace \\| with \\^ in double_byte",
     "bitstream\\.rs:65:30: replace \\| with \\^ in Bits",

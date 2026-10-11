@@ -840,8 +840,9 @@ def self_test() -> int:
         # The versioned policy drops code this all-features run never
         # compiles — both shapes of the cfg(fuzzing) bridge (a function
         # replaced, an operator inside one) and the rqrr-only stub of
-        # Binarized::black — and nothing beside it: not the compiled
-        # Binarized::black.
+        # Binarized::black — and the stage-scope wall-clock shrinks, and
+        # nothing beside them: not the compiled Binarized::black, not the
+        # killable `+` twins, not the total-scope conversion.
         if POLICY.is_file():
             versioned = load_exclusions(POLICY)
             core = "crates/qrcode-ai-scanner/src"
@@ -856,6 +857,8 @@ def self_test() -> int:
                 f"{core}/engine/locate.rs:310:9: replace {black} -> Option<bool> with None",
                 f"{core}/engine/locate.rs:310:9: replace {black} -> Option<bool> with Some(true)",
                 f"{core}/engine/locate.rs:310:9: replace {black} -> Option<bool> with Some(false)",
+                f"{core}/ladder.rs:1025:49: replace * with / in Run<'_>::rescue_stage",
+                f"{core}/ladder.rs:1205:49: replace * with / in Run<'_>::stage",
             ]
             outside = [
                 f"{core}/rescue/bitstream.rs:299:32: replace + with * in parse",
@@ -863,6 +866,9 @@ def self_test() -> int:
                 f"{core}/payload.rs:40:5: replace classify -> Payload with Default::default()",
                 f"{core}/engine/locate.rs:291:9: replace {black} -> Option<bool> with None",
                 f"{core}/engine/locate.rs:305:24: replace < with <= in {black}",
+                f"{core}/ladder.rs:1025:49: replace * with + in Run<'_>::rescue_stage",
+                f"{core}/ladder.rs:1205:49: replace * with + in Run<'_>::stage",
+                f"{core}/ladder.rs:1463:59: replace * with / in Run<'_>::finish",
             ]
             kept = [n for n in excluded if versioned.matching(mutant_key({"name": n})) is None]
             dropped = [n for n in outside if versioned.matching(mutant_key({"name": n})) is not None]
