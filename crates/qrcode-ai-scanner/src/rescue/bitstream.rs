@@ -488,6 +488,46 @@ mod tests {
     }
 
     #[test]
+    fn double_byte_segments_join_only_back_to_back_and_of_one_mode() {
+        use DoubleByteMode::{Hanzi, Kanji};
+        // 日 0x93FA and 本 0x967B as Kanji values (ISO §7.4.6), 啊 0xB0A1 as a
+        // Hanzi one (960, see below)
+        let kanji = |sjis: u16| {
+            let adj = sjis - 0x8140;
+            thirteen(u32::from(adj >> 8) * 0xC0 + u32::from(adj & 0xFF))
+        };
+        let (ri, ben) = (kanji(0x93FA), kanji(0x967B));
+        let span = |mode, start, end| DoubleByteSpan { mode, start, end };
+        let segments = |bits: &str| parse(&stream(bits), 1).unwrap().segments;
+        // two Kanji segments back to back: one span
+        assert_eq!(
+            segments(&format!("1000 00000001 {ri} 1000 00000001 {ben} 0000")),
+            [span(Kanji, 0, 4)]
+        );
+        // a byte between them: two
+        assert_eq!(
+            segments(&format!(
+                "1000 00000001 {ri} 0100 00000001 00101101 1000 00000001 {ben} 0000"
+            )),
+            [span(Kanji, 0, 2), span(Kanji, 3, 5)]
+        );
+        // Kanji, then Hanzi back to back: two
+        assert_eq!(
+            segments(&format!(
+                "1000 00000001 {ri} 1101 0001 00000001 {} 0000",
+                thirteen(960)
+            )),
+            [span(Kanji, 0, 2), span(Hanzi, 2, 4)]
+        );
+        // a segment of no character is no span, first or after another
+        assert!(segments("1000 00000000 0100 00000001 00101101 0000").is_empty());
+        assert_eq!(
+            segments(&format!("1000 00000001 {ri} 1000 00000000 0000")),
+            [span(Kanji, 0, 2)]
+        );
+    }
+
+    #[test]
     fn hanzi_gb2312_pairs() {
         // GB/T 18284: 0xB0A1 ('啊') sits past the 0x0A00 split: minus
         // 0xA6A1 = 0x0A00 → 0x0A * 0x60 + 0x00 = 960. 0xA1A1 is the first

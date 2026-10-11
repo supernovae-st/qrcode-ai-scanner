@@ -813,7 +813,8 @@ pub(crate) mod test_symbols {
         render(&colors, width)
     }
 
-    fn codeword_colors(
+    /// The module colors of [`from_corrupted_codewords`], and its width.
+    pub(crate) fn codeword_colors(
         version: qrcode::Version,
         ec: qrcode::EcLevel,
         data: &[u8],
@@ -1079,6 +1080,34 @@ mod codewords {
         };
         assert_eq!(parsed.bytes, vec![0xA1], "same bytes as rqrr");
         assert_eq!(parsed.eci, vec![EciMark { value: 4, start: 0 }]);
+    }
+
+    #[test]
+    fn the_rescue_publishes_only_streams_it_fully_accounts_for() {
+        // 260:32 · 260:60: a clean v1-M symbol the rescue reads — unless it
+        // is one part of a structured append, holds a Hanzi segment, or
+        // carries no byte at all
+        let rescued = |bits: &str| {
+            let luma = from_codewords(
+                qrcode::Version::Normal(1),
+                qrcode::EcLevel::M,
+                &stream(bits),
+            );
+            let found = grids(&luma);
+            assert_eq!(found.len(), 1, "{bits}");
+            attempt(&luma, &found[0].1).map(|rescued| rescued.raw)
+        };
+        let abc = "0100 00000011 01100001 01100010 01100011";
+        assert_eq!(rescued(&format!("{abc} 0000")), Some(b"abc".to_vec()));
+        // structured append (part 1 of 2, parity 0x41), then "abc"
+        assert_eq!(
+            rescued(&format!("0011 0000 0001 01000001 {abc} 0000")),
+            None
+        );
+        // a Hanzi segment (GB 2312): 0xB0A1, as 960
+        assert_eq!(rescued("1101 0001 00000001 0001111000000 0000"), None);
+        // ECI 26, then the terminator: no payload byte
+        assert_eq!(rescued("0111 00011010 0000"), None);
     }
 
     #[test]
