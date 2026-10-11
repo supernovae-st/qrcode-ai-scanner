@@ -24,13 +24,77 @@ mod raw_b64 {
     }
 }
 
+/// The wire spelling of the report's `f32` fields: the `f64` nearest to
+/// the shortest decimal that reads back as the `f32` — the number the JSON
+/// text shows for it. Bindings that convert a report through serde's data
+/// model instead of JSON text (a `serde_json::Value` turned into Python
+/// objects, a serializer straight to JavaScript values) would otherwise
+/// widen the `f32` itself — 0.612 arriving as 0.6119999885559082 — while
+/// the JSON says 0.612; with this every serializer sees the decimal the JSON
+/// shows. The JSON text keeps its digits (`serde_json` writes the same
+/// shortest decimal for both types); between 1e-6 and 1e-5, and from 1e13,
+/// it spells them in exponent form as it does for any `f64`. Reading a
+/// report back is unchanged.
+#[cfg(feature = "serde")]
+mod decimal {
+    use serde::Serializer;
+    use serde::ser::SerializeTuple as _;
+
+    /// The `f64` nearest to `value`'s shortest round-trip decimal, as
+    /// `serde_json` spells it: when two decimals of that length read back as
+    /// `value` and lie equally close to it, the one with the even last
+    /// digit (2015.65625 is 2015.6562, where `Display` writes 2015.6563). A
+    /// non-finite value and zero keep their kind.
+    pub(super) fn of(value: f32) -> f64 {
+        let shortest = value.to_string();
+        let digits: String = shortest.chars().filter(char::is_ascii_digit).collect();
+        let significant = digits.trim_start_matches('0').trim_end_matches('0').len();
+        if !value.is_finite() || significant == 0 {
+            return f64::from(value);
+        }
+        // the decimal of that many digits nearest to `value`, an exact tie
+        // rounded to even: the spelling when it reads back as `value`
+        let precision = significant - 1;
+        let even = format!("{value:.precision$e}");
+        let reads_back = even
+            .parse::<f32>()
+            .is_ok_and(|parsed| parsed.to_bits() == value.to_bits());
+        let spelled = if reads_back { even } else { shortest };
+        spelled.parse().unwrap_or(f64::from(value))
+    }
+
+    /// One `f32` field.
+    #[allow(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde's serialize_with passes the field by reference"
+    )]
+    pub(super) fn serialize<S: Serializer>(value: &f32, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_f64(of(*value))
+    }
+
+    /// An array of `f32` fields, element by element, in serde's own array
+    /// shape (a tuple).
+    pub(super) fn serialize_array<S: Serializer, const N: usize>(
+        values: &[f32; N],
+        ser: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut tuple = ser.serialize_tuple(N)?;
+        for value in values {
+            tuple.serialize_element(&of(*value))?;
+        }
+        tuple.end()
+    }
+}
+
 /// A 2D point in image pixel coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Point {
     /// X coordinate (pixels, sub-pixel precision).
+    #[cfg_attr(feature = "serde", serde(serialize_with = "decimal::serialize"))]
     pub x: f32,
     /// Y coordinate (pixels, sub-pixel precision).
+    #[cfg_attr(feature = "serde", serde(serialize_with = "decimal::serialize"))]
     pub y: f32,
 }
 
@@ -450,6 +514,7 @@ impl UecGrade {
 #[non_exhaustive]
 pub struct UecReport {
     /// Remaining correction margin, 0.0-1.0 (1.0 = pristine).
+    #[cfg_attr(feature = "serde", serde(serialize_with = "decimal::serialize"))]
     pub margin: f32,
     /// ISO band for `margin`.
     pub grade: UecGrade,
@@ -466,6 +531,7 @@ pub struct UecReport {
 pub struct StructuralReport {
     /// Per-finder 1:1:3:1:1 integrity, 0.0-1.0 — [top-left, top-right,
     /// bottom-left]. The #1 documented AI-art failure mode.
+    #[cfg_attr(feature = "serde", serde(serialize_with = "decimal::serialize_array"))]
     pub finder_integrity: [f32; 3],
     /// Clear border present — probed on a 2-module outer ring (ISO/IEC
     /// 18004 recommends 4 modules; the lenient probe targets what breaks
@@ -497,6 +563,7 @@ pub enum IsoGrade {
 #[non_exhaustive]
 pub struct IsoParameter {
     /// Parameter value in its ISO unit (see each field's doc).
+    #[cfg_attr(feature = "serde", serde(serialize_with = "decimal::serialize"))]
     pub value: f32,
     /// ISO band for `value`.
     pub grade: IsoGrade,
@@ -669,6 +736,7 @@ pub struct AlphaEnvelope {
 #[non_exhaustive]
 pub struct AlphaReport {
     /// Fraction of pixels with alpha < 255, rounded to 3 decimals.
+    #[cfg_attr(feature = "serde", serde(serialize_with = "decimal::serialize"))]
     pub coverage: f32,
     /// Alpha-weighted mean BT.601 luma of the visible content — what the
     /// `auto` decision reads (< 128 → white, else black).
@@ -1304,6 +1372,88 @@ mod tests {
         insta::assert_json_snapshot!("scan_report_empty", ScanReport::empty(), {
             ".versions.scanner" => "[crate-version]"
         });
+    }
+
+    /// Bindings that convert through serde's data model — pythonize over a
+    /// `serde_json::Value`, serde-wasm-bindgen — receive what the JSON text
+    /// shows: an `f32` field arrives as the decimal `serde_json` prints for
+    /// it, never as the `f32` itself widened (0.612 as 0.6119999885559082).
+    #[cfg(feature = "serde")]
+    #[test]
+    fn float_fields_reach_serde_as_the_decimals_the_json_shows() {
+        let sum = 0.1_f32 + 0.2_f32; // f32 arithmetic: 0.3
+        let third = 1.0_f32 / 3.0; // 0.33333334
+        let point = Point { x: 0.612, y: third };
+        let value = serde_json::to_value(point).unwrap();
+        assert_eq!(
+            (value["x"].as_f64(), value["y"].as_f64()),
+            (Some(0.612), Some(0.333_333_34))
+        );
+        let uec = UecReport {
+            margin: sum,
+            grade: UecGrade::A,
+            worst_block_errors: 0,
+            worst_block_capacity: 26,
+        };
+        assert_eq!(
+            serde_json::to_value(uec).unwrap()["margin"].as_f64(),
+            Some(0.3)
+        );
+        let structural = StructuralReport {
+            finder_integrity: [0.612, third, sum],
+            quiet_zone_ok: true,
+        };
+        assert_eq!(
+            serde_json::to_value(structural).unwrap()["finder_integrity"],
+            serde_json::json!([0.612, 0.333_333_34, 0.3])
+        );
+        let parameter = IsoParameter {
+            value: 0.612,
+            grade: IsoGrade::A,
+        };
+        assert_eq!(
+            serde_json::to_value(parameter).unwrap()["value"].as_f64(),
+            Some(0.612)
+        );
+        assert_eq!(
+            serde_json::to_value(full_alpha()).unwrap()["coverage"].as_f64(),
+            Some(0.612)
+        );
+        // the JSON text is the f32's own shortest decimal, as it always was
+        assert_eq!(
+            serde_json::to_string(&point).unwrap(),
+            r#"{"x":0.612,"y":0.33333334}"#
+        );
+    }
+
+    /// The decimal spelling never moves a number, and moves no JSON byte
+    /// where the report's values live: every finite `f32` of a sweep over
+    /// the whole bit range reads back as the same number, and from 1e-5 to
+    /// 1e13 (and zero) as the same text.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn the_decimal_spelling_keeps_the_json_text() {
+        let mut same_text = 0;
+        for bits in (0..=u32::MAX).step_by(65_521) {
+            let value = f32::from_bits(bits);
+            if !value.is_finite() {
+                continue;
+            }
+            let widened = serde_json::to_string(&value).unwrap();
+            let decimal = serde_json::to_string(&decimal::of(value)).unwrap();
+            assert_eq!(
+                widened.parse::<f64>().unwrap().to_bits(),
+                decimal.parse::<f64>().unwrap().to_bits(),
+                "{value:e}: {widened} vs {decimal}"
+            );
+            // ±0: every bit below the sign is clear
+            let zero = bits.trailing_zeros() >= 31;
+            if zero || (1e-5..1e13).contains(&value.abs()) {
+                assert_eq!(widened, decimal, "{value:e}");
+                same_text += 1;
+            }
+        }
+        assert!(same_text > 10_000, "{same_text}");
     }
 
     #[cfg(feature = "serde")]

@@ -13,6 +13,7 @@ import importlib.metadata
 import io
 import json
 import re
+import struct
 from pathlib import Path
 
 import pytest
@@ -104,6 +105,42 @@ def test_decodes_clean():
     assert (det["payload"]["kind"], det["payload"]["url"]) == ("url", V5Q_TEXT)
     meta = det["meta"]
     assert (meta["version"], meta["ec_level"], meta["modules"], meta["inverted"]) == (5, "q", 37, False)
+
+
+def f32_decimal(value):
+    """The shortest decimal that reads back as the same f32 — what the JSON report prints."""
+    single = struct.unpack("f", struct.pack("f", value))[0]
+    for digits in range(1, 10):
+        text = f"{single:.{digits}g}"
+        if struct.unpack("f", struct.pack("f", float(text)))[0] == single:
+            return float(text)
+    return single
+
+
+def floats(node):
+    """Every float of a report subtree."""
+    if isinstance(node, float):
+        yield node
+    elif isinstance(node, dict):
+        for value in node.values():
+            yield from floats(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from floats(value)
+
+
+def test_floats_are_the_decimals_the_json_report_prints():
+    # The report's f32 fields (corners, the UEC margin, ISO values, finder
+    # integrity, alpha coverage) carry the decimal the JSON text prints —
+    # 0.612, never the f32 widened to 0.6119999885559082. The trace's wall
+    # clock is f64 already.
+    report = qr.scan(V5Q.read_bytes(), "full", budget_ms=0)
+    values = [v for key, sub in report.items() if key != "trace" for v in floats(sub)]
+    assert values, "a scored report carries f32 fields"
+    assert [f32_decimal(v) for v in values] == values
+    sample = REPO / "playground" / "public" / "samples" / "transparent.png"
+    coverage = qr.scan(sample.read_bytes(), "full", budget_ms=0)["alpha"]["coverage"]
+    assert coverage == round(coverage, 3), coverage
 
 
 def test_max_dimension_cap_rejects_oversized():

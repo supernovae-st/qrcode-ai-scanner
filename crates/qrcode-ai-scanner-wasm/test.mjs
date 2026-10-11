@@ -44,6 +44,27 @@ assert.ok(Number.isInteger(clean.score.value) && clean.score.value >= 70 && clea
   `score ${clean.score.value}`);
 assert.equal(clean.score.iso15415.overall, "a");
 
+// every f32 field (corners, the UEC margin, ISO values, finder integrity,
+// alpha coverage) carries the decimal the JSON report prints — 0.612, never
+// the f32 widened to 0.6119999885559082. The trace's wall clock is f64.
+const f32Decimal = (value) => {
+  const single = Math.fround(value);
+  for (let digits = 1; digits <= 9; digits++) {
+    const text = single.toPrecision(digits);
+    if (Math.fround(Number(text)) === single) return Number(text);
+  }
+  return single;
+};
+const floats = (node) =>
+  typeof node === "number"
+    ? (Number.isInteger(node) ? [] : [node])
+    : node !== null && typeof node === "object"
+      ? Object.values(node).flatMap(floats)
+      : [];
+const reported = floats({ ...clean, trace: null });
+assert.ok(reported.length > 0, "a scored report carries f32 fields");
+assert.deepEqual(reported.map(f32Decimal), reported);
+
 // the blob template class (an editor OUTPUT) decodes in full, not fast —
 // the exact reason the landing integration uses the full profile
 const monkey = fixture("artistic/blob-style-monkey-logo.webp");
@@ -105,6 +126,8 @@ const flat = scan_image(transparent, "full", undefined, undefined, 0);
 assert.deepEqual(texts(flat), ["https://qrc-ai.com/76xMa"], "the flatten rescues the canvas-export class");
 assert.equal(flat.alpha.mode, "auto");
 assert.equal(flat.alpha.background, "white");
+assert.equal(flat.alpha.coverage, Number(flat.alpha.coverage.toFixed(3)),
+  "coverage is the 3-decimal value the JSON prints");
 assert.equal(flat.alpha.envelope.placement, "light_only");
 assert.deepEqual(flat.alpha.envelope.safe_luma, [[32, 255]]);
 assert.deepEqual(
