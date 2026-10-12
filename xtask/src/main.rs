@@ -77,6 +77,7 @@ unsafe impl std::alloc::GlobalAlloc for LoudAlloc {
 static GLOBAL: LoudAlloc = LoudAlloc;
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -114,7 +115,61 @@ struct Entry {
 }
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
+    let configured = std::env::var_os("QRSCAN_REPO_ROOT");
+    let embedded = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    resolve_repo_root(configured.as_deref(), &embedded)
+        .and_then(|root| {
+            if configured.is_some() {
+                validate_repo_root(&root)?;
+            }
+            Ok(root)
+        })
+        .unwrap_or_else(|error| {
+            eprintln!("xtask: {error}");
+            std::process::exit(2);
+        })
+}
+
+/// Runtime selection is separate from filesystem validation so tests never
+/// mutate the process environment. The compiled default remains unchanged.
+fn resolve_repo_root(configured: Option<&OsStr>, embedded: &Path) -> Result<PathBuf, String> {
+    let Some(configured) = configured else {
+        return Ok(embedded.to_path_buf());
+    };
+    let root = PathBuf::from(configured);
+    if !root.is_absolute() {
+        return Err(String::from("QRSCAN_REPO_ROOT must be an absolute path"));
+    }
+    Ok(root)
+}
+
+/// A downloaded instrument must read a source checkout's manifests, never
+/// silently fall back to the build runner's embedded checkout on a bad path.
+fn validate_repo_root(root: &Path) -> Result<(), String> {
+    if !root.is_dir() {
+        return Err(String::from(
+            "QRSCAN_REPO_ROOT must name an existing directory",
+        ));
+    }
+    let read = |name: &str| {
+        std::fs::read_to_string(root.join(name))
+            .map_err(|_| format!("QRSCAN_REPO_ROOT must contain readable {name}"))
+    };
+    validate_repo_manifests(&read("corpus.toml")?, &read(external::MANIFEST)?)
+}
+
+fn validate_repo_manifests(vendored: &str, external_text: &str) -> Result<(), String> {
+    let corpus: Corpus = toml::from_str(vendored)
+        .map_err(|_| String::from("QRSCAN_REPO_ROOT corpus.toml is invalid"))?;
+    oracle::vendored_truths(&corpus).map_err(|e| format!("QRSCAN_REPO_ROOT corpus.toml: {e}"))?;
+    let rows = external::parse_manifest(external_text)
+        .map_err(|e| format!("QRSCAN_REPO_ROOT corpus-external.tsv: {e}"))?;
+    if corpus.entry.is_empty() || rows.is_empty() {
+        return Err(String::from(
+            "QRSCAN_REPO_ROOT corpus manifests must not be empty",
+        ));
+    }
+    Ok(())
 }
 
 fn main() {
@@ -726,6 +781,91 @@ mod tests {
     use super::*;
     use qrcode_ai_scanner::Charset;
     use qrcode_ai_scanner::Symbology::{self, Ean13, QrCode};
+
+    #[test]
+    fn runtime_repo_root_selection_is_explicit_and_absolute() {
+        let embedded = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let relocated = std::env::temp_dir().join("qrscan-relocated-source");
+        assert_eq!(resolve_repo_root(None, &embedded), Ok(embedded.clone()));
+        assert_eq!(
+            resolve_repo_root(Some(relocated.as_os_str()), &embedded),
+            Ok(relocated)
+        );
+        for relative in ["", ".", "source", "../source"] {
+            assert_eq!(
+                resolve_repo_root(Some(OsStr::new(relative)), &embedded),
+                Err(String::from("QRSCAN_REPO_ROOT must be an absolute path"))
+            );
+        }
+    }
+
+    const ROOT_CORPUS: &str =
+        "[[entry]]\npath = 'fixtures/x.png'\ncategory = 'frontier'\nexpect = 'fail'\n";
+
+    #[test]
+    fn runtime_repo_root_requires_valid_nonempty_manifests() {
+        let external = format!("aux\t{}\tx.txt\n", "a".repeat(64));
+        assert_eq!(validate_repo_manifests(ROOT_CORPUS, &external), Ok(()));
+        assert_eq!(
+            validate_repo_manifests("[broken", &external),
+            Err(String::from("QRSCAN_REPO_ROOT corpus.toml is invalid"))
+        );
+        assert_eq!(
+            validate_repo_manifests(&ROOT_CORPUS.replace("'fail'", "'FAIL'"), &external),
+            Err(String::from(
+                "QRSCAN_REPO_ROOT corpus.toml: fixtures/x.png: expect must be \"pass\" or \"fail\""
+            ))
+        );
+        for (vendored, external) in [("entry = []", external.as_str()), (ROOT_CORPUS, "")] {
+            assert_eq!(
+                validate_repo_manifests(vendored, external),
+                Err(String::from(
+                    "QRSCAN_REPO_ROOT corpus manifests must not be empty"
+                ))
+            );
+        }
+        assert_eq!(
+            validate_repo_manifests(ROOT_CORPUS, "not a manifest"),
+            Err(String::from(
+                "QRSCAN_REPO_ROOT corpus-external.tsv: line 1: expected status<TAB>sha256<TAB>path"
+            ))
+        );
+    }
+
+    #[test]
+    fn runtime_repo_root_never_falls_back_when_configured_files_are_missing() {
+        let root = std::env::temp_dir().join(format!("qrscan-runtime-root-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("test directory");
+        assert_eq!(
+            validate_repo_root(&root.join("absent")),
+            Err(String::from(
+                "QRSCAN_REPO_ROOT must name an existing directory"
+            ))
+        );
+        assert_eq!(
+            validate_repo_root(&root),
+            Err(String::from(
+                "QRSCAN_REPO_ROOT must contain readable corpus.toml"
+            ))
+        );
+        std::fs::write(root.join("corpus.toml"), ROOT_CORPUS).expect("manifest");
+        assert_eq!(
+            validate_repo_root(&root),
+            Err(String::from(
+                "QRSCAN_REPO_ROOT must contain readable corpus-external.tsv"
+            ))
+        );
+        let external = format!("aux\t{}\tx.txt\n", "a".repeat(64));
+        std::fs::write(root.join("corpus-external.tsv"), external).expect("external manifest");
+        assert_eq!(validate_repo_root(&root), Ok(()));
+        assert_eq!(
+            validate_repo_root(&root.join("corpus.toml")),
+            Err(String::from(
+                "QRSCAN_REPO_ROOT must name an existing directory"
+            ))
+        );
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
 
     fn entry(expected: Option<&str>, expect: Option<&str>) -> Entry {
         Entry {

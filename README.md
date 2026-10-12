@@ -188,13 +188,16 @@ decode status for every file, generated from a real run, never hand-typed
 | qrcode-ai.com artistic gallery (full pinned set) | **56/161 decoded** | the blind family is multi-QR collages, extreme 3D perspective and busy marketing scenes · six are vendored as `expect = "fail"` frontier fixtures; `corpus-report --external` re-measures this exact number |
 | center-logo occlusion (v5-H, gray disk) | engines die at >20% radius · **rescue decodes through 30%** | errors-and-erasures RS · `engines: ["rescue"]` in the report |
 
-One of the 10 zxing misses is rqrr returning a Reed-Solomon
-**miscorrection** ("photography" vs ground-truth "photograph") · which the
-synthetic UEC flags at margin 0 and surfaces as the
-`low_correction_margin` hint. The decode-rate number above counts it as a
-miss; the hint is the mechanism that keeps it from being a *silent* one.
-(In the manifest it is the one `wrong` pin · its own status, distinct from
-`blind`, so a silent flip in either direction fails the gate.)
+One of the 10 zxing misses is a **truth conflict** on `qrcode-2/13.png`:
+the observed decode reads "photography", while the pinned upstream `.txt`
+reads "photograph". The provenance of that label is disputed; neither the
+scanner's output nor agreement among related ZXing implementations proves
+an amendment. The original image and truth hashes remain pinned, and the
+strict oracle retains its blocking `wrong` outcome and `known_wrong`
+disposition against that upstream text until independently qualified evidence
+resolves the conflict.
+A zero correction margin or `low_correction_margin` hint does not establish
+which text the image encodes.
 
 #### Reproducing the headline numbers
 
@@ -208,6 +211,22 @@ corpus-external/
 
 ```sh
 cargo run --release -p xtask -- corpus-report --external
+```
+
+A downloaded `xtask` can use `QRSCAN_REPO_ROOT=/absolute/source/checkout`
+to read that checkout's manifests and vendored fixtures. The directory must
+exist and both `corpus.toml` and `corpus-external.tsv` must be readable,
+nonempty and valid; an invalid override exits 2. Without the variable, the
+root embedded at build time remains the default. The strict oracle records
+the selected checkout's Git SHA and tree state; the runner must separately
+verify that the downloaded artifact belongs to that source revision.
+`QRSCAN_EXTERNAL_CORPUS` (or `oracle --corpus-root`) independently selects
+the external images. For example, after verifying the artifact:
+
+```sh
+QRSCAN_REPO_ROOT=/absolute/source/checkout /absolute/artifacts/xtask corpus-report
+QRSCAN_REPO_ROOT=/absolute/source/checkout /absolute/artifacts/xtask oracle \
+  --corpus-root /absolute/corpus-external --json /absolute/receipts/oracle.json
 ```
 
 Verifies presence + sha256 of every manifested file, rescans every image

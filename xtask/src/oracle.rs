@@ -3303,6 +3303,17 @@ mod tests {
             },
             "git failing is recorded, never fatal"
         );
+        let selected = crate::resolve_repo_root(Some(nowhere.as_os_str()), &crate::repo_root())
+            .expect("absolute override");
+        assert_eq!(selected, nowhere);
+        assert_eq!(
+            source_identity(&selected, &[]),
+            SourceEcho {
+                git_sha: String::from("unknown"),
+                tree: String::from("unknown"),
+            },
+            "runtime source identity must not fall back to the instrument's build checkout"
+        );
     }
 
     /// The tree state leaves out the files the run itself writes: the JSON
