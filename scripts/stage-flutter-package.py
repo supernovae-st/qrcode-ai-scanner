@@ -28,6 +28,10 @@ VENDOR = "rust/vendor/qrcode-ai-scanner"
 METADATA = "flutter-bundle"
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 PUBIGNORE_CORE = b"\n!rust/vendor/qrcode-ai-scanner/.cargo_vcs_info.json\n"
+DEPENDENCY_KINDS = ("dependencies", "dev-dependencies", "build-dependencies")
+TARGET_KINDS = {"lib": ("autolib", "src"), "bin": ("autobins", "src/bin"),
+                "example": ("autoexamples", "examples"), "test": ("autotests", "tests"),
+                "bench": ("autobenches", "benches")}
 
 
 def require(condition, message):
@@ -157,14 +161,118 @@ def validate_paths(files):
             require(target in files, f"missing path dependency: {name}: {dependency} -> {target}")
 
 
+def normalized_dependencies(tables, workspace):
+    result = {}
+    for kind in DEPENDENCY_KINDS:
+        expected = {}
+        for name, dependency in tables.get(kind, {}).items():
+            dependency = {"version": dependency} if isinstance(dependency, str) else dict(dependency)
+            if dependency.pop("workspace", False):
+                inherited = workspace["dependencies"][name]
+                inherited = {"version": inherited} if isinstance(inherited, str) else dict(inherited)
+                if "features" in inherited and "features" in dependency:
+                    dependency["features"] = inherited["features"] + dependency["features"]
+                dependency = inherited | dependency
+            require("registry" not in dependency, "normalized core named registry needs explicit index validation")
+            if kind == "dev-dependencies" and "version" not in dependency:
+                continue
+            for key in ("path", "base", "git", "branch", "tag", "rev"):
+                dependency.pop(key, None)
+            expected[name] = dependency
+        if expected:
+            result[kind] = expected
+    return result
+
+
+def resolved_targets(manifest, package, source):
+    """Resolve the candidate's declared and Cargo-inferred compilation targets."""
+    result = {}
+    for kind, (auto, directory) in TARGET_KINDS.items():
+        inferred = {}
+        if kind == "lib":
+            name = package["name"].replace("-", "_")
+            if "src/lib.rs" in source:
+                inferred[name] = "src/lib.rs"
+            declared = [dict(manifest[kind])] if kind in manifest else []
+            for target in declared:
+                target.setdefault("name", name)
+                target.setdefault("path", "src/lib.rs")
+        else:
+            for path in subfiles(source, directory):
+                parts = path.split("/")
+                if not parts[0].startswith("."):
+                    if len(parts) == 1 and path.endswith(".rs"):
+                        inferred[path[:-3]] = f"{directory}/{path}"
+                    elif len(parts) == 2 and parts[1] == "main.rs":
+                        inferred[parts[0]] = f"{directory}/{path}"
+            if kind == "bin" and "src/main.rs" in source:
+                inferred[package["name"]] = "src/main.rs"
+            declared = [dict(target) for target in manifest.get(kind, [])]
+            for target in declared:
+                if "path" not in target:
+                    require(target.get("name") in inferred, f"normalized core {kind} target cannot be inferred")
+                    target["path"] = inferred[target["name"]]
+        names = [target["name"] for target in declared]
+        require(len(names) == len(set(names)), f"normalized core duplicate {kind} targets")
+        autodiscover = package.get(auto, kind not in manifest or package.get("edition", "2015") != "2015")
+        if kind == "lib":
+            autodiscover = package.get(auto, True) and not declared
+        if autodiscover:
+            paths = {target["path"] for target in declared}
+            declared += [{"name": name, "path": path} for name, path in inferred.items()
+                         if name not in names and path not in paths]
+        if declared:
+            result[kind] = sorted(declared, key=lambda target: target["name"])
+    return result
+
+
+def validate_normalized_manifest(manifest, original, workspace, source):
+    """Allow Cargo's inheritance and target expansion, not new manifest semantics."""
+    package = manifest["package"]
+    expected_package = {key: workspace["package"][key] if isinstance(value, dict) and value.get("workspace") else value
+                        for key, value in original["package"].items()}
+    require("workspace" not in manifest and "workspace" not in package, "core archive still inherits a workspace")
+    auto_fields = {auto for auto, directory in TARGET_KINDS.values()}
+    generated = {
+        "build": "build.rs" if "build.rs" in source else False,
+        "readme": next((name for name in ("README.md", "README.txt", "README") if name in source), False),
+        "resolver": workspace.get("resolver", {"2024": "3", "2021": "2"}.get(expected_package.get("edition"), "1")),
+    }
+    for key in set(expected_package) | set(package):
+        if key in auto_fields:
+            require(package.get(key, expected_package.get(key)) in (False, expected_package.get(key)),
+                    f"normalized core package mismatch: {key}")
+        else:
+            require(key in expected_package or key in generated, f"normalized core unexpected package key: {key}")
+            expected = expected_package.get(key, generated.get(key))
+            if key in ("build", "readme") and expected is True:
+                expected = "build.rs" if key == "build" else "README.md"
+            require(package.get(key) == expected, f"normalized core package mismatch: {key}")
+    expected_dependencies = normalized_dependencies(original, workspace)
+    for kind in DEPENDENCY_KINDS:
+        require(manifest.get(kind, {}) == expected_dependencies.get(kind, {}), f"normalized core {kind} mismatch")
+    expected_platforms = {platform: normalized_dependencies(tables, workspace)
+                          for platform, tables in original.get("target", {}).items()}
+    require(manifest.get("target", {}) == expected_platforms, "normalized core target dependencies mismatch")
+    expected_targets = resolved_targets(original, expected_package, source)
+    actual_targets = resolved_targets(manifest, package, source)
+    require(actual_targets == expected_targets, "normalized core compilation targets mismatch")
+    for targets in actual_targets.values():
+        for target in targets:
+            require(safe_name(target["path"]) in source, f"normalized core target missing: {target['path']}")
+    compared = {"package", "target", *DEPENDENCY_KINDS, *TARGET_KINDS}
+    expected_other = {key: value for key, value in original.items() if key not in compared | {"patch", "replace"}}
+    if expected_other.get("lints", {}).get("workspace"):
+        expected_other["lints"] = workspace.get("lints", {})
+    actual_other = {key: value for key, value in manifest.items() if key not in compared}
+    require(actual_other == expected_other, "normalized core remaining manifest fields mismatch")
+
+
 def validate_core(files, source, workspace, revision, license_bytes):
     manifest = tomllib.loads(files["Cargo.toml"].decode())
     original = tomllib.loads(source["Cargo.toml"].decode())
-    package = manifest["package"]
-    for key, value in original["package"].items():
-        expected = workspace["package"][key] if isinstance(value, dict) and value.get("workspace") else value
-        require(package.get(key) == expected, f"normalized core package mismatch: {key}")
-    require(package["name"] == "qrcode-ai-scanner", "wrong core package")
+    validate_normalized_manifest(manifest, original, workspace, source)
+    require(manifest["package"]["name"] == "qrcode-ai-scanner", "wrong core package")
     require(files["LICENSE"] == license_bytes, "core LICENSE mismatch")
     require(files["Cargo.toml.orig"] == source["Cargo.toml"], "core source manifest mismatch")
     vcs = json.loads(files[".cargo_vcs_info.json"])
@@ -175,25 +283,6 @@ def validate_core(files, source, workspace, revision, license_bytes):
     for name, data in source.items():
         if name != "Cargo.toml":
             require(files[name] == data, f"core source bytes mismatch: {name}")
-    for kind in ("dependencies", "dev-dependencies", "build-dependencies"):
-        expected = {}
-        for name, dependency in original.get(kind, {}).items():
-            dependency = {"version": dependency} if isinstance(dependency, str) else dict(dependency)
-            if dependency.pop("workspace", False):
-                inherited = workspace["dependencies"][name]
-                inherited = {"version": inherited} if isinstance(inherited, str) else dict(inherited)
-                dependency = inherited | dependency
-            expected[name] = dependency
-        require(manifest.get(kind, {}) == expected, f"normalized core {kind} mismatch")
-    require(manifest.get("features", {}) == original.get("features", {}), "core features mismatch")
-    require("workspace" not in manifest and "workspace" not in package, "core archive still inherits a workspace")
-    for kind in ("lib", "bin", "test", "bench", "example"):
-        targets = manifest.get(kind, [])
-        targets = [targets] if isinstance(targets, dict) else targets
-        for target in targets:
-            if "path" in target:
-                path = safe_name(target["path"])
-                require(path in files, f"missing core target: {path}")
     validate_paths(files)
 
 
@@ -356,6 +445,78 @@ def self_test():
             self.core["Cargo.toml"] = self.core["Cargo.toml"].replace(b'version = "1"', b'version = "2"')
             with self.assertRaisesRegex(ValueError, "dependencies mismatch"):
                 bundle(self.pack(), self.snapshot, self.revision)
+
+        def assert_manifest_rejected(self, suffix):
+            altered = self.core | {"Cargo.toml": self.core["Cargo.toml"] + suffix}
+            with self.subTest(entrypoint="bundle"), self.assertRaisesRegex(ValueError, "normalized core"):
+                bundle(self.pack(altered), self.snapshot, self.revision)
+            staged, _ = bundle(self.pack(), self.snapshot, self.revision)
+            staged[f"{VENDOR}/Cargo.toml"] = altered["Cargo.toml"]
+            staged["rust/Cargo.toml"] = staged["rust/Cargo.toml"].replace(digest(self.core).encode(), digest(altered).encode())
+            with self.subTest(entrypoint="verify_staged"), self.assertRaisesRegex(ValueError, "normalized core"):
+                verify_staged(staged, self.snapshot, self.revision)
+
+        def test_rejects_library_semantic_injection(self):
+            self.assert_manifest_rejected(b'\n[lib]\npath = "src/lib.rs"\nproc-macro = true\n')
+
+        def test_rejects_target_dependency_injection(self):
+            self.assert_manifest_rejected(b'\n[target.\'cfg(unix)\'.dependencies]\ntampered = "1"\n')
+
+        def test_rejects_other_manifest_semantic_changes(self):
+            for suffix in (
+                b'\n[lib]\nname = "different"\npath = "src/lib.rs"\n',
+                b'\n[lib]\npath = "src/lib.rs"\ncrate-type = ["proc-macro"]\n',
+                b'\n[lib]\npath = "src/lib.rs"\nharness = false\n',
+                b'\n[lib]\npath = "src/lib.rs"\nedition = "2024"\n',
+                b'\n[target.\'cfg(unix)\'.build-dependencies]\ntampered = "1"\n',
+                b'\n[target.\'cfg(unix)\'.dev-dependencies]\ntampered = "1"\n',
+                b'\n[[bin]]\nname = "injected"\npath = "src/lib.rs"\n',
+                b'\n[profile.release]\npanic = "abort"\n',
+                b'\n[patch.crates-io]\nserde = { git = "https://example.invalid/injected" }\n',
+            ):
+                with self.subTest(suffix=suffix):
+                    self.assert_manifest_rejected(suffix)
+
+        def test_accepts_cargo_target_and_inheritance_expansion(self):
+            self.snapshot["Cargo.toml"] += (b'edition = "2024"\n[workspace.dependencies]\n'
+                                           b'serde = { version = "1", features = ["std"], default-features = false }\n'
+                                           b'[workspace.lints.rust]\nmissing_docs = "warn"\n')
+            original = self.core["Cargo.toml.orig"] + (
+                b'edition.workspace = true\n'
+                b'[target.\'cfg(unix)\'.dependencies]\nserde = { workspace = true, features = ["derive"] }\n'
+                b'[lints]\nworkspace = true\n[[bench]]\nname = "decode"\nharness = false\n')
+            self.core["Cargo.toml.orig"] = original
+            self.snapshot[f"{CORE}/Cargo.toml"] = original
+            for name in ("src/bin/tool.rs", "examples/demo/main.rs", "tests/sample.rs", "benches/decode.rs"):
+                self.core[name] = b"fn main() {}\n"
+                self.snapshot[f"{CORE}/{name}"] = self.core[name]
+            self.core["Cargo.toml"] += (
+                b'edition = "2024"\nbuild = false\nreadme = false\n'
+                b'autolib = false\nautobins = false\nautoexamples = false\nautotests = false\nautobenches = false\n'
+                b'[lib]\nname = "qrcode_ai_scanner"\npath = "src/lib.rs"\n'
+                b'[[bin]]\nname = "tool"\npath = "src/bin/tool.rs"\n'
+                b'[[example]]\nname = "demo"\npath = "examples/demo/main.rs"\n'
+                b'[[test]]\nname = "sample"\npath = "tests/sample.rs"\n'
+                b'[[bench]]\nname = "decode"\npath = "benches/decode.rs"\nharness = false\n'
+                b'[target.\'cfg(unix)\'.dependencies.serde]\nversion = "1"\n'
+                b'features = ["std", "derive"]\ndefault-features = false\n'
+                b'[lints.rust]\nmissing_docs = "warn"\n')
+            staged, _ = bundle(self.pack(), self.snapshot, self.revision)
+            verify_staged(staged, self.snapshot, self.revision)
+            for old, replacement in ((b'version = "1"', b'version = "2"'),
+                                     (b'harness = false', b'harness = true'),
+                                     (b'features = ["std", "derive"]', b'features = ["std"]')):
+                altered = self.core | {"Cargo.toml": self.core["Cargo.toml"].replace(old, replacement)}
+                with self.subTest(replacement=replacement), self.assertRaisesRegex(ValueError, "normalized core"):
+                    bundle(self.pack(altered), self.snapshot, self.revision)
+
+        def test_accepts_candidate_declared_library_semantics(self):
+            declaration = b'\n[lib]\nproc-macro = true\n'
+            self.core["Cargo.toml.orig"] += declaration
+            self.snapshot[f"{CORE}/Cargo.toml"] += declaration
+            self.core["Cargo.toml"] += declaration + b'name = "qrcode_ai_scanner"\npath = "src/lib.rs"\n'
+            staged, _ = bundle(self.pack(), self.snapshot, self.revision)
+            verify_staged(staged, self.snapshot, self.revision)
 
         def test_recursive_path_dependencies(self):
             for section in ("dependencies", "dev-dependencies", "build-dependencies",
