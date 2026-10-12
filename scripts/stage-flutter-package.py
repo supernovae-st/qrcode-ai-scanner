@@ -344,8 +344,8 @@ def candidate_snapshot(root, revision):
         ["git", "archive", "--format=tar", revision, "Cargo.toml", "LICENSE", CORE, BINDING], cwd=root))
 
 
-def verify_staged(files, snapshot, revision):
-    """Check staged source identity and the digest that invalidates cargokit's cache."""
+def verify_staged(files, snapshot, revision, *, unpublished_example_lock=False):
+    """Check source/cache identity; only a proven unpublished app lock may vary."""
     core = subfiles(files, VENDOR)
     workspace = tomllib.loads(snapshot["Cargo.toml"].decode())["workspace"]
     validate_core(core, subfiles(snapshot, CORE), workspace, revision, snapshot["LICENSE"])
@@ -366,6 +366,8 @@ def verify_staged(files, snapshot, revision):
     manifest["dependencies"]["scanner-core"]["path"] = canonical["dependencies"]["scanner-core"]["path"]
     require(manifest == canonical, "staged binding manifest changed beyond path and bundle metadata")
     for name, data in binding.items():
+        if name == "example/pubspec.lock" and unpublished_example_lock:
+            continue
         if name != "rust/Cargo.toml":
             require(files.get(name) == data, f"staged binding source mismatch: {name}")
     validate_paths(files)
@@ -417,6 +419,45 @@ def self_test():
             after, _ = bundle(self.pack(), self.snapshot, self.revision)
             self.assertNotEqual(before["rust/Cargo.toml"], after["rust/Cargo.toml"])
             self.assertNotEqual(digest(before), digest(after))
+
+        def test_candidate_analyzer_options_need_no_sdk_migration(self):
+            for relative, existing in (("", ["cargokit/**", "rust_builder/**", "lib/src/rust/**"]),
+                                       ("example", [])):
+                with self.subTest(project=relative or "binding"):
+                    project = ROOT / BINDING / relative
+                    text = (project / "analysis_options.yaml").read_text()
+                    analyzer = re.search(r"(?m)^analyzer:\n((?:[ \t].*\n|\n)*)", text)
+                    actual = re.findall(r"(?m)^    - (\S+)\s*$", analyzer.group(1)) if analyzer else []
+                    platforms = ("android", "ios", "web", "windows", "macos", "linux")
+                    expected = existing + ["build/**"] + [f"{name}/**" for name in platforms
+                                                          if (project / name).is_dir()]
+                    self.assertEqual(actual, expected)
+                    self.assertIn("include: package:flutter_lints/flutter.yaml\n", text)
+
+        def test_candidate_android_toolchain_matches_supported_floor(self):
+            project = ROOT / BINDING / "example/android"
+            wrapper = (project / "gradle/wrapper/gradle-wrapper.properties").read_text()
+            settings = (project / "settings.gradle.kts").read_text()
+            for expected in (
+                r"distributionUrl=https\://services.gradle.org/distributions/gradle-8.14.3-all.zip",
+                "distributionSha256Sum=ed1a8d686605fd7c23bdf62c7fc7add1c5b23b2bbc3721e661934ef4a4911d7c",
+            ):
+                with self.subTest(property=expected):
+                    self.assertIn(expected, wrapper.splitlines())
+            for plugin, version in (("com.android.application", "8.11.1"),
+                                    ("org.jetbrains.kotlin.android", "2.2.20")):
+                with self.subTest(plugin=plugin):
+                    self.assertIn(f'id("{plugin}") version "{version}" apply false', settings)
+            self.assertNotIn("android-skip-build-dependency-validation",
+                             (ROOT / ".github/workflows/flutter.yml").read_text())
+
+        def test_example_lock_names_current_path_dependency(self):
+            version = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
+            lock = (ROOT / BINDING / "example/pubspec.lock").read_text()
+            entry = re.search(r"(?m)^  qrcode_ai_scanner:\n((?: {4}.*\n)*)", lock).group(1)
+            self.assertIn('      path: ".."\n', entry)
+            self.assertIn('    source: path\n', entry)
+            self.assertIn(f'    version: "{version}"\n', entry)
 
         def test_identity_mismatches(self):
             for name, value in (("src/lib.rs", b"old registry core"), ("LICENSE", b"other"),
@@ -616,6 +657,15 @@ def self_test():
                 os.link(root / "LICENSE", root / "hard")
                 with self.assertRaisesRegex(ValueError, "hard link"):
                     read_tree(root)
+
+        def test_example_lock_identity_is_strict_by_default(self):
+            self.snapshot[f"{BINDING}/example/pubspec.lock"] = b"original app lock\n"
+            staged, _ = bundle(self.pack(), self.snapshot, self.revision)
+            self.assertEqual(staged["example/pubspec.lock"], b"original app lock\n")
+            altered = staged | {"example/pubspec.lock": b"runtime app lock\n"}
+            with self.assertRaisesRegex(ValueError, "staged binding source mismatch: example/pubspec.lock"):
+                verify_staged(altered, self.snapshot, self.revision)
+            verify_staged(altered, self.snapshot, self.revision, unpublished_example_lock=True)
 
     return 0 if unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(StagingTests)).wasSuccessful() else 1
 

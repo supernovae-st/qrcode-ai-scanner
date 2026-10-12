@@ -107,7 +107,7 @@ jobs:
       - run: flutter pub get
       - name: inspect the pub.dev package
         working-directory: .
-        run: python3 scripts/package-inspect.py flutter --package-root /tmp/flutter-package --strict --quiet --release-set
+        run: python3 scripts/package-inspect.py flutter --package-root /tmp/flutter-package --strict --release-set
       - run: flutter analyze
       - name: report.dart contract tests (host)
         run: flutter test

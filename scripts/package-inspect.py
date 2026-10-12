@@ -1204,7 +1204,10 @@ def check_flutter_sources(art: Artifact, root: pathlib.Path, listing: list, snap
     files = {name: read_flutter_file(root, name) for name in [*binding, ".pubignore"]}
     files.update({f"{staging.VENDOR}/{name}": data
                   for name, data in staging.read_tree(root / staging.VENDOR).items()})
-    metadata = staging.verify_staged(files, snapshot, revision)
+    unpublished_example_lock = "example/pubspec.lock" in binding and "example/pubspec.lock" not in listing
+    metadata = staging.verify_staged(files, snapshot, revision, unpublished_example_lock=unpublished_example_lock)
+    if unpublished_example_lock:
+        art.notes.append("example/pubspec.lock is absent from the pub file tree; runtime app lock not part of published-byte identity")
     published = {name: read_flutter_file(root, name) for name in listing}
     required = {name for name in files if not any(part.startswith(".") for part in pathlib.PurePosixPath(name).parts)
                 and pathlib.PurePosixPath(name).name != "pubspec.lock"}
@@ -1269,10 +1272,10 @@ def cmd_flutter(host: Host) -> None:
     try:
         revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
         published = check_flutter_sources(art, package_root, listing, staging.candidate_snapshot(ROOT, revision), revision)
-        art.check("staged sources, versions, LICENSE and cargokit cache identity match this candidate", True)
+        art.check("published sources, bundled core, versions, LICENSE and cargokit cache identity match this candidate", True)
         host.recorded.extend((sha256(data), str(package_root / name)) for name, data in sorted(published.items()))
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
-        art.check("staged sources, versions, LICENSE and cargokit cache identity match this candidate", False, str(error))
+        art.check("published sources, bundled core, versions, LICENSE and cargokit cache identity match this candidate", False, str(error))
 
 
 # ---------------------------------------------------------------- licenses · versions
@@ -2102,12 +2105,15 @@ def flutter_self_test():
     snapshot.update({"LICENSE": LICENSE.read_bytes(), f"{staging.CORE}/LICENSE": LICENSE.read_bytes(),
                      f"{staging.BINDING}/LICENSE": LICENSE.read_bytes(),
                      f"{staging.BINDING}/README.md": b"readme\n", f"{staging.BINDING}/CHANGELOG.md": b"changes\n"})
+    for name in ("analysis_options.yaml", "example/analysis_options.yaml"):
+        snapshot[f"{staging.BINDING}/{name}"] = b'include: package:flutter_lints/flutter.yaml\n'
+    snapshot[f"{staging.BINDING}/example/pubspec.lock"] = b"packages: {}\n"
     snapshot[f"{staging.BINDING}/rust/Cargo.toml"] += b'\n[profile.release.package.rxing]\noverflow-checks = true\n'
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     core[".cargo_vcs_info.json"] = json.dumps({"git": {"sha1": revision}, "path_in_vcs": staging.CORE}).encode()
     packed = staging.archive_bytes({f"qrcode-ai-scanner-{version}/{name}": data for name, data in core.items()})
     clean, _ = staging.bundle(packed, snapshot, revision)
-    names = sorted(name for name in clean if name != ".pubignore")
+    names = sorted(name for name in clean if name not in (".pubignore", "example/pubspec.lock"))
 
     def tree(names):
         rows, seen = [], set()
@@ -2130,6 +2136,12 @@ def flutter_self_test():
         ("unexpected published source", clean | {"extra.txt": b"stray"}, names + ["extra.txt"], 0, "", FAIL),
         ("core source tampered", clean | {f"{staging.VENDOR}/src/lib.rs": b"old core"}, names, 0, "", FAIL),
         ("binding lock tampered", clean | {"rust/Cargo.lock": b"changed"}, names, 0, "", FAIL),
+        ("unpublished example lock resolved", clean | {"example/pubspec.lock": b"resolved by pub\n"}, names, 0, "", PASS),
+        ("published example lock tampered", clean | {"example/pubspec.lock": b"changed"},
+         names + ["example/pubspec.lock"], 0, "", FAIL),
+        ("published example lock unchanged", clean, names + ["example/pubspec.lock"], 0, "", PASS),
+        ("binding analyzer migrated", clean | {"analysis_options.yaml": b"analyzer: {}\n"}, names, 0, "", FAIL),
+        ("example analyzer migrated", clean | {"example/analysis_options.yaml": b"analyzer: {}\n"}, names, 0, "", FAIL),
         ("recursive target escape", clean | {"nested/Cargo.toml": b'[target.x.dependencies]\nbad = { path = "../../outside" }\n'},
          names + ["nested/Cargo.toml"], 0, "", FAIL),
         ("duplicate tree entry", clean, names, 0, "├── LICENSE (<1 KB)\n", FAIL),
@@ -2159,6 +2171,10 @@ def flutter_self_test():
                         failures.append(f"Flutter {label}: {actual}, expected {expected}; commands {commands}")
                     if expected == PASS and len(host.recorded) != len(listing):
                         failures.append(f"Flutter {label}: incomplete same-byte record")
+                    if expected == PASS:
+                        boundary = "example/pubspec.lock is absent from the pub file tree; runtime app lock not part of published-byte identity"
+                        if (boundary in host.artifacts[0].notes) != ("example/pubspec.lock" not in listing):
+                            failures.append(f"Flutter {label}: incorrect unpublished app-lock boundary")
                 finally:
                     shutil.rmtree(host.scratch)
     finally:

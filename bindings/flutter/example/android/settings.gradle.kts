@@ -23,8 +23,8 @@ plugins {
     // 2.12 vendored cargokit uses `project.exec` + `applicationVariants`, both
     // REMOVED in AGP 9 / Gradle 9 (flutter's current default). Pin to the stack
     // cargokit supports until it ships AGP-9/Gradle-9 support.
-    id("com.android.application") version "8.7.3" apply false
-    id("org.jetbrains.kotlin.android") version "2.1.0" apply false
+    id("com.android.application") version "8.11.1" apply false
+    id("org.jetbrains.kotlin.android") version "2.2.20" apply false
 }
 
 include(":app")
