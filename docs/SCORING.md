@@ -102,13 +102,16 @@ loop: `fix_finder_pattern{corner}` · `restore_quiet_zone` ·
 `raise_error_correction{current}` (the score before the margin cap &lt;70
 **or** a published UEC grade D/F, when EC < H) ·
 `low_correction_margin{errors,capacity}` (the published UEC margin exactly 0:
-the worst block's errors spent all its parity — the miscorrection
-signature, caught live on the zxing blackbox corpus where rqrr returned
-"photography" for a "photograph" ground truth at 12/24 errors — or, with
-`rescue` among the engines, the distrust marker above; never for an
+the worst block's errors spent all its parity or, with `rescue` among the
+engines, reached the distrust marker above; never for an
 errors-only decode at the acceptance limit of v1, v2-L or v3-L. Consumers
 should treat the decoded content as unverified). Score hints come only
 with a completed judgment.
+
+The margin is a distrust signal, not proof of a miscorrection. The zxing
+`qrcode-2/13.png` observation differs from its pinned upstream text, whose
+provenance remains disputed; that conflict is not a qualified
+miscorrection example.
 
 ## ISO/IEC 15415 mapping — and what we honestly claim
 

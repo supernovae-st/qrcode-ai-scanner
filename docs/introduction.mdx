@@ -46,8 +46,8 @@ artifacts off one Rust core.
 3. **Synthetic UEC** — the ISO 15415 Unused Error Correction margin from
    RS syndromes (exact corrected-error counts; ISO's misdecode reserve is
    not subtracted, so on version 1, v2-L and v3-L a block with errors reads
-   above ISO's value). It catches real Reed-Solomon *miscorrections* and
-   flags them.
+   above ISO's value). Its `low_correction_margin` hint signals distrust;
+   it does not prove a miscorrection or detect every wrong decode.
 4. **An ISO 15415-informed grade card** — Symbol Contrast, Modulation,
    Axial Nonuniformity, Fixed Pattern Damage, UEC; honest by construction
    (hardware-only parameters reported absent, never faked).

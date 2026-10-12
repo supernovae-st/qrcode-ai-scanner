@@ -179,9 +179,9 @@ whose detections carry no stream that counts more than 3 errors (margin
 A published `margin` of 0 raises `low_correction_margin` (06-hints.md):
 treat the content as unverified. On a stream that error-corrects
 errors-only it means the worst block's errors spent every parity codeword
-(`2t = d`) — the Reed-Solomon miscorrection signature and, where `p` is 0,
-the acceptance limit itself; on a rescued read it is the distrust marker
-above.
+(`2t = d`). This is a distrust signal, not proof of a miscorrection; where
+`p` is 0, it is the acceptance limit itself. On a rescued read it is the
+distrust marker above.
 
 ## ISO 15415-informed grade card (`score.iso15415`)
 

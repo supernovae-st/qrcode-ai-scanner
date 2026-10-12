@@ -80,11 +80,12 @@ the cap: the value does not move.
 
 `margin = 1 − 2t/d` over the worst block (`d` its parity codewords).
 **Margin 0 is special**: the block's errors spent all its parity (on a
-rescued read, the distrust marker above) — the classic signature of a
-*miscorrection* (a decode that LOOKS valid but may be wrong). The
+rescued read, the distrust marker above). This is a distrust signal,
+not proof of a *miscorrection* (a decode that looks valid but is wrong). The
 `low_correction_margin` hint fires; treat the content as unverified.
-This caught a real rqrr miscorrection on the public zxing corpus
-("photography" vs ground-truth "photograph").
+The public zxing `qrcode-2/13.png` observation reads "photography" while
+the pinned upstream text reads "photograph". Its truth provenance remains
+disputed, so this conflict is not a qualified miscorrection example.
 
 <Note>
 ISO 15415 measures this parameter against `d − p`, where `p` codewords
