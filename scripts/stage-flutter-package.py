@@ -226,6 +226,20 @@ def resolved_targets(manifest, package, source):
     return result
 
 
+def normalized_lints(tables):
+    """Resolve Cargo's default table-form lint priority without dropping fields."""
+    result = {}
+    for tool, lints in tables.items():
+        require(isinstance(lints, dict), f"normalized core invalid lint table: {tool}")
+        result[tool] = {}
+        for name, lint in lints.items():
+            if isinstance(lint, dict):
+                lint = {"priority": 0} | lint
+                require(type(lint["priority"]) is int, f"normalized core invalid lint priority: {tool}.{name}")
+            result[tool][name] = lint
+    return result
+
+
 def validate_normalized_manifest(manifest, original, workspace, source):
     """Allow Cargo's inheritance and target expansion, not new manifest semantics."""
     package = manifest["package"]
@@ -265,6 +279,9 @@ def validate_normalized_manifest(manifest, original, workspace, source):
     if expected_other.get("lints", {}).get("workspace"):
         expected_other["lints"] = workspace.get("lints", {})
     actual_other = {key: value for key, value in manifest.items() if key not in compared}
+    for remaining in (expected_other, actual_other):
+        if "lints" in remaining:
+            remaining["lints"] = normalized_lints(remaining["lints"])
     require(actual_other == expected_other, "normalized core remaining manifest fields mismatch")
 
 
@@ -517,6 +534,61 @@ def self_test():
             self.core["Cargo.toml"] += declaration + b'name = "qrcode_ai_scanner"\npath = "src/lib.rs"\n'
             staged, _ = bundle(self.pack(), self.snapshot, self.revision)
             verify_staged(staged, self.snapshot, self.revision)
+
+        def configure_lints(self, inherited=True):
+            original = (b'[lints.rust]\nmissing_docs = "warn"\n'
+                        b'unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }\n'
+                        b'[lints.clippy]\nunwrap_used = "deny"\nexpect_used = "deny"\n'
+                        b'pedantic = { level = "warn", priority = -1 }\n')
+            if inherited:
+                self.snapshot["Cargo.toml"] += original.replace(b'[lints.', b'[workspace.lints.')
+                original = b'[lints]\nworkspace = true\n'
+            self.core["Cargo.toml.orig"] += original
+            self.snapshot[f"{CORE}/Cargo.toml"] += original
+            self.core["Cargo.toml"] += (
+                b'[lints.clippy]\nexpect_used = "deny"\nunwrap_used = "deny"\n'
+                b'[lints.clippy.pedantic]\nlevel = "warn"\npriority = -1\n'
+                b'[lints.rust]\nmissing_docs = "warn"\n'
+                b'[lints.rust.unexpected_cfgs]\nlevel = "warn"\npriority = 0\ncheck-cfg = ["cfg(fuzzing)"]\n')
+
+        def test_accepts_cargo_table_lint_priority_expansion(self):
+            for inherited in (True, False):
+                with self.subTest(inherited=inherited):
+                    self.core, self.snapshot, self.revision = fixture()
+                    self.configure_lints(inherited)
+                    staged, _ = bundle(self.pack(), self.snapshot, self.revision)
+                    verify_staged(staged, self.snapshot, self.revision)
+                    lints = tomllib.loads(subfiles(staged, VENDOR)["Cargo.toml"].decode())["lints"]
+                    self.assertEqual(lints["rust"]["unexpected_cfgs"],
+                                     {"level": "warn", "priority": 0, "check-cfg": ["cfg(fuzzing)"]})
+                    self.assertEqual(lints["clippy"]["pedantic"], {"level": "warn", "priority": -1})
+
+        def test_rejects_lint_semantic_changes(self):
+            self.configure_lints()
+            staged, _ = bundle(self.pack(), self.snapshot, self.revision)
+            for old, replacement in (
+                (b'priority = 0', b'priority = 1'),
+                (b'priority = 0', b'priority = -1'),
+                (b'priority = 0', b'priority = false'),
+                (b'priority = 0', b'priority = 0.0'),
+                (b'priority = -1', b'priority = 0'),
+                (b'priority = -1\n', b''),
+                (b'check-cfg = ["cfg(fuzzing)"]', b'check-cfg = ["cfg(other)"]'),
+                (b'check-cfg = ["cfg(fuzzing)"]\n', b''),
+                (b'level = "warn"', b'level = "allow"'),
+                (b'missing_docs = "warn"\n', b''),
+                (b'missing_docs = "warn"', b'missing_docs = "warn"\nunsafe_code = "allow"'),
+            ):
+                altered = self.core | {"Cargo.toml": self.core["Cargo.toml"].replace(old, replacement)}
+                with (self.subTest(replacement=replacement, entrypoint="bundle"),
+                      self.assertRaisesRegex(ValueError, "normalized core")):
+                    bundle(self.pack(altered), self.snapshot, self.revision)
+                tampered = staged | {f"{VENDOR}/Cargo.toml": altered["Cargo.toml"],
+                                     "rust/Cargo.toml": staged["rust/Cargo.toml"].replace(
+                                         digest(self.core).encode(), digest(altered).encode())}
+                with (self.subTest(replacement=replacement, entrypoint="verify_staged"),
+                      self.assertRaisesRegex(ValueError, "normalized core")):
+                    verify_staged(tampered, self.snapshot, self.revision)
 
         def test_recursive_path_dependencies(self):
             for section in ("dependencies", "dev-dependencies", "build-dependencies",
