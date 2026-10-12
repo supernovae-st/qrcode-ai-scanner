@@ -673,6 +673,19 @@ fn print_truth_amendment() {
     );
 }
 
+fn print_engine_panics(carriers: &[String]) {
+    if carriers.is_empty() {
+        return;
+    }
+    println!(
+        "\nengine panics caught + counted (report.trace.engine_panics · non-gating): {}",
+        carriers.len()
+    );
+    for carrier in carriers {
+        println!("  {carrier}");
+    }
+}
+
 pub(crate) fn verify() {
     let root = crate::repo_root();
     let manifest_text = std::fs::read_to_string(root.join(MANIFEST)).unwrap_or_else(|e| {
@@ -762,15 +775,7 @@ pub(crate) fn verify() {
 
     print_summary(&live_rows);
 
-    if !panic_carriers.is_empty() {
-        println!(
-            "\nengine panics caught + counted (report.trace.engine_panics · non-gating): {}",
-            panic_carriers.len()
-        );
-        for c in &panic_carriers {
-            println!("  {c}");
-        }
-    }
+    print_engine_panics(&panic_carriers);
 
     for p in &problems {
         eprintln!("problem: {p}");
