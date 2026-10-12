@@ -92,12 +92,13 @@ struct Corpus {
 struct Entry {
     path: String,
     category: String,
-    /// Ground-truth text. Absent = expected NOT to decode (negative sample).
+    /// Ground-truth text. Absent = negative, except an unlabelled frontier
+    /// (`expect = "fail"`). A blind spot is not proof of a negative sample.
     expected: Option<String>,
     /// Frontier pin. `"fail"` marks a documented blind spot we cannot decode
     /// yet: staying blind is GREEN (frontier held), a fresh decode is a loud
-    /// RED ("capability gained — flip expect to pass"). Absent / `"pass"` = the
-    /// normal contract (decode must match `expected`).
+    /// RED (review observation and truth before changing the pin).
+    /// Absent / `"pass"` = the normal contract (decode must match `expected`).
     expect: Option<String>,
     /// The payload bytes (lowercase hex) when they are known independently
     /// of the scanner under test: the generator's payload or an independent
@@ -469,7 +470,14 @@ fn save_modules(colors: &[qrcode::Color], width: usize, px: u32, path: &Path) {
 #[derive(Debug, Default)]
 struct CategoryStats {
     total: u32,
-    decoded_ok: u32,
+    truth: u32,
+    exact: u32,
+    negatives: u32,
+    negative_held: u32,
+    unlabelled: u32,
+    unlabelled_decoded: u32,
+    unlabelled_blind: u32,
+    scan_errors: u32,
     wrong_or_missed: u32,
     /// Frontier (`expect="fail"`) entries that stayed blind — the GREEN state.
     frontier_held: u32,
@@ -478,6 +486,36 @@ struct CategoryStats {
     /// Sum of the ladder-only `trace.total_ms` (no image decoding, no
     /// scoring) — exploratory context for the `avg ms` column, never a gate.
     total_ms: f64,
+}
+
+impl CategoryStats {
+    fn include(&mut self, entry: &Entry) {
+        self.total += 1;
+        match oracle::vendored_expectation(entry)
+            .unwrap_or_else(|e| panic!("corpus.toml: {}: {e}", entry.path))
+            .as_deref()
+        {
+            None => self.unlabelled += 1,
+            Some([]) => self.negatives += 1,
+            Some(_) => self.truth += 1,
+        }
+    }
+
+    fn record(&mut self, state: EntryState, outcome: Option<oracle::Outcome>) {
+        match outcome {
+            Some(oracle::Outcome::Exact) => self.exact += 1,
+            Some(oracle::Outcome::NegativeHeld) => self.negative_held += 1,
+            None if state == EntryState::Held => self.unlabelled_blind += 1,
+            None if state == EntryState::Gained => self.unlabelled_decoded += 1,
+            _ => {}
+        }
+        match state {
+            EntryState::Held => self.frontier_held += 1,
+            EntryState::Gained => self.frontier_gained += 1,
+            EntryState::Miss => self.wrong_or_missed += 1,
+            EntryState::Pass => {}
+        }
+    }
 }
 
 /// Corpus results plus the list of frontier fixtures that newly decoded — a
@@ -513,26 +551,25 @@ fn run_corpus() -> CorpusRun {
         let bytes =
             std::fs::read(root.join(&entry.path)).unwrap_or_else(|e| panic!("{}: {e}", entry.path));
         let stat = stats.entry(entry.category.clone()).or_default();
-        stat.total += 1;
+        stat.include(entry);
         let report = match scanner.scan(ImageInput::encoded(&bytes)) {
             Ok(report) => report,
             Err(e) => {
                 stat.wrong_or_missed += 1;
+                stat.scan_errors += 1;
                 println!("MISS {} — scan error {}: {e}", entry.path, e.code());
                 continue;
             }
         };
         stat.total_ms += report.trace.total_ms;
         let observed = oracle::observations(&report.detections);
-        match entry_state(entry, &observed) {
-            (EntryState::Held, _) => stat.frontier_held += 1,
+        let (state, outcome) = entry_state(entry, &observed);
+        stat.record(state, outcome);
+        match (state, outcome) {
             (EntryState::Gained, _) => {
-                stat.frontier_gained += 1;
                 gained.push(format!("{} — decoded {}", entry.path, described(&observed)));
             }
-            (EntryState::Pass, _) => stat.decoded_ok += 1,
             (EntryState::Miss, outcome) => {
-                stat.wrong_or_missed += 1;
                 println!(
                     "MISS {} — {}: expected {:?}, got {}",
                     entry.path,
@@ -541,6 +578,7 @@ fn run_corpus() -> CorpusRun {
                     described(&observed)
                 );
             }
+            _ => {}
         }
     }
     CorpusRun { stats, gained }
@@ -553,7 +591,7 @@ enum EntryState {
     Pass,
     /// Frontier pin still blind — the expected GREEN.
     Held,
-    /// Frontier pin now decodes — the LOUD RED "flip expect to pass".
+    /// Frontier pin now decodes — a LOUD RED observation requiring review.
     Gained,
     /// Anything else: missed, wrong, extra, partial, mixed, false positive.
     Miss,
@@ -584,35 +622,42 @@ fn entry_state(entry: &Entry, observed: &[oracle::Seen]) -> (EntryState, Option<
     (state, outcome)
 }
 
+fn corpus_table(stats: &BTreeMap<String, CategoryStats>) -> String {
+    // Unknown truth must stay visible without entering either correctness
+    // denominator, even when one category contains several label kinds.
+    let mut table = String::from(
+        "| category | images | exact / truth | negative held / negatives | unlabelled decoded / blind / total | frontier held / gained | scan errors | avg ms (ladder-only trace.total_ms, exploratory, not a gate) |\n|---|---|---|---|---|---|---|---|\n",
+    );
+    for (category, s) in stats {
+        let measured = s.total - s.scan_errors;
+        let avg = if measured == 0 {
+            String::from("n/a")
+        } else {
+            format!("{:.0}", s.total_ms / f64::from(measured))
+        };
+        writeln!(
+            table,
+            "| {category} | {} | {} / {} | {} / {} | {} / {} / {} | {} / {} | {} | {avg} |",
+            s.total,
+            s.exact,
+            s.truth,
+            s.negative_held,
+            s.negatives,
+            s.unlabelled_decoded,
+            s.unlabelled_blind,
+            s.unlabelled,
+            s.frontier_held,
+            s.frontier_gained,
+            s.scan_errors,
+        )
+        .unwrap();
+    }
+    table
+}
+
 fn corpus_report(write_readme: bool) {
     let CorpusRun { stats, gained } = run_corpus();
-    // pass/total/rate are the strict budget-free verdict; `avg ms` is the
-    // mean ladder-only `trace.total_ms`, exploratory and never a gate.
-    let mut table = String::from(
-        "| category | pass | total | rate | avg ms (ladder-only trace.total_ms, exploratory, not a gate) |\n|---|---|---|---|---|\n",
-    );
-    for (category, s) in &stats {
-        let avg = s.total_ms / f64::from(s.total);
-        if s.frontier_held + s.frontier_gained > 0 {
-            // Frontier rows pin blind spots (expect=fail): the honest metric is
-            // how many are still HELD (blind, as pinned), not a decode rate.
-            // `held` in the rate column marks the row as expect-fail.
-            writeln!(
-                table,
-                "| {category} | {} | {} | held | {avg:.0} |",
-                s.frontier_held, s.total
-            )
-            .unwrap();
-        } else {
-            let rate = f64::from(s.decoded_ok) * 100.0 / f64::from(s.total);
-            writeln!(
-                table,
-                "| {category} | {} | {} | {rate:.0}% | {avg:.0} |",
-                s.decoded_ok, s.total
-            )
-            .unwrap();
-        }
-    }
+    let table = corpus_table(&stats);
     println!("\n{table}");
 
     if write_readme {
@@ -630,9 +675,12 @@ fn corpus_report(write_readme: bool) {
     }
 
     // A crossed frontier is progress, but it must be LOUD and fail the run so
-    // CI forces the pin to be flipped (expect=fail → pass) deliberately.
+    // CI forces a deliberate review. An unknown payload cannot become
+    // ground truth merely because the scanner now produces an observation.
     for msg in &gained {
-        eprintln!("capability gained — flip expect to pass: {msg}");
+        eprintln!(
+            "capability gained — review observation and independent truth before changing expect: {msg}"
+        );
     }
     let failed: u32 = stats.values().map(|s| s.wrong_or_missed).sum();
     if failed > 0 || !gained.is_empty() {
@@ -795,6 +843,56 @@ mod tests {
         assert_eq!(
             entry_state(&labelled, &seen(&[(QrCode, "W")])).0,
             EntryState::Miss
+        );
+    }
+
+    #[test]
+    fn mixed_categories_keep_each_truth_denominator_and_frontier_observation() {
+        let mut stats = CategoryStats::default();
+        for (entry, observed) in [
+            (entry(Some("E"), None), seen(&[(QrCode, "E")])),
+            (entry(Some("E"), None), seen(&[(QrCode, "W")])),
+            (entry(None, None), vec![]),
+            (entry(None, Some("fail")), vec![]),
+            (entry(None, Some("fail")), seen(&[(QrCode, "probe")])),
+            (entry(Some("E"), Some("fail")), seen(&[(QrCode, "E")])),
+        ] {
+            stats.include(&entry);
+            let (state, outcome) = entry_state(&entry, &observed);
+            stats.record(state, outcome);
+        }
+        // Errors remain in their input denominator, but have no timing sample.
+        stats.include(&entry(None, Some("fail")));
+        stats.scan_errors += 1;
+        stats.wrong_or_missed += 1;
+        stats.total_ms = 60.0;
+        assert_eq!(stats.wrong_or_missed, 2);
+        assert_eq!(
+            corpus_table(&BTreeMap::from([(String::from("mixed"), stats)])),
+            "| category | images | exact / truth | negative held / negatives | unlabelled decoded / blind / total | frontier held / gained | scan errors | avg ms (ladder-only trace.total_ms, exploratory, not a gate) |\n\
+             |---|---|---|---|---|---|---|---|\n\
+             | mixed | 7 | 2 / 3 | 1 / 1 | 1 / 1 / 3 | 1 / 2 | 1 | 10 |\n"
+        );
+    }
+
+    #[test]
+    fn frontier_only_and_failed_categories_do_not_report_correctness_or_zero_latency() {
+        let mut frontier = CategoryStats::default();
+        frontier.include(&entry(None, Some("fail")));
+        frontier.record(EntryState::Held, None);
+        let mut failed = CategoryStats::default();
+        failed.include(&entry(None, Some("fail")));
+        failed.scan_errors = 1;
+        let table = corpus_table(&BTreeMap::from([
+            (String::from("frontier"), frontier),
+            (String::from("failed"), failed),
+        ]));
+        assert_eq!(
+            table.lines().skip(2).collect::<Vec<_>>(),
+            [
+                "| failed | 1 | 0 / 0 | 0 / 0 | 0 / 0 / 1 | 0 / 0 | 1 | n/a |",
+                "| frontier | 1 | 0 / 0 | 0 / 0 | 0 / 1 / 1 | 1 / 0 | 0 | 0 |",
+            ]
         );
     }
 

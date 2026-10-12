@@ -1,6 +1,7 @@
 # Corpus manifest — ground truth for every fixture.
-# `expected` absent = negative sample (must NOT decode).
-# Categories: clean · artistic · degraded.
+# `expected` absent = negative sample, except `expect = "fail"`: unlabelled
+# frontier (unknown truth, whether or not a reader produces output).
+# Categories: clean · artistic · degraded · frontier · symbology.
 # Derived numbers (success rates) are NEVER hand-typed: `cargo run -p xtask --
 # corpus-report --write` regenerates the README managed block from this file.
 # `raw_hex` = the payload bytes (lowercase hex) when they are known
@@ -30,8 +31,11 @@ source = "v0.2 reference image — AI-generated artistic QR"
 
 [[entry]]
 path = "fixtures/degraded/FAIL_1491ms_0_584c998c.png"
-category = "degraded"
-source = "v0.2 reference image — failed in v0.2 too (negative sample)"
+category = "frontier"
+expect = "fail"
+# WeChat reads a short link; one reader is an observation, not ground truth.
+# Keep expected/raw_hex absent pending independent confirmation.
+source = "v0.2 reference image — unlabelled frontier; WeChat observation, 2026-10-09"
 
 # ---- generated clean matrix (xtask gen-fixtures · deterministic) ----
 # bytes: the generator's payload (`content.as_bytes()`, no ECI, no FNC1);

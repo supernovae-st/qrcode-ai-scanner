@@ -1392,6 +1392,9 @@ fn external_row(
 /// list that is empty (a scanner state, never a truth), out of order,
 /// past the bytes or beyond 999999, an `fnc1` other than first or second.
 pub(crate) fn vendored_expectation(entry: &crate::Entry) -> Result<Option<Vec<Expected>>, String> {
+    if !matches!(entry.expect.as_deref(), None | Some("pass" | "fail")) {
+        return Err("expect must be \"pass\" or \"fail\"".to_owned());
+    }
     let identity = match (&entry.raw_hex, entry.expected.is_some()) {
         (None, _) if entry.eci.is_some() || entry.fnc1.is_some() => {
             return Err("eci or fnc1 without raw_hex".to_owned());
@@ -3678,6 +3681,13 @@ mod tests {
             vendored_expectation(&entry(Some("T"), Some("fail"))),
             text("T")
         );
+        for expected in [None, Some("T")] {
+            assert_eq!(
+                vendored_expectation(&entry(expected, Some("FAIL"))),
+                Err(String::from("expect must be \"pass\" or \"fail\"")),
+                "a mistyped frontier flag must not silently become a negative or a truth"
+            );
+        }
     }
 
     /// `raw_hex` (with `eci`, `fnc1`) makes the unit structural; a broken
@@ -4366,18 +4376,161 @@ mod tests {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     }
 
-    /// Byte truths are additive: without `raw_hex`, `eci` and `fnc1`, the
-    /// manifest is the entry list they were added to — the same 41
-    /// entries in order, with their paths, categories, texts, frontier pins
-    /// and sources — and it holds no other key.
+    /// Pin the entry list independently of byte-truth fields. The only
+    /// classification amendment is FAIL_1491: negative → unlabelled frontier.
     #[test]
     fn byte_truths_leave_the_entry_list_unchanged() {
         const BASE_ENTRY_LIST_SHA256: &str =
-            "fbed2b6b0707d8409cc61994ba5a297bff8fcec5dcc13dcb7e688d7b8339b1fc";
+            "1d332b3e14d237d8239c15c8244758bcb3e71779d72fe1ef735e6c78fe358387";
         let text = committed_corpus();
         assert_eq!(entry_list_sha256(&text), BASE_ENTRY_LIST_SHA256);
         let corpus: crate::Corpus = toml::from_str(&text).expect("corpus.toml parses");
         assert_eq!(corpus.entry.len(), 41);
+    }
+
+    #[test]
+    fn fail_1491_is_hash_pinned_unlabelled_and_never_a_correct_negative() {
+        let text = committed_corpus();
+        let corpus: crate::Corpus = toml::from_str(&text).expect("parses");
+        let fixture = "fixtures/degraded/FAIL_1491ms_0_584c998c.png";
+        let entry = corpus
+            .entry
+            .iter()
+            .find(|e| e.path == fixture)
+            .expect("entry");
+        let bytes = std::fs::read(crate::repo_root().join(fixture)).expect("fixture");
+        assert_eq!(
+            external::sha256_bytes(&bytes),
+            "dc8e895cffc2664db1e8aa879c2698f57ed7f11deef7c3194460b48033c265eb"
+        );
+        assert_eq!(entry.category, "frontier");
+        assert_eq!(entry.expect.as_deref(), Some("fail"));
+        assert_eq!(entry.expected, None);
+        assert_eq!(entry.raw_hex, None);
+        assert_eq!(vendored_expectation(entry), Ok(None));
+        let manifest: toml::Value = toml::from_str(&text).expect("manifest");
+        assert_eq!(
+            manifest["entry"]
+                .as_array()
+                .expect("entries")
+                .iter()
+                .find(|e| e["path"].as_str() == Some(fixture))
+                .expect("source")["source"]
+                .as_str(),
+            Some("v0.2 reference image — unlabelled frontier; WeChat observation, 2026-10-09")
+        );
+
+        // Synthetic observations exercise classification only; none supplies
+        // truth for the fixture or claims to measure the current scanner.
+        for (observed, state, outcome) in [
+            (vec![], crate::EntryState::Held, Outcome::UnlabelledBlind),
+            (
+                vec![plain(Symbology::QrCode, "probe")],
+                crate::EntryState::Gained,
+                Outcome::UnlabelledDecoded,
+            ),
+        ] {
+            assert_eq!(crate::entry_state(entry, &observed), (state, None));
+            let scan = Scan::Report {
+                detections: observed.clone(),
+                engine_panics: 0,
+            };
+            let verdict = verdict_of(None, &scan, true);
+            assert_eq!(verdict.raw, None);
+            assert_eq!(verdict.outcome, outcome);
+            assert_eq!(detections_of(&scan), observed);
+        }
+    }
+
+    #[test]
+    fn committed_frontiers_stay_in_receipts_outside_correctness_denominators() {
+        let corpus: crate::Corpus = toml::from_str(&committed_corpus()).expect("parses");
+        let truths = vendored_truths(&corpus).expect("truths");
+        let root = crate::repo_root();
+        let fixture = "fixtures/degraded/FAIL_1491ms_0_584c998c.png";
+        for outputs in [vec![], vec![("qr_code", "probe")]] {
+            let records: Vec<String> = corpus
+                .entry
+                .iter()
+                .map(|entry| {
+                    let sha256 = external::sha256_bytes(
+                        &std::fs::read(root.join(&entry.path)).expect("image"),
+                    );
+                    record(
+                        &entry.path,
+                        &sha256,
+                        if entry.path == fixture { &outputs } else { &[] },
+                    )
+                })
+                .collect();
+            let observed = parse_observed(&observed_file("synthetic", &records), "synthetic")
+                .expect("records");
+            let mut integrity = Integrity::default();
+            let rows = evaluate_vendored(
+                &root,
+                &corpus,
+                &truths,
+                Source::Observed(&observed),
+                &mut integrity,
+            );
+            assert_eq!(integrity.problems, Vec::<String>::new());
+            assert_eq!(integrity.vendored_read, 41);
+            let (groups, sets) = tallies(&rows);
+            let tally = &sets[&Set::Vendored];
+            assert_eq!(
+                (tally.images, tally.truth, tally.negatives, tally.unlabelled),
+                (41, 34, 0, 7)
+            );
+            assert_eq!(tally.outcomes.get(Outcome::Missed), 34);
+            for outcome in [
+                Outcome::Exact,
+                Outcome::Wrong,
+                Outcome::FalsePositive,
+                Outcome::NegativeHeld,
+            ] {
+                assert_eq!(tally.outcomes.get(outcome), 0);
+            }
+            let decoded = u32::from(!outputs.is_empty());
+            assert_eq!(tally.outcomes.get(Outcome::UnlabelledDecoded), decoded);
+            assert_eq!(tally.outcomes.get(Outcome::UnlabelledBlind), 7 - decoded);
+            let frontier = &groups[&(Set::Vendored, String::from("vendored/frontier"))];
+            assert_eq!(
+                (
+                    frontier.images,
+                    frontier.truth,
+                    frontier.negatives,
+                    frontier.unlabelled
+                ),
+                (7, 0, 0, 7)
+            );
+            let row = rows
+                .iter()
+                .find(|row| row.path == fixture)
+                .expect("row retained");
+            let receipt = serde_json::to_value(row_receipt(row)).expect("receipt");
+            assert_eq!(receipt["expected"], serde_json::Value::Null);
+            assert_eq!(receipt["truth_sha256"], serde_json::Value::Null);
+            assert_eq!(receipt["verdict"], serde_json::Value::Null);
+            assert_eq!(
+                receipt["outcome"],
+                if outputs.is_empty() {
+                    "unlabelled_blind"
+                } else {
+                    "unlabelled_decoded"
+                }
+            );
+            assert_eq!(
+                receipt["detections"].as_array().expect("detections").len(),
+                outputs.len()
+            );
+            if !outputs.is_empty() {
+                assert_eq!(
+                    receipt["detections"][0]["text_sha256"],
+                    external::sha256_bytes(b"probe")
+                );
+                assert_eq!(receipt["detections"][0]["text_len"], 5);
+            }
+        }
     }
 
     /// The committed byte truths: every one is the UTF-8 encoding of its
