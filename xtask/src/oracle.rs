@@ -4388,7 +4388,7 @@ mod tests {
     }
 
     /// Pin the entry list independently of byte-truth fields. The only
-    /// classification amendment is FAIL_1491: negative → unlabelled frontier.
+    /// classification amendment is `FAIL_1491`: negative → unlabelled frontier.
     #[test]
     fn byte_truths_leave_the_entry_list_unchanged() {
         const BASE_ENTRY_LIST_SHA256: &str =

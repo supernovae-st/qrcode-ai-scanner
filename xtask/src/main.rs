@@ -618,9 +618,9 @@ fn run_corpus() -> CorpusRun {
         };
         stat.total_ms += report.trace.total_ms;
         let observed = oracle::observations(&report.detections);
-        let (state, outcome) = entry_state(entry, &observed);
-        stat.record(state, outcome);
-        match (state, outcome) {
+        let (classification, outcome) = entry_state(entry, &observed);
+        stat.record(classification, outcome);
+        match (classification, outcome) {
             (EntryState::Gained, _) => {
                 gained.push(format!("{} — decoded {}", entry.path, described(&observed)));
             }
@@ -998,8 +998,8 @@ mod tests {
             (entry(Some("E"), Some("fail")), seen(&[(QrCode, "E")])),
         ] {
             stats.include(&entry);
-            let (state, outcome) = entry_state(&entry, &observed);
-            stats.record(state, outcome);
+            let (classification, outcome) = entry_state(&entry, &observed);
+            stats.record(classification, outcome);
         }
         // Errors remain in their input denominator, but have no timing sample.
         stats.include(&entry(None, Some("fail")));
