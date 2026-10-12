@@ -167,31 +167,47 @@ hand-typed. Exact results use only entries with known truth; negative samples
 and frontier observations have separate counts. A held frontier is an
 unlabelled blind spot, not a correct decode.
 
+Measured on 13 October 2026 with the verified native diagnostic from
+`2da72aee98c4cdbee93d789d96196262c37b99c3` (release, no LTO, 8 codegen units,
+1 build job; release package overflow checks retained). These corpus observations do
+not qualify shipped-package performance; trace timings are exploratory.
+
 <!-- corpus-report:begin -->
-NOT MEASURED after reclassifying FAIL_1491 as an unlabelled frontier.
-Regenerate this block from the current build; historical negative/pass counts
-do not qualify the amended corpus.
+| category | images | exact / truth | negative held / negatives | unlabelled decoded / blind / total | frontier held / gained | scan errors | avg ms (ladder-only trace.total_ms, exploratory, not a gate) |
+|---|---|---|---|---|---|---|---|
+| artistic | 2 | 2 / 2 | 0 / 0 | 0 / 0 / 0 | 0 / 0 | 0 | 637 |
+| clean | 13 | 13 / 13 | 0 / 0 | 0 / 0 / 0 | 0 / 0 | 0 | 4 |
+| degraded | 7 | 7 / 7 | 0 / 0 | 0 / 0 / 0 | 0 / 0 | 0 | 24 |
+| frontier | 7 | 0 / 0 | 0 / 0 | 0 / 7 / 7 | 7 / 0 | 0 | 921 |
+| symbology | 12 | 12 / 12 | 0 / 0 | 0 / 0 / 0 | 0 / 0 | 0 | 1 |
 <!-- corpus-report:end -->
 
-### Measured accuracy · external corpora (`corpus-external.tsv` is the living truth)
+### External corpus observations
 
-Measured against public ground truth and production data. The corpora are
-not vendored (30 MB of third-party/production images) · the measured state
-IS: [`corpus-external.tsv`](corpus-external.tsv) pins sha256 + per-image
-decode status for every file, generated from a real run, never hand-typed
-(see “Reproducing the headline numbers” below).
+[`corpus-external.tsv`](corpus-external.tsv) pins file hashes and measured
+decode states. A state pin is not content truth for an unlabelled image. The
+corpora themselves are not vendored: they contain third-party test images and
+private production exports. The 13 October diagnostic used the same original
+pixels and retained qualified truth amendments; strict complete-output results
+and exploratory any-text matches are separate measures.
 
-The following table predates the qrcode-2/13 truth amendment; it is not a
-measurement of the amended corpus.
-
-| corpus | result | note |
+| corpus | observed result | scope |
 |---|---|---|
-| zxing blackbox qrcode-1…6 (179 images, ground truth) | **169/179 exact-text match @ 0°** (9 blind · 1 wrong) | per suite 20 · 34 · 42 · 39 · 19 · 15 against ZXing's own 0° pass thresholds 17 · 32 · 38 · 36 · 19 · 15 (`QRCodeBlackBox1…6TestCase`, 157 in all): above on the first four suites, equal on the last two, whose thresholds are every image |
-| qrcode-ai.com production templates (15 single-symbol styles) | **15/15 decoded** | includes the blob-pixel style no contrast/threshold transform recovers |
-| qrcode-ai.com artistic gallery (full pinned set) | **56/161 decoded** | the blind family is multi-QR collages, extreme 3D perspective and busy marketing scenes · six are vendored as `expect = "fail"` frontier fixtures; `corpus-report --external` re-measures this exact number |
-| center-logo occlusion (v5-H, gray disk) | engines die at >20% radius · **rescue decodes through 30%** | errors-and-erasures RS · `engines: ["rescue"]` in the report |
+| ZXing blackbox qrcode-1…6 | **169/179 strict exact**, 9 missed, 1 ambiguous | The nested qrcode-2/16 scene has incomplete truth; it is not an exact success. No blocking wrong/extra output or scan error under the qualified truth/dispositions. |
+| ZXing exploratory tripwire | **170/179 any-text matches** | Per-suite 20 · 35 · 42 · 39 · 19 · 15. Historical ZXing 0° pass thresholds total 157; these are context, not a contemporary comparator ranking. |
+| Production templates (15 single-symbol styles) | **15/15 decoded observations** | No qualified content truth; part of the unlabelled gallery set. |
+| Full artistic gallery | **56/161 decoded**, 105 blind | Detection observations, not exact-content successes. Six gallery images are also retained as vendored frontier fixtures. |
 
-One historical zxing miss was a **truth conflict** on `qrcode-2/13.png`:
+The complete strict run judged 381 images: 179 ZXing, 161 unlabelled gallery
+and 41 vendored. All 522 external file hashes and 41 vendored inputs verified.
+Vendored truth comprises 34 labelled images, 0 verified negatives and 7
+unlabelled frontiers. One caught rqrr geometry panic on qrcode-6/7 is retained
+in the report trace; it is not a scan error or hidden as a zero-cost sample.
+Separate earlier center-logo experiments demonstrated errors-and-erasures rescue
+through 30% radius on v5-H; that synthetic observation is not this corpus result
+or a new comparative correctness/performance qualification.
+
+One historical ZXing wrong label was a **truth conflict** on `qrcode-2/13.png`:
 the upstream `.txt` reads "photograph", while independently executed external
 ZXing-C++ and C quirc readers confirmed "photography" on original-derived
 pixels. The [pinned text amendment](spec/corpus-truth-amendments.md#zxing-qrcode-2-13)
