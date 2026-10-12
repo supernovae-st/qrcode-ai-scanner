@@ -108,10 +108,12 @@ errors-only decode at the acceptance limit of v1, v2-L or v3-L. Consumers
 should treat the decoded content as unverified). Score hints come only
 with a completed judgment.
 
-The margin is a distrust signal, not proof of a miscorrection. The zxing
-`qrcode-2/13.png` observation differs from its pinned upstream text, whose
-provenance remains disputed; that conflict is not a qualified
-miscorrection example.
+The margin is a distrust signal, not proof of a miscorrection. For zxing
+`qrcode-2/13.png`, two external decoder families confirm "photography";
+the original upstream text reads "photograph". A
+[hash-pinned truth amendment](../spec/corpus-truth-amendments.md) preserves
+those source bytes and qualifies the corrected text. This is a corpus-label
+correction, not a proven miscorrection example or a new scanner acceptance rule.
 
 ## ISO/IEC 15415 mapping — and what we honestly claim
 

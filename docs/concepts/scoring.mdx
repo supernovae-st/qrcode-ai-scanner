@@ -84,8 +84,11 @@ rescued read, the distrust marker above). This is a distrust signal,
 not proof of a *miscorrection* (a decode that looks valid but is wrong). The
 `low_correction_margin` hint fires; treat the content as unverified.
 The public zxing `qrcode-2/13.png` observation reads "photography" while
-the pinned upstream text reads "photograph". Its truth provenance remains
-disputed, so this conflict is not a qualified miscorrection example.
+the pinned upstream text reads "photograph". Two external decoder families
+confirm the corrected text; the
+[hash-pinned truth amendment](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/corpus-truth-amendments.md)
+preserves the original bytes and provenance. This is a corpus-label correction,
+not a proven miscorrection example or a new scanner acceptance rule.
 
 <Note>
 ISO 15415 measures this parameter against `d − p`, where `p` codewords
