@@ -25,7 +25,7 @@ permissions:
 
 defaults:
   run:
-    working-directory: /tmp/flutter-package
+    working-directory: /tmp/flutter-validation/bindings/flutter
 
 env:
   CARGO_TERM_COLOR: always
@@ -59,7 +59,7 @@ jobs:
       - name: pack the candidate once without compiling
         run: |
           mkdir flutter-artifact
-          python3 scripts/stage-flutter-package.py --output /tmp/flutter-package --archive flutter-artifact/flutter-stage.tar.gz --receipt flutter-artifact/flutter-stage.json
+          python3 scripts/stage-flutter-package.py --output /tmp/flutter-validation/bindings/flutter --archive flutter-artifact/flutter-stage.tar.gz --receipt flutter-artifact/flutter-stage.json
           cd flutter-artifact
           sha256sum flutter-stage.tar.gz > flutter-stage.sha256
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -101,16 +101,21 @@ jobs:
         working-directory: .
         run: |
           (cd flutter-artifact && sha256sum -c flutter-stage.sha256)
-          python3 scripts/stage-flutter-package.py --extract flutter-artifact/flutter-stage.tar.gz --output /tmp/flutter-package
+          python3 scripts/stage-flutter-package.py --extract flutter-artifact/flutter-stage.tar.gz --output /tmp/flutter-validation/bindings/flutter
       - name: portable Rust library with the committed binding lockfile
         run: cargo check --locked --manifest-path rust/Cargo.toml --lib
       - run: flutter pub get
       - name: inspect the pub.dev package
         working-directory: .
-        run: python3 scripts/package-inspect.py flutter --package-root /tmp/flutter-package --strict --release-set
+        run: python3 scripts/package-inspect.py flutter --package-root /tmp/flutter-validation/bindings/flutter --strict --release-set
       - run: flutter analyze
+      - name: supply the candidate goldens outside the pub package
+        working-directory: .
+        run: git archive HEAD spec/examples | tar -x -C /tmp/flutter-validation
       - name: report.dart contract tests (host)
-        run: flutter test
+        run: |
+          test -f ../../spec/examples/clean-url.json
+          flutter test
       - name: FRB bindings are in sync with rust/src/api (no drift)
         run: |
           cargo install flutter_rust_bridge_codegen --version 2.12.0 --locked
@@ -150,11 +155,11 @@ jobs:
         working-directory: .
         run: |
           (cd flutter-artifact && sha256sum -c flutter-stage.sha256)
-          python3 scripts/stage-flutter-package.py --extract flutter-artifact/flutter-stage.tar.gz --output /tmp/flutter-package
+          python3 scripts/stage-flutter-package.py --extract flutter-artifact/flutter-stage.tar.gz --output /tmp/flutter-validation/bindings/flutter
       # `flutter build apk` drives cargokit, which cross-compiles the Rust crate
       # per ABI and bundles the .so — the real end-to-end Android build.
       - name: build the example APK (exercises cargokit android path)
-        working-directory: /tmp/flutter-package/example
+        working-directory: /tmp/flutter-validation/bindings/flutter/example
         run: flutter build apk --debug
 
   build-ios:
@@ -181,11 +186,11 @@ jobs:
         working-directory: .
         run: |
           (cd flutter-artifact && shasum -a 256 -c flutter-stage.sha256)
-          python3 scripts/stage-flutter-package.py --extract flutter-artifact/flutter-stage.tar.gz --output /tmp/flutter-package
+          python3 scripts/stage-flutter-package.py --extract flutter-artifact/flutter-stage.tar.gz --output /tmp/flutter-validation/bindings/flutter
       # `flutter build ios` drives cargokit's podspec script_phase (builds the
       # static lib, force-loads it) — the real end-to-end iOS build.
       - name: build the example iOS app (exercises cargokit ios path)
-        working-directory: /tmp/flutter-package/example
+        working-directory: /tmp/flutter-validation/bindings/flutter/example
         run: flutter build ios --debug --no-codesign
 
   publish:
@@ -230,7 +235,7 @@ jobs:
         working-directory: .
         run: |
           (cd flutter-artifact && sha256sum -c flutter-stage.sha256)
-          python3 scripts/stage-flutter-package.py --extract flutter-artifact/flutter-stage.tar.gz --output /tmp/flutter-package
+          python3 scripts/stage-flutter-package.py --extract flutter-artifact/flutter-stage.tar.gz --output /tmp/flutter-validation/bindings/flutter
       # The OIDC→pub.dev temporary-credential exchange. subosito/flutter-action
       # does NOT perform it; dart-lang/setup-dart does (its documented
       # publishing support). Order matters: exchange first, then the Flutter
@@ -250,7 +255,7 @@ jobs:
       - run: flutter pub get
       - name: inspect the pub.dev package about to be uploaded
         working-directory: .
-        run: python3 scripts/package-inspect.py flutter --package-root /tmp/flutter-package --strict --quiet --release-set --record "$RUNNER_TEMP/flutter-inspected.sha256"
+        run: python3 scripts/package-inspect.py flutter --package-root /tmp/flutter-validation/bindings/flutter --strict --quiet --release-set --record "$RUNNER_TEMP/flutter-inspected.sha256"
       - name: the published files are still the inspected bytes
         run: sha256sum -c "$RUNNER_TEMP/flutter-inspected.sha256"
       - name: publish (OIDC)

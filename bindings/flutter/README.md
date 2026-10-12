@@ -63,19 +63,21 @@ package archive, under `rust/vendor/qrcode-ai-scanner`. No published registry
 version is substituted. From a clean, committed checkout, with Python 3.11+:
 
 ```bash
-python3 scripts/stage-flutter-package.py --output /tmp/scanner-flutter \
+python3 scripts/stage-flutter-package.py --output /tmp/scanner-flutter-validation/bindings/flutter \
   --archive /tmp/scanner-flutter.tar.gz --receipt /tmp/scanner-flutter.json
-cd /tmp/scanner-flutter
+git archive HEAD spec/examples | tar -x -C /tmp/scanner-flutter-validation
+cd /tmp/scanner-flutter-validation/bindings/flutter
 cargo check --locked --manifest-path rust/Cargo.toml --lib
 flutter pub get
 flutter analyze
+test -f ../../spec/examples/clean-url.json
 flutter test
 ```
 
 Run the inspector from the candidate checkout, pointing it at that same root:
 
 ```bash
-python3 scripts/package-inspect.py flutter --package-root /tmp/scanner-flutter \
+python3 scripts/package-inspect.py flutter --package-root /tmp/scanner-flutter-validation/bindings/flutter \
   --strict --release-set --record /tmp/scanner-flutter-inspected.sha256
 ```
 
@@ -91,7 +93,11 @@ core-only change must update that manifest. A staged `.pubignore` preserves the
 core's Cargo provenance file in pub's published file set.
 
 CI creates one staged archive, then uses it outside the checkout for the host
-checks, Android/iOS example builds and the guarded publishing job. The inspector
+checks, Android/iOS example builds and the guarded publishing job. Host contract
+tests receive the candidate's canonical JSON goldens outside the package, at
+their expected `../../spec/examples` path; no adjacent Rust checkout is copied.
+Without these fixtures, seven golden tests skip rather than qualify the contract.
+The fixtures do not change the staged archive or pub's file set. The inspector
 requires pub's parsed file tree and completed validation, checks the bundled
 sources recursively, and records the published files' hashes for a final
 same-byte check. Validation warnings remain visible; validation errors and an
