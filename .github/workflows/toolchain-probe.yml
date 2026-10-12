@@ -114,7 +114,11 @@ jobs:
           path: warp-receipts
       - run: python3 scripts/mutation-focus.py selftest
       - name: actual misses before, actual test kills after
-        run: python3 scripts/mutation-focus.py judge --before warp-receipts/warp-before --after warp-receipts/warp-after | tee warp-verdict.json
+        shell: bash
+        env:
+          EXPECTED_BEFORE: ${{ inputs.baseline_sha }}
+          EXPECTED_AFTER: ${{ github.sha }}
+        run: python3 scripts/mutation-focus.py judge --before warp-receipts/warp-before --after warp-receipts/warp-after --expected-before "$EXPECTED_BEFORE" --expected-after "$EXPECTED_AFTER" | tee warp-verdict.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:

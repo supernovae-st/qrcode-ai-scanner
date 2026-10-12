@@ -86,6 +86,7 @@ def validate(directory, expected_summary, expected_exit):
     names = [item["name"] for item in listing]
     require(len(names) == 8 and set(names) == set(EXPECTED), "incomplete or duplicate listing")
     require(result["cargo_mutants_version"] == "27.1.0" and result["end_time"], "wrong tool or incomplete run")
+    require(len(result["outcomes"]) == 9, "unexpected outcome count")
     baselines = [item for item in result["outcomes"] if item["scenario"] == "Baseline"]
     require(len(baselines) == 1 and baselines[0]["summary"] == "Success", "baseline failed or missing")
     require([(phase["phase"], phase["process_status"]) for phase in baselines[0]["phase_results"]]
@@ -102,18 +103,22 @@ def validate(directory, expected_summary, expected_exit):
         require(phases[1]["phase"] == "Test", "missing test phase")
         status = phases[1]["process_status"]
         require(status == "Success" if expected_summary == "MissedMutant"
-                else isinstance(status, dict) and isinstance(status.get("Failure"), int) and status["Failure"] != 0,
+                else isinstance(status, dict) and type(status.get("Failure")) is int and status["Failure"] != 0,
                 "test status contradicts verdict")
     return receipt
 
 
-def judge(before, after):
+def judge(before, after, expected_before=None, expected_after=None):
     old = validate(before, "MissedMutant", 2)
     new = validate(after, "CaughtMutant", 0)
+    if expected_before is not None:
+        require(old["revision"] == expected_before, "before revision differs from requested baseline")
+    if expected_after is not None:
+        require(new["revision"] == expected_after, "after revision differs from requested candidate")
     require(old["revision"] != new["revision"], "before and after use the same revision")
     require(old["production_sha256"] == new["production_sha256"], "production changed: not a tests-only comparison")
     require(old["source_sha256"] != new["source_sha256"], "test source unchanged")
-    return {"verdict": "pass", "scope": "warp boundaries only", "before": old["revision"],
+    return {"verdict": "pass", "scope": "warp boundaries only; unchanged production proven for warp.rs", "before": old["revision"],
             "after": new["revision"], "missed_before": 8, "caught_after": 8, "identities": list(EXPECTED)}
 
 
@@ -150,6 +155,7 @@ def selftest():
         build = copy.deepcopy(valid); build["outcomes"][1]["phase_results"][0]["process_status"] = {"Failure": 1}; defects.append(build)
         timeout = copy.deepcopy(valid); timeout["outcomes"][1]["summary"] = "Timeout"; defects.append(timeout)
         incomplete = copy.deepcopy(valid); incomplete["end_time"] = None; defects.append(incomplete)
+        unknown = copy.deepcopy(valid); unknown["outcomes"].append({"scenario": "UnrecognisedScenario", "summary": "Timeout", "phase_results": []}); defects.append(unknown)
         for defect in defects:
             write_json(after / "mutants.out" / "outcomes.json", defect)
             try:
@@ -157,7 +163,14 @@ def selftest():
             except ValueError:
                 continue
             raise ValueError("invalid receipt accepted")
-    print("PASS: valid comparison and 6 rejected forensic defects")
+        write_json(after / "mutants.out" / "outcomes.json", valid)
+        try:
+            judge(before, after, expected_before="c" * 40, expected_after="b" * 40)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("wrong requested revision accepted")
+    print("PASS: valid comparison and 8 rejected forensic defects")
 
 
 def main():
@@ -169,11 +182,13 @@ def main():
     compare = modes.add_parser("judge")
     compare.add_argument("--before", type=pathlib.Path, required=True)
     compare.add_argument("--after", type=pathlib.Path, required=True)
+    compare.add_argument("--expected-before", required=True)
+    compare.add_argument("--expected-after", required=True)
     modes.add_parser("selftest")
     args = parser.parse_args()
     try:
         if args.mode == "run": run(args)
-        elif args.mode == "judge": print(json.dumps(judge(args.before, args.after), indent=2))
+        elif args.mode == "judge": print(json.dumps(judge(args.before, args.after, args.expected_before, args.expected_after), indent=2))
         else: selftest()
     except (ValueError, KeyError, TypeError, OSError, json.JSONDecodeError, subprocess.SubprocessError) as error:
         print(f"FAIL: {error}", file=sys.stderr)
