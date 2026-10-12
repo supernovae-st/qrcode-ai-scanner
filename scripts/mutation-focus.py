@@ -64,7 +64,7 @@ def run(args):
     require(bool(separator), "missing test-module boundary")
     command = cargo + ["mutants", "-p", "qrcode-ai-scanner", "--in-place", "--cargo-arg=--locked",
                        "--test-tool", "nextest", "--timeout", "120", "--build-timeout", "900",
-                       "--file", FILE, "-o", str(out / "mutants.out")] + filters + [
+                       "--file", FILE, "-o", str(out)] + filters + [
                            "--", "--all-features", "--lib", "-E", "test(/^score::warp::tests::/)"
                        ]
     result = capture(command, out / "command.stdout", out / "command.stderr")
@@ -79,7 +79,13 @@ def run(args):
 def validate(directory, expected_summary, expected_exit):
     receipt = json.loads((directory / "receipt.json").read_text())
     listing = json.loads((directory / "listed.json").read_text())
-    result = json.loads((directory / "mutants.out" / "outcomes.json").read_text())
+    # cargo-mutants appends mutants.out to its -o base directory. Accept the
+    # first diagnostic's nested archive layout when replaying its raw receipts.
+    paths = [directory / "mutants.out" / "outcomes.json",
+             directory / "mutants.out" / "mutants.out" / "outcomes.json"]
+    paths = [path for path in paths if path.is_file()]
+    require(len(paths) == 1, "missing or ambiguous outcomes archive")
+    result = json.loads(paths[0].read_text())
     require(re.fullmatch(r"[0-9a-f]{40}", receipt["revision"]), "invalid source revision")
     require(receipt["exit_code"] == expected_exit, "unexpected mutation exit code")
     require(receipt["cohort"] == list(EXPECTED), "receipt cohort differs")
@@ -170,7 +176,19 @@ def selftest():
             pass
         else:
             raise ValueError("wrong requested revision accepted")
-    print("PASS: valid comparison and 8 rejected forensic defects")
+        outcomes = after / "mutants.out" / "outcomes.json"
+        nested = after / "mutants.out" / "mutants.out" / "outcomes.json"
+        nested.parent.mkdir()
+        outcomes.rename(nested)
+        require(judge(before, after)["caught_after"] == 8, "initial nested artifact layout rejected")
+        outcomes.write_bytes(nested.read_bytes())
+        try:
+            judge(before, after)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("ambiguous outcomes archives accepted")
+    print("PASS: valid flat/nested comparisons and 9 rejected forensic defects")
 
 
 def main():
