@@ -966,6 +966,8 @@ mod tests {
     }
 
     /// The helper side of the orphan test: a worker that keeps its parent.
+    /// It prints its pid once `exit_with_parent` has taken that parent: the
+    /// test lets the shell go only then.
     #[test]
     #[ignore = "a helper process of a_worker_leaves_when_its_parent_does"]
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -980,7 +982,11 @@ mod tests {
 
     /// With a fake child: a worker whose parent goes away — a shell that
     /// started it, then exits — leaves within about [`PARENT_POLL`] while
-    /// it sleeps through a long call.
+    /// it sleeps through a long call. The shell leaves only once the worker
+    /// has printed its pid, after taking its parent: a worker keeps the
+    /// parent it sees when it starts, so a shell gone before a slow start
+    /// would leave it no parent to lose. The shell first closes its own
+    /// stdout, so a helper that dies before printing ends the pid read.
     #[test]
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn a_worker_leaves_when_its_parent_does() {
@@ -989,16 +995,23 @@ mod tests {
         let mut shell = std::process::Command::new("sh")
             .args([
                 "-c",
-                "\"$0\" bench::worker::tests::orphan_helper --exact --ignored --nocapture & sleep 0.5",
+                "\"$0\" bench::worker::tests::orphan_helper --exact --ignored --nocapture & exec >&-; read -r go",
                 exe.to_str().expect("utf-8 path"),
             ])
             .env("QRSCAN_BENCH_TEST_HELPER", "orphan")
             .env_remove(PARENT_ENV)
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("shell");
         let worker = read_pid(shell.stdout.take().expect("stdout"), "worker ");
+        shell
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(b"go\n")
+            .expect("the shell reads its go");
         assert!(shell.wait().expect("shell exits").success());
         assert!(
             gone_within(worker, Duration::from_secs(1)),
