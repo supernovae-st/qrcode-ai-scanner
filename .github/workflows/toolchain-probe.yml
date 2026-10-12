@@ -54,9 +54,12 @@ jobs:
   oracle-artifact:
     if: inputs.probe == 'oracle-artifact'
     runs-on: macos-15
-    timeout-minutes: 35
+    timeout-minutes: 25
     env:
-      CARGO_BUILD_JOBS: "2"
+      CARGO_BUILD_JOBS: "1"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
+      CARGO_TARGET_DIR: "target/oracle-diagnostic-v1"
       MACOSX_DEPLOYMENT_TARGET: "14.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -67,21 +70,100 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2, resolved 2026-10-12
         with:
-          key: oracle-aarch64-apple-darwin
-      - name: build the immutable native oracle
+          key: oracle-aarch64-apple-darwin-diagnostic-nolto-cgu8-v1
+          workspaces: ". -> target/oracle-diagnostic-v1"
+      # Unit/contract coverage belongs to the three-OS PR CI. This diagnostic
+      # builds only the runtime: its profile is not a shipped artifact or a
+      # performance baseline. Keep rxing's package overflow checks intact.
+      - name: verify native source identity
         shell: bash
         run: |
           test "$(uname -m)" = arm64
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          cargo test --locked -p xtask
-          cargo build --release --locked -p xtask
+      - name: bounded diagnostic native build
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          python3 - <<'PYBUILD'
+          import datetime, json, os, pathlib, signal, subprocess, sys, time
+          command = ["cargo", "build", "--release", "--locked", "-p", "xtask"]
+          wall_limit_seconds = 1140
+          rss_limit_bytes = 4 * 1024**3
+          started_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+          print(f"diagnostic build start: {started_utc} command={command}", flush=True)
+          started, peak = time.monotonic(), 0
+          child = None
+          reason, exit_code = "exception", 1
+          interrupted_signal = 0
+          def interrupted(signum, _frame):
+              global interrupted_signal
+              interrupted_signal = signum
+          signal.signal(signal.SIGTERM, interrupted)
+          signal.signal(signal.SIGINT, interrupted)
+          try:
+              child = subprocess.Popen(command, start_new_session=True)
+              if interrupted_signal:
+                  raise SystemExit(128 + interrupted_signal)
+              while child.poll() is None:
+                  if interrupted_signal:
+                      raise SystemExit(128 + interrupted_signal)
+                  rows = subprocess.check_output(["ps", "-axo", "pgid=,rss="], text=True)
+                  rss = sum(int(row.split()[1]) * 1024 for row in rows.splitlines()
+                            if len(row.split()) == 2 and int(row.split()[0]) == child.pid)
+                  peak = max(peak, rss)
+                  if rss > rss_limit_bytes or time.monotonic() - started > wall_limit_seconds:
+                      reason, exit_code = "sampled-rss-or-wall-limit", 124
+                      break
+                  time.sleep(0.5)
+              else:
+                  if interrupted_signal:
+                      raise SystemExit(128 + interrupted_signal)
+                  reason, exit_code = "build-exit", child.returncode
+          except SystemExit as error:
+              reason, exit_code = "interrupted", error.code
+          finally:
+              # Cleanup the owned group, including descendants after leader exit.
+              signal.signal(signal.SIGTERM, signal.SIG_IGN)
+              signal.signal(signal.SIGINT, signal.SIG_IGN)
+              if child is not None:
+                  try:
+                      os.killpg(child.pid, signal.SIGTERM)
+                  except ProcessLookupError:
+                      pass
+                  deadline = time.monotonic() + 3
+                  while time.monotonic() < deadline:
+                      child.poll()
+                      try:
+                          os.killpg(child.pid, 0)
+                      except ProcessLookupError:
+                          break
+                      time.sleep(0.1)
+                  try:
+                      os.killpg(child.pid, signal.SIGKILL)
+                  except ProcessLookupError:
+                      pass
+                  child.wait()
+              result = {
+                  "command": command, "started_utc": started_utc,
+                  "finished_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                  "elapsed_seconds": time.monotonic() - started,
+                  "wall_limit_seconds": wall_limit_seconds, "rss_limit_bytes": rss_limit_bytes,
+                  "sampled_group_peak_rss_bytes": peak, "reason": reason, "exit_code": exit_code,
+              }
+              pathlib.Path("diagnostic-build.json").write_text(json.dumps(result, indent=2) + "\n")
+              print(json.dumps(result), flush=True)
+          sys.exit(exit_code)
+          PYBUILD
+      - name: record immutable diagnostic identity
+        shell: bash
+        run: |
           git diff --exit-code
           mkdir -p oracle-runtime
-          cp target/release/xtask oracle-runtime/xtask
+          cp "$CARGO_TARGET_DIR/release/xtask" oracle-runtime/xtask
           file oracle-runtime/xtask
           otool -L oracle-runtime/xtask
           python3 - <<'PYMETA'
-          import hashlib, json, os, pathlib, subprocess
+          import hashlib, json, os, pathlib, subprocess, tomllib
           binary = pathlib.Path("oracle-runtime/xtask")
           version = subprocess.check_output(["rustc", "--version", "--verbose"], text=True)
           if "host: aarch64-apple-darwin" not in version:
@@ -91,6 +173,17 @@ jobs:
               "source_sha": os.environ["GITHUB_SHA"],
               "source_tree": subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip(),
               "target": "aarch64-apple-darwin",
+              "build": {
+                  "purpose": "diagnostic-accuracy-only",
+                  "profile": "release",
+                  "lto": os.environ["CARGO_PROFILE_RELEASE_LTO"],
+                  "codegen_units": os.environ["CARGO_PROFILE_RELEASE_CODEGEN_UNITS"],
+                  "cargo_jobs": os.environ["CARGO_BUILD_JOBS"],
+                  "target_directory": os.environ["CARGO_TARGET_DIR"],
+                  "rxing_overflow_checks": tomllib.loads(pathlib.Path("Cargo.toml").read_text())["profile"]["release"]["package"]["rxing"]["overflow-checks"],
+                  "rustflags": os.environ.get("RUSTFLAGS", ""),
+                  "guard": json.loads(pathlib.Path("diagnostic-build.json").read_text()),
+              },
               "rustc": version,
               "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
               "bytes": binary.stat().st_size,
