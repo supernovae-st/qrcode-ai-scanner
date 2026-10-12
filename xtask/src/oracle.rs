@@ -3049,8 +3049,8 @@ mod tests {
             assert_eq!(truth.status, Status::Aux, "{}: truth row", d.path);
             assert_eq!(truth.sha256, d.truth_sha256, "{}: truth sha256", d.path);
         }
-        // the any()-based pins the two dispositions correct
-        assert_eq!(pin("zxing-blackbox/qrcode-2/13.png").status, Status::Wrong);
+        // Capability pins use effective truth; historical dispositions retain their original hashes.
+        assert_eq!(pin("zxing-blackbox/qrcode-2/13.png").status, Status::Match);
         assert_eq!(pin("zxing-blackbox/qrcode-2/16.png").status, Status::Match);
     }
 
