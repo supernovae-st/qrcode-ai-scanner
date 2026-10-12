@@ -291,6 +291,17 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
 
 ### CI
 
+- **Flutter builds consume one portable candidate** — the staging tool packs
+  the current core once, validates its normalized manifest and sources, and
+  vendors it inside the pub package. Host, Android, iOS and publishing jobs
+  consume the same hashed archive outside the repository. The committed
+  binding lockfile is preserved, and a core-content digest invalidates
+  cargokit's cache when only the bundled core changes.
+- **Warp boundary tests kill eight recorded mutation debts** — exact pixels
+  cover the half-pixel edges and outside fill without changing production
+  code. A focused before/after run establishes the eight kills from its raw
+  artifacts; its failed collector was repaired separately. This focused
+  evidence does not replace the complete deep gate.
 - **The release tooling pins its napi CLI exactly** — the v0.9.0 npm
   publishing jobs failed partway because the unpinned napi CLI range
   (`^3.7.1`) resolved to 3.7.3, which rejects `--use-napi-cross` on macOS

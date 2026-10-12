@@ -77,6 +77,12 @@
 # separators the GS1 loop strips anyway. The two flatten reservation mutants
 # remain debt: equal output bytes do not establish equal allocation behavior.
 # Now 33 equivalent · 9 timeout-structural · 21 debt.
+# Pruned (2026-10-12, warp boundaries): focused run 38283583505 reports
+# all eight selected warp_into mutants missed on b09919e and caught on
+# 653ab1f, with passing build/test baselines and unchanged production source.
+# Its collector failed on an archive path; verified raw receipts establish
+# these eight kills, not a fresh full deep verdict. Now 33 equivalent · 9
+# timeout-structural · 13 debt.
 
 # ── equivalent ──────────────────────────────────────────────────────────────
 
@@ -628,70 +634,6 @@ reason = """\
   surviving mutant recorded at 1c38d7c (run 37262272113), re-anchored 2026-10-11 from 513:44 \
   where the code moved: a resolution knee past the first cell refines at the knee itself. \
   Killed by a test pinning the refined label of such a knee (a 179 px knee refines at 217 px)"""
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/score/warp.rs"
-line = 24
-column = 40
-mutation = "replace - with + in warp_into"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/score/warp.rs"
-line = 24
-column = 40
-mutation = "replace - with / in warp_into"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/score/warp.rs"
-line = 24
-column = 67
-mutation = "replace - with + in warp_into"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/score/warp.rs"
-line = 24
-column = 67
-mutation = "replace - with / in warp_into"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/score/warp.rs"
-line = 33
-column = 35
-mutation = "replace match guard sx >= -0.5 && sx <= sw + 0.5 && sy >= -0.5 && sy <= sh + 0.5 with true in warp_into"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/score/warp.rs"
-line = 33
-column = 46
-mutation = "replace && with || in warp_into"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/score/warp.rs"
-line = 33
-column = 64
-mutation = "replace && with || in warp_into"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/score/warp.rs"
-line = 33
-column = 78
-mutation = "replace && with || in warp_into"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
 
 [[mutant]]
 file = "crates/qrcode-ai-scanner/src/score/warp.rs"
