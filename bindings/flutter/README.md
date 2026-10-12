@@ -63,6 +63,7 @@ package archive, under `rust/vendor/qrcode-ai-scanner`. No published registry
 version is substituted. From a clean, committed checkout, with Python 3.11+:
 
 ```bash
+set -o pipefail
 python3 scripts/stage-flutter-package.py --output /tmp/scanner-flutter-validation/bindings/flutter \
   --archive /tmp/scanner-flutter.tar.gz --receipt /tmp/scanner-flutter.json
 git archive HEAD spec/examples | tar -x -C /tmp/scanner-flutter-validation

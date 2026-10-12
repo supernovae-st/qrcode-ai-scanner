@@ -111,6 +111,7 @@ jobs:
       - run: flutter analyze
       - name: supply the candidate goldens outside the pub package
         working-directory: .
+        shell: bash
         run: git archive HEAD spec/examples | tar -x -C /tmp/flutter-validation
       - name: report.dart contract tests (host)
         run: |
