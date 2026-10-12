@@ -217,6 +217,11 @@ corpus instruments and records the historical `known_wrong` disposition as
 still block. This is text confirmation, not proof of ECI/FNC1 declarations or
 native QR byte length; a zero correction margin alone proves neither text.
 
+For suites 1 through 6, the historical ZXing 0° pass
+thresholds 17 · 32 · 38 · 36 · 19 · 15 (`QRCodeBlackBox1…6TestCase`, 157 in all)
+provide context for the observations above. Strict complete-output verdicts and
+exploratory any-text matches remain separate measures.
+
 #### Reproducing the headline numbers
 
 Place the corpora at the repo root (layout below), then run the gate:
