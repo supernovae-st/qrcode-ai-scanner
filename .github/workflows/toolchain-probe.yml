@@ -15,7 +15,7 @@ on:
       probe:
         description: "bounded diagnostic to run"
         type: choice
-        options: [build, warp-mutations]
+        options: [build, warp-mutations, oracle-artifact]
         default: build
       baseline_sha:
         description: "40-hex tests-only baseline (required for warp-mutations)"
@@ -33,7 +33,7 @@ env:
 
 jobs:
   build-no-cache:
-    if: inputs.probe != 'warp-mutations'
+    if: inputs.probe == 'build'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -48,6 +48,61 @@ jobs:
           ulimit -v 12582912
           RUST_BACKTRACE=full cargo build --release --locked -p xtask -j 1
           echo "BUILD OK — cache poisoning confirmed by elimination"
+
+  # Diagnostic runtime only: build the exact oracle on a matching host, then
+  # run it against local hash-verified corpora without uploading private data.
+  oracle-artifact:
+    if: inputs.probe == 'oracle-artifact'
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: "2"
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, resolved 2026-10-12
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2, resolved 2026-10-12
+        with:
+          key: oracle-aarch64-apple-darwin
+      - name: build the immutable native oracle
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          cargo test --locked -p xtask
+          cargo build --release --locked -p xtask
+          git diff --exit-code
+          mkdir -p oracle-runtime
+          cp target/release/xtask oracle-runtime/xtask
+          file oracle-runtime/xtask
+          otool -L oracle-runtime/xtask
+          python3 - <<'PYMETA'
+          import hashlib, json, os, pathlib, subprocess
+          binary = pathlib.Path("oracle-runtime/xtask")
+          version = subprocess.check_output(["rustc", "--version", "--verbose"], text=True)
+          if "host: aarch64-apple-darwin" not in version:
+              raise SystemExit("oracle artifact requires aarch64-apple-darwin")
+          metadata = {
+              "schema": "qrscan.oracle-runtime.v1",
+              "source_sha": os.environ["GITHUB_SHA"],
+              "source_tree": subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip(),
+              "target": "aarch64-apple-darwin",
+              "rustc": version,
+              "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+              "bytes": binary.stat().st_size,
+          }
+          pathlib.Path("oracle-runtime/identity.json").write_text(json.dumps(metadata, indent=2) + "\n")
+          PYMETA
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        with:
+          name: oracle-aarch64-apple-darwin-${{ github.sha }}
+          path: oracle-runtime/
+          if-no-files-found: error
+          retention-days: 3
 
   warp-mutations:
     if: inputs.probe == 'warp-mutations'
