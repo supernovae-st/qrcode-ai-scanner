@@ -83,6 +83,7 @@ use serde::ser::SerializeMap as _;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::external::{self, CorpusRoot, Row, Status};
+use crate::truth_amendments::{self, Amendment};
 
 /// Judge-rules identifier carried by every receipt — bump it with any rule
 /// change so receipts made under different rules never compare silently.
@@ -92,8 +93,9 @@ use crate::external::{self, CorpusRoot, Row, Status};
 /// judged by content identity, a text truth by text unless the detection's
 /// charset is `unknown`; `unread` is an outcome with its own rate; the
 /// grouping contract forbids two detections of one identity; the receipt
-/// states the rule of each truth kind ([`RULES`]).
-const RULES_ID: &str = "qrscan-oracle/v2";
+/// states the rule of each truth kind ([`RULES`]). v2.1: a validated text
+/// amendment supersedes historical disposition truth without excusing output.
+const RULES_ID: &str = "qrscan-oracle/v2.1";
 /// The vendored manifest, at the repo root.
 const VENDORED: &str = "corpus.toml";
 /// Detection groups per report (`spec/01-report.md`, anti-amplification).
@@ -579,7 +581,8 @@ fn same_content(one: &Seen, other: &Seen) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DispositionKind {
     /// A confident decode the truth contradicts: stays `wrong` and blocks
-    /// until fixed or honestly refused. `signature` pins the misread
+    /// until fixed, honestly refused, or independently superseded by a
+    /// validated truth amendment. `signature` pins the historical read
     /// ([`observed_signature`] at pin time): any other output — even
     /// another wrong text — makes the entry stale.
     KnownWrong { signature: &'static str },
@@ -631,7 +634,7 @@ pub(crate) const DISPOSITIONS: [Disposition; 2] = [
         path: "zxing-blackbox/qrcode-2/13.png",
         image_sha256: "a8d498d6d2d6a3e27e24fd75ed023cd5b8b6b42cb4996674e88e555d68855ec1",
         truth_sha256: "c19d2dcb13469aae263a41cd73add68c45e086223a04c41368128c47143c0e5a",
-        // [(qr_code, sha256 of the 72-byte "…photography…" misread)]
+        // Historical read judged wrong against the original upstream truth.
         kind: DispositionKind::KnownWrong {
             signature: "1aae7f6958dc301435f86f4de43c5e9dc4a62f6885d6f83dbdab39b35d96cb55",
         },
@@ -665,6 +668,9 @@ enum DispositionState {
     /// Observed decoder: its output is not the pinned qrcode-ai-scanner
     /// reading. Information only — the outcome rule still applies.
     Differs,
+    /// Original pins still hold, but independently validated effective text
+    /// supersedes this historical judgment. The complete-set verdict stands.
+    Superseded,
     /// The row's image or truth sha256 differs from the pinned one.
     Void,
     /// The row was not judged (absent, unreadable, drifted or errored).
@@ -677,6 +683,7 @@ impl DispositionState {
             Self::Holds => "holds",
             Self::Stale => "stale",
             Self::Differs => "differs",
+            Self::Superseded => "superseded",
             Self::Void => "void",
             Self::Unevaluated => "unevaluated",
         }
@@ -746,6 +753,23 @@ fn settle(
 ) -> (Outcome, DispositionState) {
     let truth_sha256 = row.truth_sha256.as_deref().unwrap_or_default();
     if disposition.image_sha256 != row.image_sha256 || disposition.truth_sha256 != truth_sha256 {
+        return (verdict, DispositionState::Void);
+    }
+    if let Some(amendment) = row.truth_amendment {
+        let effective_matches = row.expected.as_deref().is_some_and(|units| {
+            matches!(units, [unit] if unit.identity.is_none()
+                && unit.unit.symbology == Some(Symbology::QrCode)
+                && external::sha256_bytes(unit.unit.text.as_bytes()) == amendment.effective_text_sha256)
+        });
+        if matches!(disposition.kind, DispositionKind::KnownWrong { .. })
+            && amendment == &truth_amendments::Q13
+            && amendment.image_path == row.path
+            && amendment.image_sha256 == row.image_sha256
+            && amendment.original_truth_sha256 == truth_sha256
+            && effective_matches
+        {
+            return (verdict, DispositionState::Superseded);
+        }
         return (verdict, DispositionState::Void);
     }
     let observed = detections_of(&row.scan);
@@ -889,6 +913,8 @@ struct Judged {
     expected: Option<Vec<Expected>>,
     /// sha256 of the truth's source bytes (`.txt` file or manifest string).
     truth_sha256: Option<String>,
+    /// Present only after original inputs passed the shared amendment resolver.
+    truth_amendment: Option<&'static Amendment>,
     /// Raw judge verdict (labelled rows), before any disposition.
     verdict: Option<Outcome>,
     outcome: Outcome,
@@ -1195,8 +1221,8 @@ struct Integrity {
 enum Probe {
     Unreadable(String),
     Drift,
-    /// Hash-verified non-image; a `.txt` file's content decoded as truth.
-    Aux(Option<String>),
+    /// Hash-verified non-image; original `.txt` bytes retained for provenance.
+    Aux(Option<Vec<u8>>),
     /// Hash-verified image, its observation and merged-output count.
     Image(Scan, usize),
     /// Hash-verified image the source has no usable observation for.
@@ -1220,7 +1246,7 @@ fn probe(dir: &Path, row: &Row, source: Source<'_>) -> Probe {
     let is_text = Path::new(&row.path)
         .extension()
         .is_some_and(|ext| ext == "txt");
-    Probe::Aux(is_text.then(|| external::decode_truth(bytes)))
+    Probe::Aux(is_text.then_some(bytes))
 }
 
 /// Sibling truth file of a manifest image (`…/13.png` → `…/13.txt`) — the
@@ -1288,8 +1314,8 @@ fn evaluate_external(
         .map(|row| (row, probe(dir, row, source)))
         .collect();
 
-    // path → (pinned sha256, text) of every hash-verified truth file
-    let mut truths: BTreeMap<&str, (&str, String)> = BTreeMap::new();
+    // path → (pinned sha256, original bytes) of every verified truth file
+    let mut truths: BTreeMap<&str, (&str, Vec<u8>)> = BTreeMap::new();
     let mut scans: Vec<(&Row, Scan, usize)> = Vec::new();
     for (row, probe) in probes {
         match probe {
@@ -1331,10 +1357,11 @@ fn evaluate_external(
 fn external_row(
     row: &Row,
     (scan, merged, wire_binds): (Scan, usize, bool),
-    truths: &BTreeMap<&str, (&str, String)>,
+    truths: &BTreeMap<&str, (&str, Vec<u8>)>,
     problems: &mut Vec<String>,
 ) -> Option<Judged> {
-    let (set, expected, truth_sha256) = if row.path.starts_with("zxing-blackbox/") {
+    let (set, expected, truth_sha256, truth_amendment) = if row.path.starts_with("zxing-blackbox/")
+    {
         let truth_file = truth_path(&row.path);
         let (Some(symbology), Some((sha256, text))) =
             (suite_symbology(&row.path), truths.get(truth_file.as_str()))
@@ -1345,17 +1372,25 @@ fn external_row(
             ));
             return None;
         };
+        let truth = match truth_amendments::resolve(&row.path, &row.sha256, sha256, text) {
+            Ok(truth) => truth,
+            Err(why) => {
+                problems.push(why);
+                return None;
+            }
+        };
         let unit = Unit {
             symbology: Some(symbology),
-            text: text.clone(),
+            text: truth.text,
         };
         (
             Set::Zxing,
             Some(vec![Expected::from(unit)]),
             Some((*sha256).to_owned()),
+            truth.amendment,
         )
     } else if row.path.starts_with("qrcode-ai/") {
-        (Set::Gallery, None, None)
+        (Set::Gallery, None, None, None)
     } else {
         problems.push(format!(
             "image outside the known corpus roots: {}",
@@ -1372,6 +1407,7 @@ fn external_row(
         pin: Some(row.status),
         expected,
         truth_sha256,
+        truth_amendment,
         verdict: verdict.raw,
         outcome: verdict.outcome,
         disposition: None,
@@ -1540,6 +1576,7 @@ fn evaluate_vendored(
                 .expected
                 .as_deref()
                 .map(|text| external::sha256_bytes(text.as_bytes())),
+            truth_amendment: None,
             verdict: verdict.raw,
             outcome: verdict.outcome,
             disposition: None,
@@ -1602,7 +1639,10 @@ fn blockers(integrity: &Integrity, rows: &[Judged], checks: &[DispositionCheck])
     for check in checks {
         let d = &check.disposition;
         let why = match (check.state, check.observed) {
-            (DispositionState::Holds | DispositionState::Differs, _) => continue,
+            (
+                DispositionState::Holds | DispositionState::Differs | DispositionState::Superseded,
+                _,
+            ) => continue,
             (DispositionState::Stale, Some(now)) => format!(
                 "pinned verdict {}, now {} — update DISPOSITIONS deliberately",
                 d.verdict.as_str(),
@@ -1741,6 +1781,7 @@ struct Inputs {
     manifest: FileEcho,
     vendored: FileEcho,
     dispositions_sha256: String,
+    truth_amendments_sha256: String,
 }
 
 /// The outcome rule of each truth kind, as every receipt states it.
@@ -1857,6 +1898,8 @@ struct RowReceipt {
     image_sha256: String,
     pin: Option<&'static str>,
     truth_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truth_amendment: Option<&'static Amendment>,
     /// `null` = unlabelled · `[]` = negative sample.
     expected: Option<Vec<UnitReceipt>>,
     verdict: Option<Outcome>,
@@ -2043,6 +2086,7 @@ fn row_receipt(row: &Judged) -> RowReceipt {
         image_sha256: row.image_sha256.clone(),
         pin: row.pin.map(Status::as_str),
         truth_sha256: row.truth_sha256.clone(),
+        truth_amendment: row.truth_amendment,
         expected,
         verdict: row.verdict,
         outcome: row.outcome,
@@ -2455,6 +2499,7 @@ fn new_receipt(
                 sha256: external::sha256_bytes(vendored_text.as_bytes()),
             },
             dispositions_sha256: dispositions_sha256(),
+            truth_amendments_sha256: truth_amendments::fingerprint(),
         },
         integrity,
         sets: Vec::new(),
@@ -2745,7 +2790,7 @@ mod tests {
     /// truth and the unnamed inner symbol it excuses.
     const TRUTH_13: &str =
         "The 2005 USGS aerial photograph of the Washington Monument is censored.";
-    const MISREAD_13: &str =
+    const READ_13: &str =
         "The 2005 USGS aerial photography of the Washington Monument is censored.";
     const OUTER_16: &str = "[\u{5916}\u{5074}QR\u{30b3}\u{30fc}\u{30c9}]\r\n \r\n\
                             *\u{ff80}\u{ff9e}\u{ff8c}\u{ff9e}\u{ff99}QR*\r\nhttp://d-qr.net/ex/";
@@ -2766,6 +2811,7 @@ mod tests {
             pin: None,
             expected: Some(expected),
             truth_sha256: Some(disposition.truth_sha256.to_owned()),
+            truth_amendment: None,
             verdict: verdict.raw,
             outcome: verdict.outcome,
             disposition: None,
@@ -2911,9 +2957,8 @@ mod tests {
         assert_eq!(blocking, ["extra", "mixed", "wrong", "false_positive"]);
     }
 
-    /// Every receipt names the rules it was judged under — v1.1 receipts
-    /// (text units only, no `unread`) must never read as comparable to v2
-    /// ones — and states the outcome rule of each truth kind.
+    /// Every receipt names its judge rules and amendment provenance so
+    /// historical truth and effective truth are never compared silently.
     #[test]
     fn receipts_carry_the_rules_id() {
         let source = SourceEcho {
@@ -2922,7 +2967,11 @@ mod tests {
         };
         let receipt = new_receipt(source, "manifest", "vendored", Integrity::default());
         let json = serde_json::to_value(&receipt).expect("receipt serialises");
-        assert_eq!(json["oracle"], "qrscan-oracle/v2");
+        assert_eq!(json["oracle"], "qrscan-oracle/v2.1");
+        assert_eq!(
+            json["inputs"]["truth_amendments_sha256"],
+            "0798a4c08952380c3195494be65e658045c5a1d89e43065e9def3b4485a022c8"
+        );
         let rules = json["rules"].as_object().expect("a rules object");
         let mut kinds: Vec<&str> = rules.keys().map(String::as_str).collect();
         kinds.sort_unstable();
@@ -3005,6 +3054,166 @@ mod tests {
         assert_eq!(pin("zxing-blackbox/qrcode-2/16.png").status, Status::Match);
     }
 
+    fn amended_q13(observed: &[&str]) -> Judged {
+        let pin = &truth_amendments::Q13;
+        let row = Row {
+            status: Status::Wrong,
+            sha256: pin.image_sha256.to_owned(),
+            path: pin.image_path.to_owned(),
+        };
+        let truths = BTreeMap::from([(
+            "zxing-blackbox/qrcode-2/13.txt",
+            (pin.original_truth_sha256, TRUTH_13.as_bytes().to_vec()),
+        )]);
+        let mut problems = Vec::new();
+        let judged = external_row(&row, (report(observed), 0, true), &truths, &mut problems)
+            .expect("validated q13 source");
+        assert_eq!(problems, Vec::<String>::new());
+        judged
+    }
+
+    #[test]
+    fn amended_text_is_shared_and_supersedes_history_without_excusing_output() {
+        for (observed, expected_outcome) in [
+            (vec![READ_13], Outcome::Exact),
+            (vec![TRUTH_13], Outcome::Wrong),
+            (vec!["unrelated"], Outcome::Wrong),
+            (vec![READ_13, "unrelated"], Outcome::Extra),
+            (vec![], Outcome::Missed),
+        ] {
+            let mut rows = vec![
+                amended_q13(&observed),
+                zxing_row(&DISPOSITIONS[1], OUTER_16, &[OUTER_16, INNER_16]),
+            ];
+            let checks = apply_dispositions(&mut rows, true);
+            assert_eq!(rows[0].verdict, Some(expected_outcome));
+            assert_eq!(rows[0].outcome, expected_outcome);
+            assert_eq!(checks[0].state, DispositionState::Superseded);
+            assert_eq!(rows[1].outcome, Outcome::Ambiguous);
+            assert_eq!(checks[1].state, DispositionState::Holds);
+            let expected = rows[0].expected.as_ref().expect("text truth");
+            assert_eq!(expected.len(), 1);
+            assert_eq!(expected[0].identity, None);
+            assert_eq!(expected[0].unit.symbology, Some(QrCode));
+            assert_eq!(expected[0].unit.text, READ_13);
+            let shared = truth_amendments::resolve(
+                &rows[0].path,
+                &rows[0].image_sha256,
+                rows[0].truth_sha256.as_deref().expect("original hash"),
+                TRUTH_13.as_bytes(),
+            )
+            .expect("same shared loader");
+            assert_eq!(expected[0].unit.text, shared.text);
+            let problems = blockers(&Integrity::default(), &rows, &checks);
+            let wanted = if expected_outcome.is_wrong_class() {
+                vec![format!(
+                    "{} — {}",
+                    expected_outcome.as_str(),
+                    truth_amendments::Q13.image_path
+                )]
+            } else {
+                vec![]
+            };
+            assert_eq!(problems, wanted);
+            let receipt = serde_json::to_value(row_receipt(&rows[0])).expect("receipt");
+            assert_eq!(
+                receipt["truth_sha256"],
+                external::sha256_bytes(TRUTH_13.as_bytes())
+            );
+            assert_eq!(
+                receipt["truth_amendment"]["effective_text_sha256"],
+                external::sha256_bytes(READ_13.as_bytes())
+            );
+            assert_eq!(receipt["disposition"], "known_wrong");
+            assert_eq!(receipt["disposition_state"], "superseded");
+            let (_, sets) = tallies(&rows);
+            let tally = &sets[&Set::Zxing];
+            assert_eq!(
+                (tally.images, tally.truth, tally.negatives, tally.unlabelled),
+                (2, 2, 0, 0)
+            );
+            for outcome in Outcome::ALL {
+                assert_eq!(
+                    tally.outcomes.get(outcome),
+                    u32::from(outcome == expected_outcome)
+                        + u32::from(outcome == Outcome::Ambiguous)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn amended_external_row_refuses_drift_instead_of_emitting_a_false_exact() {
+        let pin = &truth_amendments::Q13;
+        for (image_sha, truth_sha, truth, error) in [
+            (
+                "changed",
+                pin.original_truth_sha256,
+                TRUTH_13,
+                "q13 truth amendment: image sha256 mismatch",
+            ),
+            (
+                pin.image_sha256,
+                "changed",
+                TRUTH_13,
+                "q13 truth amendment: original truth sha256 mismatch",
+            ),
+            (
+                pin.image_sha256,
+                pin.original_truth_sha256,
+                READ_13,
+                "q13 truth amendment: original truth sha256 mismatch",
+            ),
+        ] {
+            let row = Row {
+                status: Status::Wrong,
+                sha256: image_sha.to_owned(),
+                path: pin.image_path.to_owned(),
+            };
+            let truths = BTreeMap::from([(
+                "zxing-blackbox/qrcode-2/13.txt",
+                (truth_sha, truth.as_bytes().to_vec()),
+            )]);
+            let mut problems = Vec::new();
+            assert!(
+                external_row(&row, (report(&[READ_13]), 0, true), &truths, &mut problems).is_none()
+            );
+            assert_eq!(problems, [error]);
+        }
+        let mut row = amended_q13(&[READ_13]);
+        row.expected = Some(vec![text_unit(TRUTH_13)]);
+        assert_eq!(
+            settle(&row, Outcome::Wrong, &DISPOSITIONS[0], true),
+            (Outcome::Wrong, DispositionState::Void)
+        );
+    }
+
+    #[test]
+    fn amended_external_row_requires_the_original_truth_file() {
+        let pin = &truth_amendments::Q13;
+        let row = Row {
+            status: Status::Wrong,
+            sha256: pin.image_sha256.to_owned(),
+            path: pin.image_path.to_owned(),
+        };
+        let mut problems = Vec::new();
+        assert!(
+            external_row(
+                &row,
+                (report(&[]), 0, true),
+                &BTreeMap::new(),
+                &mut problems
+            )
+            .is_none()
+        );
+        assert_eq!(
+            problems,
+            [
+                "labelled image without a verified zxing-blackbox/qrcode-2/13.txt or a pinned symbology: zxing-blackbox/qrcode-2/13.png"
+            ]
+        );
+    }
+
     /// The pins are the public payloads' own hashes, nothing typed by hand.
     #[test]
     fn disposition_pins_match_the_public_payloads() {
@@ -3020,7 +3229,7 @@ mod tests {
         let DispositionKind::KnownWrong { signature } = known_wrong.kind else {
             panic!("13 is known_wrong");
         };
-        assert_eq!(observed_signature(&[plain(QrCode, MISREAD_13)]), signature);
+        assert_eq!(observed_signature(&[plain(QrCode, READ_13)]), signature);
         let DispositionKind::TruthIncomplete { excused } = double_qr.kind else {
             panic!("16 is truth_incomplete");
         };
@@ -3036,10 +3245,7 @@ mod tests {
         let settled =
             |d: &Disposition, row: &Judged| settle(row, row.verdict.expect("labelled"), d, true);
         assert_eq!(
-            settled(
-                &known_wrong,
-                &zxing_row(&known_wrong, TRUTH_13, &[MISREAD_13])
-            ),
+            settled(&known_wrong, &zxing_row(&known_wrong, TRUTH_13, &[READ_13])),
             (Outcome::Wrong, DispositionState::Holds)
         );
         // fixed (exact) or honestly refused (missed): stale, never silent
@@ -3051,13 +3257,13 @@ mod tests {
             );
         }
         // a re-shot image or an amended truth voids the pin
-        let mut redrawn = zxing_row(&known_wrong, TRUTH_13, &[MISREAD_13]);
+        let mut redrawn = zxing_row(&known_wrong, TRUTH_13, &[READ_13]);
         redrawn.image_sha256 = "0".repeat(64);
         assert_eq!(
             settled(&known_wrong, &redrawn),
             (Outcome::Wrong, DispositionState::Void)
         );
-        let mut amended = zxing_row(&known_wrong, TRUTH_13, &[MISREAD_13]);
+        let mut amended = zxing_row(&known_wrong, TRUTH_13, &[READ_13]);
         amended.truth_sha256 = Some("0".repeat(64));
         assert_eq!(settled(&known_wrong, &amended).1, DispositionState::Void);
         // the truth plus the excused inner symbol: ambiguous, as pinned
@@ -3102,10 +3308,7 @@ mod tests {
         let decoder =
             |d: &Disposition, row: &Judged| settle(row, row.verdict.expect("labelled"), d, false);
         assert_eq!(
-            decoder(
-                &known_wrong,
-                &zxing_row(&known_wrong, TRUTH_13, &[MISREAD_13])
-            ),
+            decoder(&known_wrong, &zxing_row(&known_wrong, TRUTH_13, &[READ_13])),
             (Outcome::Wrong, DispositionState::Holds),
             "a decoder sharing the misread is counted wrong"
         );
@@ -3191,7 +3394,7 @@ mod tests {
     fn holding_dispositions_settle_rows_and_known_wrong_blocks() {
         let [known_wrong, double_qr] = DISPOSITIONS;
         let mut rows = vec![
-            zxing_row(&known_wrong, TRUTH_13, &[MISREAD_13]),
+            zxing_row(&known_wrong, TRUTH_13, &[READ_13]),
             zxing_row(&double_qr, OUTER_16, &[INNER_16, OUTER_16]),
         ];
         let checks = apply_dispositions(&mut rows, true);

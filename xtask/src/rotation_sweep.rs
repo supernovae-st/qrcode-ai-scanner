@@ -10,7 +10,7 @@
 //! sibling is an ENGINE orientation gap, not image damage — the rotation is
 //! lossless by construction.
 //!
-//! Non-gating (prints the table, always exits 0): cardinal-rotation truth
+//! Non-gating decode counts (input/truth errors still fail): cardinal-rotation truth
 //! moves with engine versions, so it reads as a dashboard, not a pin. The
 //! per-suite `zxing-ref` column is zxing's `mustPassCount` at 0° — their
 //! per-rotation thresholds differ per suite and are not mirrored here; our
@@ -171,50 +171,69 @@ fn print_row(suite: &str, images: usize, counts: &[u32]) {
 /// Arbitrary-angle probe points — interpolated (trend), unlike the cardinals.
 const ANGLES: [f32; 3] = [15.0, 30.0, 45.0];
 
-/// Sorted decodable images of one suite (sibling `.txt` ground truth exists).
-fn suite_images(suite_dir: &Path) -> Vec<std::path::PathBuf> {
-    let mut images: Vec<std::path::PathBuf> = std::fs::read_dir(suite_dir)
-        .expect("read suite")
-        .filter_map(|e| {
-            let p = e.expect("dir entry").path();
-            let ext = p
-                .extension()
-                .and_then(|x| x.to_str())
-                .map(str::to_ascii_lowercase);
-            (matches!(ext.as_deref(), Some("png" | "jpg" | "jpeg" | "gif"))
-                && ground_truth(&p).is_some())
-            .then_some(p)
-        })
-        .collect();
-    images.sort();
-    images
+/// Original encoded input and the truth validated against those exact bytes.
+struct SuiteImage {
+    path: std::path::PathBuf,
+    encoded: Vec<u8>,
+    truth: String,
 }
 
-/// Per-suite match counts: run `per_image(base, w, h, truth)` over every
-/// image in parallel and sum the N-column hit rows.
+/// Sorted labelled images. Missing ordinary labels may be skipped; an
+/// amendment error must stop the sweep, never disappear through a filter.
+fn suite_images(corpus: &Path, suite_dir: &Path) -> Result<Vec<SuiteImage>, String> {
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(suite_dir).map_err(|e| e.to_string())? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        let ext = path
+            .extension()
+            .and_then(|x| x.to_str())
+            .map(str::to_ascii_lowercase);
+        if matches!(ext.as_deref(), Some("png" | "jpg" | "jpeg" | "gif")) {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    let mut images = Vec::new();
+    for path in paths {
+        let relative = path
+            .strip_prefix(corpus)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let encoded = std::fs::read(&path).map_err(|e| format!("{relative}: {e}"))?;
+        if let Some(truth) = ground_truth(corpus, &relative, &encoded)? {
+            images.push(SuiteImage {
+                path,
+                encoded,
+                truth: truth.text,
+            });
+        }
+    }
+    Ok(images)
+}
+
+/// Transform only pixels decoded from the encoded input used to validate
+/// the truth; reopening the file here would sever that provenance binding.
 fn tally<const N: usize>(
-    images: &[std::path::PathBuf],
+    images: &[SuiteImage],
     per_image: impl Fn(&[u8], u32, u32, &str) -> [u32; N] + Sync,
-) -> [u32; N] {
-    images
+) -> Result<[u32; N], String> {
+    let rows: Result<Vec<[u32; N]>, String> = images
         .par_iter()
-        .map(|img_path| {
-            let truth = ground_truth(img_path).expect("filtered on Some");
-            let luma = image::open(img_path)
-                .unwrap_or_else(|e| panic!("{}: {e}", img_path.display()))
+        .map(|input| {
+            let luma = image::load_from_memory(&input.encoded)
+                .map_err(|e| format!("{}: {e}", input.path.display()))?
                 .to_luma8();
             let (w, h) = (luma.width(), luma.height());
-            per_image(&luma.into_raw(), w, h, &truth)
+            Ok(per_image(&luma.into_raw(), w, h, &input.truth))
         })
-        .reduce(
-            || [0u32; N],
-            |mut acc, hits| {
-                for (a, h) in acc.iter_mut().zip(hits) {
-                    *a += h;
-                }
-                acc
-            },
-        )
+        .collect();
+    Ok(rows?.into_iter().fold([0u32; N], |mut acc, row| {
+        for (a, r) in acc.iter_mut().zip(row) {
+            *a += r;
+        }
+        acc
+    }))
 }
 
 fn print_total<const N: usize>(grand_images: u32, totals: [u32; N]) {
@@ -223,7 +242,15 @@ fn print_total<const N: usize>(grand_images: u32, totals: [u32; N]) {
 }
 
 pub(crate) fn run() {
-    let dir = crate::external::corpus_dir(None).join("zxing-blackbox");
+    if let Err(error) = run_sweep() {
+        eprintln!("rotation-sweep: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn run_sweep() -> Result<(), String> {
+    let corpus = crate::external::corpus_dir(None);
+    let dir = corpus.join("zxing-blackbox");
     if !dir.is_dir() {
         eprintln!(
             "{} not present — fetch the corpora first \
@@ -233,15 +260,13 @@ pub(crate) fn run() {
         std::process::exit(2);
     }
 
-    let mut suites: Vec<String> = std::fs::read_dir(&dir)
-        .expect("read zxing-blackbox")
-        .filter_map(|e| {
-            let e = e.expect("dir entry");
-            e.path()
-                .is_dir()
-                .then(|| e.file_name().to_string_lossy().into_owned())
-        })
-        .collect();
+    let mut suites = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.path().is_dir() {
+            suites.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
     suites.sort();
 
     println!(
@@ -251,14 +276,14 @@ pub(crate) fn run() {
     let mut totals = [0u32; 8];
     let mut grand_images = 0u32;
     for suite in &suites {
-        let images = suite_images(&dir.join(suite));
+        let images = suite_images(&corpus, &dir.join(suite))?;
         let counts = tally::<8>(&images, |base, w, h, truth| {
             let scanner = scanner();
             hit_row([0u8, 1, 2, 3].map(|turn| {
                 let (buf, rw, rh) = rot_luma(base, w, h, turn);
                 verdicts(&scanner, &buf, rw, rh, truth)
             }))
-        });
+        })?;
         #[expect(
             clippy::cast_possible_truncation,
             reason = "suite sizes are double digits"
@@ -283,7 +308,7 @@ pub(crate) fn run() {
     println!("|---|---|---|---|---|---|---|---|---|---|");
     let mut arb_totals = [0u32; 8];
     for suite in &suites {
-        let images = suite_images(&dir.join(suite));
+        let images = suite_images(&corpus, &dir.join(suite))?;
         let counts = tally::<8>(&images, |base, w, h, truth| {
             let scanner = scanner();
             let [at15, at30, at45] = ANGLES.map(|angle| {
@@ -291,7 +316,7 @@ pub(crate) fn run() {
                 verdicts(&scanner, &buf, rw, rh, truth)
             });
             hit_row([verdicts(&scanner, base, w, h, truth), at15, at30, at45])
-        });
+        })?;
         for (t, c) in arb_totals.iter_mut().zip(counts) {
             *t += c;
         }
@@ -303,6 +328,7 @@ pub(crate) fn run() {
          background) — drops mix resampling loss with engine tolerance; read \
          this table as a trend line, never a gate"
     );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -310,6 +336,58 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[test]
+    fn suite_loading_keeps_amendment_errors_instead_of_filtering_the_row() {
+        let root =
+            std::env::temp_dir().join(format!("qrscan-rotation-truth-{}", std::process::id()));
+        let image = root.join(crate::truth_amendments::Q13.image_path);
+        let suite = image.parent().expect("suite");
+        std::fs::create_dir_all(suite).expect("directory");
+        std::fs::write(&image, b"changed encoded PNG").expect("changed image");
+        assert_eq!(
+            suite_images(&root, suite).err(),
+            Some(String::from(
+                "unreadable original truth for zxing-blackbox/qrcode-2/13.png"
+            ))
+        );
+        std::fs::write(
+            image.with_extension("txt"),
+            b"The 2005 USGS aerial photograph of the Washington Monument is censored.",
+        )
+        .expect("original truth");
+        assert_eq!(
+            suite_images(&root, suite).err(),
+            Some(String::from("q13 truth amendment: image sha256 mismatch"))
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn rotations_use_the_original_encoded_input_that_bound_the_truth() {
+        let root =
+            std::env::temp_dir().join(format!("qrscan-rotation-original-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("directory");
+        let path = root.join("x.png");
+        let image = image::DynamicImage::ImageLuma8(
+            image::GrayImage::from_raw(2, 1, vec![19, 207]).expect("pixels"),
+        );
+        image.save(&path).expect("image");
+        std::fs::write(root.join("x.txt"), b"truth\n").expect("truth");
+        let inputs = suite_images(&root, &root).expect("loaded");
+        assert_eq!(inputs.len(), 1);
+        std::fs::write(&path, b"replaced after input validation").expect("replace");
+        assert_eq!(
+            tally::<1>(&inputs, |pixels, width, height, truth| {
+                assert_eq!((width, height), (2, 1));
+                assert_eq!(pixels, [19, 207]);
+                assert_eq!(truth, "truth\n");
+                [1]
+            }),
+            Ok([1])
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
 
     #[test]
     fn bilinear_rotation_grows_the_canvas_and_preserves_flat_fields() {

@@ -181,6 +181,9 @@ IS: [`corpus-external.tsv`](corpus-external.tsv) pins sha256 + per-image
 decode status for every file, generated from a real run, never hand-typed
 (see “Reproducing the headline numbers” below).
 
+The following table predates the qrcode-2/13 truth amendment; it is not a
+measurement of the amended corpus.
+
 | corpus | result | note |
 |---|---|---|
 | zxing blackbox qrcode-1…6 (179 images, ground truth) | **169/179 exact-text match @ 0°** (9 blind · 1 wrong) | per suite 20 · 34 · 42 · 39 · 19 · 15 against ZXing's own 0° pass thresholds 17 · 32 · 38 · 36 · 19 · 15 (`QRCodeBlackBox1…6TestCase`, 157 in all): above on the first four suites, equal on the last two, whose thresholds are every image |
@@ -188,16 +191,15 @@ decode status for every file, generated from a real run, never hand-typed
 | qrcode-ai.com artistic gallery (full pinned set) | **56/161 decoded** | the blind family is multi-QR collages, extreme 3D perspective and busy marketing scenes · six are vendored as `expect = "fail"` frontier fixtures; `corpus-report --external` re-measures this exact number |
 | center-logo occlusion (v5-H, gray disk) | engines die at >20% radius · **rescue decodes through 30%** | errors-and-erasures RS · `engines: ["rescue"]` in the report |
 
-One of the 10 zxing misses is a **truth conflict** on `qrcode-2/13.png`:
-the observed decode reads "photography", while the pinned upstream `.txt`
-reads "photograph". The provenance of that label is disputed; neither the
-scanner's output nor agreement among related ZXing implementations proves
-an amendment. The original image and truth hashes remain pinned, and the
-strict oracle retains its blocking `wrong` outcome and `known_wrong`
-disposition against that upstream text until independently qualified evidence
-resolves the conflict.
-A zero correction margin or `low_correction_margin` hint does not establish
-which text the image encodes.
+One historical zxing miss was a **truth conflict** on `qrcode-2/13.png`:
+the upstream `.txt` reads "photograph", while independently executed external
+ZXing-C++ and C quirc readers confirmed "photography" on original-derived
+pixels. The [pinned text amendment](spec/corpus-truth-amendments.md#zxing-qrcode-2-13)
+preserves the original image and truth hashes, uses the confirmed text in all
+corpus instruments and records the historical `known_wrong` disposition as
+`superseded` only when those exact inputs validate. Wrong and extra outputs
+still block. This is text confirmation, not proof of ECI/FNC1 declarations or
+native QR byte length; a zero correction margin alone proves neither text.
 
 #### Reproducing the headline numbers
 

@@ -33,6 +33,7 @@ mod oracle;
 mod rescue_stress;
 mod rotation_sweep;
 mod sync_version;
+mod truth_amendments;
 
 /// Loud allocator — every single allocation request ≥ 1 GiB prints its size
 /// before being served. The CI runner died on a silent 14 GiB request from

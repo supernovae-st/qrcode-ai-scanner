@@ -62,6 +62,8 @@ use qrcode_ai_scanner::{ImageInput, ScanProfile, Scanner, ScoreDepth};
 use rayon::prelude::*;
 use sha2::{Digest as _, Sha256};
 
+use crate::truth_amendments::{self, Truth};
+
 /// Committed manifest, at the repo root next to `corpus.toml`.
 pub(crate) const MANIFEST: &str = "corpus-external.tsv";
 /// Gitignored corpus root, at the repo root.
@@ -328,11 +330,6 @@ pub(crate) fn walk_sorted(dir: &Path) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-fn sha256_hex(path: &Path) -> String {
-    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    sha256_bytes(&bytes)
-}
-
 /// Lowercase hex sha256 — the manifest's hash format.
 pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
@@ -344,11 +341,31 @@ pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
     hex
 }
 
-/// Ground truth for a zxing image: the sibling `.txt`, decoded exactly the
-/// way the blackbox harness reads it (UTF-8, then ISO-8859-1) — no trimming.
-pub(crate) fn ground_truth(img_abs: &Path) -> Option<String> {
-    let txt = img_abs.with_extension("txt");
-    std::fs::read(txt).ok().map(decode_truth)
+/// Read the sibling truth without trimming, then resolve its amendment
+/// against the original encoded image bytes, before any transforms or scan.
+pub(crate) fn ground_truth(
+    corpus: &Path,
+    image_path: &str,
+    encoded: &[u8],
+) -> Result<Option<Truth>, String> {
+    let txt = corpus.join(image_path).with_extension("txt");
+    let original = match std::fs::read(&txt) {
+        Ok(original) => original,
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                && image_path != truth_amendments::Q13.image_path =>
+        {
+            return Ok(None);
+        }
+        Err(_) => return Err(format!("unreadable original truth for {image_path}")),
+    };
+    truth_amendments::resolve(
+        image_path,
+        &sha256_bytes(encoded),
+        &sha256_bytes(&original),
+        &original,
+    )
+    .map(Some)
 }
 
 /// Truth-file bytes → text: UTF-8, else ISO-8859-1 (the blackbox harness
@@ -376,11 +393,17 @@ pub(crate) fn scanner() -> Scanner {
 /// gate — a caught panic is already the honest accounting the engine wrapper
 /// records in `report.trace.engine_panics`; the anonymous stderr line from
 /// the panic hook names no file, this does).
-fn scan_status(scanner: &Scanner, abs: &Path) -> (Status, u8) {
-    let bytes = std::fs::read(abs).unwrap_or_else(|e| panic!("{}: {e}", abs.display()));
+fn scan_status(
+    scanner: &Scanner,
+    corpus: &Path,
+    image_path: &str,
+    bytes: &[u8],
+) -> Result<(Status, u8), String> {
+    // Truth errors must survive a blind scan: validate before the early return.
+    let truth = ground_truth(corpus, image_path, bytes)?;
     let report = scanner
-        .scan(ImageInput::encoded(&bytes))
-        .unwrap_or_else(|e| panic!("scan {}: {e}", abs.display()));
+        .scan(ImageInput::encoded(bytes))
+        .map_err(|e| format!("scan {image_path}: {e}"))?;
     let engine_panics = report.trace.engine_panics;
     let texts: Vec<&str> = report
         .detections
@@ -388,12 +411,12 @@ fn scan_status(scanner: &Scanner, abs: &Path) -> (Status, u8) {
         .map(|d| d.content.text.as_str())
         .collect();
     if texts.is_empty() {
-        return (Status::Blind, engine_panics);
+        return Ok((Status::Blind, engine_panics));
     }
     // any() on purpose: the pin is a tripwire; oracle.rs judges the full set.
-    let status = match ground_truth(abs) {
+    let status = match truth {
         Some(truth) => {
-            if texts.iter().any(|t| *t == truth) {
+            if texts.iter().any(|t| *t == truth.text) {
                 Status::Match
             } else {
                 Status::Wrong
@@ -401,7 +424,7 @@ fn scan_status(scanner: &Scanner, abs: &Path) -> (Status, u8) {
         }
         None => Status::Decode,
     };
-    (status, engine_panics)
+    Ok((status, engine_panics))
 }
 
 pub(crate) fn parse_manifest(text: &str) -> Result<Vec<Row>, String> {
@@ -508,38 +531,44 @@ fn print_summary(rows: &[Row]) {
 pub(crate) fn generate() {
     let root = crate::repo_root();
     let dir = corpus_dir(None);
+    print_truth_amendment();
     let rels = walk_sorted(&dir).unwrap_or_else(|e| {
         eprintln!("gen-external-manifest: cannot read the corpus: {e}");
         std::process::exit(2);
     });
     let scanner = scanner();
-    let rows: Vec<Row> = rels
+    let rows: Result<Vec<Row>, String> = rels
         .par_iter()
         .map(|rel| {
             let abs = dir.join(rel);
+            let bytes = std::fs::read(&abs).map_err(|e| format!("read {rel}: {e}"))?;
             let status = if is_image(rel) {
                 // Pins hold decode truth only — panic counts move with engine
                 // versions and would churn the manifest for zero pin value.
-                scan_status(&scanner, &abs).0
+                scan_status(&scanner, &dir, rel, &bytes)?.0
             } else {
                 Status::Aux
             };
-            Row {
+            Ok(Row {
                 status,
-                sha256: sha256_hex(&abs),
+                sha256: sha256_bytes(&bytes),
                 path: rel.clone(),
-            }
+            })
         })
         .collect();
+    let rows = rows.unwrap_or_else(|e| {
+        eprintln!("gen-external-manifest: {e}");
+        std::process::exit(1);
+    });
 
     let mut out = String::from(
         "# corpus-external.tsv — pinned truth for the NOT-vendored external corpora.\n\
          # Generated by `cargo run --release -p xtask -- gen-external-manifest` from a\n\
          # real budget-free run — never hand-edited. Columns: status<TAB>sha256<TAB>path\n\
          # (path relative to corpus-external/). Status vocabulary:\n\
-         #   match  — decoded, text equals the sibling .txt ground truth\n\
+         #   match  — decoded, text equals the effective truth (see spec/corpus-truth-amendments.md)\n\
          #   decode — decoded, no ground truth exists (gallery images)\n\
-         #   wrong  — decoded, text differs from ground truth (miscorrection class)\n\
+         #   wrong  — decoded, text differs from effective truth\n\
          #   blind  — no decode (the documented-blind-spot family)\n\
          #   aux    — not an image (ground truth / metadata), hash-pinned only\n\
          # `corpus-report --external` re-measures and fails on ANY divergence:\n\
@@ -622,6 +651,28 @@ fn classify(
 /// when the pin was scannable (hash matches, image row).
 type Measured<'a> = (&'a Row, String, Option<(Status, u8)>);
 
+fn measure<'a>(scanner: &Scanner, dir: &Path, row: &'a Row) -> Result<Measured<'a>, String> {
+    let bytes =
+        std::fs::read(dir.join(&row.path)).map_err(|e| format!("read {}: {e}", row.path))?;
+    let sha = sha256_bytes(&bytes);
+    // A hash-drifted file's pin is void — report the drift, skip the scan.
+    let status = (sha == row.sha256 && row.status != Status::Aux)
+        .then(|| scan_status(scanner, dir, &row.path, &bytes))
+        .transpose()?;
+    Ok((row, sha, status))
+}
+
+fn print_truth_amendment() {
+    let amendment = &truth_amendments::Q13;
+    println!(
+        "truth amendment {}: original {} -> effective {} (spec/corpus-truth-amendments.md; provenance {})",
+        amendment.id,
+        amendment.original_truth_sha256,
+        amendment.effective_text_sha256,
+        truth_amendments::fingerprint()
+    );
+}
+
 pub(crate) fn verify() {
     let root = crate::repo_root();
     let manifest_text = std::fs::read_to_string(root.join(MANIFEST)).unwrap_or_else(|e| {
@@ -632,6 +683,7 @@ pub(crate) fn verify() {
         eprintln!("{MANIFEST}: {e}");
         std::process::exit(2);
     });
+    print_truth_amendment();
 
     let dir = match corpus_root(None) {
         CorpusRoot::Present(dir) => dir,
@@ -677,16 +729,19 @@ pub(crate) fn verify() {
     }
 
     let scanner = scanner();
-    let measured: Vec<Measured<'_>> = pinned
+    let measured: Vec<Result<Measured<'_>, String>> = pinned
         .par_iter()
         .filter(|row| disk_set.contains(row.path.as_str()))
-        .map(|row| {
-            let abs = dir.join(&row.path);
-            let sha = sha256_hex(&abs);
-            // A hash-drifted file's pin is void — report the drift, skip the scan.
-            let status = (sha == row.sha256 && row.status != Status::Aux)
-                .then(|| scan_status(&scanner, &abs));
-            (row, sha, status)
+        .map(|row| measure(&scanner, &dir, row))
+        .collect();
+    let measured: Vec<Measured<'_>> = measured
+        .into_iter()
+        .filter_map(|result| match result {
+            Ok(measurement) => Some(measurement),
+            Err(error) => {
+                problems.push(error);
+                None
+            }
         })
         .collect();
 
@@ -743,6 +798,45 @@ pub(crate) fn verify() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn amended_truth_errors_survive_missing_files_and_a_blind_input() {
+        let root =
+            std::env::temp_dir().join(format!("qrscan-truth-before-scan-{}", std::process::id()));
+        let pin = &truth_amendments::Q13;
+        let txt = root.join(pin.image_path).with_extension("txt");
+        std::fs::create_dir_all(txt.parent().expect("suite")).expect("directory");
+        let blank = image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(
+            32,
+            32,
+            image::Luma([255]),
+        ));
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        blank
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .expect("PNG");
+        assert_eq!(
+            scan_status(&scanner(), &root, pin.image_path, encoded.get_ref()),
+            Err(String::from(
+                "unreadable original truth for zxing-blackbox/qrcode-2/13.png"
+            ))
+        );
+        std::fs::write(
+            &txt,
+            b"The 2005 USGS aerial photograph of the Washington Monument is censored.",
+        )
+        .expect("original truth");
+        assert_eq!(
+            scan_status(&scanner(), &root, pin.image_path, encoded.get_ref()),
+            Err(String::from("q13 truth amendment: image sha256 mismatch")),
+            "a blank scan must not hide a changed amended input"
+        );
+        assert_eq!(
+            ground_truth(&root, "qrcode-ai/unlabelled.png", encoded.get_ref()),
+            Ok(None)
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
 
     /// The committed manifest itself is a fixture: parseable, sorted,
     /// duplicate-free, and shaped like the corpus it pins. Runs everywhere —
