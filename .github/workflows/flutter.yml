@@ -73,13 +73,14 @@ jobs:
   test:
     needs: stage
     runs-on: ubuntu-24.04
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/flutter-target
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: isolate the portable Cargo target
+        working-directory: .
+        run: printf 'CARGO_TARGET_DIR=%s/flutter-target\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       # flutter_rust_bridge_codegen formats the file it generates with rustfmt,
       # and the pinned toolchain installs with the minimal profile: without the
       # component the drift check below compares unformatted output and fails
