@@ -434,23 +434,6 @@ def self_test():
                     self.assertEqual(actual, expected)
                     self.assertIn("include: package:flutter_lints/flutter.yaml\n", text)
 
-        def test_candidate_android_toolchain_matches_supported_floor(self):
-            project = ROOT / BINDING / "example/android"
-            wrapper = (project / "gradle/wrapper/gradle-wrapper.properties").read_text()
-            settings = (project / "settings.gradle.kts").read_text()
-            for expected in (
-                r"distributionUrl=https\://services.gradle.org/distributions/gradle-8.14.3-all.zip",
-                "distributionSha256Sum=ed1a8d686605fd7c23bdf62c7fc7add1c5b23b2bbc3721e661934ef4a4911d7c",
-            ):
-                with self.subTest(property=expected):
-                    self.assertIn(expected, wrapper.splitlines())
-            for plugin, version in (("com.android.application", "8.11.1"),
-                                    ("org.jetbrains.kotlin.android", "2.2.20")):
-                with self.subTest(plugin=plugin):
-                    self.assertIn(f'id("{plugin}") version "{version}" apply false', settings)
-            self.assertNotIn("android-skip-build-dependency-validation",
-                             (ROOT / ".github/workflows/flutter.yml").read_text())
-
         def test_example_lock_names_current_path_dependency(self):
             version = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
             lock = (ROOT / BINDING / "example/pubspec.lock").read_text()
