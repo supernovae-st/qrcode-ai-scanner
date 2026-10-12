@@ -22,7 +22,7 @@ workspace version, no credential.
   package-inspect.py node [--platform-dirs D]  the main npm tarball (+ platform packages)
   package-inspect.py wasm [--no-build]         the wasm npm tarball (builds pkg/ first)
   package-inspect.py python                    wheel + sdist through maturin
-  package-inspect.py flutter [--flutter BIN]   the pub.dev package
+  package-inspect.py flutter --package-root D the staged pub.dev package
   package-inspect.py archive FILE...           already-built .crate · .tgz · .whl · .tar.gz
   package-inspect.py pypi-live FILE...         wheels + sdist against what PyPI already serves at this version
   package-inspect.py licenses [--sync]         every LICENSE copy against the root text
@@ -40,7 +40,7 @@ its platform package; Python: one wheel per row of python.yml's wheels
 matrix and one sdist) · --record FILE (archive: once nothing failed, one
 `<sha256>  <file>` line per archive given, in sha256sum's format, so a later
 step can prove it holds the very bytes inspected; removed when anything
-failed).
+failed; flutter records each published file instead).
 
 Verdicts: PASS · FAIL · UNAVAILABLE (a tool or input this host lacks, named,
 never a pass) · BLOCKED (a known structural blocker that packaging metadata
@@ -53,8 +53,10 @@ import contextlib
 import dataclasses
 import datetime
 import email.parser
+import functools
 import gzip
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -1156,73 +1158,121 @@ def parse_pub_tree(output: str) -> list:
     drew `|-- name` / `'-- name` with `|   `.
     """
     rows = []
-    for line in output.splitlines():
+    for line in re.sub(r"\x1b\[[0-9;]*m", "", output).splitlines():
         found = re.match(r"^((?:[│| ]   )*)(?:[├└]──|[|'`]--) (.+)$", line)
         if found:
             name = re.sub(r" \(<?[\d.]+ [KMG]?B\)$", "", found.group(2).strip())
             rows.append((len(found.group(1)) // 4, name))
+        elif re.match(r"^[│| ├└'`]*[├└|'][─-]", line):
+            raise ValueError(f"unparsed pub tree row: {line!r}")
     leaves, stack = [], []
     for i, (depth, name) in enumerate(rows):
+        if depth > len(stack) or "/" in name or "\\" in name or name in (".", ".."):
+            raise ValueError(f"invalid pub tree row: {depth}: {name!r}")
         del stack[depth:]
         stack.append(name)
         if i + 1 == len(rows) or rows[i + 1][0] <= depth:
             leaves.append("/".join(stack))
+    if len(leaves) != len(set(leaves)):
+        raise ValueError("duplicate pub tree leaves")
     return leaves
 
 
+@functools.cache
+def flutter_staging():
+    spec = importlib.util.spec_from_file_location("flutter_staging", ROOT / "scripts" / "stage-flutter-package.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def read_flutter_file(root: pathlib.Path, name: str) -> bytes:
+    flutter_staging().safe_name(name)
+    path = root
+    for part in pathlib.PurePosixPath(name).parts:
+        path = path / part
+        if path.is_symlink():
+            raise ValueError(f"symlink in pub package: {name}")
+    if not path.is_file() or path.stat().st_nlink != 1:
+        raise ValueError(f"not a regular, unlinked pub file: {name}")
+    return path.read_bytes()
+
+
+def check_flutter_sources(art: Artifact, root: pathlib.Path, listing: list, snapshot: dict, revision: str) -> dict:
+    staging = flutter_staging()
+    binding = staging.subfiles(snapshot, staging.BINDING)
+    files = {name: read_flutter_file(root, name) for name in [*binding, ".pubignore"]}
+    files.update({f"{staging.VENDOR}/{name}": data
+                  for name, data in staging.read_tree(root / staging.VENDOR).items()})
+    metadata = staging.verify_staged(files, snapshot, revision)
+    published = {name: read_flutter_file(root, name) for name in listing}
+    required = {name for name in files if not any(part.startswith(".") for part in pathlib.PurePosixPath(name).parts)
+                and pathlib.PurePosixPath(name).name != "pubspec.lock"}
+    required.add(f"{staging.VENDOR}/.cargo_vcs_info.json")
+    missing, extra = sorted(required - set(published)), sorted(set(published) - set(files))
+    art.check("pub includes the complete bundled core and binding sources", not missing, ", ".join(missing))
+    art.check("pub includes only candidate files and staging output", not extra, ", ".join(extra))
+    staging.validate_paths(published)
+    art.sha256 = staging.digest(published)
+    art.size = sum(len(data) for data in published.values())
+    art.notes.append(f"candidate {revision}; bundled core sha256 {metadata['core-content-sha256']}")
+    return published
+
+
 def cmd_flutter(host: Host) -> None:
-    pubspec = (FLUTTER_DIR / "pubspec.yaml").read_text()
+    package_root = pathlib.Path(host.args.package_root).resolve() if host.args.package_root else FLUTTER_DIR
+    pubspec = (package_root / "pubspec.yaml").read_text()
     found = re.search(r"^version:\s*(\S+)", pubspec, re.MULTILINE)
     version = found.group(1) if found else None
     art = host.add(Artifact(f"pub qrcode_ai_scanner {version}", "pub"))
     art.check(f"pubspec version = {host.version} (workspace)", version == host.version, f"{version}")
     binary = host.args.flutter or which("flutter") or which("dart")
-    listing, source = None, ""
+    listing = []
+    art.path = rel(package_root)
+    try:
+        staging = flutter_staging()
+        manifests = {path.relative_to(package_root).as_posix(): read_flutter_file(
+            package_root, path.relative_to(package_root).as_posix()) for path in package_root.rglob("Cargo.toml")
+            if not {"target", ".dart_tool", "build"}.intersection(path.relative_to(package_root).parts)}
+        staging.validate_paths(manifests)
+        art.check("all recursive Rust path dependencies stay inside the package", True)
+    except (OSError, ValueError, KeyError) as error:
+        art.check("all recursive Rust path dependencies stay inside the package", False, str(error))
     if binary:
-        proc = host.run("pub-publish-dry-run", [binary, "pub", "publish", "--dry-run"], cwd=FLUTTER_DIR, timeout=900)
-        leaves = parse_pub_tree(proc.stdout)
-        if leaves:
-            listing, source = leaves, f"{pathlib.Path(binary).name} pub publish --dry-run (exit {proc.returncode})"
-            warnings = re.search(r"Package has (\d+) warnings?", proc.stdout + proc.stderr)
-            art.notes.append(f"pub validator: {warnings.group(0) if warnings else 'no warning count printed'}")
-        else:
-            art.notes.append(f"pub publish --dry-run printed no file tree (exit {proc.returncode}): {tail(proc, 4)}")
-    if listing is None:
-        proc = host.run("git-ls-files-flutter", ["git", "ls-files", "--cached", "--others", "--exclude-standard",
-                                                 "--", "."], cwd=FLUTTER_DIR)
-        listing = proc.stdout.split()
-        source = "git ls-files approximation (no Flutter/Dart SDK): pub honours the same .gitignore rules"
+        proc = host.run("pub-publish-dry-run", [binary, "pub", "publish", "--dry-run"], cwd=package_root, timeout=900)
+        summary = re.search(r"Package has (\d+) warnings?(?: and \d+ hints?)?\.\s*\Z", proc.stdout)
+        warning_only = proc.returncode == 65 and summary and int(summary.group(1)) > 0
+        art.check("pub validator completes without errors", proc.returncode == 0 or warning_only, tail(proc, 4))
+        if summary:
+            art.notes.append(f"pub validator: {summary.group(0).strip()}")
+        try:
+            listing = parse_pub_tree(proc.stdout)
+        except ValueError as error:
+            art.check("pub file tree parses completely", False, str(error))
+        art.check("pub publish --dry-run prints a parsed file tree", bool(listing))
+    else:
+        art.unavailable("Flutter/Dart SDK absent; pub validator and published file tree NOT VERIFIED")
+        return
     art.listing = sorted(listing)
-    art.path = rel(FLUTTER_DIR)
-    art.notes.append(f"listing: {source}")
+    if not listing:
+        return
     art.check("LICENSE at the package root", "LICENSE" in listing)
-    check_license(art, (FLUTTER_DIR / "LICENSE").read_bytes() if (FLUTTER_DIR / "LICENSE").is_file() else None,
-                  "bindings/flutter/LICENSE")
+    check_license(art, (package_root / "LICENSE").read_bytes() if (package_root / "LICENSE").is_file() else None,
+                  "Flutter package LICENSE")
     for required in ("README.md", "CHANGELOG.md", "pubspec.yaml", "rust/Cargo.toml"):
         art.check(f"{required} in the package", required in listing)
     check_stray(art, listing)
-    crate = tomllib.loads((FLUTTER_DIR / "rust" / "Cargo.toml").read_text())
+    crate = tomllib.loads((package_root / "rust" / "Cargo.toml").read_text())
     rxing = crate.get("profile", {}).get("release", {}).get("package", {}).get("rxing", {})
     art.check("rust/Cargo.toml keeps rxing overflow-checks (cargokit builds it as its own root)",
               rxing.get("overflow-checks") is True, f"profile.release.package.rxing = {rxing}")
-    escaping = []
-    for dep_name, dep in crate.get("dependencies", {}).items():
-        if isinstance(dep, dict) and "path" in dep:
-            target = (FLUTTER_DIR / "rust" / dep["path"]).resolve()
-            if FLUTTER_DIR.resolve() not in target.parents and target != FLUTTER_DIR.resolve():
-                escaping.append(f"{dep_name} → {dep['path']}")
-    if escaping:
-        art.blocked("the Rust crate's path dependency leaves the package, so the published package cannot "
-                    f"build its core ({'; '.join(escaping)}); pub.dev's first publish is also manual")
-    # The publish step passes --release-set: there, unlike flutter › test, the
-    # inspection must have read pub's real file tree (not the git ls-files
-    # fallback) and the package must not be BLOCKED — nothing that cannot build
-    # for a consumer, or whose file list was never parsed, may be uploaded.
-    if host.args.release_set:
-        art.check("pub publish --dry-run printed the real file tree (not the git ls-files fallback)",
-                  bool(source) and "git ls-files" not in source, source or "no listing")
-        if art.forced == BLOCKED:
-            art.check("the published package can build for a consumer (not BLOCKED)", False, art.reason)
+    try:
+        revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        published = check_flutter_sources(art, package_root, listing, staging.candidate_snapshot(ROOT, revision), revision)
+        art.check("staged sources, versions, LICENSE and cargokit cache identity match this candidate", True)
+        host.recorded.extend((sha256(data), str(package_root / name)) for name, data in sorted(published.items()))
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+        art.check("staged sources, versions, LICENSE and cargokit cache identity match this candidate", False, str(error))
 
 
 # ---------------------------------------------------------------- licenses · versions
@@ -2035,10 +2085,85 @@ def self_test() -> int:
         if _run_main(["versions", "--record", str(base / "versions.sha256")]) != 2:
             failures.append("--record with versions: not refused as a usage error (exit 2)")
 
+    flutter_count, flutter_failures = flutter_self_test()
+    ran += flutter_count
+    failures.extend(flutter_failures)
     for failure in failures:
         print(f"SELF-TEST FAILED · {failure}", file=sys.stderr)
     print(f"self-test: {ran - len(failures)}/{ran} scenarios as expected")
     return 1 if failures else 0
+
+
+def flutter_self_test():
+    staging = flutter_staging()
+    version = workspace_version()
+    core, snapshot, revision = staging.fixture(version)
+    core["LICENSE"] = LICENSE.read_bytes()
+    snapshot.update({"LICENSE": LICENSE.read_bytes(), f"{staging.CORE}/LICENSE": LICENSE.read_bytes(),
+                     f"{staging.BINDING}/LICENSE": LICENSE.read_bytes(),
+                     f"{staging.BINDING}/README.md": b"readme\n", f"{staging.BINDING}/CHANGELOG.md": b"changes\n"})
+    snapshot[f"{staging.BINDING}/rust/Cargo.toml"] += b'\n[profile.release.package.rxing]\noverflow-checks = true\n'
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    core[".cargo_vcs_info.json"] = json.dumps({"git": {"sha1": revision}, "path_in_vcs": staging.CORE}).encode()
+    packed = staging.archive_bytes({f"qrcode-ai-scanner-{version}/{name}": data for name, data in core.items()})
+    clean, _ = staging.bundle(packed, snapshot, revision)
+    names = sorted(name for name in clean if name != ".pubignore")
+
+    def tree(names):
+        rows, seen = [], set()
+        for name in sorted(names):
+            parts = name.split("/")
+            for depth, part in enumerate(parts):
+                prefix = "/".join(parts[:depth + 1])
+                if prefix not in seen:
+                    rows.append("│   " * depth + "├── " + part + (" (<1 KB)" if depth == len(parts) - 1 else ""))
+                    seen.add(prefix)
+        return "\n".join(rows) + "\n"
+
+    failures, count = [], 0
+    scenarios = [
+        ("portable candidate", clean, names, 0, "", PASS),
+        ("warning-only pub validation", clean, names, 65, "Package has 1 warning.\n", PASS),
+        ("validator error with tree", clean, names, 65, "validation failed\n", FAIL),
+        ("unparsed pub listing", clean, [], 0, "files omitted\n", FAIL),
+        ("core source omitted", clean, [name for name in names if not name.endswith("src/lib.rs")], 0, "", FAIL),
+        ("unexpected published source", clean | {"extra.txt": b"stray"}, names + ["extra.txt"], 0, "", FAIL),
+        ("core source tampered", clean | {f"{staging.VENDOR}/src/lib.rs": b"old core"}, names, 0, "", FAIL),
+        ("binding lock tampered", clean | {"rust/Cargo.lock": b"changed"}, names, 0, "", FAIL),
+        ("recursive target escape", clean | {"nested/Cargo.toml": b'[target.x.dependencies]\nbad = { path = "../../outside" }\n'},
+         names + ["nested/Cargo.toml"], 0, "", FAIL),
+        ("duplicate tree entry", clean, names, 0, "├── LICENSE (<1 KB)\n", FAIL),
+        ("tree traversal", clean, names, 0, "├── ..\n│   └── outside (<1 KB)\n", FAIL),
+    ]
+    original_snapshot = staging.candidate_snapshot
+    staging.candidate_snapshot = lambda root, candidate: snapshot
+    try:
+        with tempfile.TemporaryDirectory(prefix="flutter-inspect-selftest-") as temporary:
+            for label, files, listing, status, suffix, expected in scenarios:
+                count += 1
+                root = pathlib.Path(temporary) / str(count)
+                staging.write_tree(root, files)
+                host = Host(build_parser().parse_args(["flutter", "--package-root", str(root), "--flutter", "fake-pub",
+                                                       "--strict", "--release-set"]))
+                commands = []
+
+                def run(label, command, cwd=ROOT, timeout=0):
+                    commands.append((command, cwd))
+                    return subprocess.CompletedProcess(command, status, tree(listing) + suffix, "")
+
+                host.run = run
+                try:
+                    cmd_flutter(host)
+                    actual = host.artifacts[0].status
+                    if actual != expected or commands != [(["fake-pub", "pub", "publish", "--dry-run"], root.resolve())]:
+                        failures.append(f"Flutter {label}: {actual}, expected {expected}; commands {commands}")
+                    if expected == PASS and len(host.recorded) != len(listing):
+                        failures.append(f"Flutter {label}: incomplete same-byte record")
+                finally:
+                    shutil.rmtree(host.scratch)
+    finally:
+        staging.candidate_snapshot = original_snapshot
+    return count, failures
 
 
 # ---------------------------------------------------------------- report
@@ -2087,24 +2212,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-build", action="store_true", help="wasm: inspect the existing pkg/")
     parser.add_argument("--platform-dirs", help="node: a dir of napi platform packages (npm/)")
     parser.add_argument("--flutter", help="flutter: the flutter (or dart) binary")
+    parser.add_argument("--package-root", help="flutter: inspect this staged package root, not the in-tree binding")
     parser.add_argument("--sync", action="store_true", help="licenses: rewrite stale copies")
     parser.add_argument("--nightly", help="profiles: the nightly toolchain for --unit-graph")
     parser.add_argument("--tag", help="versions: the release tag (vX.Y.Z or refs/tags/vX.Y.Z)")
-    parser.add_argument("--record", help="archive: once nothing failed, write `<sha256>  <file>` per archive given "
+    parser.add_argument("--record", help="archive · flutter: once nothing failed, write `<sha256>  <file>` per inspected file "
                                          "(sha256sum's format) to this file; removed when anything failed")
     parser.add_argument("--release-set", action="store_true",
                         help="node · archive: the set about to publish, complete and nothing else — npm: the main "
                              "package pins every napi target at this version and every pin has its platform "
                              "package; Python: one wheel per row of python.yml's matrix and one sdist. flutter: the "
-                             "stricter publish mode — a BLOCKED package or the git ls-files fallback fails")
+                             "complete portable candidate and real pub validator (required in every Flutter inspection)")
     return parser
 
 
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.record and args.target != "archive":
-        parser.error("--record goes with archive")
+    if args.record and args.target not in ("archive", "flutter"):
+        parser.error("--record goes with archive or flutter")
     if args.target == "selftest":
         return self_test()
 
@@ -2142,7 +2268,7 @@ def main(argv=None) -> int:
         # What this run judged, path as given and sha256: a later step proves
         # it holds those very bytes. Nothing to prove when anything failed.
         record = pathlib.Path(args.record)
-        if bad:
+        if bad or any(art.status != PASS for art in host.artifacts):
             record.unlink(missing_ok=True)
         else:
             record.write_text("".join(f"{digest}  {name}\n" for digest, name in host.recorded))

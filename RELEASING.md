@@ -139,7 +139,7 @@ outside Linux-gnu (2026-07-20) — a toolchain must never move under a tag.
 | crates-publish · npm-publish · python | green; registries live in ~10-15 min — once the one-time setup is done (§ Publishing). Before it, crates-publish and npm-publish stop at authentication; with only some npm trusted publishers configured, the configured platform packages go up and the main package does not, until a re-run after the rest are configured |
 | mobile › test + android | green (JitPack chain proven since v0.6.0) |
 | mobile › ios | **expected red** at the dev-mode guard until the one-time Xcode leg (`bindings/swift/release.sh`) runs; `ios-release` is then skipped |
-| flutter › publish to pub.dev | **expected red** until the one-time manual first publish (and the package can only build its core once its Rust crate stops depending on a path outside the package) |
+| flutter › publish to pub.dev | **expected red** until the one-time manual first publish and owner step 6; the staged package must first pass real pub validation and native Android/iOS consumer builds |
 | JitPack | builds on demand — trigger with a GET on the artifact URL |
 
 ## 7 · The steps no pipeline does
@@ -193,7 +193,7 @@ repository tokens — hence step 0, at merge.
 | crates-publish › publish | `crates-io` | crates.io trusted publishing: `rust-lang/crates-io-auth-action` trades the OIDC token for a 30-minute crates.io token | both crates, packed (`cargo package --locked --no-verify`) and inspected in the job before the token is minted; each upload compared with its inspected archive, byte for byte |
 | npm-publish › publish-native · publish-wasm | `npm` | npm trusted publishing (npm CLI ≥ 11.5.1 on Node 24), provenance attested automatically | the very tarballs pack-native and build-wasm packed and inspected, read back again in the job and uploaded unchanged with `npm publish <tarball> --ignore-scripts`; each `npm publish` first checks that its operand is an absolute path to a regular `.tgz` file whose path and sha256 the in-job re-inspection recorded, and stops the job otherwise; after every upload, and for a version already live, the registry's `dist.integrity` must be that tarball's sha512 |
 | python › release | `release` | PyPI trusted publishing (already live: 0.9.0 carries PEP 740 attestations) | `dist/`, read back in the job: exactly one wheel per row of the wheels matrix and the sdist; before the upload, every file PyPI already serves at the version must be the one read back (sha256), and PyPI may serve no other file there, so `skip-existing` (which goes by file name) skips only proven copies |
-| flutter › publish | `pub` | pub.dev automated publishing; a pushed tag only (pub.dev accepts no other trigger) | the package `package-inspect.py flutter` read back in the job (dormant) |
+| flutter › publish | `pub` | pub.dev automated publishing; a pushed tag only (pub.dev accepts no other trigger) | the portable archive created once by the unprivileged stage job and consumed by host/native checks; extracted outside the checkout, re-inspected with `package-inspect.py flutter --package-root … --strict --release-set --record …`, with file hashes checked immediately before publishing (dormant pending owner step 6) |
 | mobile › ios-release | `release` | the workflow's own `GITHUB_TOKEN`, `contents: write` | the CI-built xcframework zip only when its sha256 is the one Package.swift pins, compared before the release is created or touched; an attached asset is verified, never replaced |
 
 No registry token is read by any workflow. A token (or a person) is still
@@ -373,6 +373,15 @@ performs them):
    nothing to waive). Then Admin › Automated publishing › enable GitHub
    Actions: repository `supernovae-st/qrcode-ai-scanner`, tag pattern
    `v{{version}}`, require environment `pub`.
+   Use `scripts/stage-flutter-package.py` from the exact committed candidate
+   for the manual upload too; never publish `bindings/flutter` directly.
+   The stage vendors that candidate's normalized Cargo archive, verifies its
+   source/version/LICENSE identity, preserves the binding lockfile, and adds
+   the bundled-core digest to the staged manifest to invalidate cargokit's
+   cache on core-only edits. Its receipt records source, content and archive
+   hashes. Inspect that same root and run the native example builds before
+   claiming readiness; source-only checks are insufficient. See
+   `bindings/flutter/README.md` for the staging and inspection commands.
 7. Branch protection: the matrix check `ci / test (ubuntu-latest)` is now
    `test (ubuntu-24.04)`; if it is a required check, update the rule (and
    add `node-smoke`, `wasm-smoke` and `packaging` if they should be).
