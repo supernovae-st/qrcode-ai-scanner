@@ -73,9 +73,10 @@
 # ScoreCheck::from_name and its arms, validate_dims at its limits, Bits::take
 # at its widest read, the GS1 element-string truncation and Digital Link
 # qualifiers, unmask_to_codewords's length check, flatten_or_drop's routing.
-# Four more, missed on both, move to equivalent with their arguments: two
-# separators the GS1 loop strips anyway, two reservations in flatten that only
-# change capacity. Now 35 equivalent · 9 timeout-structural · 19 debt.
+# Two more, missed on both, move to equivalent with their arguments: two
+# separators the GS1 loop strips anyway. The two flatten reservation mutants
+# remain debt: equal output bytes do not establish equal allocation behavior.
+# Now 33 equivalent · 9 timeout-structural · 21 debt.
 
 # ── equivalent ──────────────────────────────────────────────────────────────
 
@@ -368,30 +369,6 @@ reason = """\
 
 [[mutant]]
 file = "crates/qrcode-ai-scanner/src/transform.rs"
-line = 239
-column = 29
-mutation = "replace / with % in flatten"
-category = "equivalent"
-reason = """\
-  `pixels` only sizes flatten's four with_capacity reservations (luma, rgb, fg_luma, \
-  alpha_plane), and the loop pushes the same bytes into them; `% 4` is 0 for an RGBA buffer, so \
-  the planes grow as they fill. std documents a reservation only as a lower bound (capacity at \
-  least n), so no test of the output can tell them apart (recorded as debt at 1c38d7c)"""
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/transform.rs"
-line = 239
-column = 29
-mutation = "replace / with * in flatten"
-category = "equivalent"
-reason = """\
-  `pixels` only sizes flatten's four with_capacity reservations (luma, rgb, fg_luma, \
-  alpha_plane), and the loop pushes the same bytes into them; `* 4` reserves 16 times what they \
-  fill, a resource difference only. std documents a reservation only as a lower bound (capacity \
-  at least n), so no test of the output can tell them apart (recorded as debt at 1c38d7c)"""
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/transform.rs"
 line = 376
 column = 87
 mutation = "replace + with * in downscale_to"
@@ -549,6 +526,32 @@ reason = """\
 
 # ── debt: surviving mutants recorded at 1c38d7c, to be killed by tests (debt,
 #    not equivalence) ────────────────────────────────────────────────────────
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/transform.rs"
+line = 239
+column = 29
+mutation = "replace / with % in flatten"
+category = "debt"
+reason = """\
+  `pixels` only sizes flatten's four with_capacity reservations (luma, rgb, fg_luma, \
+  alpha_plane), and the loop pushes the same bytes into them; `% 4` is 0 for an RGBA buffer, so \
+  the planes grow as they fill. Equal output does not prove equivalence: allocator-call \
+  instrumentation can distinguish the extra growth. Retain as resource-behavior test debt \
+  (recorded as debt at 1c38d7c)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/transform.rs"
+line = 239
+column = 29
+mutation = "replace / with * in flatten"
+category = "debt"
+reason = """\
+  `pixels` only sizes flatten's four with_capacity reservations (luma, rgb, fg_luma, \
+  alpha_plane), and the loop pushes the same bytes into them; `* 4` reserves 16 times what they \
+  fill. A bounded allocator can accept the original reservations and reject the enlarged ones, \
+  so equal output does not prove equivalence. Retain as resource-behavior test debt \
+  (recorded as debt at 1c38d7c)"""
 
 [[mutant]]
 file = "crates/qrcode-ai-scanner/src/engine/rqrr_engine.rs"

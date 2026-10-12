@@ -382,10 +382,11 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   races its shell** — unit tests pin the score-check names, the input
   limits at their exact values, the widest bit read, the GS1
   element-string truncation and Digital Link qualifiers, the
-  stream-length check and when raw RGBA flattens; four survivors no test
-  can tell apart are argued equivalent
-  (`.cargo/mutants-dispositions.toml`: 35 equivalent · 9
-  timeout-structural · 19 debt); and the orphaned-worker test releases
+  stream-length check and when raw RGBA flattens; two GS1 separator
+  survivors are argued equivalent, while two allocation mutants remain
+  resource-behavior test debt
+  (`.cargo/mutants-dispositions.toml`: 33 equivalent · 9
+  timeout-structural · 21 debt); and the orphaned-worker test releases
   its shell only once the worker has taken its parent.
 
 ## 0.9.0 — 2026-07-20
