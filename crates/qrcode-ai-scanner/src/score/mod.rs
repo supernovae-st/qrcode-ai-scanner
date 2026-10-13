@@ -1375,7 +1375,10 @@ mod tests {
         .unwrap() else {
             panic!("the measured QR witness must calibrate");
         };
-        assert_eq!((calibration.spent(), calibration.cut()), (1, false));
+        assert_eq!(
+            (calibration.spent(), calibration.cut(), calibration.panics()),
+            (1, false, 0)
+        );
         assert!(probe.rung.is_none());
         assert_eq!(probe.symbology, crate::report::Symbology::QrCode);
 
@@ -1435,93 +1438,26 @@ mod tests {
         );
     }
 
-    fn measure_resolution_candidate(label: &str, payload: &[u8], image: &LumaImage) {
-        let base = transform::downscale_to(image, STRESS_BASE_SIDE);
-        let fingerprint = score_base_fingerprint(&base);
-        println!(
-            "candidate={label:?} payload={payload:?} source={}x{} base={}x{} fnv1a64={fingerprint:016x}",
-            image.width(),
-            image.height(),
-            base.width(),
-            base.height(),
-        );
-        let key = plain_key(payload);
-        let cancel = CancelToken::new();
-        let mut calibration = Bound::new(&cancel, None).with_quota(16);
-        let calibrated = CellProbe::calibrate_within(
-            &base,
-            &key,
-            crate::report::Symbology::QrCode,
-            &mut calibration,
-        )
-        .unwrap();
-        let probe = match calibrated {
-            Calibrated::Class(probe) => probe,
-            Calibrated::Undecodable => {
-                println!("candidate={label:?} calibration=undecodable");
-                return;
-            }
-            Calibrated::Interrupted => {
-                println!("candidate={label:?} calibration=interrupted");
-                return;
-            }
-        };
-        println!(
-            "candidate={label:?} calibration_units={} cut={} panics={} rung={:?}",
-            calibration.spent(),
-            calibration.cut(),
-            calibration.panics(),
-            probe.rung,
-        );
-        let axis = StressAxis::Resolution;
-        let skip: Vec<_> = WEIGHTS
-            .iter()
-            .map(|&(other, _)| other)
-            .filter(|&other| other != axis)
-            .collect();
-        let mut bound = Bound::new(&cancel, None).with_quota(6);
-        let axes = run_axes(&base, &key, ScoreDepth::Full, &skip, &mut bound, probe).unwrap();
-        let witness = axes.as_ref().is_some_and(|axes| {
-            axes.iter().any(|score| {
-                score.axis == StressAxis::Resolution
-                    && score.passed > 0
-                    && score.failed_at.is_some()
-                    && score.refined_failed_at.is_some()
-                    && score.refined_failed_at != score.failed_at
-            })
-        }) && !bound.cut();
-        println!(
-            "candidate={label:?} axis={axis:?} units={} cut={} panics={} \
-             refinement_witness={witness} result={axes:?}",
-            bound.spent(),
-            bound.cut(),
-            bound.panics(),
-        );
-    }
-
     #[test]
-    #[ignore = "bounded 16-recipe resolution discovery; measure before pinning a witness"]
-    fn discover_resolution_refinement_witnesses() {
-        let payload = "https://qrcode-ai.com/c/v5q";
-        let mut candidates = 0;
-        for version in [11, 12, 13, 14] {
-            for module in [3, 4] {
-                let image = render_qr_candidate(payload.as_bytes(), version, module, 255);
-                for preblur in [0.0, 0.5] {
-                    let input = if preblur > 0.0 {
-                        transform::gaussian_blur(&image, preblur)
-                    } else {
-                        image.clone()
-                    };
-                    let label = format!(
-                        "payload={payload};version={version};ecc=Q;module={module};preblur={preblur};black=0;white=255"
-                    );
-                    measure_resolution_candidate(&label, payload.as_bytes(), &input);
-                    candidates += 1;
-                }
-            }
-        }
-        assert_eq!(candidates, 16);
+    fn qr_resolution_knee_refines_to_the_measured_failing_midpoint() {
+        let payload = b"https://qrcode-ai.com/c/v5q";
+        let image = render_qr_candidate(payload, 13, 3, 255);
+        assert_eq!((image.width(), image.height()), (231, 231));
+        let base = transform::downscale_to(&image, STRESS_BASE_SIDE);
+        assert_eq!((base.width(), base.height()), (231, 231));
+        assert_eq!(score_base_fingerprint(&base), 0x54d9_83f4_4539_6ebc);
+        assert_measured_axis(
+            &base,
+            payload,
+            AxisScore {
+                axis: StressAxis::Resolution,
+                passed: 4,
+                total: 5,
+                failed_at: Some("90px".to_owned()),
+                refined_failed_at: Some("109px".to_owned()),
+            },
+            6,
+        );
     }
 
     /// The primary detection of an unbounded Full walk and its content.
