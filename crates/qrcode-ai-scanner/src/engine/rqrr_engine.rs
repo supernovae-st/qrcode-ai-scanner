@@ -1634,7 +1634,7 @@ mod tests {
         let Rederived::Parsed { parsed, margin } = rederive_sampled(&other_meta, &other_raw) else {
             panic!("the actual transpose must independently verify");
         };
-        assert_eq!(parsed.bytes, []);
+        assert_eq!(parsed.bytes.as_slice(), b"");
         assert_eq!(parsed.byte_segments.len(), 1);
         assert_eq!(parsed.byte_segments[0], 0..0);
         assert_eq!(parsed.eci, []);
