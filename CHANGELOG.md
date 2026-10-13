@@ -8,6 +8,9 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
 
 ### Fixed
 
+- Python source distributions carry the exact type stub and `py.typed` beside
+  the relocated `pyproject.toml`, so wheels built from the sdist retain typing.
+  Archive inspection rejects missing or changed project-root typing files.
 - Swift xcframework archives carry `LICENSE` and `LICENSING.md` inside the
   bundle. The release helper refuses version drift; Swift and JitPack Cargo
   builds use the committed binding lockfile.

@@ -154,6 +154,8 @@ STRAY = tuple((re.compile(pattern, re.IGNORECASE), why) for pattern, why in (
 CARGO_GENERATED = frozenset({".cargo_vcs_info.json", "Cargo.toml.orig", "Cargo.lock"})
 # What maturin writes at the sdist root besides the PEP 639 license files.
 MATURIN_SDIST_ROOT = frozenset({"PKG-INFO", "pyproject.toml", "README.md"})
+# Explicit source copies at the relocated project root, never generated files.
+MATURIN_SDIST_TYPING = frozenset({"qrcode_ai_scanner.pyi", "py.typed"})
 # The sdist packs the binding crate and its path dependency side by side.
 SDIST_CRATES = {"qrcode-ai-scanner-py/": "crates/qrcode-ai-scanner-py",
                 "qrcode-ai-scanner/": "crates/qrcode-ai-scanner"}
@@ -1021,7 +1023,11 @@ def inspect_sdist(host: Host, path: pathlib.Path, notes=()) -> Artifact:
                 check_license(art, files[name], f"{name} (license-files {pattern!r})")
         licensed |= set(matched)
     check_license(art, files.get("qrcode-ai-scanner/LICENSE"), "qrcode-ai-scanner/LICENSE (vendored core)")
-    check_tracked(art, files, SDIST_CRATES, MATURIN_SDIST_ROOT | licensed | {
+    # Maturin's pure-Rust wheel builder resolves stubs beside pyproject.toml,
+    # which the sdist relocates above the vendored binding manifest.
+    for stub in ("qrcode_ai_scanner.pyi", "py.typed"):
+        check_equal_file(art, f"{stub} at the sdist project root", files.get(stub), PY_DIR / stub)
+    check_tracked(art, files, SDIST_CRATES, MATURIN_SDIST_ROOT | MATURIN_SDIST_TYPING | licensed | {
         prefix + name for prefix in SDIST_CRATES for name in CARGO_GENERATED})
     # Every packed file is the checkout's, byte for byte — the source a build
     # from the sdist compiles where no wheel fits — except what maturin
@@ -1592,6 +1598,8 @@ def _clean_sdist(version: str) -> dict:
     return {
         "PKG-INFO": _python_metadata(version), "pyproject.toml": (py / "pyproject.toml").read_bytes(),
         "README.md": (py / "README.md").read_bytes(), "LICENSE": LICENSE.read_bytes(),
+        "qrcode_ai_scanner.pyi": (py / "qrcode_ai_scanner.pyi").read_bytes(),
+        "py.typed": (py / "py.typed").read_bytes(),
         "qrcode-ai-scanner-py/Cargo.toml": (py / "Cargo.toml").read_bytes(),
         "qrcode-ai-scanner-py/src/lib.rs": (py / "src" / "lib.rs").read_bytes(),
         "qrcode-ai-scanner-py/LICENSE": LICENSE.read_bytes(),
@@ -1738,6 +1746,11 @@ def self_test() -> int:
             judge(f"CLI overflow checks {label}", [cli_crate(f"cli-guard-{label}", bad)], FAIL, "overflow-checks")
         judge("clean wheel", [wheel("wheel", _clean_wheel(version))], PASS)
         judge("clean sdist", [sdist("sdist", _clean_sdist(version))], PASS)
+        for stub in ("qrcode_ai_scanner.pyi", "py.typed"):
+            missing = {k: v for k, v in _clean_sdist(version).items() if k != stub}
+            judge(f"sdist root missing {stub}", [sdist(f"sdist-missing-{stub}", missing)], FAIL, stub)
+            judge(f"sdist root changed {stub}",
+                  [sdist(f"sdist-changed-{stub}", _clean_sdist(version) | {stub: b"changed"})], FAIL, stub)
         judge("clean platform package", [npm("platform", _npm_platform(version, "linux-x64-gnu"))], PASS)
         judge("clean main package", [npm("main", _npm_main(version))], PASS)
         judge("clean wasm package", [npm("wasm", _npm_wasm(version))], PASS)

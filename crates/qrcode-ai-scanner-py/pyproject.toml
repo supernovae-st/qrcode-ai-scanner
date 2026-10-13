@@ -33,6 +33,13 @@ Documentation = "https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/do
 
 [tool.maturin]
 module-name = "qrcode_ai_scanner"
+# The sdist relocates pyproject.toml above the vendored crates. Pure-Rust
+# wheel builds look for the module stub beside that file, not beside the
+# relocated Cargo.toml; carry these exact files at the sdist root too.
+include = [
+  { path = "qrcode_ai_scanner.pyi", format = "sdist" },
+  { path = "py.typed", format = "sdist" },
+]
 
 [tool.maturin.generate-ci.github]
 trusted-publishing = true
