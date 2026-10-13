@@ -483,6 +483,15 @@ fn render_cell(cell: &Cell) -> Vec<u8> {
     png
 }
 
+/// The original resource-regression cell, without scanning any grid or base
+/// symbol. Keep the producer shared with the sweep so a diagnostic cannot
+/// silently replace the adversarial input with an easier render.
+pub(crate) fn resource_case() -> (String, String, Vec<u8>) {
+    let cells = build_grid();
+    let cell = &cells[2067];
+    (cell_label(cell), cell.truth.clone(), render_cell(cell))
+}
+
 // --------------------------------------------------------------- dual pass
 
 /// Side of the dual pass's square blot, in modules.

@@ -12,6 +12,8 @@
 //! - `rescue-stress` — QD-2 adversarial miscorrection measurement: a
 //!   deterministic synthetic-occlusion sweep reporting the S5 rescue's
 //!   wrong-vs-refuse rate under rising occlusion (see `rescue_stress.rs`).
+//! - `resource-probe` — one scoring resource regression cell, one scan per
+//!   process, for an external wall/RSS/CPU guard (see `resource_probe.rs`).
 //! - `rotation-sweep` — decode-under-rotation truth on the zxing blackbox
 //!   corpus at 0°/90°/180°/270° via exact index-permutation rotations
 //!   (see `rotation_sweep.rs`). Non-gating dashboard.
@@ -31,6 +33,7 @@ mod bench;
 mod external;
 mod oracle;
 mod rescue_stress;
+mod resource_probe;
 mod rotation_sweep;
 mod sync_version;
 mod truth_amendments;
@@ -182,6 +185,7 @@ fn main() {
         Some("oracle") => oracle::run(args.collect()),
         Some("bench") => bench::run(args.collect()),
         Some("rescue-stress") => rescue_stress::run(),
+        Some("resource-probe") => resource_probe::run(&args.collect::<Vec<_>>()),
         Some("rotation-sweep") => rotation_sweep::run(),
         Some("sync-version") => {
             let flags: Vec<String> = args.collect();
@@ -216,7 +220,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: xtask <gen-fixtures | gen-symbology-fixtures | gen-external-manifest | corpus-report [--write | --external] | oracle [--json <path>] [--corpus-root <abs path>] | bench <prepare | prepare-base | stamp | inspect | gate | run> | rescue-stress | rotation-sweep | sync-version [--check] | baseline --bin <p>>"
+                "usage: xtask <gen-fixtures | gen-symbology-fixtures | gen-external-manifest | corpus-report [--write | --external] | oracle [--json <path>] [--corpus-root <abs path>] | bench <prepare | prepare-base | stamp | inspect | gate | run> | rescue-stress | resource-probe --mode full|fast|frame|design | rotation-sweep | sync-version [--check] | baseline --bin <p>>"
             );
             std::process::exit(2);
         }
