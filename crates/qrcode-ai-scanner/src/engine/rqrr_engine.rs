@@ -1372,4 +1372,303 @@ mod tests {
         let input = rescue_input(&grid).expect("the format information reads");
         assert!(!input.transposed);
     }
+
+    fn symbol_grid(colors: &[qrcode::Color]) -> rqrr::Grid<rqrr::SimpleGrid> {
+        assert_eq!(colors.len(), 25 * 25);
+        rqrr::Grid::new(rqrr::SimpleGrid::from_func(25, |x, y| {
+            colors[y * 25 + x] == qrcode::Color::Dark
+        }))
+    }
+
+    /// Actual sampled/transposed codewords, with the L/0 -> H/2 format
+    /// relation checked before imposing any syndrome or payload constraints.
+    fn dual_words(colors: &[qrcode::Color]) -> [Vec<u8>; 2] {
+        let grid = symbol_grid(colors);
+        let reads = [
+            grid.get_raw_data().unwrap(),
+            rqrr::Grid::new(Transposed(&grid.grid))
+                .get_raw_data()
+                .unwrap(),
+        ];
+        for ((meta, _), (ec, mask)) in reads.iter().zip([(1, 0), (2, 2)]) {
+            assert_eq!((meta.version.0, meta.ecc_level, meta.mask), (2, ec, mask));
+        }
+        reads.map(|(meta, raw)| {
+            assert_eq!(raw.len, 359);
+            crate::matrix::zigzag::unmask_to_codewords(
+                &raw.data,
+                raw.len,
+                2,
+                u8::try_from(meta.mask).unwrap(),
+            )
+            .unwrap()
+        })
+    }
+
+    fn bits_of(bytes: &[u8]) -> Vec<bool> {
+        bytes
+            .iter()
+            .flat_map(|byte| (0..8).map(move |bit| byte & (0x80 >> bit) != 0))
+            .collect()
+    }
+
+    /// Affine GF(2) constraints only construct a fixture. The tests below
+    /// independently re-encode its parity and check both real re-derivations.
+    fn dual_constraints(colors: &[qrcode::Color], prefix_lengths: [usize; 2]) -> Vec<bool> {
+        let mut constraints = Vec::new();
+        for (i, word) in dual_words(colors).iter().enumerate() {
+            let blocks = crate::matrix::deinterleave::deinterleave(word, 2, i + 1);
+            let mut data = Vec::new();
+            for block in blocks {
+                constraints.extend(bits_of(&crate::matrix::gf256::syndromes(
+                    &block.bytes,
+                    block.npar,
+                )));
+                data.extend_from_slice(&block.bytes[..block.bytes.len() - block.npar]);
+            }
+            constraints.extend_from_slice(&bits_of(&data)[..prefix_lengths[i]]);
+        }
+        constraints
+    }
+
+    /// Solve one bounded binary system; free variables are zero. Inconsistent
+    /// constraints fail the fixture, never skip the behavioral assertion.
+    fn solve_fixture(mut rows: Vec<Vec<bool>>, variables: usize) -> Vec<bool> {
+        let mut pivots = Vec::new();
+        for column in 0..variables {
+            let rank = pivots.len();
+            let Some(pivot) = (rank..rows.len()).find(|&row| rows[row][column]) else {
+                continue;
+            };
+            rows.swap(rank, pivot);
+            let pivot_row = rows[rank].clone();
+            for row in rows.iter_mut().skip(rank + 1) {
+                if row[column] {
+                    for (value, &pivot) in row.iter_mut().zip(&pivot_row).skip(column) {
+                        *value ^= pivot;
+                    }
+                }
+            }
+            pivots.push(column);
+        }
+        assert!(
+            rows.iter().skip(pivots.len()).all(|row| !row[variables]),
+            "dual-orientation fixture constraints must have a solution"
+        );
+        let mut solution = vec![false; variables];
+        for (row, &column) in rows.iter().zip(&pivots).rev() {
+            solution[column] = row[variables]
+                ^ row[..variables]
+                    .iter()
+                    .zip(&solution)
+                    .skip(column + 1)
+                    .fold(false, |sum, (&coefficient, &value)| {
+                        sum ^ (coefficient & value)
+                    });
+        }
+        solution
+    }
+
+    fn dual_symbol(prefixes: [&str; 2]) -> Vec<qrcode::Color> {
+        let (mut colors, width) = test_symbols::masked_colors(
+            qrcode::Version::Normal(2),
+            qrcode::EcLevel::L,
+            qrcode::canvas::MaskPattern::Checkerboard,
+            |bits| bits.push_byte_data(b"A"),
+        );
+        assert_eq!(width, 25);
+        let positions = crate::matrix::zigzag::zigzag_positions(2);
+        assert_eq!(positions.len(), 359);
+        let prefixes = prefixes.map(|prefix| {
+            prefix
+                .bytes()
+                .filter(|byte| !byte.is_ascii_whitespace())
+                .map(|byte| {
+                    assert!(matches!(byte, b'0' | b'1'));
+                    byte == b'1'
+                })
+                .collect::<Vec<_>>()
+        });
+        let lengths = [prefixes[0].len(), prefixes[1].len()];
+        // v2-L: one block with 10 parity bytes; v2-H: one with 28.
+        let target = [
+            vec![false; 80],
+            prefixes[0].clone(),
+            vec![false; 224],
+            prefixes[1].clone(),
+        ]
+        .concat();
+        let initial = dual_constraints(&colors, lengths);
+        assert_eq!(initial.len(), target.len());
+        let mut rows: Vec<Vec<bool>> = initial
+            .iter()
+            .zip(&target)
+            .map(|(&value, &wanted)| {
+                let mut row = vec![false; positions.len() + 1];
+                row[positions.len()] = value ^ wanted;
+                row
+            })
+            .collect();
+        for (column, &(y, x)) in positions.iter().enumerate() {
+            colors[y * width + x] = !colors[y * width + x];
+            let changed = dual_constraints(&colors, lengths);
+            for ((row, &value), &original) in rows.iter_mut().zip(&changed).zip(&initial) {
+                row[column] = value ^ original;
+            }
+            colors[y * width + x] = !colors[y * width + x];
+        }
+        let solution = solve_fixture(rows, positions.len());
+        for (&toggle, &(y, x)) in solution.iter().zip(&positions) {
+            if toggle {
+                colors[y * width + x] = !colors[y * width + x];
+            }
+        }
+        assert_eq!(dual_constraints(&colors, lengths), target);
+        // An independent encoder checks both complete words. Syndrome zero
+        // from the construction path alone is not a parity oracle.
+        for (i, word) in dual_words(&colors).iter().enumerate() {
+            let blocks = crate::matrix::deinterleave::deinterleave(word, 2, i + 1);
+            let data: Vec<u8> = blocks
+                .iter()
+                .flat_map(|block| {
+                    block.bytes[..block.bytes.len() - block.npar]
+                        .iter()
+                        .copied()
+                })
+                .collect();
+            let ec = [qrcode::EcLevel::L, qrcode::EcLevel::H][i];
+            let (data, parity) =
+                qrcode::ec::construct_codewords(&data, qrcode::Version::Normal(2), ec).unwrap();
+            assert_eq!([data, parity].concat(), *word, "orientation {i} parity");
+        }
+        colors
+    }
+
+    #[test]
+    fn rescue_input_compares_real_malformed_orientations() {
+        // The two masks make sampled mode 0111 transpose to mode 0100.
+        // An oversized byte count is malformed in both readers; an empty
+        // byte segment can instead precede a tolerant ECI or a terminator.
+        let invalid_eci = "0111 111";
+        let oversized_count = "0100 11111111";
+        let above_register = "0100 00000000 0111 11001111 01000010 01000000 0000";
+        let empty_byte_segment = Rederived::Parsed {
+            parsed: Parsed {
+                bytes: Vec::new(),
+                eci: Vec::new(),
+                fnc1: Fnc1::None,
+                structured_append: false,
+                segments: Vec::new(),
+                byte_segments: std::iter::once(0..0).collect(),
+            },
+            margin: 14,
+        };
+        for (prefix, other, expected) in [
+            (oversized_count, malformed(), malformed()),
+            (above_register, malformed_reading(b""), ambiguous()),
+            ("0100 00000000 0000", empty_byte_segment, ambiguous()),
+        ] {
+            let colors = dual_symbol([invalid_eci, prefix]);
+            let mut grid = symbol_grid(&colors);
+            grid.bounds = [
+                rqrr::Point { x: 11, y: 13 },
+                rqrr::Point { x: 211, y: 17 },
+                rqrr::Point { x: 207, y: 219 },
+                rqrr::Point { x: 9, y: 215 },
+            ];
+            let (meta, raw) = grid.get_raw_data().unwrap();
+            let (other_meta, other_raw) = rqrr::Grid::new(Transposed(&grid.grid))
+                .get_raw_data()
+                .unwrap();
+            assert_eq!((meta.version.0, meta.ecc_level, meta.mask), (2, 1, 0));
+            assert_eq!(
+                (other_meta.version.0, other_meta.ecc_level, other_meta.mask),
+                (2, 2, 2)
+            );
+            assert_eq!(rederive_sampled(&meta, &raw), malformed());
+            assert_eq!(rederive_sampled(&other_meta, &other_raw), other);
+            let input = rescue_input(&grid).expect("both formats read");
+            assert_eq!(input.rederived, Some(expected));
+            assert_eq!((input.version, input.ec, input.mask), (2, EcLevel::L, 0));
+            assert_eq!(input.corners, super::corners(&grid));
+            assert_eq!(input.stream.bits, super::masked(&raw).bits);
+            assert_eq!(input.stream.bit_len, raw.len);
+            assert!(!input.transposed);
+            assert!(!input.inverted);
+        }
+    }
+
+    #[test]
+    fn an_ambiguous_real_decode_retains_its_grid_bound_declaration_hint() {
+        let colors = dual_symbol([
+            "0111 11100000 0100 00000001 01000001 0000",
+            "0100 00000000 0000",
+        ]);
+        let luma = test_symbols::render(&colors, 25);
+        let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(
+            luma.width() as usize,
+            luma.height() as usize,
+            |x, y| luma.data()[y * luma.width() as usize + x],
+        );
+        let grids = prepared.detect_grids();
+        assert_eq!(grids.len(), 1);
+        let grid = &grids[0];
+        let mut raw = Vec::new();
+        let decoded_meta = grid
+            .decode_to(&mut raw)
+            .expect("rqrr tolerates the malformed ECI");
+        assert_eq!(raw, b"A");
+        assert_eq!(
+            (
+                decoded_meta.version.0,
+                decoded_meta.ecc_level,
+                decoded_meta.mask
+            ),
+            (2, 1, 0)
+        );
+        let (meta, sampled) = grid.get_raw_data().unwrap();
+        let (other_meta, other_raw) = rqrr::Grid::new(Transposed(&grid.grid))
+            .get_raw_data()
+            .unwrap();
+        assert_eq!(rederive_sampled(&meta, &sampled), malformed());
+        let Rederived::Parsed { parsed, margin } = rederive_sampled(&other_meta, &other_raw) else {
+            panic!("the actual transpose must independently verify");
+        };
+        assert_eq!(parsed.bytes, []);
+        assert_eq!(parsed.byte_segments.len(), 1);
+        assert_eq!(parsed.byte_segments[0], 0..0);
+        assert_eq!(parsed.eci, []);
+        assert_eq!(parsed.fnc1, Fnc1::None);
+        assert_eq!(parsed.segments, []);
+        assert!(!parsed.structured_append);
+        assert_eq!(margin, 14);
+        let bounds = super::corners(grid);
+        let pass = decode(&luma, true);
+        assert_eq!(pass.found.len(), 1);
+        assert!(pass.refused.is_empty());
+        assert!(pass.rescue.is_empty());
+        let read = &pass.found[0];
+        assert_eq!(read.raw, b"A");
+        assert_eq!(read.eci, EciEvidence::Unobserved);
+        assert_eq!(read.margin, Margin::Unknown);
+        assert_eq!(read.segments, Segments::NotObserved);
+        assert_eq!(read.fnc1, Fnc1::None);
+        assert!(!read.parsed);
+        assert!(read.masked_stream.is_none());
+        assert_eq!((read.version, read.ec, read.mask), (None, None, None));
+        assert_eq!(read.corners, Some(bounds));
+        assert_eq!(read.location, Some(bounds));
+        assert_eq!(
+            read.locate,
+            Some(crate::engine::locate::LocateHint {
+                points: bounds,
+                frame: crate::engine::locate::Frame::GridBounds,
+                inverted: false,
+                ec: EcLevel::L,
+                versions: 2..=2,
+                modifier: None,
+                declarations: true,
+            })
+        );
+    }
 }

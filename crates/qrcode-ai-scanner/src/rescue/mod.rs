@@ -1615,6 +1615,85 @@ mod pins {
         (LumaImage::new(data, DIM, DIM), candidate)
     }
 
+    #[test]
+    fn rescue_attempt_keeps_the_exact_thirty_percent_boundary_out_of_erasures() {
+        // Two errors at v1-M leave margin 2; treating both as erasures leaves
+        // margin 3. A clean word would ignore erasures and miss this boundary.
+        let data = test_symbols::stream("0100 00000011 01100001 01100010 01100011 0000");
+        let corrupt = [6, 8];
+        let mut words = Vec::new();
+        let mut damaged = None;
+        for errors in [&[][..], &corrupt[..]] {
+            let (colors, width) = test_symbols::codeword_colors(
+                qrcode::Version::Normal(1),
+                qrcode::EcLevel::M,
+                &data,
+                errors,
+            );
+            assert_eq!(width, 21);
+            let grid = rqrr::Grid::new(rqrr::SimpleGrid::from_func(width, |x, y| {
+                colors[y * width + x] == qrcode::Color::Dark
+            }));
+            let (meta, raw) = grid.get_raw_data().expect("the actual masked grid");
+            assert_eq!((meta.version.0, meta.ecc_level, raw.len), (1, 0, 208));
+            let mask = u8::try_from(meta.mask).unwrap();
+            let codewords = unmask_to_codewords(&raw.data, raw.len, 1, mask).unwrap();
+            assert_eq!(codewords.len(), 26);
+            words.push(codewords);
+            if !errors.is_empty() {
+                damaged = Some((colors, mask, raw));
+            }
+        }
+        for (i, (&clean, &received)) in words[0].iter().zip(&words[1]).enumerate() {
+            assert_eq!(
+                clean ^ received,
+                if corrupt.contains(&i) { 0xFF } else { 0 }
+            );
+        }
+        let (colors, mask, raw) = damaged.unwrap();
+        for (dark, light, confidence, expected_margin) in [
+            (71, 129, 0.29_f32, 3),
+            (70, 130, 0.30_f32, 2),
+            (69, 131, 0.31_f32, 2),
+        ] {
+            let sampled: Vec<u8> = zigzag_positions(1)
+                .iter()
+                .enumerate()
+                .map(|(i, &(y, x))| {
+                    let dark_module = colors[y * 21 + x] == qrcode::Color::Dark;
+                    match (corrupt.contains(&(i / 8)), dark_module) {
+                        (true, true) => dark,
+                        (true, false) => light,
+                        (false, true) => 0,
+                        (false, false) => 200,
+                    }
+                })
+                .collect();
+            let (luma, mut candidate) = v1_luma(&sampled);
+            candidate.mask = mask;
+            candidate.stream = MaskedStream {
+                bits: raw.data[..26].to_vec(),
+                bit_len: raw.len,
+            };
+            let margins = codeword_margins(&luma, &candidate, 26).unwrap();
+            assert_eq!(margins.len(), 26);
+            for (i, measured) in margins.iter().enumerate() {
+                let expected = if corrupt.contains(&i) {
+                    confidence
+                } else {
+                    1.0
+                };
+                assert_eq!(measured.to_bits(), expected.to_bits(), "codeword {i}");
+            }
+            let rescued = attempt(&luma, &candidate).expect("two errors remain within reserve");
+            assert_eq!(rescued.raw, b"abc");
+            assert_eq!(rescued.margin, expected_margin, "confidence {confidence}");
+            assert_eq!(rescued.fnc1, Fnc1::None);
+            assert_eq!(rescued.eci, []);
+            assert_eq!(rescued.segments, []);
+        }
+    }
+
     /// Strictly increasing sample set (0..208): `sorted == input`, so the
     /// p2/p98 picks are pinned literals — lo = sorted[208/50]=sorted[4]=4,
     /// hi = sorted[208-1-4]=sorted[203]=203. Any percentile-index mutation
