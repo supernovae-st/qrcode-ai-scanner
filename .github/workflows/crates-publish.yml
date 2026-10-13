@@ -62,12 +62,26 @@ jobs:
         run: |
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
           python3 scripts/packed-rust-consumer.py target/package fixtures/clean/gen_v5_q.png "$version"
+      - name: retain qualified bytes in one upload root on every OS
+        env:
+          RUST_RECEIPT: ${{ steps.consumer.outputs.receipt }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, os, shutil
+          from pathlib import Path
+          output = Path(os.environ["RUNNER_TEMP"]) / "rust-qualified"
+          output.mkdir()
+          crates = list(Path("target/package").glob("*.crate"))
+          assert len(crates) == 2, "exactly two qualified crate archives"
+          for source in [Path(os.environ["RUST_RECEIPT"]), *crates]:
+              destination = output / source.name
+              shutil.copyfile(source, destination)
+              assert hashlib.sha256(source.read_bytes()).digest() == hashlib.sha256(destination.read_bytes()).digest()
+          PY
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: rust-packed-consumer-${{ matrix.os }}
-          path: |
-            ${{ steps.consumer.outputs.receipt }}
-            target/package/*.crate
+          path: ${{ runner.temp }}/rust-qualified
           if-no-files-found: error
 
   publish:
