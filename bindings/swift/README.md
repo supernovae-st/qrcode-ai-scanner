@@ -18,6 +18,10 @@ Dual-licensed **AGPL-3.0-or-later OR commercial** — see the repo-root
 closed-source and therefore needs the **commercial** license. Contact
 `studio.supernovae@gmail.com`.
 
+The distributed xcframework includes `LICENSE` and `LICENSING.md` inside its
+bundle. The release helper refuses a version that differs from the workspace
+version and uses the committed Cargo lockfile.
+
 ## Install (SwiftPM, on a tagged release)
 
 ```swift

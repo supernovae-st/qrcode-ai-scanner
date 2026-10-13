@@ -1,7 +1,7 @@
 //! `qrscan` — scan and validate QR codes from the command line.
 //!
 //! JSON (the `ScanReport` contract) by default; `--pretty` for humans.
-//! Exit codes: 0 = QR found · 1 = no QR found · 2 = invalid input/usage/error ·
+//! Exit codes: 0 = symbol found · 1 = no symbol found · 2 = invalid input/usage/error ·
 //! 3 = --score-only: decoded, not judged within the budget.
 
 use std::path::PathBuf;

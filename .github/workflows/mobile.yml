@@ -215,6 +215,9 @@ jobs:
             -output build/QrcodeAiScannerFFI.xcframework
       - name: zip + checksum
         run: |
+          # Keep one xcframework at the archive root, with its license materials
+          # inside the bundle so they travel with the binary SwiftPM extracts.
+          cp LICENSE LICENSING.md build/QrcodeAiScannerFFI.xcframework/
           (cd build && zip -ry QrcodeAiScannerFFI.xcframework.zip QrcodeAiScannerFFI.xcframework)
           swift package compute-checksum build/QrcodeAiScannerFFI.xcframework.zip > build/checksum.txt
           echo "xcframework checksum: $(cat build/checksum.txt)"

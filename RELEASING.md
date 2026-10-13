@@ -258,13 +258,14 @@ check). `scripts/check-publish-guards.py` holds every job whose artifacts a
 publishing job downloads, then theirs, to this. They are not privileged, and
 the inspections read file sets and texts, not compiled binaries.
 
-**Named exceptions** to "every distributed archive carries the AGPL text, and
-only a tag publishes":
-- the iOS xcframework zip (a GitHub release asset, built by mobile › ios or
-  bindings/swift/release.sh) holds no LICENSE, unless SwiftPM is shown to
-  accept one at the zip root beside the .xcframework;
+The iOS xcframework zip carries the root `LICENSE` and `LICENSING.md` inside
+`QrcodeAiScannerFFI.xcframework/`, preserving the single binary artifact at
+the archive root. Inspect both files in the actual archive before distribution;
+this packaging step does not establish remote SwiftPM consumer readiness.
+
+**Named exception** to "only a tag publishes":
 - JitPack builds the Android AAR from any ref on demand, a branch snapshot
-  included, outside Actions (jitpack.yml: Rust 1.88.0, no `--locked`): neither
+  included, outside Actions (jitpack.yml: Rust 1.88.0, locked Cargo builds): neither
   the tag guard nor the inspection applies to it.
 
 **Accepted residuals**, each with its reason:

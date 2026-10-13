@@ -6,6 +6,14 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
 
 ## Unreleased
 
+### Fixed
+
+- Swift xcframework archives carry `LICENSE` and `LICENSING.md` inside the
+  bundle. The release helper refuses version drift; Swift and JitPack Cargo
+  builds use the committed binding lockfile.
+- The CLI's own packaged manifest retains rxing overflow checks for standalone
+  `cargo install` builds; archive inspection rejects a missing or false guard.
+
 ### Changed
 
 - **Exact QR content** (`versions.pipeline` 2 → 3) — a QR-family
@@ -156,8 +164,8 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   wasm packages, the wheels and the sdist now carry the root text byte
   for byte (Python through PEP 639 `license-files`, with a
   `License-File` entry), and CI reads every archive back before
-  anything publishes. Named exceptions: the iOS xcframework zip and the
-  JitPack AAR.
+  anything publishes. The iOS xcframework carries license materials inside
+  its bundle; the JitPack AAR remains a named exception.
 - **rxing overflow-checks in the Python, Kotlin/Swift and Flutter
   builds** — cargo reads `[profile]` from the build root only, so the
   wheels and sdist builds, the UniFFI library and the Flutter crate
@@ -165,7 +173,7 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   that turns the crafted-image arithmetic underflow documented in 0.6.0
   into a caught panic counted in `trace.engine_panics` instead of a
   runaway allocation. Each of those build roots now restates it.
-  `cargo install qrcode-ai-scanner-cli` still builds without it.
+  The packaged CLI now restates it for `cargo install` as well.
 - **Malformed streams are refused, whichever decoder reads them** —
   designators above 999999 or written `111xxxxx` (mirrored symbols
   included), FNC1 in both positions, out-of-range numeric or
@@ -284,9 +292,9 @@ Kotlin/Android · Swift/iOS · Flutter bindings.
   report with the schema of the release tag its `versions.scanner`
   names. Pin `qrcode-ai-scanner~=0.10.0` and `cargo install
   qrcode-ai-scanner-cli --locked --version 0.10.0`. That `--locked`
-  install builds rxing 0.9.1, the version the lockfile pins, without the
-  `overflow-checks` guard: `cargo install` reads no workspace profile
-  (see Fixed). Projects that gate on the score should re-measure their
+  install builds rxing 0.9.1, the version the lockfile pins, with the
+  `overflow-checks` guard declared in the packaged CLI root (see Fixed).
+  Projects that gate on the score should re-measure their
   thresholds before upgrading.
 
 ### CI

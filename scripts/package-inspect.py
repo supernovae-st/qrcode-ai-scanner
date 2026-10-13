@@ -515,11 +515,8 @@ def inspect_crate(host: Host, path: pathlib.Path, notes=()) -> Artifact:
     # builds is whatever this manifest itself says.
     rxing = manifest.get("profile", {}).get("release", {}).get("package", {}).get("rxing", {})
     if name.endswith("-cli"):
-        art.notes.append(
-            "packaged manifest carries rxing overflow-checks"
-            if rxing.get("overflow-checks") is True
-            else "packaged manifest has no [profile]: `cargo install` builds rxing without overflow-checks"
-        )
+        art.check("packaged CLI manifest keeps rxing overflow-checks", rxing.get("overflow-checks") is True,
+                  f"profile.release.package.rxing = {rxing}")
     return art
 
 
@@ -1720,6 +1717,25 @@ def self_test() -> int:
 
         # The clean archives pass: every negative below fails for its plant.
         judge("clean crate", [crate("clean", _clean_crate(version))], PASS)
+        cli_dir = ROOT / "crates/qrcode-ai-scanner-cli"
+        cli_files = {
+            "Cargo.toml": (
+                f'[package]\nname = "qrcode-ai-scanner-cli"\nversion = "{version}"\nlicense = "{SPDX}"\n'
+                f'[dependencies.qrcode-ai-scanner]\nversion = "{version}"\n'
+                '[profile.release.package.rxing]\noverflow-checks = true\n'
+            ).encode(),
+            "Cargo.toml.orig": (cli_dir / "Cargo.toml").read_bytes(),
+            "src/main.rs": b"//! synthetic\n",
+            "README.md": (cli_dir / "README.md").read_bytes(),
+            "LICENSE": LICENSE.read_bytes(),
+        }
+        def cli_crate(label, files):
+            return _tar(place(label, f"qrcode-ai-scanner-cli-{version}.crate"),
+                        f"qrcode-ai-scanner-cli-{version}", files)
+        judge("CLI overflow checks retained", [cli_crate("cli-guard", cli_files)], PASS)
+        for label, replacement in [("absent", b""), ("false", b"overflow-checks = false\n")]:
+            bad = cli_files | {"Cargo.toml": cli_files["Cargo.toml"].replace(b"overflow-checks = true\n", replacement)}
+            judge(f"CLI overflow checks {label}", [cli_crate(f"cli-guard-{label}", bad)], FAIL, "overflow-checks")
         judge("clean wheel", [wheel("wheel", _clean_wheel(version))], PASS)
         judge("clean sdist", [sdist("sdist", _clean_sdist(version))], PASS)
         judge("clean platform package", [npm("platform", _npm_platform(version, "linux-x64-gnu"))], PASS)
