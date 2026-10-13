@@ -38,7 +38,7 @@ TESTS = {
 }
 EXPECTED = {k: tuple(PREFIX + x for x in v) for k, v in COHORTS.items()}
 ARTIFACTS = tuple(label + suffix for label in ("version", "nextest-version", "listing", "tests", "command")
-                  for suffix in (".stdout", ".stderr")) + ("selected-tests.json", "mutants.out/outcomes.json")
+                  for suffix in (".stdout", ".stderr")) + ("anchors.diff", "selected-tests.json", "mutants.out/outcomes.json")
 
 
 def require(value, message):
@@ -73,14 +73,37 @@ def selected_tests(discovered):
     return selected
 
 
+def anchor_diff(cohort, source_lines):
+    """Selection-only insertion hunks: the new side is exact current source.
+
+    cargo-mutants27.1 ignores name filters for struct-field deletions. Its
+    supported --in-diff filter runs after discovery and applies to every
+    genre. This patch is never applied and is not a claimed Git change.
+    """
+    lines_by_file = {}
+    for name in EXPECTED[cohort]:
+        file, line, _ = name.split(":", 2)
+        lines_by_file.setdefault(file, set()).add(int(line))
+    patch = []
+    for file, lines in sorted(lines_by_file.items()):
+        patch.extend((f"--- a/{file}\n", f"+++ b/{file}\n"))
+        for line in sorted(lines):
+            content = source_lines[file][line - 1]
+            require("\n" not in content and "\r" not in content, "anchor contains a newline")
+            patch.extend((f"@@ -{line - 1},0 +{line},1 @@\n", "+" + content + "\n"))
+    return "".join(patch).encode("utf-8")
+
+
 def mutation_command(cohort, out):
+    out = pathlib.Path(out)
     expected = EXPECTED[cohort]
     files = sorted({name.split(":", 1)[0] for name in expected})
     filters = [value for name in expected for value in ("-F", "^" + re.escape(name) + "$")]
     selectors = [value for file in files for value in ("--file", file)]
     return ["cargo", "mutants", "-p", "qrcode-ai-scanner", "--in-place", "--cargo-arg=--locked",
             "--test-tool", "nextest", "--timeout", "180", "--build-timeout", "900", "-o", str(out)] + \
-        selectors + filters + ["--", "--all-features", "--lib", "-E", TESTS[cohort]]
+        selectors + filters + ["--in-diff", str(out / "anchors.diff"),
+                               "--", "--all-features", "--lib", "-E", TESTS[cohort]]
 
 
 def artifact_hashes(directory):
@@ -106,13 +129,16 @@ def run(args):
         require(boundary is not None, "missing test module: " + file)
         hashes[file] = {"source_sha256": sha(data), "production_prefix_sha256": sha(data[:boundary.start()]),
                         "test_module_boundary": boundary.start()}
+    (out / "anchors.diff").write_bytes(anchor_diff(args.cohort, {
+        file: pathlib.Path(file).read_text().splitlines() for file in files}))
     filters = [value for name in expected for value in ("-F", "^" + re.escape(name) + "$")]
     selectors = [value for file in files for value in ("--file", file)]
     version = capture(["cargo", "mutants", "--version"], out, "version")
     require(version.returncode == 0 and version.stdout.strip() == b"cargo-mutants 27.1.0", "wrong mutant tool")
     nextest = capture(["cargo", "nextest", "--version"], out, "nextest-version")
     require(nextest.returncode == 0 and re.match(rb"cargo-nextest 0\.9\.116(?:\s|$)", nextest.stdout), "wrong nextest tool")
-    listing = capture(["cargo", "mutants", "--list", "--json"] + selectors + filters, out, "listing")
+    listing = capture(["cargo", "mutants", "--list", "--json"] + selectors + filters +
+                      ["--in-diff", str(out / "anchors.diff")], out, "listing")
     require(listing.returncode == 0, "mutant listing failed")
     names = [x["name"] for x in json.loads(listing.stdout.decode("utf-8"))]
     require(len(names) == len(expected) and set(names) == set(expected), "changed or incomplete cohort anchors")
@@ -148,6 +174,19 @@ def validate(directory, cohort, revision, harness_source):
     require(receipt["harness_sha256"] == sha(pathlib.Path(__file__).read_bytes())
             and receipt["harness_source_sha"] == harness_source, "wrong harness source")
     require(receipt["artifacts"] == artifact_hashes(directory), "raw artifact digest/size drift")
+    # Insertion-only hunks select exactly the declared lines, without admitting
+    # adjacent deletions or being applied to the source checkout.
+    pattern = []
+    lines_by_file = {}
+    for name in expected:
+        file, line, _ = name.split(":", 2)
+        lines_by_file.setdefault(file, set()).add(int(line))
+    for file, lines in sorted(lines_by_file.items()):
+        pattern.append(re.escape(f"--- a/{file}\n+++ b/{file}\n"))
+        for line in sorted(lines):
+            pattern.append(re.escape(f"@@ -{line - 1},0 +{line},1 @@\n+") + r"[^\r\n]*\n")
+    require(re.fullmatch("".join(pattern), (directory / "anchors.diff").read_text()),
+            "selection patch differs from exact insertion-only anchor lines")
     require((directory / "version.stdout").read_bytes().strip() == b"cargo-mutants 27.1.0", "wrong mutant version")
     require(re.match(rb"cargo-nextest 0\.9\.116(?:\s|$)", (directory / "nextest-version.stdout").read_bytes()), "wrong nextest version")
     selected = selected_tests(read_json(directory / "tests.stdout"))
@@ -264,6 +303,8 @@ def selftest():
                      "output_directory": str(out), "command": mutation_command(cohort, out), "test_expression": TESTS[cohort]})
                 for file in ARTIFACTS:
                     (out / file).write_bytes(b"")
+                (out / "anchors.diff").write_bytes(anchor_diff(cohort, {
+                    file: ["synthetic fixture line"] * 2000 for file in hashes}))
                 (out / "version.stdout").write_bytes(b"cargo-mutants 27.1.0\n")
                 (out / "nextest-version.stdout").write_bytes(b"cargo-nextest 0.9.116\n")
                 save(out / "tests.stdout", {"rust-suites": {"qrscan": {"testcases": {
@@ -339,6 +380,18 @@ def selftest():
         else:
             raise AssertionError("raw byte tamper accepted")
         (out / "tests.stdout").write_bytes(original_tests)
+        original_patch = (out / "anchors.diff").read_bytes()
+        for patch in (original_patch + b"@@ -0,0 +1,1 @@\n+extra\n",
+                      original_patch.replace(b",0 +239,1", b",1 +239,1")):
+            (out / "anchors.diff").write_bytes(patch)
+            refresh(out)
+            try:
+                judge(args)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("extra/adjacent selection lines accepted")
+        (out / "anchors.diff").write_bytes(original_patch)
         save(out / "selected-tests.json", [])
         refresh(out)
         try:
@@ -347,7 +400,7 @@ def selftest():
             pass
         else:
             raise AssertionError("empty selected tests accepted")
-    print("debt-cohort validator: mixed before statuses, incomplete results and sixteen negative controls PASS")
+    print("debt-cohort validator: mixed before statuses, incomplete results and eighteen negative controls PASS")
 
 
 def main():
