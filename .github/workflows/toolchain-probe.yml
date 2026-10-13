@@ -251,7 +251,9 @@ jobs:
           version = subprocess.check_output(["cargo", "+1.97.0", "semver-checks", "--version"], env=env, text=True, encoding="utf-8")
           assert version.strip() == "cargo-semver-checks 0.51.0"
           (root / "tool-version.txt").write_text(version, encoding="utf-8")
-          command = ["cargo", "+1.97.0", "semver-checks", "--verbose", "check-release",
+          # v0.51's top-level verbosity conflicts with its optional subcommand.
+          # Omitting that subcommand invokes the same CheckRelease arguments.
+          command = ["cargo", "+1.97.0", "semver-checks", "--verbose",
                      "--baseline-rustdoc", str(root / "baseline/rustdoc.json"),
                      "--current-rustdoc", str(root / "candidate/rustdoc.json"), "--release-type", "patch"]
           started = datetime.datetime.now(datetime.timezone.utc).isoformat()
