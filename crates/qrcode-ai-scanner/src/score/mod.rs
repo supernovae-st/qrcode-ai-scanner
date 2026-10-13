@@ -1328,6 +1328,131 @@ mod tests {
         }
     }
 
+    fn measure_refinement_candidate(label: &str, payload: &[u8], image: &LumaImage) {
+        let base = transform::downscale_to(image, STRESS_BASE_SIDE);
+        // FNV-1a over little-endian dimensions followed by the exact score pixels.
+        let fingerprint = base
+            .width()
+            .to_le_bytes()
+            .into_iter()
+            .chain(base.height().to_le_bytes())
+            .chain(base.data().iter().copied())
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+            });
+        println!(
+            "candidate={label:?} payload={payload:?} base={}x{} fnv1a64={fingerprint:016x}",
+            base.width(),
+            base.height(),
+        );
+        let key = plain_key(payload);
+        let cancel = CancelToken::new();
+        let mut calibration = Bound::new(&cancel, None).with_quota(16);
+        let calibrated = CellProbe::calibrate_within(
+            &base,
+            &key,
+            crate::report::Symbology::QrCode,
+            &mut calibration,
+        )
+        .unwrap();
+        let probe = match calibrated {
+            Calibrated::Class(probe) => probe,
+            Calibrated::Undecodable => {
+                println!("candidate={label:?} calibration=undecodable");
+                return;
+            }
+            Calibrated::Interrupted => {
+                println!("candidate={label:?} calibration=interrupted");
+                return;
+            }
+        };
+        println!(
+            "candidate={label:?} calibration_units={} rung={:?}",
+            calibration.spent(),
+            probe.rung,
+        );
+        for axis in [
+            StressAxis::Resolution,
+            StressAxis::Blur,
+            StressAxis::Lighting,
+        ] {
+            let skip: Vec<_> = WEIGHTS
+                .iter()
+                .map(|&(other, _)| other)
+                .filter(|&other| other != axis)
+                .collect();
+            let mut bound = Bound::new(&cancel, None).with_quota(6);
+            let axes = run_axes(&base, &key, ScoreDepth::Full, &skip, &mut bound, probe).unwrap();
+            let witness = axes.as_ref().is_some_and(|axes| {
+                axes.iter().any(|score| {
+                    score.axis != StressAxis::Lighting
+                        && score.passed > 0
+                        && score.failed_at.is_some()
+                        && score.refined_failed_at.is_some()
+                        && score.refined_failed_at != score.failed_at
+                })
+            }) && !bound.cut();
+            println!(
+                "candidate={label:?} axis={axis:?} units={} cut={} panics={} \
+                 refinement_witness={witness} result={axes:?}",
+                bound.spent(),
+                bound.cut(),
+                bound.panics,
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "bounded fixture discovery; run explicitly to measure, then pin the witnesses"]
+    fn discover_refinement_witnesses() {
+        // Existing degraded fixtures consume two slots in the 24-input ceiling.
+        // Remaining slots follow payload/version/module/preblur order below.
+        for name in ["gen_v5_q_blur2.png", "gen_v5_q_tiny.png"] {
+            let path = format!(
+                "{}/../../fixtures/degraded/{name}",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let bytes = std::fs::read(path).expect("fixture present");
+            let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
+            measure_refinement_candidate(name, b"https://qrcode-ai.com/c/v5q", &planes.luma);
+        }
+        let mut candidates = 2;
+        'candidates: for payload in ["refine knee pin", "https://qrcode-ai.com/c/v5q"] {
+            for version in [5, 10, 20] {
+                let code = qrcode::QrCode::with_version(
+                    payload.as_bytes(),
+                    qrcode::Version::Normal(version),
+                    qrcode::EcLevel::Q,
+                )
+                .unwrap();
+                for module in [3, 4] {
+                    let rendered = code
+                        .render::<image::Luma<u8>>()
+                        .module_dimensions(module, module)
+                        .build();
+                    let (width, height) = rendered.dimensions();
+                    let image = LumaImage::new(rendered.into_raw(), width, height);
+                    for preblur in [0.0, 0.5] {
+                        if candidates == 24 {
+                            break 'candidates;
+                        }
+                        let input = if preblur > 0.0 {
+                            transform::gaussian_blur(&image, preblur)
+                        } else {
+                            image.clone()
+                        };
+                        let label = format!(
+                            "payload={payload};version={version};ecc=Q;module={module};preblur={preblur}"
+                        );
+                        measure_refinement_candidate(&label, payload.as_bytes(), &input);
+                        candidates += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(candidates, 24);
+    }
+
     /// The primary detection of an unbounded Full walk and its content.
     fn primary_of(planes: &crate::transform::SourcePlanes) -> (MergedDetection, ContentKey) {
         let outcome = ladder::run(planes, &ScanConfig::full(), &CancelToken::new(), None).unwrap();
