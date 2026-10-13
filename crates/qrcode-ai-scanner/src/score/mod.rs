@@ -1328,20 +1328,120 @@ mod tests {
         }
     }
 
-    fn measure_refinement_candidate(label: &str, payload: &[u8], image: &LumaImage) {
-        let base = transform::downscale_to(image, STRESS_BASE_SIDE);
+    fn render_qr_candidate(payload: &[u8], version: i16, module: u32, white: u8) -> LumaImage {
+        let code = qrcode::QrCode::with_version(
+            payload,
+            qrcode::Version::Normal(version),
+            qrcode::EcLevel::Q,
+        )
+        .unwrap();
+        let rendered = code
+            .render::<image::Luma<u8>>()
+            .module_dimensions(module, module)
+            .dark_color(image::Luma([0]))
+            .light_color(image::Luma([white]))
+            .build();
+        let (width, height) = rendered.dimensions();
+        LumaImage::new(rendered.into_raw(), width, height)
+    }
+
+    fn score_base_fingerprint(base: &LumaImage) -> u64 {
         // FNV-1a over little-endian dimensions followed by the exact score pixels.
-        let fingerprint = base
-            .width()
+        base.width()
             .to_le_bytes()
             .into_iter()
             .chain(base.height().to_le_bytes())
             .chain(base.data().iter().copied())
             .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
                 (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
-            });
+            })
+    }
+
+    fn assert_measured_axis(
+        base: &LumaImage,
+        payload: &[u8],
+        expected: AxisScore,
+        expected_units: u32,
+    ) {
+        let key = plain_key(payload);
+        let cancel = CancelToken::new();
+        let mut calibration = Bound::new(&cancel, None).with_quota(16);
+        let Calibrated::Class(probe) = CellProbe::calibrate_within(
+            base,
+            &key,
+            crate::report::Symbology::QrCode,
+            &mut calibration,
+        )
+        .unwrap() else {
+            panic!("the measured QR witness must calibrate");
+        };
+        assert_eq!((calibration.spent(), calibration.cut()), (1, false));
+        assert!(probe.rung.is_none());
+        assert_eq!(probe.symbology, crate::report::Symbology::QrCode);
+
+        let skip: Vec<_> = WEIGHTS
+            .iter()
+            .map(|&(other, _)| other)
+            .filter(|&other| other != expected.axis)
+            .collect();
+        let mut bound = Bound::new(&cancel, None).with_quota(6);
+        let axes = run_axes(base, &key, ScoreDepth::Full, &skip, &mut bound, probe).unwrap();
+        assert_eq!(axes, Some(vec![expected]));
+        assert_eq!(
+            (bound.spent(), bound.cut(), bound.panics()),
+            (expected_units, false, 0)
+        );
+    }
+
+    #[test]
+    fn low_luma_qr_fails_only_the_underexposure_cell() {
+        let payload = b"https://qrcode-ai.com/c/v5q";
+        let image = render_qr_candidate(payload, 5, 4, 60);
+        let base = transform::downscale_to(&image, STRESS_BASE_SIDE);
+        assert_eq!((base.width(), base.height()), (180, 180));
+        assert_eq!(score_base_fingerprint(&base), 0x09ca_6527_c122_72e5);
+        assert_measured_axis(
+            &base,
+            payload,
+            AxisScore {
+                axis: StressAxis::Lighting,
+                passed: 4,
+                total: 5,
+                failed_at: Some("underexposure".to_owned()),
+                refined_failed_at: None,
+            },
+            5,
+        );
+    }
+
+    #[test]
+    fn qr_blur_knee_refines_to_the_measured_failing_midpoint() {
+        let payload = b"refine knee pin";
+        let image = render_qr_candidate(payload, 5, 3, 255);
+        let base = transform::downscale_to(&image, STRESS_BASE_SIDE);
+        assert_eq!((base.width(), base.height()), (135, 135));
+        assert_eq!(score_base_fingerprint(&base), 0x9b0a_eeab_5c72_e34c);
+        assert_measured_axis(
+            &base,
+            payload,
+            AxisScore {
+                axis: StressAxis::Blur,
+                passed: 3,
+                total: 5,
+                failed_at: Some("blur 2.0".to_owned()),
+                refined_failed_at: Some("blur 1.75".to_owned()),
+            },
+            5,
+        );
+    }
+
+    fn measure_resolution_candidate(label: &str, payload: &[u8], image: &LumaImage) {
+        let base = transform::downscale_to(image, STRESS_BASE_SIDE);
+        let fingerprint = score_base_fingerprint(&base);
         println!(
-            "candidate={label:?} payload={payload:?} base={}x{} fnv1a64={fingerprint:016x}",
+            "candidate={label:?} payload={payload:?} source={}x{} base={}x{} fnv1a64={fingerprint:016x}",
+            image.width(),
+            image.height(),
             base.width(),
             base.height(),
         );
@@ -1367,108 +1467,61 @@ mod tests {
             }
         };
         println!(
-            "candidate={label:?} calibration_units={} rung={:?}",
+            "candidate={label:?} calibration_units={} cut={} panics={} rung={:?}",
             calibration.spent(),
+            calibration.cut(),
+            calibration.panics(),
             probe.rung,
         );
-        for axis in [
-            StressAxis::Resolution,
-            StressAxis::Blur,
-            StressAxis::Lighting,
-        ] {
-            let skip: Vec<_> = WEIGHTS
-                .iter()
-                .map(|&(other, _)| other)
-                .filter(|&other| other != axis)
-                .collect();
-            let mut bound = Bound::new(&cancel, None).with_quota(6);
-            let axes = run_axes(&base, &key, ScoreDepth::Full, &skip, &mut bound, probe).unwrap();
-            let witness = axes.as_ref().is_some_and(|axes| {
-                axes.iter().any(|score| {
-                    score.axis != StressAxis::Lighting
-                        && score.passed > 0
-                        && score.failed_at.is_some()
-                        && score.refined_failed_at.is_some()
-                        && score.refined_failed_at != score.failed_at
-                })
-            }) && !bound.cut();
-            println!(
-                "candidate={label:?} axis={axis:?} units={} cut={} panics={} \
-                 refinement_witness={witness} result={axes:?}",
-                bound.spent(),
-                bound.cut(),
-                bound.panics,
-            );
-        }
+        let axis = StressAxis::Resolution;
+        let skip: Vec<_> = WEIGHTS
+            .iter()
+            .map(|&(other, _)| other)
+            .filter(|&other| other != axis)
+            .collect();
+        let mut bound = Bound::new(&cancel, None).with_quota(6);
+        let axes = run_axes(&base, &key, ScoreDepth::Full, &skip, &mut bound, probe).unwrap();
+        let witness = axes.as_ref().is_some_and(|axes| {
+            axes.iter().any(|score| {
+                score.axis == StressAxis::Resolution
+                    && score.passed > 0
+                    && score.failed_at.is_some()
+                    && score.refined_failed_at.is_some()
+                    && score.refined_failed_at != score.failed_at
+            })
+        }) && !bound.cut();
+        println!(
+            "candidate={label:?} axis={axis:?} units={} cut={} panics={} \
+             refinement_witness={witness} result={axes:?}",
+            bound.spent(),
+            bound.cut(),
+            bound.panics(),
+        );
     }
 
     #[test]
-    #[ignore = "bounded fixture discovery; run explicitly to measure, then pin the witnesses"]
-    fn discover_refinement_witnesses() {
-        // Existing degraded fixtures consume two slots in the 24-input ceiling.
-        for name in ["gen_v5_q_blur2.png", "gen_v5_q_tiny.png"] {
-            let path = format!(
-                "{}/../../fixtures/degraded/{name}",
-                env!("CARGO_MANIFEST_DIR")
-            );
-            let bytes = std::fs::read(path).expect("fixture present");
-            let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
-            measure_refinement_candidate(name, b"https://qrcode-ai.com/c/v5q", &planes.luma);
-        }
-        // Reserve one slot for low luma at the actual underexposure cell.
-        let payload = b"https://qrcode-ai.com/c/v5q";
-        let code =
-            qrcode::QrCode::with_version(payload, qrcode::Version::Normal(5), qrcode::EcLevel::Q)
-                .unwrap();
-        let rendered = code
-            .render::<image::Luma<u8>>()
-            .module_dimensions(4, 4)
-            .dark_color(image::Luma([0]))
-            .light_color(image::Luma([60]))
-            .build();
-        let (width, height) = rendered.dimensions();
-        let image = LumaImage::new(rendered.into_raw(), width, height);
-        let label = format!(
-            "low-luma;version=5;ecc=Q;module=4;preblur=0;black=0;white=60;source={width}x{height}"
-        );
-        measure_refinement_candidate(&label, payload, &image);
-
-        // Remaining slots follow payload/version/module/preblur order below.
-        let mut candidates = 3;
-        'candidates: for payload in ["refine knee pin", "https://qrcode-ai.com/c/v5q"] {
-            for version in [5, 10, 20] {
-                let code = qrcode::QrCode::with_version(
-                    payload.as_bytes(),
-                    qrcode::Version::Normal(version),
-                    qrcode::EcLevel::Q,
-                )
-                .unwrap();
-                for module in [3, 4] {
-                    let rendered = code
-                        .render::<image::Luma<u8>>()
-                        .module_dimensions(module, module)
-                        .build();
-                    let (width, height) = rendered.dimensions();
-                    let image = LumaImage::new(rendered.into_raw(), width, height);
-                    for preblur in [0.0, 0.5] {
-                        if candidates == 24 {
-                            break 'candidates;
-                        }
-                        let input = if preblur > 0.0 {
-                            transform::gaussian_blur(&image, preblur)
-                        } else {
-                            image.clone()
-                        };
-                        let label = format!(
-                            "payload={payload};version={version};ecc=Q;module={module};preblur={preblur}"
-                        );
-                        measure_refinement_candidate(&label, payload.as_bytes(), &input);
-                        candidates += 1;
-                    }
+    #[ignore = "bounded 16-recipe resolution discovery; measure before pinning a witness"]
+    fn discover_resolution_refinement_witnesses() {
+        let payload = "https://qrcode-ai.com/c/v5q";
+        let mut candidates = 0;
+        for version in [11, 12, 13, 14] {
+            for module in [3, 4] {
+                let image = render_qr_candidate(payload.as_bytes(), version, module, 255);
+                for preblur in [0.0, 0.5] {
+                    let input = if preblur > 0.0 {
+                        transform::gaussian_blur(&image, preblur)
+                    } else {
+                        image.clone()
+                    };
+                    let label = format!(
+                        "payload={payload};version={version};ecc=Q;module={module};preblur={preblur};black=0;white=255"
+                    );
+                    measure_resolution_candidate(&label, payload.as_bytes(), &input);
+                    candidates += 1;
                 }
             }
         }
-        assert_eq!(candidates, 24);
+        assert_eq!(candidates, 16);
     }
 
     /// The primary detection of an unbounded Full walk and its content.
