@@ -60,8 +60,10 @@ Deep checks (weekly `deep-checks.yml`): cargo-mutants in 85 shards, judged
 by the `mutants-summary` job — red on a baseline failure or on any missed /
 timed-out mutant absent from `.cargo/mutants-dispositions.toml` (after an
 edit there: `python3 scripts/check-mutants-outcome.py --self-test`) · fuzz
-×4 · rescue-stress (`rescue_wrong == 0` in both the uncapped and the capped
-pass is a hard gate) · advisories. Judge-bump moments add the external
+×4 · rescue-stress (every emitted engine/rescue/extra QR and non-QR output is
+judged against the single-symbol truth, exact output dispositions and pinned
+recall/panic floors; rescue-path wrong output is forbidden in both the uncapped
+and capped passes) · advisories. Judge-bump moments add the external
 truth, `xtask corpus-report --external` (the `corpus-external.tsv` pins):
 it runs locally with the corpus present — CI has no corpus, parses the
 manifest only and reports the gate as NOT VERIFIED, never as a pass.
