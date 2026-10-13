@@ -42,6 +42,15 @@ version line and timings only, unless the release changes behavior.
 
 ## 2 · Cut the changelog
 
+When local compilation is unavailable, dispatch `toolchain-probe.yml` with
+`probe=release-prepare` and `version=X.Y.Z` on the clean release branch. Its
+unprivileged job runs `scripts/prepare-release.py`: the actual `sync-version`
+binary, Cargo regeneration of all five locks without dependency drift, a rebuilt
+CLI producing every golden, and the dated changelog. It uploads a patch and a
+receipt pinning the input source, tools and generated hashes. Inspect the official
+artifact, review/apply its patch to the same source, commit it and qualify that
+new revision normally. Preparation itself does not commit, tag or publish.
+
 `## Unreleased` → `## X.Y.Z — YYYY-MM-DD`. The tag-time gates REQUIRE a
 dated section matching the workspace version: mobile.yml's version gate
 (shipped after 0.5.0 stale-notes) and, since crates, npm and PyPI used to
