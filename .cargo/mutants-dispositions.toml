@@ -84,6 +84,17 @@
 # these eight kills, not a fresh full deep verdict. Now 33 equivalent · 9
 # timeout-structural · 13 debt.
 
+# Pruned (2026-10-13, fixed thirteen debts): paired run 38394518452
+# measures f73555e before and 5b5cffc after, with passing cohort baselines,
+# complete exact anchors/tool/test/raw outcomes and unchanged production.
+# Before: 12 MISSED and 1 TIMEOUT; after: all 13 CAUGHT at regression
+# assertions after successful builds. The rotation timeout becomes an
+# assertion failure; it is not a MISSED-to-CAUGHT transition. Permanent
+# measured Lighting/Blur/Resolution pins and first-scheduled rotation
+# geometry complete this focused coverage. No exclusions were added.
+# This is fixed-cohort qualification, not a fresh full-deep verdict.
+# Now 33 equivalent · 9 timeout-structural · 0 debt.
+
 # ── equivalent ──────────────────────────────────────────────────────────────
 
 [[mutant]]
@@ -529,143 +540,3 @@ category = "timeout-structural"
 reason = """\
   `head *= 1` never advances the deque head, so the left-edge expiry loop spins as soon as the \
   window slides — TIMEOUT in run 37262272113"""
-
-# ── debt: surviving mutants recorded at 1c38d7c, to be killed by tests (debt,
-#    not equivalence) ────────────────────────────────────────────────────────
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/transform.rs"
-line = 239
-column = 29
-mutation = "replace / with % in flatten"
-category = "debt"
-reason = """\
-  `pixels` only sizes flatten's four with_capacity reservations (luma, rgb, fg_luma, \
-  alpha_plane), and the loop pushes the same bytes into them; `% 4` is 0 for an RGBA buffer, so \
-  the planes grow as they fill. Equal output does not prove equivalence: allocator-call \
-  instrumentation can distinguish the extra growth. Retain as resource-behavior test debt \
-  (recorded as debt at 1c38d7c)"""
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/transform.rs"
-line = 239
-column = 29
-mutation = "replace / with * in flatten"
-category = "debt"
-reason = """\
-  `pixels` only sizes flatten's four with_capacity reservations (luma, rgb, fg_luma, \
-  alpha_plane), and the loop pushes the same bytes into them; `* 4` reserves 16 times what they \
-  fill. A bounded allocator can accept the original reservations and reject the enlarged ones, \
-  so equal output does not prove equivalence. Retain as resource-behavior test debt \
-  (recorded as debt at 1c38d7c)"""
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/engine/rqrr_engine.rs"
-line = 111
-column = 13
-mutation = "delete match arm (EciEvidence::Unobserved, Some(ec)) in decode"
-category = "debt"
-reason = """\
-  recorded 2026-10-11 (run 38105646991): the arm hands a re-read hint to an rqrr read whose grid \
-  decided nothing — no orientation verifies, or both verify differently. No fixture reaches it: \
-  rqrr decodes a word the scanner's bounded RS refuses only by a miscorrection past ⌊npar/2⌋. \
-  Killed by a test whose grid is such a decode (or a crafted grid both orientations verify) \
-  and which pins that read's GridBounds hint at its measured version"""
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/engine/rqrr_engine.rs"
-line = 244
-column = 39
-mutation = "replace == with != in rescue_input"
-category = "debt"
-reason = """\
-  recorded 2026-10-11 (run 38105646991): differs only when an undecodable grid parses malformed \
-  as sampled and its transpose verifies, which no natural symbol does — only a crafted grid \
-  verifies both ways. Killed by a test on such grids: a transpose verifying to another result \
-  leaves the candidate ambiguous, one verifying to the same malformed stream lets it stand"""
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/ladder.rs"
-line = 478
-column = 25
-mutation = "replace > with >= in Rung::apply"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/rescue/mod.rs"
-line = 250
-column = 43
-mutation = "replace < with <= in attempt"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/score/mod.rs"
-line = 482
-column = 32
-mutation = "delete - in run_lighting"
-category = "debt"
-reason = """\
-  surviving mutant recorded at 1c38d7c (run 37262272113), re-anchored 2026-10-11 from 451:32 \
-  where the code moved: the fifth lighting cell turns underexposure into a second +60. Killed \
-  by a test on a symbol that fails only underexposure (light modules near black): its lighting \
-  set fails at the −60 cell"""
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/score/mod.rs"
-line = 533
-column = 61
-mutation = "replace - with / in run_axes"
-category = "debt"
-reason = """\
-  surviving mutant recorded at 1c38d7c (run 37262272113), re-anchored 2026-10-11 from 502:61 \
-  where the code moved: a knee past the first cell refines at the knee itself instead of the \
-  midpoint with the cell before. Killed by a test pinning the refined label of such a knee on \
-  the blur, contrast, tilt or rotation ramp (a blur knee at 1.5 refines at 1.25)"""
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/score/mod.rs"
-line = 544
-column = 44
-mutation = "replace - with / in run_axes"
-category = "debt"
-reason = """\
-  surviving mutant recorded at 1c38d7c (run 37262272113), re-anchored 2026-10-11 from 513:44 \
-  where the code moved: a resolution knee past the first cell refines at the knee itself. \
-  Killed by a test pinning the refined label of such a knee (a 179 px knee refines at 217 px)"""
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/score/warp.rs"
-line = 95
-column = 40
-mutation = "replace + with * in rotate"
-category = "debt"
-reason = """\
-  out_h becomes ceil(w|sin| * h|cos|): rotation canvases grow quadratically and the rotation \
-  axis outlives the suite timeout — a resource blow-up, not a divergence; a canvas-size \
-  assertion on rotate() would kill it fast — TIMEOUT in run 37262272113, debt not equivalence"""
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/score/warp.rs"
-line = 98
-column = 28
-mutation = "replace - with / in rotate"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/score/warp.rs"
-line = 98
-column = 45
-mutation = "replace - with / in rotate"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
-
-[[mutant]]
-file = "crates/qrcode-ai-scanner/src/score/warp.rs"
-line = 99
-column = 39
-mutation = "replace - with / in rotate"
-category = "debt"
-reason = "surviving mutant recorded at 1c38d7c (run 37262272113), to be killed by a test"
