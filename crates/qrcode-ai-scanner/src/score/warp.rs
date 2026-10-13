@@ -218,6 +218,22 @@ mod tests {
     }
 
     #[test]
+    fn zero_angle_rotation_preserves_rectangular_pixels_exactly() {
+        // Mixed parity dimensions exercise both integer and half-pixel centres;
+        // distinct pixels expose translation even when the canvas size is right.
+        let img = LumaImage::new(
+            vec![
+                0, 255, 17, 90, 33, 201, 64, 7, 128, 240, 52, 180, 99, 221, 11, 155, 42, 80,
+            ],
+            6,
+            3,
+        );
+        let out = rotate(&img, 0.0);
+        assert_eq!((out.width(), out.height()), (6, 3));
+        assert_eq!(out.data(), img.data());
+    }
+
+    #[test]
     fn warp_into_paints_white_beyond_each_half_pixel_boundary() {
         let img = LumaImage::new(vec![0; 4 * 3], 4, 3);
         for (source_x, source_y) in [(3.75, 1.0), (1.0, 2.75), (-0.75, 1.0), (1.0, -0.75)] {

@@ -1668,6 +1668,34 @@ mod tests {
     }
 
     #[test]
+    fn boost_rung_blurs_only_above_sigma_point_three() {
+        let mut pixels = vec![0; 5 * 3];
+        pixels[7] = 255;
+        let img = LumaImage::new(pixels, 5, 3);
+        let apply = |blur| {
+            Rung::Boost {
+                resize: 0,
+                contrast: 1.0,
+                brightness: 1.0,
+                blur,
+            }
+            .apply(&img)
+        };
+
+        let at_threshold = apply(0.3);
+        assert_eq!((at_threshold.width(), at_threshold.height()), (5, 3));
+        assert_eq!(at_threshold.data(), img.data());
+
+        // A sharp impulse makes even the smallest admitted blur observable.
+        let sigma = f32::from_bits(0.3_f32.to_bits() + 1);
+        let above_threshold = apply(sigma);
+        let blurred = transform::gaussian_blur(&img, sigma);
+        assert_eq!((above_threshold.width(), above_threshold.height()), (5, 3));
+        assert_ne!(blurred.data(), img.data());
+        assert_eq!(above_threshold.data(), blurred.data());
+    }
+
+    #[test]
     fn morph_rungs_close_gaps_and_hit_their_target_size() {
         // checkerboard of 2px dark dots with 2px gaps — a close with a
         // big-enough kernel turns the dark quadrant solid black.
