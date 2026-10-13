@@ -1384,16 +1384,9 @@ mod tests {
     /// relation checked before imposing any syndrome or payload constraints.
     fn dual_words(colors: &[qrcode::Color]) -> [Vec<u8>; 2] {
         let grid = symbol_grid(colors);
-        let reads = [
-            grid.get_raw_data().unwrap(),
-            rqrr::Grid::new(Transposed(&grid.grid))
-                .get_raw_data()
-                .unwrap(),
-        ];
-        for ((meta, _), (ec, mask)) in reads.iter().zip([(1, 0), (2, 2)]) {
+        // Convert each large raw reading before retaining the other orientation.
+        let read = |(meta, raw): (rqrr::MetaData, rqrr::RawData), ec, mask| {
             assert_eq!((meta.version.0, meta.ecc_level, meta.mask), (2, ec, mask));
-        }
-        reads.map(|(meta, raw)| {
             assert_eq!(raw.len, 359);
             crate::matrix::zigzag::unmask_to_codewords(
                 &raw.data,
@@ -1402,7 +1395,17 @@ mod tests {
                 u8::try_from(meta.mask).unwrap(),
             )
             .unwrap()
-        })
+        };
+        [
+            read(grid.get_raw_data().unwrap(), 1, 0),
+            read(
+                rqrr::Grid::new(Transposed(&grid.grid))
+                    .get_raw_data()
+                    .unwrap(),
+                2,
+                2,
+            ),
+        ]
     }
 
     fn bits_of(bytes: &[u8]) -> Vec<bool> {
