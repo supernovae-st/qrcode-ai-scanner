@@ -87,7 +87,8 @@
 //!
 //! The tables above judge one QR detection per cell. The output gate counts
 //! them all: every published detection of a cell is one output. The cell's
-//! truth is its first `qr_code` output with the truth text (the grid renders
+//! truth is its first `qr_code` output with the exact truth bytes and text,
+//! a non-lossy charset and no ECI or FNC1 (the producer writes unmarked ASCII
 //! Model 2 QR only); every other output is a wrong output of one kind:
 //!
 //! - `qr_wrong` — any other QR-family engine read, in a cell with no truth
@@ -100,8 +101,9 @@
 //! An output's path is `rescue` when its engines include the rescue, else
 //! `engine`. `strict_correct` counts the cells whose outputs are exactly one
 //! truth. `DISPOSITIONS_PATH` (compiled in) holds one row per tolerated wrong
-//! output, with a public reason, and pins each pass's exact `strict_correct`
-//! (its floor), its exact `engine_panics` sum and its exact `caught_panics`
+//! output, including its full-content fingerprint, with a public reason,
+//! and pins each pass's exact `strict_correct` (its floor), its exact
+//! `engine_panics` sum and its exact `caught_panics`
 //! count. A row holds only while its exact output occurs; a row whose output
 //! no longer occurs is stale.
 //!
@@ -131,7 +133,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use image::{GrayImage, Luma};
 use qrcode::canvas::{Canvas, MaskPattern, Module};
 use qrcode_ai_scanner::{
-    Detection, EngineKind, Hint, ImageInput, ScanProfile, ScanReport, Scanner,
+    DecodedContent, Detection, EngineKind, Hint, ImageInput, ScanProfile, ScanReport, Scanner,
 };
 use rayon::prelude::*;
 
@@ -780,7 +782,7 @@ fn build_s5_constructed() -> Vec<Cell> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Class {
-    /// A QR-family detection decoded to the known truth.
+    /// A Model 2 QR detection carries the exact known content.
     Correct,
     /// A QR-family detection decoded to something ELSE — the miscorrection class.
     Wrong,
@@ -941,30 +943,32 @@ fn classify(cell: &Cell, report: &ScanReport) -> (Verdict, Option<WrongRow>) {
         .filter(|d| d.symbology.is_qr_family())
         .collect();
 
-    let (class, via_rescue, wrong) =
-        if let Some(hit) = qr.iter().find(|d| d.content.text == cell.truth) {
-            (
-                Class::Correct,
-                hit.engines.contains(&EngineKind::Rescue),
-                None,
-            )
-        } else if let Some(miss) = qr.first() {
-            let via = miss.engines.contains(&EngineKind::Rescue);
-            let row = WrongRow {
-                version: cell.version,
-                ec: cell.ec.tag,
-                fill: cell.fill.label(),
-                position: cell.position.label(),
-                occ_pct: cell.occ_pct,
-                engines: engines_label(&miss.engines),
-                via_rescue: via,
-                hinted: hint_low_margin,
-                decoded: preview(&miss.content.text),
-            };
-            (Class::Wrong, via, Some(row))
-        } else {
-            (Class::Refused, false, None)
+    let (class, via_rescue, wrong) = if let Some(hit) = qr
+        .iter()
+        .find(|d| is_truth(&crate::oracle::wire(&d.symbology), &d.content, &cell.truth))
+    {
+        (
+            Class::Correct,
+            hit.engines.contains(&EngineKind::Rescue),
+            None,
+        )
+    } else if let Some(miss) = qr.first() {
+        let via = miss.engines.contains(&EngineKind::Rescue);
+        let row = WrongRow {
+            version: cell.version,
+            ec: cell.ec.tag,
+            fill: cell.fill.label(),
+            position: cell.position.label(),
+            occ_pct: cell.occ_pct,
+            engines: engines_label(&miss.engines),
+            via_rescue: via,
+            hinted: hint_low_margin,
+            decoded: preview(&miss.content.text),
         };
+        (Class::Wrong, via, Some(row))
+    } else {
+        (Class::Refused, false, None)
+    };
 
     (
         Verdict {
@@ -1035,12 +1039,12 @@ impl OutputPath {
 }
 
 /// One published detection, reduced to what the accounting reads.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Published {
     /// Wire name (`qr_code`, `data_bar`).
     symbology: String,
     qr_family: bool,
-    text: String,
+    content: DecodedContent,
     engines: Vec<EngineKind>,
 }
 
@@ -1049,10 +1053,45 @@ impl Published {
         Self {
             symbology: crate::oracle::wire(&detection.symbology),
             qr_family: detection.symbology.is_qr_family(),
-            text: detection.content.text.clone(),
+            content: detection.content.clone(),
             engines: detection.engines.clone(),
         }
     }
+}
+
+/// The producer writes ASCII without ECI or FNC1. A matching rendering alone
+/// cannot establish its bytes or declarations, and the producer does not pin
+/// one charset label among the non-lossy readings of those bytes.
+fn is_truth(symbology: &str, content: &DecodedContent, truth: &str) -> bool {
+    symbology == "qr_code"
+        && !content.charset.is_lossy()
+        && content.raw == truth.as_bytes()
+        && content.text == truth
+        && content.eci.is_none()
+        && content.fnc1.is_none()
+}
+
+/// Versioned, unambiguous encoding of every content field a disposition holds.
+/// JSON tuples preserve absent versus empty ECI and its order and duplicates;
+/// serializing the enums directly refuses unwritable variants instead of
+/// collapsing them into a fallback wire name.
+fn content_sha256(content: &DecodedContent) -> String {
+    let eci = content.eci.as_ref().map(|segments| {
+        segments
+            .iter()
+            .map(|segment| (segment.designator, segment.start))
+            .collect::<Vec<_>>()
+    });
+    let encoded = serde_json::to_vec(&(
+        "qrscan.rescue-stress.content.v1",
+        &content.raw,
+        content.charset,
+        eci,
+        content.fnc1,
+        &content.text,
+    ))
+    .expect("published content must serialize without loss");
+    crate::external::sha256_bytes(&encoded)
 }
 
 /// The identity of a wrong output: every field a disposition row matches.
@@ -1063,6 +1102,7 @@ struct OutputKey {
     kind: OutputKind,
     path: OutputPath,
     symbology: String,
+    content_sha256: String,
     text_sha256: String,
     /// UTF-8 bytes.
     text_len: usize,
@@ -1090,13 +1130,13 @@ struct CellOutputs {
 }
 
 /// Account one cell's published detections against its truth. The first
-/// `qr_code` output with the truth text is the truth (the grid renders Model 2
-/// QR only); every other output is wrong, a second copy of the truth text or
-/// the truth text under another symbology included (one symbol, one output).
+/// exact unmarked ASCII `qr_code` output is the truth; every other output is
+/// wrong, a second copy of the truth or the truth text with different bytes,
+/// declarations or symbology included (one symbol, one output).
 fn account(cell: usize, label: &str, truth: &str, published: &[Published]) -> CellOutputs {
     let truth_at = published
         .iter()
-        .position(|p| p.symbology == "qr_code" && p.text == truth);
+        .position(|p| is_truth(&p.symbology, &p.content, truth));
     let wrong = published
         .iter()
         .enumerate()
@@ -1120,12 +1160,13 @@ fn account(cell: usize, label: &str, truth: &str, published: &[Published]) -> Ce
                     kind,
                     path,
                     symbology: p.symbology.clone(),
-                    text_sha256: crate::external::sha256_bytes(p.text.as_bytes()),
-                    text_len: p.text.len(),
+                    content_sha256: content_sha256(&p.content),
+                    text_sha256: crate::external::sha256_bytes(p.content.text.as_bytes()),
+                    text_len: p.content.text.len(),
                     engines: engines_label(&p.engines),
                 },
                 truth_len: truth.len(),
-                at: truth.find(p.text.as_str()),
+                at: truth.find(p.content.text.as_str()),
             }
         })
         .collect();
@@ -1336,8 +1377,7 @@ const DISPOSITIONS: &str = include_str!("../data/rescue-stress-dispositions.tsv"
 const DISPOSITIONS_PATH: &str = "xtask/data/rescue-stress-dispositions.tsv";
 
 /// The ledger's column header: the row format, pinned.
-const LEDGER_COLUMNS: &str =
-    "pass\tcell\tlabel\tkind\tpath\tsymbology\ttext_sha256\ttext_len\tengines\treason";
+const LEDGER_COLUMNS: &str = "pass\tcell\tlabel\tkind\tpath\tsymbology\tcontent_sha256\ttext_sha256\ttext_len\tengines\treason";
 
 /// The three passes the gate judges, in report order.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -1462,13 +1502,14 @@ fn parse_row(fields: &[&str], line: usize) -> Result<Disposition, String> {
         kind,
         path,
         symbology,
+        content_sha,
         sha,
         len,
         engines,
         reason,
     ] = fields
     else {
-        return Err("a row has 10 tab-separated fields".to_owned());
+        return Err("a row has 11 tab-separated fields".to_owned());
     };
     let pass = PassId::parse(pass).ok_or("unknown pass")?;
     if cell.len() != 4 || !cell.bytes().all(|b| b.is_ascii_digit()) {
@@ -1489,12 +1530,14 @@ fn parse_row(fields: &[&str], line: usize) -> Result<Disposition, String> {
     {
         return Err("symbology is a wire name".to_owned());
     }
-    if sha.len() != 64
-        || !sha
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
-        return Err("text_sha256 is 64 lowercase hex digits".to_owned());
+    for (name, value) in [("content_sha256", content_sha), ("text_sha256", sha)] {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(format!("{name} is 64 lowercase hex digits"));
+        }
     }
     let text_len: usize = len.parse().map_err(|_| "text_len is a byte count")?;
     if engines
@@ -1514,6 +1557,7 @@ fn parse_row(fields: &[&str], line: usize) -> Result<Disposition, String> {
             kind,
             path,
             symbology: (*symbology).to_owned(),
+            content_sha256: (*content_sha).to_owned(),
             text_sha256: (*sha).to_owned(),
             text_len,
             engines: (*engines).to_owned(),
@@ -2189,16 +2233,16 @@ fn write_output_ledger(out: &mut String, gates: &[PassGate<'_>]) {
     writeln!(
         out,
         "| pass | cell | label | kind | path | symbology | engines | text_len | truth_len | at | \
-         text_sha256 | state |"
+         content_sha256 | text_sha256 | state |"
     )
     .unwrap();
-    writeln!(out, "|---|---|---|---|---|---|---|---|---|---|---|---|").unwrap();
+    writeln!(out, "|---|---|---|---|---|---|---|---|---|---|---|---|---|").unwrap();
     for gate in gates {
         for (output, held) in &gate.outputs {
             let key = &output.key;
             writeln!(
                 out,
-                "| {} | {:04} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                "| {} | {:04} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
                 gate.pass.name(),
                 key.cell,
                 key.label,
@@ -2211,6 +2255,7 @@ fn write_output_ledger(out: &mut String, gates: &[PassGate<'_>]) {
                 output
                     .at
                     .map_or_else(|| "-".to_owned(), |at| at.to_string()),
+                key.content_sha256,
                 key.text_sha256,
                 if *held { "held" } else { "open" }
             )
@@ -2226,16 +2271,16 @@ fn write_stale(out: &mut String, gates: &[PassGate<'_>]) {
     writeln!(out, "\n## stale dispositions ({stale} rows)").unwrap();
     writeln!(
         out,
-        "| pass | line | label | kind | path | symbology | engines | text_len | text_sha256 | \
-         reason |"
+        "| pass | line | label | kind | path | symbology | engines | text_len | content_sha256 | \
+         text_sha256 | reason |"
     )
     .unwrap();
-    writeln!(out, "|---|---|---|---|---|---|---|---|---|---|").unwrap();
+    writeln!(out, "|---|---|---|---|---|---|---|---|---|---|---|").unwrap();
     for row in gates.iter().flat_map(|gate| &gate.stale) {
         let key = &row.key;
         writeln!(
             out,
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             row.pass.name(),
             row.line,
             key.label,
@@ -2244,6 +2289,7 @@ fn write_stale(out: &mut String, gates: &[PassGate<'_>]) {
             key.symbology,
             key.engines,
             key.text_len,
+            key.content_sha256,
             key.text_sha256,
             row.reason
         )
@@ -2304,6 +2350,7 @@ fn verify_base_symbols(scanner: &Scanner) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qrcode_ai_scanner::{Charset, EciSegment, Fnc1Position, Symbology};
 
     fn rescued(correct: u32, wrong: u32) -> Bucket {
         Bucket {
@@ -2384,11 +2431,46 @@ mod tests {
         assert_eq!(out, expected);
     }
 
+    fn content(text: &str) -> DecodedContent {
+        let mut value: DecodedContent =
+            serde_json::from_str(r#"{"text":"","raw":"","charset":"utf8"}"#).unwrap();
+        value.text = text.to_owned();
+        value.raw = text.as_bytes().to_vec();
+        value
+    }
+
+    fn eci(designator: u32, start: u32) -> EciSegment {
+        serde_json::from_value(serde_json::json!({"designator": designator, "start": start}))
+            .unwrap()
+    }
+
+    /// Each change leaves the displayed truth intact but contradicts the
+    /// producer's original bytes or its unmarked, non-lossy content.
+    fn same_text_mismatches(text: &str) -> Vec<DecodedContent> {
+        let edits: [fn(&mut DecodedContent); 7] = [
+            |c| c.raw[0] ^= 1,
+            |c| c.raw.push(0),
+            |c| c.charset = Charset::Unknown,
+            |c| c.fnc1 = Some(Fnc1Position::First),
+            |c| c.fnc1 = Some(Fnc1Position::Second),
+            |c| c.eci = Some(Vec::new()),
+            |c| c.eci = Some(vec![eci(26, 0)]),
+        ];
+        edits
+            .into_iter()
+            .map(|edit| {
+                let mut value = content(text);
+                edit(&mut value);
+                value
+            })
+            .collect()
+    }
+
     fn qr(text: &str, engines: &[EngineKind]) -> Published {
         Published {
             symbology: "qr_code".to_owned(),
             qr_family: true,
-            text: text.to_owned(),
+            content: content(text),
             engines: engines.to_vec(),
         }
     }
@@ -2397,13 +2479,173 @@ mod tests {
         Published {
             symbology: symbology.to_owned(),
             qr_family: false,
-            text: text.to_owned(),
+            content: content(text),
             engines: vec![EngineKind::Rxing],
         }
     }
 
     fn sha(text: &str) -> String {
         crate::external::sha256_bytes(text.as_bytes())
+    }
+
+    #[test]
+    fn same_text_cannot_hide_wrong_content_on_any_path() {
+        let mut report: ScanReport =
+            serde_json::from_str(include_str!("../../spec/examples/clean-url.json")).unwrap();
+        let truth = report.detections[0].content.text.clone();
+        let cell = Cell {
+            index: 0,
+            version: 2,
+            ec: EC_LEVELS[0],
+            payload_pct: 100,
+            shape: Shape::Square,
+            fill: Fill::Dark,
+            position: Position::Center,
+            occ_pct: 5,
+            truth: truth.clone(),
+            blot: None,
+            constructed: None,
+        };
+        for engine in [EngineKind::Rxing, EngineKind::Rqrr, EngineKind::Rescue] {
+            for mismatch in same_text_mismatches(&truth) {
+                report.detections[0].content = mismatch.clone();
+                report.detections[0].engines = vec![engine];
+                let published = Published::of(&report.detections[0]);
+                assert_eq!(
+                    published.content, mismatch,
+                    "projection must preserve content"
+                );
+                assert_eq!(published.content.text, truth);
+                let outputs = account(0, "0000_t", &truth, std::slice::from_ref(&published));
+                assert!(!outputs.strict_correct);
+                assert_eq!(outputs.wrong.len(), 1);
+                let rescue = engine == EngineKind::Rescue;
+                let kind = if rescue {
+                    OutputKind::RescueQr
+                } else {
+                    OutputKind::QrWrong
+                };
+                let path = if rescue {
+                    OutputPath::Rescue
+                } else {
+                    OutputPath::Engine
+                };
+                assert_eq!(
+                    (outputs.wrong[0].key.kind, outputs.wrong[0].key.path),
+                    (kind, path)
+                );
+                let (verdict, wrong) = classify(&cell, &report);
+                assert!(verdict.class == Class::Wrong);
+                assert_eq!(verdict.via_rescue, rescue);
+                let wrong = wrong.unwrap();
+                assert_eq!(wrong.via_rescue, rescue);
+                assert_eq!(wrong.decoded, preview(&truth));
+
+                let exact = qr(&truth, &[EngineKind::Rxing]);
+                for pair in [[exact.clone(), published.clone()], [published, exact]] {
+                    let outputs = account(0, "0000_t", &truth, &pair);
+                    assert!(!outputs.strict_correct);
+                    assert_eq!(outputs.wrong.len(), 1);
+                    assert_eq!(outputs.wrong[0].key.path, path);
+                    assert_eq!(
+                        outputs.wrong[0].key.kind,
+                        if rescue {
+                            OutputKind::RescueQr
+                        } else {
+                            OutputKind::QrExtra
+                        }
+                    );
+                    assert_eq!(
+                        outputs.wrong[0].key.content_sha256,
+                        content_sha256(&mismatch)
+                    );
+                }
+            }
+        }
+        report.detections[0].content = content(&truth);
+        report.detections[0].symbology = Symbology::MicroQrCode;
+        assert!(classify(&cell, &report).0.class == Class::Wrong);
+        report.detections[0].symbology = Symbology::QrCode;
+        assert!(classify(&cell, &report).0.class == Class::Correct);
+    }
+
+    #[test]
+    fn exact_content_accepts_non_lossy_charsets_but_only_one_output() {
+        for engine in [EngineKind::Rxing, EngineKind::Rqrr, EngineKind::Rescue] {
+            for charset in [
+                Charset::Utf8,
+                Charset::Latin1,
+                Charset::ShiftJis,
+                Charset::Gb18030,
+            ] {
+                let mut published = qr("abc", &[engine]);
+                published.content.charset = charset;
+                let outputs = account(0, "0000_t", "abc", std::slice::from_ref(&published));
+                assert!(outputs.strict_correct);
+                assert_eq!(outputs.wrong.len(), 0);
+                let twice = account(0, "0000_t", "abc", &[published.clone(), published]);
+                assert!(!twice.strict_correct);
+                assert_eq!(twice.wrong.len(), 1);
+                assert_eq!(
+                    twice.wrong[0].key.kind,
+                    if engine == EngineKind::Rescue {
+                        OutputKind::RescueQr
+                    } else {
+                        OutputKind::QrExtra
+                    }
+                );
+            }
+        }
+        let absent = account(0, "0000_t", "abc", &[]);
+        assert!(!absent.strict_correct);
+        assert_eq!(absent.wrong.len(), 0);
+        let mut wrong_text = qr("abc", &[EngineKind::Rxing]);
+        wrong_text.content.text = "abd".to_owned();
+        let outputs = account(0, "0000_t", "abc", &[wrong_text]);
+        assert!(!outputs.strict_correct);
+        assert_eq!(outputs.wrong.len(), 1);
+        assert_eq!(outputs.wrong[0].key.kind, OutputKind::QrWrong);
+    }
+
+    #[test]
+    fn content_fingerprint_pins_every_field_and_declaration_state() {
+        // SHA-256 of the literal versioned JSON tuple, independently computed.
+        let encoded = br#"["qrscan.rescue-stress.content.v1",[97,98,99],"utf8",null,null,"abc"]"#;
+        let pinned = "d7cd30f9f3bf617c7c23f98bb46c813ff43fadbc35bfadcba68a95e83be75d6e";
+        assert_eq!(crate::external::sha256_bytes(encoded), pinned);
+        assert_eq!(content_sha256(&content("abc")), pinned);
+        let mut variants = vec![content("abc")];
+        variants.extend(same_text_mismatches("abc"));
+        let mut known_charset = content("abc");
+        known_charset.charset = Charset::Latin1;
+        variants.push(known_charset);
+        let mut changed_text = content("abc");
+        changed_text.text = "abd".to_owned();
+        variants.push(changed_text);
+        for declarations in [
+            vec![eci(27, 0)],
+            vec![eci(26, 1)],
+            vec![eci(26, 0), eci(27, 0)],
+            vec![eci(27, 0), eci(26, 0)],
+            vec![eci(26, 0), eci(26, 0)],
+        ] {
+            let mut declared = content("abc");
+            declared.eci = Some(declarations);
+            variants.push(declared);
+        }
+        assert_eq!(variants.len(), 15);
+        let mut hashes: Vec<String> = variants.iter().map(content_sha256).collect();
+        hashes.sort();
+        hashes.dedup();
+        assert_eq!(hashes.len(), 15, "no field or ECI state may alias another");
+    }
+
+    #[test]
+    #[should_panic(expected = "published content must serialize without loss")]
+    fn content_fingerprint_never_falls_back_for_an_unwritable_charset() {
+        let mut value = content("abc");
+        value.charset = Charset::Unrecognized;
+        let _ = content_sha256(&value);
     }
 
     /// One synthetic cell per kind: each wrong output lands in its kind and
@@ -2461,6 +2703,7 @@ mod tests {
                 kind: OutputKind::QrExtra,
                 path: OutputPath::Engine,
                 symbology: "qr_code".to_owned(),
+                content_sha256: content_sha256(&content("abcdef")),
                 text_sha256: sha("abcdef"),
                 text_len: 6,
                 engines: "rxing".to_owned(),
@@ -2507,6 +2750,7 @@ mod tests {
                     OutputPath::Engine
                 },
                 symbology: "qr_code".to_owned(),
+                content_sha256: content_sha256(&content(text)),
                 text_sha256: sha(text),
                 text_len: text.len(),
                 engines: "rxing".to_owned(),
@@ -2519,12 +2763,13 @@ mod tests {
     fn row(pass: &str, output: &WrongOutput) -> String {
         let key = &output.key;
         format!(
-            "{pass}\t{:04}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\ta test reason",
+            "{pass}\t{:04}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\ta test reason",
             key.cell,
             key.label,
             key.kind.label(),
             key.path.label(),
             key.symbology,
+            key.content_sha256,
             key.text_sha256,
             key.text_len,
             key.engines
@@ -2548,6 +2793,57 @@ mod tests {
         "engine_panics\tuncapped\t2",
         "caught_panics\tuncapped\t2",
     ];
+
+    #[test]
+    fn same_text_disposition_cannot_hold_different_content() {
+        let original = qr("abc", &[EngineKind::Rxing]);
+        let held = account(1, "0001_t", "truth", std::slice::from_ref(&original))
+            .wrong
+            .remove(0);
+        let book = ledger(
+            &[
+                "floor\tuncapped\t0",
+                "engine_panics\tuncapped\t0",
+                "caught_panics\tuncapped\t0",
+            ],
+            &[row("uncapped", &held)],
+        );
+        let pass = Pass {
+            outputs: vec![held.clone()],
+            ..Pass::default()
+        };
+        let gate = judge(PassId::Uncapped, &pass, &book);
+        assert_eq!((gate.held(), gate.open(), gate.stale.len()), (1, 0, 0));
+        assert_eq!(gate.failures(), Vec::<String>::new());
+
+        let mut variants = same_text_mismatches("abc");
+        let mut known_charset = content("abc");
+        known_charset.charset = Charset::Latin1;
+        variants.push(known_charset);
+        for variant in variants {
+            let changed = Published {
+                content: variant,
+                ..original.clone()
+            };
+            let observed = account(1, "0001_t", "truth", &[changed]).wrong.remove(0);
+            assert_eq!(observed.key.text_sha256, held.key.text_sha256);
+            assert_eq!(observed.key.text_len, held.key.text_len);
+            assert_ne!(observed.key.content_sha256, held.key.content_sha256);
+            let pass = Pass {
+                outputs: vec![observed],
+                ..Pass::default()
+            };
+            let gate = judge(PassId::Uncapped, &pass, &book);
+            assert_eq!((gate.held(), gate.open(), gate.stale.len()), (0, 1, 1));
+            assert_eq!(
+                gate.failures(),
+                [
+                    "uncapped: 1 wrong outputs without a disposition row",
+                    "uncapped: 1 stale disposition rows (their output no longer occurs)",
+                ]
+            );
+        }
+    }
 
     #[test]
     fn dispositions_hold_stale_and_open() {
@@ -2598,10 +2894,11 @@ mod tests {
         let counts = state(&book);
         assert_eq!((counts.0, counts.1, counts.2), (2, 0, 1));
         // Exact match: a row differing in any key field holds nothing.
-        let edits: [fn(&mut OutputKey); 6] = [
+        let edits: [fn(&mut OutputKey); 7] = [
             |k| k.label.push('x'),
             |k| k.kind = OutputKind::QrExtra,
             |k| k.symbology = "micro_qr_code".to_owned(),
+            |k| k.content_sha256 = content_sha256(&content("abd")),
             |k| k.text_sha256 = sha("abd"),
             |k| k.text_len += 1,
             |k| k.engines = "rxing+rqrr".to_owned(),
@@ -2710,6 +3007,22 @@ mod tests {
             (ok.replace("qr_wrong", "qr_odd"), "an unknown kind"),
             (ok.replace("\tengine\t", "\tscan\t"), "an unknown path"),
             (ok.replace(&good.key.text_sha256, "abc"), "a short sha256"),
+            (
+                ok.replace(&good.key.content_sha256, "abc"),
+                "a short content sha256",
+            ),
+            (
+                ok.replace(&good.key.content_sha256, &"g".repeat(64)),
+                "a non-hex content sha256",
+            ),
+            (
+                ok.replace(&good.key.content_sha256, &"A".repeat(64)),
+                "an uppercase content sha256",
+            ),
+            (
+                ok.replace(&format!("{}\t", good.key.content_sha256), ""),
+                "a missing content sha256 field",
+            ),
             (ok.replace("\ta test reason", ""), "a missing field"),
             (ok.replace("a test reason", " "), "a blank reason"),
             (
@@ -2724,6 +3037,17 @@ mod tests {
         ] {
             assert!(!parses(&file("", &bad)), "{why}");
         }
+        assert!(
+            !parses(&file("", &ok).replace("content_sha256\t", "")),
+            "the old header cannot weaken content identity"
+        );
+        assert!(
+            !parses(&format!(
+                "{}\n",
+                LEDGER_COLUMNS.replace("content_sha256\t", "")
+            )),
+            "an empty old-format ledger also needs the new identity header"
+        );
         // Only the dual pass may hold a rescue-path output.
         let rescued = output(1, OutputKind::RescueQr, "abc");
         assert!(parses(&file("", &row("dual", &rescued))));
@@ -3203,12 +3527,40 @@ mod tests {
         let gates = [judge(PassId::Uncapped, &pass, &book)];
         let mut out = String::new();
         write_output_ledger(&mut out, &gates);
+        assert_eq!(
+            out.lines().nth(2),
+            Some(
+                "| pass | cell | label | kind | path | symbology | engines | text_len | truth_len | at | content_sha256 | text_sha256 | state |"
+            )
+        );
         let line = format!(
             "\n| uncapped | 0007 | 0007_t | qr_wrong | engine | qr_code | rxing | 6 | 48 | 18 | {} \
-             | open |\n",
+             | {} | open |\n",
+            content_sha256(&content("abcdef")),
             sha("abcdef")
         );
         assert!(out.contains(&line), "{out}");
         assert!(out.starts_with("\n## wrong-output ledger (1 outputs: 0 held, 1 open)\n"));
+    }
+
+    #[test]
+    fn stale_rows_print_the_content_identity_that_no_longer_occurs() {
+        let gone = output(1, OutputKind::QrWrong, "abc");
+        let book = ledger(&[], &[row("uncapped", &gone)]);
+        let pass = Pass::default();
+        let gates = [judge(PassId::Uncapped, &pass, &book)];
+        let mut out = String::new();
+        write_stale(&mut out, &gates);
+        assert_eq!(
+            out,
+            format!(
+                "\n## stale dispositions (1 rows)\n\
+                 | pass | line | label | kind | path | symbology | engines | text_len | content_sha256 | text_sha256 | reason |\n\
+                 |---|---|---|---|---|---|---|---|---|---|---|\n\
+                 | uncapped | 4 | 0001_t | qr_wrong | engine | qr_code | rxing | 3 | {} | {} | a test reason |\n",
+                "d7cd30f9f3bf617c7c23f98bb46c813ff43fadbc35bfadcba68a95e83be75d6e",
+                sha("abc")
+            )
+        );
     }
 }
