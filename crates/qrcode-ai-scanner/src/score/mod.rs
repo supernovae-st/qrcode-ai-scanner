@@ -1406,7 +1406,6 @@ mod tests {
     #[ignore = "bounded fixture discovery; run explicitly to measure, then pin the witnesses"]
     fn discover_refinement_witnesses() {
         // Existing degraded fixtures consume two slots in the 24-input ceiling.
-        // Remaining slots follow payload/version/module/preblur order below.
         for name in ["gen_v5_q_blur2.png", "gen_v5_q_tiny.png"] {
             let path = format!(
                 "{}/../../fixtures/degraded/{name}",
@@ -1416,7 +1415,26 @@ mod tests {
             let planes = normalize(&ImageInput::encoded(&bytes), &Limits::default()).unwrap();
             measure_refinement_candidate(name, b"https://qrcode-ai.com/c/v5q", &planes.luma);
         }
-        let mut candidates = 2;
+        // Reserve one slot for low luma at the actual underexposure cell.
+        let payload = b"https://qrcode-ai.com/c/v5q";
+        let code =
+            qrcode::QrCode::with_version(payload, qrcode::Version::Normal(5), qrcode::EcLevel::Q)
+                .unwrap();
+        let rendered = code
+            .render::<image::Luma<u8>>()
+            .module_dimensions(4, 4)
+            .dark_color(image::Luma([0]))
+            .light_color(image::Luma([60]))
+            .build();
+        let (width, height) = rendered.dimensions();
+        let image = LumaImage::new(rendered.into_raw(), width, height);
+        let label = format!(
+            "low-luma;version=5;ecc=Q;module=4;preblur=0;black=0;white=60;source={width}x{height}"
+        );
+        measure_refinement_candidate(&label, payload, &image);
+
+        // Remaining slots follow payload/version/module/preblur order below.
+        let mut candidates = 3;
         'candidates: for payload in ["refine knee pin", "https://qrcode-ai.com/c/v5q"] {
             for version in [5, 10, 20] {
                 let code = qrcode::QrCode::with_version(
