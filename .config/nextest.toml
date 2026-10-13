@@ -29,3 +29,11 @@ wall-clock = { max-threads = 1 }
 filter = 'test(artistic_image_that_decodes_must_not_score_zero) + test(blob_style_template_decodes_and_scores) + test(legacy_artistic_image_decodes_within_full_ladder) + test(concurrent_scans_yield_byte_identical_reports) + test(work_quota_cuts_are_absent_never_partial) + test(budget_cuts_never_ship_a_partial_judgment) + test(a_present_score_is_budget_independent) + test(flag_false_means_final) + test(unbounded_scans_never_set_the_flag)'
 test-group = 'wall-clock'
 threads-required = "num-cpus"
+
+# Check the direct rotation geometry before decoding stress can hang on a
+# malformed canvas. Reserve the slots so a failing geometry assertion stops
+# nextest before an expensive ladder scan starts. No test is excluded.
+[[profile.default.overrides]]
+filter = 'test(/^score::warp::tests::zero_angle_rotation_preserves_rectangular_pixels_exactly$/)'
+priority = 100
+threads-required = "num-cpus"
