@@ -133,7 +133,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use image::{GrayImage, Luma};
 use qrcode::canvas::{Canvas, MaskPattern, Module};
 use qrcode_ai_scanner::{
-    DecodedContent, Detection, EngineKind, Hint, ImageInput, ScanProfile, ScanReport, Scanner,
+    Charset, DecodedContent, Detection, EngineKind, Hint, ImageInput, ScanProfile, ScanReport,
+    Scanner,
 };
 use rayon::prelude::*;
 
@@ -1061,10 +1062,11 @@ impl Published {
 
 /// The producer writes ASCII without ECI or FNC1. A matching rendering alone
 /// cannot establish its bytes or declarations, and the producer does not pin
-/// one charset label among the non-lossy readings of those bytes.
+/// one charset label among the known non-lossy readings of those bytes. The
+/// reader-only `Unrecognized` sentinel cannot be published by this producer.
 fn is_truth(symbology: &str, content: &DecodedContent, truth: &str) -> bool {
     symbology == "qr_code"
-        && !content.charset.is_lossy()
+        && !matches!(content.charset, Charset::Unknown | Charset::Unrecognized)
         && content.raw == truth.as_bytes()
         && content.text == truth
         && content.eci.is_none()
@@ -1133,6 +1135,8 @@ struct CellOutputs {
 /// exact unmarked ASCII `qr_code` output is the truth; every other output is
 /// wrong, a second copy of the truth or the truth text with different bytes,
 /// declarations or symbology included (one symbol, one output).
+/// Unwritable content fails loudly while fingerprinting: it cannot be counted
+/// as strict truth or represented by an invented disposition identity.
 fn account(cell: usize, label: &str, truth: &str, published: &[Published]) -> CellOutputs {
     let truth_at = published
         .iter()
@@ -2350,7 +2354,7 @@ fn verify_base_symbols(scanner: &Scanner) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qrcode_ai_scanner::{Charset, EciSegment, Fnc1Position, Symbology};
+    use qrcode_ai_scanner::{EciSegment, Fnc1Position, Symbology};
 
     fn rescued(correct: u32, wrong: u32) -> Bucket {
         Bucket {
@@ -2567,6 +2571,17 @@ mod tests {
         assert!(classify(&cell, &report).0.class == Class::Wrong);
         report.detections[0].symbology = Symbology::QrCode;
         assert!(classify(&cell, &report).0.class == Class::Correct);
+
+        // This reader-only sentinel is not lossy, but is not publishable truth.
+        report.detections[0].content.charset = Charset::Unrecognized;
+        assert!(!is_truth("qr_code", &report.detections[0].content, &truth));
+        for engine in [EngineKind::Rxing, EngineKind::Rqrr, EngineKind::Rescue] {
+            report.detections[0].engines = vec![engine];
+            let (verdict, wrong) = classify(&cell, &report);
+            assert!(verdict.class == Class::Wrong);
+            assert_eq!(verdict.via_rescue, engine == EngineKind::Rescue);
+            assert_eq!(wrong.unwrap().decoded, preview(&truth));
+        }
     }
 
     #[test]
@@ -2646,6 +2661,16 @@ mod tests {
         let mut value = content("abc");
         value.charset = Charset::Unrecognized;
         let _ = content_sha256(&value);
+    }
+
+    #[test]
+    #[should_panic(expected = "published content must serialize without loss")]
+    fn accounting_refuses_unwritable_charset_instead_of_counting_truth() {
+        let mut published = qr("abc", &[EngineKind::Rxing]);
+        published.content.charset = Charset::Unrecognized;
+        // Even a sole output with exact bytes and text must reach the explicit
+        // serialization refusal, never return `strict_correct = true`.
+        let _ = account(0, "0000_t", "abc", &[published]);
     }
 
     /// One synthetic cell per kind: each wrong output lands in its kind and
