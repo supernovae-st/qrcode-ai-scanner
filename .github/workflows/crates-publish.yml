@@ -63,6 +63,7 @@ jobs:
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
           python3 scripts/packed-rust-consumer.py target/package fixtures/clean/gen_v5_q.png "$version"
       - name: retain qualified bytes in one upload root on every OS
+        shell: bash
         env:
           RUST_RECEIPT: ${{ steps.consumer.outputs.receipt }}
         run: |
