@@ -172,7 +172,7 @@ jobs:
           if-no-files-found: error
 
   publish-native:
-    needs: [pack-native, operand-proof]
+    needs: [pack-native, operand-proof, consume-native, consume-native-musl]
     # refs/tags/v* only: no other ref reaches the registry.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
@@ -365,7 +365,7 @@ jobs:
           if-no-files-found: error
 
   publish-wasm:
-    needs: [build-wasm, operand-proof]
+    needs: [build-wasm, operand-proof, consume-wasm]
     # refs/tags/v* only: no other ref reaches the registry.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
@@ -478,6 +478,123 @@ jobs:
             *) echo "::error::registry probe for $name@$version failed"; exit 1 ;;
           esac
           verify_live
+
+  # Real installs from the inspected tarballs, on both supported Node lines
+  # and every native target. No registry fallback, lifecycle script or OIDC.
+  consume-native:
+    needs: pack-native
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+        platform:
+          - { runner: ubuntu-24.04, suffix: linux-x64-gnu }
+          - { runner: ubuntu-24.04-arm, suffix: linux-arm64-gnu }
+          - { runner: macos-15, suffix: darwin-arm64 }
+          - { runner: macos-15-intel, suffix: darwin-x64 }
+          - { runner: windows-2025, suffix: win32-x64-msvc }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-native-tarballs
+          path: ${{ runner.temp }}/native-tarballs
+      - name: clean offline install + exact consumer assertions
+        id: consumer
+        env:
+          NAPI_SUFFIX: ${{ matrix.platform.suffix }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./crates/qrcode-ai-scanner-node/package.json').version")
+          node scripts/packed-node-consumer.mjs native "$RUNNER_TEMP/native-tarballs" \
+            fixtures/clean/gen_v5_q.png "$version" "$NAPI_SUFFIX"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        with:
+          name: consumer-node-${{ matrix.node }}-${{ matrix.platform.suffix }}
+          path: ${{ steps.consumer.outputs.receipt }}
+          if-no-files-found: error
+
+  consume-native-musl:
+    needs: pack-native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Official Node Alpine amd64 manifests, resolved 2026-10-13.
+          - { node: 22, image: 'node:22-alpine@sha256:2c752226d477b4a886378baa95b9af252be59301b725fdb0b7e15208131505a8' }
+          - { node: 24, image: 'node:24-alpine@sha256:83f1c388c31fb2e51f7cbd4dea949b96260798c98f206e8e4696bc93bd964e3a' }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-native-tarballs
+          path: ${{ runner.temp }}/native-tarballs
+      - name: musl clean offline install + exact consumer assertions
+        env:
+          CONSUMER_IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/musl"
+          docker pull "$CONSUMER_IMAGE"
+          version=$(node -p "require('./crates/qrcode-ai-scanner-node/package.json').version")
+          docker run --rm --network none --cpus 2 --memory 1g --pids-limit 128 \
+            -v "$PWD:/source:ro" -v "$RUNNER_TEMP/native-tarballs:/archives:ro" \
+            -v "$RUNNER_TEMP/musl:/tmp" "$CONSUMER_IMAGE" \
+            node /source/scripts/packed-node-consumer.mjs native /archives \
+            /source/fixtures/clean/gen_v5_q.png "$version" linux-x64-musl
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        with:
+          name: consumer-node-${{ matrix.node }}-linux-x64-musl
+          path: ${{ runner.temp }}/musl/qrscan-packed-node-*/receipt.json
+          if-no-files-found: error
+
+  consume-wasm:
+    needs: build-wasm
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-wasm-tarball
+          path: ${{ runner.temp }}/wasm-tarball
+      - name: clean offline install + Node SSR consumer assertions
+        id: consumer
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./crates/qrcode-ai-scanner-node/package.json').version")
+          node scripts/packed-node-consumer.mjs wasm "$RUNNER_TEMP/wasm-tarball" \
+            fixtures/clean/gen_v5_q.png "$version"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        with:
+          name: consumer-wasm-node-${{ matrix.node }}
+          path: ${{ steps.consumer.outputs.receipt }}
+          if-no-files-found: error
 
   # What npm makes of each operand, proved before either publish job runs:
   # npm-package-arg looks for a hosted-git shorthand before a file, so a

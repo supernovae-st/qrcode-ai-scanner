@@ -2025,6 +2025,135 @@ mod tests {
         );
     }
 
+    /// A fixed-mask v1-L render with exact codeword errors, publicly scanned
+    /// without a budget. Contrast alone exposes the correction-margin cap.
+    fn scan_v1l_codeword_damage(
+        corrupt: &[usize],
+        checks: &[crate::ladder::ScoreCheck],
+    ) -> crate::report::ScanReport {
+        use crate::rescue::test_symbols::{drawn_v1l, v1l_codewords};
+
+        let mut codewords = v1l_codewords(b"abc");
+        assert_eq!(codewords.len(), 26, "19 data + 7 parity codewords");
+        for &index in corrupt {
+            codewords[index] ^= 0xFF;
+        }
+        // Fixed mask and geometry make the refused twin differ only in one
+        // additional corrupt codeword, never in the encoder's mask choice.
+        let luma = drawn_v1l(&codewords);
+        let mut config = ScanConfig::full();
+        config.budget_ms = None;
+        config.score_skip_axes = vec![
+            StressAxis::Resolution,
+            StressAxis::Blur,
+            StressAxis::Perspective,
+            StressAxis::Rotation,
+            StressAxis::Lighting,
+        ];
+        config.score_skip_checks = checks.to_vec();
+        crate::Scanner::builder()
+            .profile(crate::ScanProfile::Custom(config))
+            .build()
+            .scan(ImageInput::luma8(luma.data(), luma.width(), luma.height()))
+            .unwrap()
+    }
+
+    /// v1-L acceptance reserves three of its seven parity codewords: two
+    /// errors reach that limit, while synthetic UEC deliberately reports
+    /// `1 - 2t/d = 3/7`, grade C. The ISO-informed parameter repeats that
+    /// synthetic margin; it is not an ISO-conformant correction margin.
+    #[test]
+    fn v1l_acceptance_limit_keeps_synthetic_uec_and_skipped_check_caps() {
+        use crate::ladder::ScoreCheck;
+        use crate::report::{Charset, IsoGrade, IsoParameter, Symbology, UecGrade};
+
+        let shown = scan_v1l_codeword_damage(&[0, 2], &[]);
+        assert_eq!(shown.trace.budget_exhausted, Some(false));
+        assert_eq!(shown.trace.engine_panics, 0);
+        assert_eq!(shown.detections.len(), 1, "{shown:?}");
+        let detection = &shown.detections[0];
+        assert_eq!(detection.symbology, Symbology::QrCode);
+        assert_eq!(detection.content.raw, b"abc");
+        assert_eq!(detection.content.text, "abc");
+        assert_eq!(detection.content.charset, Charset::Utf8);
+        assert_eq!(detection.content.eci, None);
+        assert_eq!(detection.content.fnc1, None);
+        let meta = detection.meta;
+        assert_eq!(
+            (meta.version, meta.ec_level, meta.modules, meta.mask),
+            (Some(1), Some(EcLevel::L), Some(21), Some(3))
+        );
+
+        let score = shown.score.as_ref().expect("unbounded complete judgment");
+        let uec = score.uec.expect("the two errors are measurable");
+        assert_eq!(
+            (uec.worst_block_errors, uec.worst_block_capacity, uec.grade),
+            (2, 7, UecGrade::C)
+        );
+        assert!((uec.margin - 3.0 / 7.0).abs() < 1e-6, "{uec:?}");
+        assert_eq!(
+            score.axes,
+            vec![AxisScore {
+                axis: StressAxis::Contrast,
+                passed: 5,
+                total: 5,
+                failed_at: None,
+                refined_failed_at: None,
+            }],
+            "precondition: the uncapped composite is 100"
+        );
+        assert_eq!(score.weights_run, 15);
+        assert_eq!((score.value, score.grade), (91, Grade::Excellent));
+        let iso = score.iso15415.expect("the ISO-informed card is measured");
+        assert_eq!(
+            iso.unused_error_correction,
+            Some(IsoParameter {
+                value: uec.margin,
+                grade: IsoGrade::C,
+            })
+        );
+        // Acceptance margin zero does not imply synthetic margin zero, and
+        // grade C drives neither of the UEC hints on this rendered symbol.
+        assert!(!shown.hints.iter().any(|hint| matches!(
+            hint,
+            Hint::LowCorrectionMargin { .. } | Hint::RaiseErrorCorrection { .. }
+        )));
+
+        for checks in [
+            &[ScoreCheck::Uec][..],
+            &[ScoreCheck::Iso15415][..],
+            &[ScoreCheck::Uec, ScoreCheck::Iso15415][..],
+        ] {
+            let hidden = scan_v1l_codeword_damage(&[0, 2], checks);
+            assert_eq!(hidden.trace.budget_exhausted, Some(false));
+            assert_eq!(hidden.trace.engine_panics, 0);
+            assert_eq!(hidden.detections, shown.detections, "{checks:?}");
+            let mut expected = score.clone();
+            if checks.contains(&ScoreCheck::Uec) {
+                expected.uec = None;
+                if let Some(card) = &mut expected.iso15415 {
+                    card.unused_error_correction = None;
+                }
+            }
+            if checks.contains(&ScoreCheck::Iso15415) {
+                expected.iso15415 = None;
+            }
+            // Equality pins value, grade, axes, weights, structural checks
+            // and the retained ISO overall, allowing only section visibility.
+            assert_eq!(hidden.score, Some(expected), "{checks:?}");
+            assert_eq!(hidden.hints, shown.hints, "{checks:?}");
+        }
+
+        // Plain RS still corrects three errors, but 2*3 + p=3 > d=7:
+        // every read of this stream is past the reserve and must be refused.
+        let refused = scan_v1l_codeword_damage(&[0, 2, 4], &[]);
+        assert_eq!(refused.trace.budget_exhausted, Some(false));
+        assert_eq!(refused.trace.engine_panics, 0);
+        assert_eq!(refused.detections, Vec::new(), "{refused:?}");
+        assert_eq!(refused.score, None);
+        assert_eq!(refused.hints, Vec::new());
+    }
+
     /// The pristine EC-Q symbol of the section-skip seam — a clean rqrr
     /// decode whose every stress cell survives.
     fn pristine_q_example() -> (LumaImage, MergedDetection, ContentKey) {

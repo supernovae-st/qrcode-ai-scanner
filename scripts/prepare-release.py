@@ -29,9 +29,11 @@ def examples():
         match = re.match(r"\| \[`(examples/[^`]+\.json)`\].*? \| `([^`]+)` \|", line)
         if match:
             golden, fixture = match.groups()
-            if ".." in Path(golden).parts or Path(fixture).is_absolute():
+            fixture_path = (ROOT / fixture).resolve()
+            if (".." in Path(golden).parts or Path(fixture).is_absolute()
+                    or not fixture_path.is_relative_to(ROOT)):
                 raise ValueError("unsafe example path")
-            if not (ROOT / fixture).is_file():
+            if not fixture_path.is_file():
                 raise ValueError(f"missing fixture: {fixture}")
             rows.append(("spec/" + golden, fixture))
     actual = {str(p.relative_to(ROOT)) for p in (ROOT / "spec/examples").glob("*.json")}

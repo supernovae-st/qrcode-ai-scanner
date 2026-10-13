@@ -265,6 +265,13 @@ INSPECTION = {
     ("flutter.yml", "publish"): "test",
 }
 
+# Archive shape and installed runtime are separate release gates.
+CONSUMERS = {
+    ("npm-publish.yml", "publish-native"): {"consume-native", "consume-native-musl"},
+    ("npm-publish.yml", "publish-wasm"): {"consume-wasm"},
+    ("python.yml", "release"): {"consume-wheels", "consume-wheels-musl", "consume-sdist-wheel"},
+}
+
 # What a job relying on the setup-node/-python relaxation runs, verbatim, in
 # one step after the setup and before its first publishing step.
 PRINTED = {
@@ -1149,6 +1156,9 @@ def check_job(workflow: str, job_id: str, job: dict, wf: dict) -> list:
         flag("needs", "a publishing job with no inspection job declared (INSPECTION)")
     elif inspection not in needs or inspection not in wf["jobs"]:
         flag("needs", f"needs {needs}: must include {inspection!r}, the job that inspects what this one uploads")
+    for consumer in sorted(CONSUMERS.get((workflow, job_id), set())):
+        if consumer not in needs or consumer not in wf["jobs"]:
+            flag("needs", f"needs {needs}: must include {consumer!r}, the clean installed-package gate")
     env = job.get("environment")
     env_name = env.get("name") if isinstance(env, dict) else env
     if env_name not in ENVIRONMENTS:
@@ -1496,7 +1506,8 @@ PRINT_STEP = """\
 """
 CRATES_IF = ("    if: startsWith(github.ref, 'refs/tags/v')\n    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n"
              "    environment: crates-io")
-PY_IF = "    if: startsWith(github.ref, 'refs/tags/v')\n    needs: [test, inspect]"
+PY_NEEDS = "[test, inspect, consume-wheels, consume-wheels-musl, consume-sdist-wheel]"
+PY_IF = f"    if: startsWith(github.ref, 'refs/tags/v')\n    needs: {PY_NEEDS}"
 IOS_IF = "    if: startsWith(github.ref, 'refs/tags/v')\n    runs-on: ubuntu-24.04\n    environment: release"
 RUSTUP_STEP = "      - name: Rust ${{ env.RUST_TOOLCHAIN }} through rustup\n        run: |\n"
 REINSPECT = "      - name: re-inspect the release set about to be uploaded\n"
@@ -1651,8 +1662,16 @@ MUTATIONS = (
     # -- the inspection job
     ("crates publish no longer needs package", P, [("crates-publish.yml", "  publish:\n    needs: package\n",
                                                     "  publish:\n")], {}, 1, "crates-publish.yml › publish [needs]"),
-    ("python release needs test only", P, [("python.yml", PY_IF, PY_IF.replace("[test, inspect]", "[test]"))], {}, 1,
+    ("python release needs test only", P, [("python.yml", PY_IF, PY_IF.replace(PY_NEEDS, "[test]"))], {}, 1,
      "python.yml › release [needs]"),
+    ("native publish bypasses clean consumers", P, [("npm-publish.yml",
+        "    needs: [pack-native, operand-proof, consume-native, consume-native-musl]",
+        "    needs: [pack-native, operand-proof]")], {}, 1, "clean installed-package gate"),
+    ("wasm publish bypasses clean consumers", P, [("npm-publish.yml",
+        "    needs: [build-wasm, operand-proof, consume-wasm]",
+        "    needs: [build-wasm, operand-proof]")], {}, 1, "clean installed-package gate"),
+    ("python publish bypasses clean consumers", P, [("python.yml",
+        PY_IF, PY_IF.replace(PY_NEEDS, "[test, inspect]"))], {}, 1, "clean installed-package gate"),
     ("a publishing job with no declared inspection job", P, [("npm-publish.yml", None, OIDC_PNPM)], {}, 1,
      "npm-publish.yml › sneaky [needs]"),
     # -- environment, permissions
@@ -1749,11 +1768,16 @@ MUTATIONS = (
                                                    "        uses: dtolnay/rust-toolchain@master\n        with:\n"
                                                    "          toolchain: ${{ env.RUST_TOOLCHAIN }}")], {}, 1,
      "dtolnay/rust-toolchain@master is not pinned"),
-    ("checkout by tag in a publish job", P, [("crates-publish.yml", CHECKOUT, "actions/checkout@v7")], {}, 1,
+    ("checkout by tag in a publish job", P, [("crates-publish.yml",
+        CHECKOUT + "\n        with:\n          persist-credentials: false\n      # The tag must name",
+        "actions/checkout@v7\n        with:\n          persist-credentials: false\n      # The tag must name")], {}, 1,
      "crates-publish.yml › publish [unpinned-action]"),
     ("download-artifact by tag in a publish job", P, [(
-        "python.yml", "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2",
-        "actions/download-artifact@v8")], {}, 1, "python.yml › release [unpinned-action]"),
+        "python.yml", "      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2\n"
+                      "        with:\n          pattern: wheels-*\n          path: dist\n          merge-multiple: true\n",
+        "      - uses: actions/download-artifact@v8\n"
+        "        with:\n          pattern: wheels-*\n          path: dist\n          merge-multiple: true\n")], {}, 1,
+     "python.yml › release [unpinned-action]"),
     ("a floating first-party action asking for the OIDC token", P, [(
         "npm-publish.yml", REINSPECT, "      - uses: actions/github-script@v8\n        with:\n          script: "
                                       "core.info(await core.getIDToken())\n" + REINSPECT)], {}, 1,
@@ -1978,7 +2002,7 @@ MUTATIONS = (
         ("npm-publish.yml", NATIVE_REINSPECT, NATIVE_REINSPECT.replace('"$PWD"/npm-release', '"$PWD"/./npm-release'))],
      {}, 1, "npm-publish.yml › publish-native [npm-operand] the publishing step takes"),
     ("a publishing job that does not need the operand proof", P, [
-        ("npm-publish.yml", "  publish-wasm:\n    needs: [build-wasm, operand-proof]\n",
+        ("npm-publish.yml", "  publish-wasm:\n    needs: [build-wasm, operand-proof, consume-wasm]\n",
          "  publish-wasm:\n    needs: build-wasm\n")], {}, 1,
      "npm-publish.yml › publish-wasm [npm-operand] needs ['build-wasm']: must include 'operand-proof'"),
     ("the operand proof under another name", P, [

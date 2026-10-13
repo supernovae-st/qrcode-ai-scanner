@@ -182,13 +182,153 @@ jobs:
           python -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/from-sdist" dist/*.tar.gz
           unzip -p "$RUNNER_TEMP"/from-sdist/*.whl '*.dist-info/WHEEL' | grep -Fx "Generator: maturin (${MATURIN_VERSION#v})"
           python scripts/package-inspect.py archive "$RUNNER_TEMP"/from-sdist/*.whl --strict --quiet
+      # Deliberately outside wheels-*: this reconstructed wheel is consumer
+      # evidence, never an extra file in the six-wheel PyPI release set.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        with:
+          name: sdist-rebuilt-wheel
+          path: ${{ runner.temp }}/from-sdist/*.whl
+          if-no-files-found: error
+
+  consume-wheels:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    needs: inspect
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.14"]
+        platform:
+          - { runner: ubuntu-24.04, tag: 'manylinux.*x86_64', label: linux-x64-gnu }
+          - { runner: ubuntu-24.04-arm, tag: 'manylinux.*aarch64', label: linux-arm64-gnu }
+          - { runner: macos-15, tag: 'macosx.*arm64', label: darwin-arm64 }
+          - { runner: macos-15-intel, tag: 'macosx.*x86_64', label: darwin-x64 }
+          - { runner: windows-2025, tag: 'win_amd64', label: win32-x64 }
+    defaults:
+      run:
+        working-directory: .
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wheels-*
+          path: ${{ runner.temp }}/wheel-tarballs
+          merge-multiple: true
+      - name: clean venv install + exact consumer assertions
+        id: consumer
+        env:
+          WHEEL_TAG: ${{ matrix.platform.tag }}
+        run: |
+          set -euo pipefail
+          version=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          python scripts/packed-python-consumer.py "$RUNNER_TEMP/wheel-tarballs" \
+            fixtures/clean/gen_v5_q.png "$version" "$WHEEL_TAG" --suite
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        with:
+          name: consumer-python-${{ matrix.python }}-${{ matrix.platform.label }}
+          path: |
+            ${{ steps.consumer.outputs.receipt }}
+            ${{ steps.consumer.outputs.junit }}
+          if-no-files-found: error
+
+  consume-wheels-musl:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    needs: inspect
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Official Python Alpine amd64 manifests, resolved 2026-10-13.
+          - { python: '3.11', image: 'python:3.11-alpine@sha256:bfebb8e11b53c46715fe3634e3b7bc5afb33b21ec82521539af1467c81ad3aed' }
+          - { python: '3.14', image: 'python:3.14-alpine@sha256:7f2ec713f0436c59df2362d973b6a05af9e87ba78f0e94f5245c302984a7a1fd' }
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wheels-*
+          path: ${{ runner.temp }}/wheel-tarballs
+          merge-multiple: true
+      - name: musl clean venv install + exact consumer assertions
+        env:
+          CONSUMER_IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/musl"
+          docker pull "$CONSUMER_IMAGE"
+          version=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          # Only the hash-pinned test dependencies use PyPI. The scanner
+          # wheel still installs by exact local path with --no-index.
+          docker run --rm --cpus 2 --memory 1g --pids-limit 128 \
+            -v "$PWD:/source:ro" -v "$RUNNER_TEMP/wheel-tarballs:/archives:ro" \
+            -v "$RUNNER_TEMP/musl:/tmp" "$CONSUMER_IMAGE" \
+            python /source/scripts/packed-python-consumer.py /archives \
+            /source/fixtures/clean/gen_v5_q.png "$version" musllinux --suite
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        with:
+          name: consumer-python-${{ matrix.python }}-linux-x64-musl
+          path: |
+            ${{ runner.temp }}/musl/qrscan-packed-python-*/receipt.json
+            ${{ runner.temp }}/musl/qrscan-packed-python-*/pytest.xml
+          if-no-files-found: error
+
+  consume-sdist-wheel:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    needs: inspect
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.14"]
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdist-rebuilt-wheel
+          path: ${{ runner.temp }}/sdist-wheel
+      - name: install the wheel rebuilt from the shipped sdist in a fresh venv
+        id: consumer
+        run: |
+          set -euo pipefail
+          version=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          python scripts/packed-python-consumer.py "$RUNNER_TEMP/sdist-wheel" \
+            fixtures/clean/gen_v5_q.png "$version" 'linux_x86_64' --suite
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        with:
+          name: consumer-sdist-python-${{ matrix.python }}
+          path: |
+            ${{ steps.consumer.outputs.receipt }}
+            ${{ steps.consumer.outputs.junit }}
+          if-no-files-found: error
 
   release:
     name: publish to PyPI
     # refs/tags/v* only: a workflow_dispatch from a branch builds and
     # inspects above, and stops before the registry.
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, inspect]
+    needs: [test, inspect, consume-wheels, consume-wheels-musl, consume-sdist-wheel]
     runs-on: ubuntu-24.04
     environment: release
     # One publish per tag at a time: a dispatch on the tag waits for the

@@ -82,6 +82,7 @@ jobs:
       # 0.25.10 → 1.88 did exactly that) and fail the job for the wrong
       # reason. Lockfile drift then fails loudly here instead.
       - run: cargo check -p qrcode-ai-scanner --all-features --locked
+      - run: cargo check -p qrcode-ai-scanner-cli --locked
 
   wasm-shape:
     runs-on: ubuntu-24.04
