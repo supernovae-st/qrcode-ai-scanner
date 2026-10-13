@@ -1090,4 +1090,31 @@ mod tests {
         );
         assert_eq!(flattened.planes.luma.data(), [255, straight[1]]);
     }
+
+    #[test]
+    fn flattened_rgba_retains_exact_rgb_capacity_and_pixels() {
+        let rgba = [10, 20, 30, 128].repeat(17);
+        let normalized = normalize_with(
+            &ImageInput::rgba8(&rgba, 17, 1),
+            &Limits::default(),
+            AlphaBackground::White,
+        )
+        .unwrap();
+
+        // Inspect the retained Vec: cloning or channel extraction can hide
+        // excess capacity. This pins capacity, not allocator calls or RSS.
+        let rgb = normalized.planes.rgb.as_ref().unwrap();
+        assert_eq!(rgb.len(), 51);
+        assert_eq!(rgb.capacity(), 51);
+        assert_eq!(rgb.as_slice(), [132, 137, 142].repeat(17));
+        assert_eq!(normalized.planes.luma.width(), 17);
+        assert_eq!(normalized.planes.luma.height(), 1);
+        assert_eq!(normalized.planes.luma.data(), [136; 17]);
+
+        let alpha = normalized.alpha.unwrap().into_report(false, None);
+        assert_eq!(alpha.mode, crate::report::AlphaMode::White);
+        assert_eq!(alpha.background, "white");
+        assert_eq!(alpha.coverage.to_bits(), 1.0_f32.to_bits());
+        assert_eq!(alpha.content_luma, 18);
+    }
 }
