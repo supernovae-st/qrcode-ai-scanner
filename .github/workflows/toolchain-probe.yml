@@ -15,7 +15,7 @@ on:
       probe:
         description: "bounded diagnostic to run"
         type: choice
-        options: [build, warp-mutations, oracle-artifact, debt-baseline, debt-paired, release-prepare]
+        options: [build, warp-mutations, oracle-artifact, debt-baseline, debt-paired, release-prepare, api-compat]
         default: build
       baseline_sha:
         description: "40-hex qualified baseline (required for warp/debt probes)"
@@ -26,6 +26,9 @@ on:
       version:
         description: "Exact next version for release-prepare; no commit, tag or upload"
         default: ""
+      candidate_sha:
+        description: "40-hex candidate for api-compat; checked independently of the diagnostic branch"
+        default: ""
 
 permissions:
   contents: read
@@ -35,6 +38,271 @@ env:
   RUST_TOOLCHAIN: "1.97.0"
 
 jobs:
+  # No untrusted input enters shell source: the only revision input is passed
+  # through env, checked as 40 lowercase hex, then verified after checkout.
+  # Diagnostic only; patch asks every real lint to judge compatibility despite
+  # the 0.x minor version bump. It is not a publication or comparative score.
+  api-compat:
+    if: inputs.probe == 'api-compat'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            asset: cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz
+            sha256: cacadafaa5cd27ae6d05a74a103266917ebab4c5e43c898360e177d4fbf06a65
+            bytes: 8397378
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset: cargo-semver-checks-aarch64-apple-darwin.tar.gz
+            sha256: 3cec5da41eee9a3336d75ad43d1f30a5c9680818f4ba209024786f452cabab5b
+            bytes: 7525750
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            asset: cargo-semver-checks-x86_64-pc-windows-msvc.zip
+            sha256: 7663ba2c938b59f0476d375ee1b5d8bece36a81819612d1541bc6ccf6316c4b7
+            bytes: 7901345
+    env:
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      BASELINE_SHA: "170e3fb30008f0dc20793712213f7d4c6f2d233e" # v0.9.0^{commit}
+      API_TARGET: ${{ matrix.target }}
+      TOOL_ASSET: ${{ matrix.asset }}
+      TOOL_SHA256: ${{ matrix.sha256 }}
+      TOOL_BYTES: ${{ matrix.bytes }}
+      CARGO_BUILD_JOBS: "2"
+      RUSTC_BOOTSTRAP: "1" # Stable 1.97 rustdoc JSON only; same for both inputs.
+      RUSTFLAGS: "--cap-lints=allow"
+    steps:
+      - name: require an immutable candidate and initialize retained evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PROOF_ROOT="$RUNNER_TEMP/api-qualified"
+          echo "PROOF_ROOT=$PROOF_ROOT" >> "$GITHUB_ENV"
+          mkdir -p "$PROOF_ROOT"
+          if [[ ! "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::candidate_sha must be a full immutable commit SHA"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          path: api-candidate
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: "170e3fb30008f0dc20793712213f7d4c6f2d233e"
+          path: api-baseline
+          fetch-depth: 0
+          persist-credentials: false
+      - name: verify both checked-out revisions and the fixed release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C api-candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git -C api-baseline rev-parse HEAD)" = "$BASELINE_SHA"
+          test "$(git -C api-baseline rev-parse 'v0.9.0^{commit}')" = "$BASELINE_SHA"
+          test "$(git -C api-baseline rev-parse v0.9.0)" = "6def484ef193897590b862597ec0d8c3f6211d3a"
+          git -C api-candidate diff --exit-code
+          git -C api-baseline diff --exit-code
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, resolved 2026-10-12
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+      - name: checksum-verified prebuilt API checker, never an installer build
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            "https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.51.0/$TOOL_ASSET" \
+            --output "$PROOF_ROOT/$TOOL_ASSET"
+          python3 - <<'PYTOOL'
+          import hashlib, json, os, pathlib, stat, tarfile, zipfile
+          root = pathlib.Path(os.environ["PROOF_ROOT"])
+          archive = root / os.environ["TOOL_ASSET"]
+          assert archive.stat().st_size == int(os.environ["TOOL_BYTES"]), "upstream prebuilt size mismatch"
+          expected = os.environ["TOOL_SHA256"]
+          actual = hashlib.sha256(archive.read_bytes()).hexdigest()
+          assert actual == expected, "upstream prebuilt checksum mismatch"
+          binary_name = "cargo-semver-checks.exe" if os.name == "nt" else "cargo-semver-checks"
+          files = {}
+          if archive.suffix == ".zip":
+              with zipfile.ZipFile(archive) as packed:
+                  assert packed.testzip() is None
+                  assert len({m.filename for m in packed.infolist()}) == len(packed.infolist())
+                  for member in packed.infolist():
+                      path = pathlib.PurePosixPath(member.filename)
+                      assert not path.is_absolute() and ".." not in path.parts and "\\" not in member.filename
+                      assert (member.external_attr >> 16) & 0o170000 in [0, stat.S_IFREG, stat.S_IFDIR]
+                      if not member.is_dir():
+                          files[member.filename] = packed.read(member)
+          else:
+              with tarfile.open(archive) as packed:
+                  assert len({m.name for m in packed.getmembers()}) == len(packed.getmembers())
+                  for member in packed.getmembers():
+                      path = pathlib.PurePosixPath(member.name)
+                      assert not path.is_absolute() and ".." not in path.parts and "\\" not in member.name
+                      assert member.isfile() or member.isdir(), "nonregular tool member"
+                      if member.isfile():
+                          files[member.name] = packed.extractfile(member).read()
+          binaries = [data for name, data in files.items() if pathlib.PurePosixPath(name).name == binary_name]
+          assert len(binaries) == 1, "one exact upstream tool binary required"
+          tool = root / "tool-bin" / binary_name
+          tool.parent.mkdir()
+          tool.write_bytes(binaries[0])
+          tool.chmod(0o755)
+          identity = {"version": "0.51.0", "upstream_source": "260fad71517e8b320c5c1ad1f367900ab37362a1",
+                      "url": "https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.51.0/" + archive.name,
+                      "archive_sha256": actual, "archive_bytes": archive.stat().st_size,
+                      "binary_sha256": hashlib.sha256(tool.read_bytes()).hexdigest(),
+                      "target": os.environ["API_TARGET"]}
+          (root / "tool-identity.json").write_text(json.dumps(identity, indent=2) + "\n", encoding="utf-8")
+          PYTOOL
+      - name: symmetric locked Rust 1.97 JSON inputs and all enabled features
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == Linux ]]; then ulimit -v 12582912; fi
+          python3 - <<'PYDOC'
+          import datetime, hashlib, json, os, pathlib, shutil, subprocess, sys, tomllib
+          root = pathlib.Path(os.environ["PROOF_ROOT"])
+          target = os.environ["API_TARGET"]
+          assert sys.version_info[:2] == (3, 13)
+          (root / "python.txt").write_text(sys.version + "\n", encoding="utf-8")
+          assert os.environ["RUST_TOOLCHAIN"] == "1.97.0"
+          rustc = subprocess.check_output(["rustc", "+1.97.0", "--version", "--verbose"], text=True, encoding="utf-8")
+          assert "rustc 1.97.0 " in rustc and "host: " + target in rustc
+          (root / "rustc.txt").write_text(rustc, encoding="utf-8")
+          (root / "rustdoc.txt").write_text(subprocess.check_output(["rustdoc", "+1.97.0", "--version", "--verbose"], text=True, encoding="utf-8"), encoding="utf-8")
+          flags = ["-Z", "unstable-options", "--document-private-items", "--document-hidden-items", "--output-format=json", "--cap-lints=allow"]
+          def tracked_hashes(source):
+              paths = subprocess.check_output(["git", "ls-files", "-z"], cwd=source).decode().split("\0")
+              return {name: hashlib.sha256((source / name).read_bytes()).hexdigest() for name in paths if name}
+          rows = []
+          for label, sha in [("baseline", os.environ["BASELINE_SHA"]), ("candidate", os.environ["CANDIDATE_SHA"])]:
+              source = pathlib.Path("api-" + label).resolve()
+              assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True, encoding="utf-8").strip() == sha
+              out = root / label
+              out.mkdir()
+              env = dict(os.environ, CARGO_HOME=str(root.parent / ("api-" + label + "-cargo-home")),
+                         CARGO_TARGET_DIR=str(root.parent / ("api-" + label + "-target")))
+              lock = source / "Cargo.lock"
+              lock_hash = hashlib.sha256(lock.read_bytes()).hexdigest()
+              shutil.copyfile(lock, out / "Cargo.lock")
+              sources_before = tracked_hashes(source)
+              (out / "tracked-input-sha256.json").write_text(json.dumps(sources_before, indent=2) + "\n", encoding="utf-8")
+              commands = [["cargo", "+1.97.0", "metadata", "--locked", "--all-features", "--filter-platform", target, "--format-version", "1"],
+                          ["cargo", "+1.97.0", "rustdoc", "--locked", "-p", "qrcode-ai-scanner", "--lib", "--all-features", "--target", target, "--", *flags]]
+              row = {"label": label, "source_sha": sha, "source_tree": subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=source, text=True, encoding="utf-8").strip(),
+                     "started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                     "lock_sha256": lock_hash, "target": target, "all_features": True,
+                     "cargo_home": env["CARGO_HOME"], "cargo_target_dir": env["CARGO_TARGET_DIR"], "commands": commands,
+                     "version": tomllib.loads((source / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]["package"]["version"]}
+              rows.append(row)
+              assert row["version"] == ("0.9.0" if label == "baseline" else "0.10.0")
+              (root / "inputs.json").write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+              for i, command in enumerate(commands):
+                  stdout = out / ("metadata.json" if i == 0 else "rustdoc.log")
+                  with stdout.open("w", encoding="utf-8") as output, (out / f"command-{i}.stderr").open("w", encoding="utf-8") as errors:
+                      result = subprocess.run(command, cwd=source, env=env, stdout=output, stderr=errors)
+                  row.setdefault("exit_codes", []).append(result.returncode)
+                  (root / "inputs.json").write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+                  if result.returncode:
+                      print((out / f"command-{i}.stderr").read_text(encoding="utf-8")[-16000:], flush=True)
+                      raise SystemExit(result.returncode)
+              metadata = json.loads((out / "metadata.json").read_text(encoding="utf-8"))
+              core = next(p for p in metadata["packages"] if p["name"] == "qrcode-ai-scanner" and pathlib.Path(p["manifest_path"]).parent == source / "crates/qrcode-ai-scanner")
+              assert core["version"] == row["version"]
+              row["registry_packages"] = [{"name": p["name"], "version": p["version"], "source": p["source"]}
+                                           for p in metadata["packages"] if p["source"] and p["source"].startswith("registry+")]
+              assert [p["version"] for p in row["registry_packages"] if p["name"] == "rxing"] == ["0.9.1"]
+              node = next(n for n in metadata["resolve"]["nodes"] if n["id"] == core["id"])
+              row["enabled_features"] = sorted(node["features"])
+              assert row["enabled_features"] == ["default", "engine-rqrr", "engine-rxing", "parallel", "serde"]
+              generated = pathlib.Path(env["CARGO_TARGET_DIR"]) / target / "doc/qrcode_ai_scanner.json"
+              shutil.copyfile(generated, out / "rustdoc.json")
+              row["rustdoc_sha256"] = hashlib.sha256(generated.read_bytes()).hexdigest()
+              generated_json = json.loads(generated.read_text(encoding="utf-8"))
+              row["rustdoc_format_version"] = generated_json["format_version"]
+              row["rustdoc_crate_version"] = generated_json["crate_version"]
+              assert row["rustdoc_crate_version"] == row["version"]
+              assert hashlib.sha256(lock.read_bytes()).hexdigest() == lock_hash
+              assert tracked_hashes(source) == sources_before
+              row["all_tracked_source_hashes_unchanged"] = True
+              row["finished_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+              assert subprocess.run(["git", "diff", "--exit-code"], cwd=source).returncode == 0
+              (root / "inputs.json").write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+          assert len(rows) == 2 and rows[0]["rustdoc_format_version"] == rows[1]["rustdoc_format_version"]
+          PYDOC
+      - name: real patch compatibility lints, refuse zero-check success
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCHECK'
+          import datetime, json, os, pathlib, re, subprocess
+          root = pathlib.Path(os.environ["PROOF_ROOT"])
+          env = dict(os.environ, PATH=str(root / "tool-bin") + os.pathsep + os.environ["PATH"])
+          version = subprocess.check_output(["cargo", "+1.97.0", "semver-checks", "--version"], env=env, text=True, encoding="utf-8")
+          assert version.strip() == "cargo-semver-checks 0.51.0"
+          (root / "tool-version.txt").write_text(version, encoding="utf-8")
+          command = ["cargo", "+1.97.0", "semver-checks", "--verbose", "check-release",
+                     "--baseline-rustdoc", str(root / "baseline/rustdoc.json"),
+                     "--current-rustdoc", str(root / "candidate/rustdoc.json"), "--release-type", "patch"]
+          started = datetime.datetime.now(datetime.timezone.utc).isoformat()
+          with (root / "semver-checks.log").open("w", encoding="utf-8") as output:
+              result = subprocess.run(command, env=env, stdout=output, stderr=subprocess.STDOUT)
+          output = (root / "semver-checks.log").read_text(encoding="utf-8")
+          print(output, flush=True)
+          clean = re.sub(r"\x1b\[[0-9;]*m", "", output)
+          selected = [(int(n), int(m)) for n, m in re.findall(r"Starting\s+(\d+)\s+checks,\s+(\d+)\s+unnecessary", clean)]
+          counts = [n for n, _ in selected]
+          real_checks = selected == [(229, 31)] and counts[0] > 0
+          warnings = [line for line in clean.splitlines() if re.search(r"\bWARN(?:ING)?\b", line, re.IGNORECASE)]
+          verdict = "PASS" if result.returncode == 0 and real_checks else "API_VIOLATIONS" if result.returncode == 100 and real_checks else "INCOMPLETE"
+          if verdict == "PASS" and warnings:
+              verdict = "WARNINGS_REQUIRE_REVIEW"
+          receipt = {"command": command, "exit_code": result.returncode, "verdict": verdict,
+                     "target": os.environ["API_TARGET"],
+                     "diagnostic_harness_sha": os.environ["GITHUB_SHA"], "workflow_ref": os.environ["GITHUB_WORKFLOW_REF"],
+                     "actual_check_counts": counts, "nonzero_lints_required": True,
+                     "actual_selection": selected, "expected_pinned_tool_selection": [229, 31],
+                     "warning_lines": warnings, "started_utc": started,
+                     "finished_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                     "release_type_assumption": "patch", "qualification": "API compatibility diagnostic, no publication",
+                     "baseline_sha": os.environ["BASELINE_SHA"], "candidate_sha": os.environ["CANDIDATE_SHA"]}
+          (root / "api-compat.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+          if verdict != "PASS":
+              raise SystemExit(result.returncode if result.returncode else 1)
+          PYCHECK
+      - name: retain exact input, tool and log identities even after a failure
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYHASH'
+          import hashlib, json, os, pathlib
+          root = pathlib.Path(os.environ["PROOF_ROOT"])
+          root.mkdir(exist_ok=True)
+          files = {str(path.relative_to(root)): {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "bytes": path.stat().st_size}
+                   for path in root.rglob("*") if path.is_file() and not path.is_symlink()
+                   and not any(part.endswith("-cargo-home") or part.endswith("-target") for part in path.relative_to(root).parts)
+                   and path.name != "sha256.json"}
+          (root / "sha256.json").write_text(json.dumps(files, indent=2) + "\n", encoding="utf-8")
+          PYHASH
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        if: always()
+        with:
+          name: api-compat-${{ matrix.target }}-${{ inputs.candidate_sha }}
+          path: ${{ runner.temp }}/api-qualified/
+          if-no-files-found: error
+          retention-days: 14
+
   release-prepare:
     if: inputs.probe == 'release-prepare'
     runs-on: ubuntu-24.04
