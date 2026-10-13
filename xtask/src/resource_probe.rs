@@ -50,6 +50,7 @@ fn config(args: &[String]) -> Result<ScanConfig, &'static str> {
 
 fn exact(detection: &Detection, truth: &str) -> bool {
     detection.symbology == Symbology::QrCode
+        && !detection.content.charset.is_lossy()
         && detection.content.raw == truth.as_bytes()
         && detection.content.text == truth
         && detection.content.eci.is_none()
@@ -265,6 +266,28 @@ mod tests {
         report.detections[0].content.fnc1 = None;
         report.detections[0].content.eci = Some(Vec::new());
         assert_eq!(account(&report, &truth, true)["wrong_outputs"], 1);
+    }
+
+    #[test]
+    fn unknown_charset_is_not_an_exact_output_even_when_text_matches() {
+        let mut report: ScanReport =
+            serde_json::from_str(include_str!("../../spec/examples/clean-url.json")).unwrap();
+        let truth = report.detections[0].content.text.clone();
+        for (charset, truth_outputs, wrong_outputs, strict_correct) in [
+            (qrcode_ai_scanner::Charset::Utf8, 1, 0, true),
+            (qrcode_ai_scanner::Charset::Unknown, 0, 1, false),
+        ] {
+            // Change only the declaration: equal bytes/text cannot make a
+            // lossy reading exact (the owning oracle calls it Unread).
+            report.detections[0].content.charset = charset;
+            let counts = account(&report, &truth, true);
+            assert_eq!(counts["total_outputs"], 1);
+            assert_eq!(counts["truth_outputs"], truth_outputs);
+            assert_eq!(counts["wrong_outputs"], wrong_outputs);
+            assert_eq!(counts["qr_wrong_or_extra_outputs"], wrong_outputs);
+            assert_eq!(counts["non_qr_outputs"], 0);
+            assert_eq!(counts["strict_correct"], strict_correct);
+        }
     }
 
     #[test]
