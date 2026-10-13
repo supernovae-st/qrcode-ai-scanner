@@ -15,10 +15,10 @@ on:
       probe:
         description: "bounded diagnostic to run"
         type: choice
-        options: [build, warp-mutations, oracle-artifact]
+        options: [build, warp-mutations, oracle-artifact, debt-baseline, debt-paired]
         default: build
       baseline_sha:
-        description: "40-hex tests-only baseline (required for warp-mutations)"
+        description: "40-hex qualified baseline (required for warp/debt probes)"
         default: ""
       toolchain:
         description: "rust toolchain to probe (empty: the pinned RUST_TOOLCHAIN)"
@@ -272,3 +272,13 @@ jobs:
         with:
           name: warp-verdict
           path: warp-verdict.json
+
+
+  # The existing dispatch entry can call a new branch-local workflow before
+  # that workflow reaches the default branch. The fixed warp cohort is unchanged.
+  debt-mutations:
+    if: inputs.probe == 'debt-baseline' || inputs.probe == 'debt-paired'
+    uses: ./.github/workflows/debt-mutations.yml
+    with:
+      baseline_sha: ${{ inputs.baseline_sha }}
+      mode: ${{ inputs.probe == 'debt-baseline' && 'baseline' || 'paired' }}
