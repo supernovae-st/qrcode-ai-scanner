@@ -552,7 +552,9 @@ jobs:
           mkdir "$RUNNER_TEMP/musl"
           docker pull "$CONSUMER_IMAGE"
           version=$(node -p "require('./crates/qrcode-ai-scanner-node/package.json').version")
-          docker run --rm --network none --cpus 2 --memory 1g --pids-limit 128 \
+          # mkdtemp creates mode0700 directories; run as the host owner so
+          # the unprivileged artifact action can read the consumer receipt.
+          docker run --rm --user "$(id -u):$(id -g)" --network none --cpus 2 --memory 1g --pids-limit 128 \
             -v "$PWD:/source:ro" -v "$RUNNER_TEMP/native-tarballs:/archives:ro" \
             -v "$RUNNER_TEMP/musl:/tmp" "$CONSUMER_IMAGE" \
             node /source/scripts/packed-node-consumer.mjs native /archives \

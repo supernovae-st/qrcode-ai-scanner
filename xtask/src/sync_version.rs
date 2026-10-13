@@ -6,8 +6,9 @@
 //! releases hand-bumped eight files (RELEASING.md §1) and the gradle
 //! comment promised this command for two releases. `--check` verifies
 //! only (exit 1 on drift) — the local twin of mobile.yml's tag gate.
-//! Lockfiles stay YOURS: the command prints the regeneration list
-//! instead of mutating them (offline, fast, no cargo invocations).
+//! Cargo lockfiles stay YOURS: the command prints their regeneration list.
+//! The Flutter example's local path dependency identity is mirrored here;
+//! its hosted dependency resolution remains untouched. No cargo invocations.
 
 use std::path::Path;
 
@@ -142,12 +143,35 @@ fn sync_surface(surface: &Surface, version: &str, write: bool) -> Option<(String
     hit
 }
 
+/// Mirror only the local package identity, preserving every resolved dependency.
+fn flutter_example_lock(text: &str, version: &str) -> String {
+    let mut inside = false;
+    let mut found = 0;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        if line.starts_with("  ") && !line.starts_with("    ") && line.ends_with(':') {
+            inside = line == "  qrcode_ai_scanner:";
+        }
+        if inside && line.starts_with("    version:") {
+            out.push(format!("    version: \"{version}\""));
+            found += 1;
+        } else {
+            out.push(line.to_owned());
+        }
+    }
+    assert_eq!(
+        found, 1,
+        "Flutter example local package version must be unique"
+    );
+    out.join("\n") + if text.ends_with('\n') { "\n" } else { "" }
+}
+
 /// Entry point: `xtask sync-version [--check]`.
 pub fn run(check_only: bool) {
     let version = workspace_version();
     println!(
         "sync-version · workspace {version} · {} surfaces{}",
-        SURFACES.len(),
+        SURFACES.len() + 1,
         if check_only { " · --check" } else { "" }
     );
     let mut drifted = 0usize;
@@ -159,6 +183,16 @@ pub fn run(check_only: bool) {
         );
         if sync_surface(surface, &version, !check_only).is_some() {
             drifted += 1;
+        }
+    }
+    let path = "bindings/flutter/example/pubspec.lock";
+    let original = std::fs::read_to_string(path).expect("Flutter example lockfile");
+    let updated = flutter_example_lock(&original, &version);
+    if updated != original {
+        drifted += 1;
+        println!("  {path} · local package identity → {version}");
+        if !check_only {
+            std::fs::write(path, updated).expect("Flutter example lockfile write");
         }
     }
     if drifted == 0 {
@@ -179,6 +213,14 @@ pub fn run(check_only: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flutter_local_identity_preserves_hosted_resolution_and_is_idempotent() {
+        let text = "packages:\n  before:\n    source: hosted\n    version: \"2.3.4\"\n  qrcode_ai_scanner:\n    source: path\n    version: \"0.9.0\"\n  after:\n    source: hosted\n    version: \"5.6.7\"\n";
+        let expected = text.replace("version: \"0.9.0\"", "version: \"0.10.0\"");
+        assert_eq!(flutter_example_lock(text, "0.10.0"), expected);
+        assert_eq!(flutter_example_lock(&expected, "0.10.0"), expected);
+    }
 
     #[test]
     fn cli_pin_render_keeps_path_and_features() {

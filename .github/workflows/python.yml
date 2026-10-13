@@ -272,7 +272,8 @@ jobs:
           version=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
           # Only the hash-pinned test dependencies use PyPI. The scanner
           # wheel still installs by exact local path with --no-index.
-          docker run --rm --cpus 2 --memory 1g --pids-limit 128 \
+          # Keep the mode0700 tempdir and JUnit readable by the host action.
+          docker run --rm --user "$(id -u):$(id -g)" --cpus 2 --memory 1g --pids-limit 128 \
             -v "$PWD:/source:ro" -v "$RUNNER_TEMP/wheel-tarballs:/archives:ro" \
             -v "$RUNNER_TEMP/musl:/tmp" "$CONSUMER_IMAGE" \
             python /source/scripts/packed-python-consumer.py /archives \

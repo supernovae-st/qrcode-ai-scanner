@@ -18,7 +18,10 @@ const name = `@supernovae-st/qrcode-ai-scanner${mode === "wasm" ? "-wasm" : ""}`
 const files = readdirSync(archives, { recursive: true }).filter((file) => file.endsWith(".tgz"));
 const packages = files.map((file) => {
   const path = join(archives, file);
-  const manifest = JSON.parse(execFileSync("tar", ["-xzOf", path, "package/package.json"], { encoding: "utf8" }));
+  // Git's GNU tar treats a Windows drive colon as a remote archive. Feed
+  // the same tarball bytes through stdin on every host instead.
+  const manifest = JSON.parse(execFileSync("tar", ["-xzOf", "-", "package/package.json"],
+    { input: readFileSync(path), encoding: "utf8" }));
   assert.equal(manifest.version, expectedVersion, `${manifest.name}: wrong producer version`);
   return { path, manifest, sha256: digest(path) };
 });

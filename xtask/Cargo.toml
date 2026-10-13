@@ -10,7 +10,7 @@ authors.workspace = true
 publish = false
 
 [dependencies]
-rxing = { version = "0.9.1", default-features = false, features = [
+rxing = { version = "=0.9.1", default-features = false, features = [
   "decoders",
   "encoders",
   "multi_barcode_readers",
