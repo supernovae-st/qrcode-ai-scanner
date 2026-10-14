@@ -44,12 +44,13 @@ Consult each binding's README for its implementation and current install path:
 [`bindings/kotlin/`](bindings/kotlin/), [`bindings/swift/`](bindings/swift/), and
 [`bindings/flutter/`](bindings/flutter/).
 
-**🐳 Containers and agents:** [CLI container recipe](distribution/docker/),
-[local stdio MCP adapter](integrations/mcp/) and
-[portable QR image scanner skill](skills/qr-image-scanner/) reuse engine 0.10.0.
-The adapter and skill have independent versions. Their guides distinguish
-downloadable artifacts, qualified runtimes and catalogue admission; source
-availability does not imply publication on every registry.
+**🐳 Containers and agents:** the CLI 0.10.0 is public on
+[GHCR](https://github.com/supernovae-st/qrcode-ai-scanner/pkgs/container/qrcode-ai-scanner).
+The MCP adapter and portable skill 0.1.0 are in the
+[agents release](https://github.com/supernovae-st/qrcode-ai-scanner/releases/tag/agents-v0.1.0),
+and the skill is also on [ClawHub](https://clawhub.ai/thibautmelen/skills/qr-image-scanner).
+Use the [installation guide](distribution/README.md) for exact downloads,
+immutable digests, licenses and qualified clients.
 
 ## Why
 
