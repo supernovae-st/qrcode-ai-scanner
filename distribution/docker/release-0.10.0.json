@@ -1,0 +1,111 @@
+{
+  "schema": 1,
+  "version": "0.10.0",
+  "tag": "oci-v0.10.0",
+  "repository": "supernovae-st/qrcode-ai-scanner",
+  "image": "ghcr.io/supernovae-st/qrcode-ai-scanner",
+  "engine_source": "2d3b577582979f0dc603b5cb0d96d1be02b459f5",
+  "producer_source": "f6b61605c8c204a0f8005fc05181683546cd0479",
+  "producer_run": 38583785567,
+  "producer_workflow": "distribution-checks.yml",
+  "image_packaging_revision": "3c8c7b1d796c729b597a02de75b2fc93101c355a",
+  "annotations": {
+    "org.opencontainers.image.source": "https://github.com/supernovae-st/qrcode-ai-scanner",
+    "org.opencontainers.image.description": "Local QR and barcode decoding and scannability scoring. Mount an image and run qrscan; no hosted service or network access is needed.",
+    "org.opencontainers.image.licenses": "AGPL-3.0-or-later",
+    "org.opencontainers.image.version": "0.10.0",
+    "org.opencontainers.image.revision": "2d3b577582979f0dc603b5cb0d96d1be02b459f5"
+  },
+  "artifacts": {
+    "arm64": {
+      "id": 11904033809,
+      "name": "qrscan-oci-arm64",
+      "official_zip_digest": "sha256:ae09910400fb09e3a0a7ccdb39470b97db75c5d17f42660c685a0c13d6557067",
+      "files": {
+        "SHA256SUMS": "d336f6a110aab32cbd6ab4fa2f595453cc679608ce28a53401157f0567a18ea0",
+        "consumer.json": "bf45ff85e3771f5152461d890347889e0b9a5be74546a635287f55f6866381c9",
+        "image-inspect.json": "8275f4c3408503a9af7ca94345cdba2d5208f3b8b1e0aa8e7c2caa45afccf93b",
+        "image.tar.gz": "167d8c412118ec4f65d067e964870dcacac434fa7788ef1f01c1fa8bbcfd1656"
+      },
+      "archive_sha256": "167d8c412118ec4f65d067e964870dcacac434fa7788ef1f01c1fa8bbcfd1656",
+      "image_id": "sha256:630942243cc6c7d4a3e528f5232d5c9c9125e50eebd9e6e0bf44ea6e9a33a056",
+      "config_size": 3765,
+      "raw_layers": [
+        {
+          "digest": "sha256:dca69811453d69d10b6c0345a5c49147162abe20a2f77802d66efc60667949ea",
+          "size": 100270080
+        },
+        {
+          "digest": "sha256:6bdb7157386b358fada3217358bb83e308fd060bb63a60a17921c9f16d3eb927",
+          "size": 5201408
+        },
+        {
+          "digest": "sha256:573a47b988796bb3e631eec810fcd3b3bd181f351fd3e2ea0eafc3e4f6023ce7",
+          "size": 439296
+        },
+        {
+          "digest": "sha256:8ac927b845665d2c73f3350e08202bb8084f930f497ccfb0fb4b21262e72f497",
+          "size": 41472
+        },
+        {
+          "digest": "sha256:7336d2ac0baca61ef2c1dc2261c977baa8eac49ed589c0d1cf5879795787b1ac",
+          "size": 4608
+        },
+        {
+          "digest": "sha256:988739c1f0176468f564aa7956c54d68d66f2f00ab295a0a86fb7cf9684c1bcb",
+          "size": 1536
+        }
+      ],
+      "binary_sha256": "eb44f1bc9b4ecc0bb4d215f7cb71a47d0460d7247f2d648a28148ac1f0ee118a"
+    },
+    "amd64": {
+      "id": 11903554096,
+      "name": "qrscan-oci-amd64",
+      "official_zip_digest": "sha256:1fd995816df560c6adda26546f194daf989d60d83bb7056d336849a1bf3aa190",
+      "files": {
+        "SHA256SUMS": "0dddc4487984324eafbba6fefccfb26135afe524cbae16d294def57612f5672c",
+        "consumer.json": "b6a7354edc2e9809b9cb79fc377ee6daded6bcbe77cc5c51a465e923d78450d7",
+        "image-inspect.json": "b2353e391ae2c81dced6e53501be4ded7b2b5fd067d6326626fb8f97f43d6cee",
+        "image.tar.gz": "a55b9a8f937b1d122bf380809b8a7731b34000942fb07ec8c261069ba9ac8063"
+      },
+      "archive_sha256": "a55b9a8f937b1d122bf380809b8a7731b34000942fb07ec8c261069ba9ac8063",
+      "image_id": "sha256:d6cccaa9d004a4c2f3abdcebe989a5e9409df533cc6eac267366bf1bb30a48c0",
+      "config_size": 3766,
+      "raw_layers": [
+        {
+          "digest": "sha256:e58989146fcec76699871403b9897b5c014af1ccd85f5a9300a215e7975525d7",
+          "size": 77936640
+        },
+        {
+          "digest": "sha256:31f44e13ef8e3d9b197ee8fcb103ee51355ab8314334d5bca3523c70ca6229ba",
+          "size": 5501440
+        },
+        {
+          "digest": "sha256:3d583c1de0bf950830536c3dbc3892302f126ccabef456476a6e940bb2c499de",
+          "size": 439296
+        },
+        {
+          "digest": "sha256:6935f2285c479b83fe570f506603983eef1e5ba048a39015f42e4c225057ef02",
+          "size": 41472
+        },
+        {
+          "digest": "sha256:3bcaded3f96f2d9b0531eaa7413256825f98048d6ebf61e4802918fb3573c4b1",
+          "size": 4608
+        },
+        {
+          "digest": "sha256:82e2c1932373b3846625b6176487ef41e5d2124266e59b90f393b7686bc8e9ed",
+          "size": 1536
+        }
+      ],
+      "binary_sha256": "73f4e8d1ae15006d1cb78c19b944f205f6bbd9faee25bb475b8f62a33598b189"
+    }
+  },
+  "source_file_sha256": {
+    "distribution/docker/Dockerfile": "0392a3d07c1ecb278cc7dd80efedefd03c5f9541954d49aac9e09b40fb31b55a",
+    "distribution/docker/SOURCE.md": "56977cdb1757fe83c7d8666ca768d9c02432e2fd6b2b703aef3bf5c93009fc45",
+    "LICENSE": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+    "LICENSING.md": "2759860723c8a0d474a858b677d1ae951467785860e81eb1a14ac34673a111c4",
+    "distribution/docker/verify.py": "47d86c4a28f3aed16c7aca3c7366a79a446b0b29b6afb3d1d7aa9ef7e45d4375"
+  },
+  "checked_out_source": "3c8c7b1d796c729b597a02de75b2fc93101c355a"
+}

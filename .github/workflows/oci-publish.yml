@@ -1,0 +1,161 @@
+name: oci-publish
+
+# A separate distribution tag preserves the immutable v0.10.0 engine release.
+# Existing, already-executed images are downloaded by artifact ID and checked;
+# no rebuild, unlocked installer, permanent credential or inline interpolation.
+on:
+  push:
+    tags: ["oci-v*"]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Inspect frozen images, publish them, or verify anonymous registry consumers
+        type: choice
+        default: inspect
+        options: [inspect, publish, public-pull]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            architecture: amd64
+            artifact_id: "11903554096"
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+            artifact_id: "11904033809"
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ matrix.artifact_id }}
+          run-id: "38583785567"
+          repository: supernovae-st/qrcode-ai-scanner
+          digest-mismatch: error
+          github-token: ${{ github.token }}
+          path: qualified/${{ matrix.architecture }}
+      - name: re-inspect and reload the exact native image
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          python3 distribution/docker/publish.py inspect --artifacts "$PWD/qualified" --architecture "$ARCHITECTURE" --load --native
+          python3 distribution/docker/verify.py qrscan:qualified fixtures/clean/gen_v5_q.png --expected-platform "linux/$ARCHITECTURE" --receipt "inspected/$ARCHITECTURE.json"
+          python3 distribution/docker/publish.py record-consumer --architecture "$ARCHITECTURE" --receipt "inspected/$ARCHITECTURE.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: qrscan-oci-inspected-${{ matrix.architecture }}
+          path: inspected/
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/oci-v') && (github.event_name == 'push' || inputs.mode == 'publish')
+    needs: [inspect]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: container
+    concurrency:
+      group: publish-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: gate the independent OCI tag against the frozen BOM
+        run: python3 distribution/docker/publish.py gate --ref "$GITHUB_REF"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: "11903554096"
+          run-id: "38583785567"
+          repository: supernovae-st/qrcode-ai-scanner
+          digest-mismatch: error
+          github-token: ${{ github.token }}
+          path: qualified/amd64
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: "11904033809"
+          run-id: "38583785567"
+          repository: supernovae-st/qrcode-ai-scanner
+          digest-mismatch: error
+          github-token: ${{ github.token }}
+          path: qualified/arm64
+      - name: re-inspect both downloaded images before registry authentication
+        run: |
+          set -euo pipefail
+          python3 distribution/docker/publish.py inspect --artifacts "$PWD/qualified" --architecture amd64
+          python3 distribution/docker/publish.py inspect --artifacts "$PWD/qualified" --architecture arm64
+      - name: authenticate with this job's repository token
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          DOCKER_CONFIG: ${{ runner.temp }}/qrscan-publish-docker
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOCKER_CONFIG"
+          chmod 700 "$DOCKER_CONFIG"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: publish only the previously executed bytes and read back their manifests
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          DOCKER_CONFIG: ${{ runner.temp }}/qrscan-publish-docker
+        run: python3 distribution/docker/publish.py publish --artifacts "$PWD/qualified" --receipt published/registry.json
+      - name: discard the ephemeral Docker credential
+        if: always()
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/qrscan-publish-docker
+        run: docker logout ghcr.io
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: qrscan-oci-published
+          path: published/
+          if-no-files-found: error
+
+  consume-public:
+    if: startsWith(github.ref, 'refs/tags/oci-v') && github.event_name == 'workflow_dispatch' && inputs.mode == 'public-pull'
+    needs: [inspect]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            architecture: amd64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: pull by immutable index digest anonymously and execute natively
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+          DOCKER_CONFIG: ${{ runner.temp }}/qrscan-public-docker
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOCKER_CONFIG"
+          chmod 700 "$DOCKER_CONFIG"
+          python3 distribution/docker/publish.py public-pull --architecture "$ARCHITECTURE" --receipt "public/$ARCHITECTURE.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: qrscan-oci-public-${{ matrix.architecture }}
+          path: public/
+          if-no-files-found: error
