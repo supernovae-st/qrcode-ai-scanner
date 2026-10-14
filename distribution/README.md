@@ -5,9 +5,10 @@ The scanner engine is **0.10.0**. The local MCP adapter and portable
 [agents-v0.1.0 release](https://github.com/supernovae-st/qrcode-ai-scanner/releases/tag/agents-v0.1.0).
 Choose the interface your application or agent already supports.
 
-**Shipping:** the GHCR CLI image, GitHub MCP/skill release assets and the ClawHub skill.
-**Pending:** DockerHub publication, the MCP adapter's npm
-publication, and MCP Registry/Glama/Smithery admission. Discovery on skills.sh
+**Shipping:** the GHCR and Docker Hub CLI images, GitHub MCP/skill release assets
+and the ClawHub skill.
+**Pending:** the MCP adapter's npm publication and MCP Registry/Glama/Smithery
+admission. Discovery on skills.sh
 is unverified. The native scanner engine itself is already published on npm
 at 0.10.0; install the adapter using its GitHub archive URL below.
 
@@ -99,14 +100,19 @@ engine or exempt a consumer from the engine's terms.
 
 ## Docker: run the local CLI
 
-The public GHCR image is pinned by its qualified multi-architecture index:
+The public [GHCR image](https://github.com/supernovae-st/qrcode-ai-scanner/pkgs/container/qrcode-ai-scanner)
+and [Docker Hub mirror](https://hub.docker.com/r/thibautmelen/qrcode-ai-scanner)
+have the same qualified multi-architecture index, manifests, configs and layers:
 
 ```text
 ghcr.io/supernovae-st/qrcode-ai-scanner@sha256:48b40b5f1abcf6eeb52b93bc0c8b9413babfe24801b8a8925b2bdaba507df23b
+docker.io/thibautmelen/qrcode-ai-scanner@sha256:48b40b5f1abcf6eeb52b93bc0c8b9413babfe24801b8a8925b2bdaba507df23b
 ```
 
-Anonymous pulls and CLI scans passed on native Linux amd64 and arm64
-[in the registry consumer checks](https://github.com/supernovae-st/qrcode-ai-scanner/actions/runs/38592287392).
+Fresh anonymous pulls and ten CLI cases per architecture passed on native Linux
+amd64 and arm64 for both [GHCR](https://github.com/supernovae-st/qrcode-ai-scanner/actions/runs/38592287392)
+and [Docker Hub](https://github.com/supernovae-st/qrcode-ai-scanner/actions/runs/38604603468).
+These images expose version `0.10.0`; no `latest` tag is published.
 
 The image runs `qrscan` 0.10.0 against mounted local images. It provides a CLI;
 HTTP serving and MCP transport are supplied by their respective applications.
