@@ -1,6 +1,6 @@
 # Licensing
 
-`qrcode-ai-scanner` is **dual-licensed**. You may use it under **either** license below.
+The `qrcode-ai-scanner` engine is **dual-licensed**. You may use it under **either** license below.
 
 ## ① AGPL-3.0-or-later — free & open source (the default)
 
@@ -27,6 +27,14 @@ the AGPL's source-disclosure obligations, a commercial license is available.
 | Native mobile app shipped on the App Store / Play Store | **Commercial** (these are almost always closed-source) |
 
 Unsure? The AGPL is always the safe free option — reach out if you need the commercial terms.
+
+## Portable consumer skill
+
+The original instructions and helpers under [`skills/qr-image-scanner/`](skills/qr-image-scanner/)
+are separately licensed **MIT-0**, as declared in that directory's LICENSE.
+They do not bundle or relicense the engine. Installing the scanner as a separate
+dependency retains its AGPL-3.0-or-later or agreed commercial terms. The MCP
+adapter and CLI container retain the engine's AGPL source/license materials.
 
 ## Contributions
 

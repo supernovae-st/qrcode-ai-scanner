@@ -22,9 +22,9 @@ photo-captured QR codes. Deterministic, sovereign, pure Rust.
 
 ## Install · pick your surface
 
-One Rust core, **six published surfaces** · the five below plus Kotlin/Android
-live on JitPack (mobile paragraph under the table) · all return the same
-versioned [`ScanReport`](spec/) contract.
+One Rust core. **0.10.0 is published for Rust, CLI, Node and WASM**;
+Python's last verified public release is 0.9.0. Check each package's version
+when consuming its [`ScanReport`](spec/) contract.
 
 | Surface | Package | Install | One-liner |
 |---|---|---|---|
@@ -36,13 +36,20 @@ versioned [`ScanReport`](spec/) contract.
 
 Per-surface guides in [`docs/`](docs/) · code examples in the Quick start below.
 
-**📱 Mobile + cross-platform:** Kotlin/Android is **live on JitPack**
-(`com.github.supernovae-st:qrcode-ai-scanner:v0.10.0` — use the latest tag).
-Swift/iOS (UniFFI → SwiftPM) and Flutter/Dart (flutter_rust_bridge →
-pub.dev) are built and CI-green, returning the same `ScanReport`.
-Consult each binding's README for the current install path:
+**📱 Mobile + cross-platform:** Kotlin/Android, Swift/iOS (UniFFI → SwiftPM)
+and Flutter/Dart (flutter_rust_bridge → pub.dev) have source bindings.
+Their 0.10.0 remote packages and complete native consumer journeys are not yet
+qualified; a source tag does not prove availability on JitPack or another registry.
+Consult each binding's README for its implementation and current install path:
 [`bindings/kotlin/`](bindings/kotlin/), [`bindings/swift/`](bindings/swift/), and
 [`bindings/flutter/`](bindings/flutter/).
+
+**🐳 Containers and agents:** [CLI container recipe](distribution/docker/),
+[local stdio MCP adapter](integrations/mcp/) and
+[portable QR image scanner skill](skills/qr-image-scanner/) reuse engine 0.10.0.
+The adapter and skill have independent versions. Their guides distinguish
+downloadable artifacts, qualified runtimes and catalogue admission; source
+availability does not imply publication on every registry.
 
 ## Why
 

@@ -1,0 +1,52 @@
+name: ecosystem-checks
+
+# Packed adapter and portable skill consumers only: no publishing permissions.
+# Untrusted event fields are never interpolated into shell scripts.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "integrations/mcp/**"
+      - "skills/qr-image-scanner/**"
+      - ".github/workflows/ecosystem-checks.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  consumers:
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - name: packed MCP consumer outside the checkout
+        env:
+          QRSCAN_MCP_EVIDENCE_DIR: ${{ runner.temp }}/ecosystem-qualified/mcp
+        run: |
+          set -euo pipefail
+          node --version
+          npm --version
+          node integrations/mcp/test/packed-consumer.mjs
+      - name: portable skill with separately installed published engine
+        run: |
+          set -euo pipefail
+          npm install --prefix "$RUNNER_TEMP/skill-engine" --ignore-scripts --no-audit --no-fund \
+            --save-exact @supernovae-st/qrcode-ai-scanner@0.10.0
+          node skills/qr-image-scanner/scripts/test.mjs --engine-root "$RUNNER_TEMP/skill-engine" \
+            --fixture fixtures/clean/gen_v5_q.png > "$RUNNER_TEMP/ecosystem-qualified/skill.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: qrscan-ecosystem-node-${{ matrix.node }}
+          path: ${{ runner.temp }}/ecosystem-qualified/
+          if-no-files-found: error
+          retention-days: 14
