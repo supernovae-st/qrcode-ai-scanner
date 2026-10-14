@@ -34,7 +34,7 @@
       "meta": {
         "version": 6,
         "ec_level": "q",
-        "mask": 2,
+        "mask": 0,
         "modules": 41,
         "inverted": false
       },
@@ -45,7 +45,8 @@
     }
   ],
   "score": {
-    "value": 92,
+    "value": 100,
+    "weights_run": 100,
     "grade": "excellent",
     "axes": [
       {
@@ -74,9 +75,9 @@
       },
       {
         "axis": "rotation",
-        "passed": 1,
+        "passed": 5,
         "total": 5,
-        "failed_at": "30°"
+        "failed_at": null
       },
       {
         "axis": "lighting",
@@ -129,16 +130,17 @@
       {
         "stage": "direct",
         "transforms_tried": 1,
-        "ms": 5.325333,
+        "ms": 6.992444,
         "detections_found": 2
       }
     ],
     "engine_panics": 0,
-    "total_ms": 5.347
+    "total_ms": 7.01169,
+    "budget_exhausted": false
   },
   "versions": {
-    "scanner": "0.3.0",
-    "pipeline": 2,
-    "score_contract": 4
+    "scanner": "0.10.0",
+    "pipeline": 3,
+    "score_contract": 5
   }
 }

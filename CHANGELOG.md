@@ -4,33 +4,412 @@ All notable changes to this workspace. Every surface versions together — the R
 crate + CLI, the npm node + wasm packages, the Python wheel, and the
 Kotlin/Android · Swift/iOS · Flutter bindings.
 
-## Unreleased
+## 0.10.0 — 2026-10-13
+
+### Fixed
+
+- Python source distributions carry the exact type stub and `py.typed` beside
+  the relocated `pyproject.toml`, so wheels built from the sdist retain typing.
+  Archive inspection rejects missing or changed project-root typing files.
+- Swift xcframework archives carry `LICENSE` and `LICENSING.md` inside the
+  bundle. The release helper refuses version drift; Swift and JitPack Cargo
+  builds use the committed binding lockfile.
+- The CLI's own packaged manifest retains rxing overflow checks for standalone
+  `cargo install` builds; archive inspection rejects a missing or false guard.
 
 ### Changed
 
-- **A melting RS margin now caps the composite** (`score_contract` +1) —
-  the occlusion cliff (door-admin probe 2026-08-05): a growing center
-  logo ate the correction budget while every stress axis kept passing,
-  so the score sat flat (88 at `logo_scale` 12 AND 18) then decode died
-  at 24 with zero warning — at EC=H the raise-EC hint can never fire,
-  and `low_correction_margin` only speaks at margin ZERO. The measured
-  UEC margin now caps the value on a continuous slope below the healthy
-  half-budget: 0.5 → 100 (no-op seam) · 0.25 (ISO D) → 70 · 0.0 (ISO F)
-  → 40, the finder-damage floor — a decode at the RS limit is never a
-  pass. Scope honesty: the cap only bites where UEC measures (rqrr-path
-  decodes carrying the raw stream); rxing-path artistic decodes report
-  `uec: null` and keep their prior scores unchanged (the youtube-video
-  bench face re-judged 88, byte-stable) — consumers must read a null
-  margin as UNMEASURED, never as healthy.
+- **Exact QR content** (`versions.pipeline` 2 → 3) — a QR-family
+  `content.raw` is now the original payload on every decode path: where
+  the scanner can error-correct the grid a decoder read, its own parse
+  decides the bytes. Declared ECIs decide `content.text`; unmarked Kanji
+  and Hanzi segments read Shift_JIS or GB 18030 when that set also reads
+  the surrounding bytes, UTF-8 when the whole payload is UTF-8, and
+  `unknown` otherwise; Micro QR and rMQR Kanji read Shift_JIS when the
+  decoder's own reading is exactly that decoding. Detections are the
+  distinct contents the scanner can tell apart: every read is reconciled
+  at the end of the walk by its bytes, FNC1 position, ECI declarations
+  and where it lies — never by `text`. The ladder keeps going while every
+  QR code found only signals an ECI it could not locate (also beside a
+  retail barcode).
+- **`versions.score_contract` 4 → 5** (one bump, with the margin cap
+  below) — the UEC cap is measured even when `uec` is skipped, and on the
+  orientation the decoder read (a clean mirrored code scores like an
+  upright one), never from a stream that does not error-correct;
+  `score_skip_checks` never moves `score.value` or the ISO overall. A
+  judgment the wall-clock budget interrupted is absent (`score: null`,
+  with `trace.budget_exhausted: true`) where 0.9 published a partial
+  composite. Stress cells and alpha probes match content identity, so ECI
+  and non-UTF-8 symbols score their cells. The alpha placement envelope's
+  calibration honours the scan deadline: an envelope the budget cut is
+  absent with `trace.budget_exhausted: true`, no longer conflated with a
+  design no background decodes (0.9 ran that calibration unbounded).
+- **CLI** — `--score-only` exits 3 with empty stdout when the budget
+  interrupted the judgment of a decoded QR (0.9 printed a deflated value,
+  exit 0); every-axis-skipped and internal-fault cases name their cause
+  (exit 2). `--pretty` says why a score is missing and when the budget
+  cut the scan (`budget … exhausted — not final` where no score line
+  says it: the frame profile, or every stress axis skipped), prints
+  `charset` and `fnc1` lines (a content with no verified text ends its
+  charset line with `(raw: in the JSON report, run without --pretty)`),
+  and shows controls and spoofing characters as `\u{…}`, a backslash as
+  `\\` and a U+FFFD that is part of the text as `\u{fffd}`.
+- **`trace.stages[].detections_found` still counts raw decoder hits** —
+  hits the scanner later refuses or holds for confirmation included; a
+  decode refused inside the decoder step is not a hit — an rqrr decode
+  whose own grid parses malformed, an rxing read a read check refuses (a
+  DataBar text that is not fourteen digits, a `]Q1` read whose bytes are
+  not its text) or whose original bytes cannot be established. The reads
+  of a confirmation decode are not counted either.
+- **QR content without ECI** — unmarked 0x80–0x9F and binary payloads
+  become one windows-1252 detection; reads only rxing made publish their
+  original bytes (Micro QR `[e9]`: `[c3 a9]` utf8 → `[e9]` `é` latin1;
+  Micro QR and rMQR 山田: `[e5 b1 b1 e7 94 b0]` utf8 → `[8e 52 93 63]`
+  `山田` shift_jis); no byte-order-mark sniffing; Kanji with ASCII trail
+  bytes (山田, テスト) read shift_jis, Hanzi gb18030, UTF-8 runs beside
+  such segments `unknown`; the Kanji values 5949–5951 keep `9f fd`–`9f
+  ff`, read `unknown`, one detection. FNC1, Hanzi and structured-append
+  symbols one decoder cannot read gain geometry and score sections
+  (`engines: ["rxing"]`); FNC1 symbols gain `content.fnc1` (GS1 Data
+  Matrix including `]d5`, GS1-128); Data Matrix `]d3` / `]d6` and Code 128
+  `]C2` data is AIM application data; same-text symbols with different
+  bytes, declarations or FNC1 stay separate; a QR read whose declarations
+  could not be observed (rare) shows non-ASCII bytes as U+FFFD
+  (`unknown`). Short unmarked Latin-1 payloads (for example `© 2026`,
+  `¡Hola!`), read as two detections in 0.9 through rxing's charset guess,
+  are now one detection.
+- **Other symbologies carry the bytes of their decoding engine's
+  reading** — Data Matrix, PDF417 and Aztec `content.raw` is that
+  reading's ISO/IEC 8859-1 encoding when every character fits, else its
+  UTF-8: UTF-8 text such as `Café crème brûlée` or
+  `https://…/日本語テスト` reads correctly and whole, mixed encodations
+  keep all their data, and distinct Data Matrix symbols no longer merge.
+- **ECI symbols** — one detection with the declared reading; unsupported,
+  binary or undecodable declarations and unlocatable ECIs (`eci: []`)
+  read `unknown`; mirrored and damaged-but-correctable symbols are
+  located.
+- **A melting RS margin now caps the composite** (part of
+  `score_contract` 4 → 5) — a growing center logo used up the correction
+  budget while every stress axis kept passing, so the score stayed flat
+  until decoding failed without warning: at EC level H the
+  `raise_error_correction` hint can never fire, and
+  `low_correction_margin` only speaks at margin zero. The measured UEC
+  margin now caps the value on a continuous slope below the healthy
+  half-budget: 0.5 → 100 (no cap) · 0.25 (ISO D) → 70 · 0.0 (ISO F) → 40,
+  the finder-damage floor, so a decode at the RS limit scores at most 40
+  where the symbol reserves no misdecode-protection codewords. On
+  version 1, v2-L and v3-L, which reserve them, the margin does not
+  subtract them: an errors-only decode at the acceptance limit reads above
+  0 and caps at 47 to 91 (spec/04 § Synthetic UEC). The cap applies only
+  where UEC measures (decodes that carry the raw stream, the rqrr path);
+  rxing-path artistic decodes report `uec: null` and keep their prior
+  scores — read a null margin as unmeasured, never as healthy.
+- **Releases publish from a version tag only, through trusted publishing,
+  and upload exactly what they inspected** — crates.io and npm now
+  publish through GitHub OIDC trusted publishing (no workflow reads a
+  long-lived registry token; npm packages carry provenance attestations,
+  as the PyPI wheels already did); every publishing job runs only for a
+  `v*` tag, in its own GitHub environment, after checking that the tag
+  names the version and that this changelog dates it. Each job reads
+  back, in the job itself, the archives it uploads: the npm tarballs go
+  up as packed, with no lifecycle script run; PyPI receives exactly one
+  wheel per platform and the sdist; each crate upload is compared with
+  its inspected archive byte for byte. Publishing jobs run only actions
+  pinned by commit. A run from any other ref builds and inspects every
+  archive and stops, and the npm main package goes up only once every
+  platform package it pins is live. A live version on crates.io or npm,
+  and every file PyPI already serves at the version, must match the
+  inspected archive (PyPI may serve no other file there), every npm
+  upload first checks that its operand is the very tarball inspected in
+  the job, a tarball npm would read differently fails, and manifests and
+  Python sources are bound to the checkout.
+- **Source builds of the Python package need maturin 1.9.3 or newer** —
+  the build requirement is now `maturin>=1.9.3,<2.0`, the first maturin
+  that puts PEP 639 license files into source distributions.
+
+### Added
+
+- `content.charset` values `gb18030`, `eci` and `unknown` (`unknown` is
+  the only lossy value, now and later); the optional `content.eci`
+  (`[{designator, start}]`: located designators, `[]` when signalled but
+  not located) and `content.fnc1` (`"first"` | `"second"`); Rust
+  `EciSegment`, `Fnc1Position`, `Charset::is_lossy`, reader-only
+  `Unrecognized` variants and `ScanConfig::computes_score`; Dart
+  `Charset.gb18030` / `eci` / `unrecognized`, `isLossy`, `EciSegment`,
+  `Fnc1Position`; `trace.budget_exhausted` (`false`: the report is final;
+  absent on older reports: unknown).
+
+### Fixed
+
+- **Inputs larger than the engine cap keep their rescue decodes** — the
+  S5 erasure rescue kept its candidate geometry in original input
+  coordinates but sampled module confidence on the engine-capped plane,
+  so for any input whose longest side exceeds `max_engine_side` (2048 px
+  in every built-in profile) it read the wrong pixels, and a symbol only
+  the rescue can recover was lost. Candidate geometry is now mapped into
+  the capped sampling plane before sampling, and the reported `corners`
+  stay in original input space. Transparent inputs under automatic
+  background selection now follow the documented stage order: a
+  successful rescue over the automatically chosen background settles the
+  scan, where the opposite-background retry used to run instead (and
+  report `fallback_used: true` when an engine read the other placement).
+- **The Node loader enforces its own version, and loads without its
+  manifest** — with `NAPI_RS_ENFORCE_VERSION_CHECK` set (and not `0`),
+  the 0.9.0 loader compared every installed platform package against
+  `0.8.1`, a literal napi-rs wrote when the loader was generated, and
+  refused its own 0.9.0 binaries. The loader now compares against the
+  package's own `package.json`, read only once the check is on: an
+  installed platform package must carry this package's version, and a
+  loader vendored or bundled without its `package.json` still loads
+  with the check off (the default).
+- **Every distributed archive carries the AGPL text** — none of the
+  0.9.0 archives held a LICENSE. Both crates, the npm main, platform and
+  wasm packages, the wheels and the sdist now carry the root text byte
+  for byte (Python through PEP 639 `license-files`, with a
+  `License-File` entry), and CI reads every archive back before
+  anything publishes. The iOS xcframework carries license materials inside
+  its bundle; the JitPack AAR remains a named exception.
+- **rxing overflow-checks in the Python, Kotlin/Swift and Flutter
+  builds** — cargo reads `[profile]` from the build root only, so the
+  wheels and sdist builds, the UniFFI library and the Flutter crate
+  compiled rxing without the workspace's `overflow-checks`, the guard
+  that turns the crafted-image arithmetic underflow documented in 0.6.0
+  into a caught panic counted in `trace.engine_panics` instead of a
+  runaway allocation. Each of those build roots now restates it.
+  The packaged CLI now restates it for `cargo install` as well.
+- **Malformed streams are refused, whichever decoder reads them** —
+  designators above 999999 or written `111xxxxx` (mirrored symbols
+  included), FNC1 in both positions, out-of-range numeric or
+  alphanumeric groups; a tolerant reading of the same symbol is withheld.
+  The rescue reads FNC1 `%%` as `%`; the FNC1-second indicator is kept
+  and never read as GS1; no more split ECI or 0x80–0x9F detections; no
+  guessed charset for an unsupported ECI. The Python stub types `score`
+  as `dict | None` (`NotRequired` from `typing_extensions`), and the docs
+  say that reproducible scans need `budget_ms=0` / `--budget-ms 0`.
+- **A plain port read whose bytes are not its text is refused** — rxing's
+  zxing-cpp port reader could report a QR Code read under identifier
+  `]Q1` with ASCII text whose raw bytes were another reader's shape
+  (codewords, not the text). Such a read is now refused unless its bytes
+  are its text, or decode to it behind a byte-order mark the way rxing
+  decodes them. An empty text claims nothing of the bytes (it is how
+  rxing renders a segment its decoder rejects, such as a Kanji pair
+  5949–5951) and keeps the read.
+- **A DataBar text is exactly fourteen digits** — a DataBar (RSS-14) read
+  whose text is anything else is refused.
+- **The misdecode-protection reserve of v2-L is two codewords** —
+  ISO/IEC 18004:2015 Table 9 reserves two on version 2 at level L; the
+  scanner reserved one.
+- **The S5 rescue keeps two parity codewords unspent in every block it
+  erases** — with f erasures a block keeps only npar − f checks, and a
+  correction that spent them all could land on another valid codeword: a
+  constructed v2-M symbol was rescued onto a different payload. A block
+  corrected with erasures must now keep two parity codewords beyond the
+  reserve (a wrong correction passes about once in 65 536), and the
+  rescue marks at most npar − p − 2 erasures per block. Trade-off:
+  rescues that spent the last parity codewords are refused too (the
+  rescue-stress sweep loses 4 correct reads of 2304 in each of its
+  uncapped and capped passes, 13 in its dual pass).
+- **A QR Code content whose every measured correction went past the
+  Annex B reserve is not published** — the scanner now measures a read's
+  correction margin on its own received word wherever it error-corrects
+  that word itself (the worst block's ⌊(npar − p − f)/2⌋ − e). A content
+  whose every measured margin is negative is refused, with its reads of
+  unknown margin: both engines sample the same damaged modules, so two
+  engines agreeing on such a word are no independent evidence. A margin
+  is negative in two cases: errors alone took the word past the reserve,
+  which only happens on versions 1 and 2 at low EC levels, or rqrr
+  decoded a grid that neither orientation error-corrects for the
+  scanner's bounded decoder, which counts as negative at any version and
+  EC level. One read keeping a margin of zero or more confirms the
+  content. Port reads at EC level L or M are re-read on versions 1 and 2
+  to measure their margin. Reads with no measured margin — every Micro
+  QR and rMQR read, and any other QR Code read no parse measured — are
+  published as before, and a margin of zero or more does not prove a
+  correction right. Trade-off: a v1/v2 symbol so damaged
+  that every read of it corrects past the reserve now reads as no
+  detection (it was published, with a misdecode risk the standard's
+  reserve exists to bound), and so, at any version, does a symbol whose
+  only known margin is that of an rqrr decode of a grid that does not
+  verify. On the ZXing blackbox QR sets this
+  costs one exact read of 179: `qrcode-4/41.png`, a v2-L symbol rxing
+  read with five corrections (margin −1); its `corpus-external.tsv`
+  expectation moves from `match` to `blind`.
+- **A content measured only on a re-derived grid meets the same margin
+  rule** — a QR content whose only measured correction margin came from
+  re-deriving a grid rqrr detects but cannot decode (FNC1 in either
+  position, Hanzi, structured append) is now refused when that margin is
+  negative, as the acceptance rules require: such an FNC1 symbol
+  corrected one error past the ISO/IEC 18004 Annex B reserve (v1-M with
+  five errors, v1-L with three) was published, possibly as another valid
+  GTIN. A port read the re-derived grid carries is still re-read at its
+  own corners for its margin (versions 1 and 2, EC level L or M), and
+  one read with a margin of zero or more admits the content.
+- **Barcodes the readers invent from noise need a second, independent
+  read** — UPC-E, DataBar, DataBar Expanded and PDF417 at EC level 0, 1
+  or none are published only once a read of the same symbology and bytes
+  comes from a plane whose longest side differs by a factor of 1.25 or
+  more. Right after the attempt that first reads one, the scanner
+  decodes that symbology alone on the attempt's plane at three quarters
+  of its size (at most one decode per content and four per scan walk).
+  While the core crate admits rxing below 0.9.3, whose RSS-14 reader can
+  underflow, no DataBar decode of that kind runs: a DataBar is confirmed
+  only by a read the walk makes anyway. EAN-13, EAN-8, UPC-A, Code 128,
+  Code 39, Code 93, Codabar, ITF and Telepen keep settling on their first
+  read. In the rescue-stress sweep the 46 UPC-E and DataBar outputs rxing
+  read out of QR modules are gone (wrong outputs 0 in every pass).
+  Trade-off: a DataBar the walk reads at one size only is no longer
+  published. Only the first three stages read symbologies outside the QR
+  family, at the 512 px pyramid and at full size, so in every profile a
+  DataBar in an image whose longest side is under 640 px is refused,
+  until the core crate requires rxing 0.9.3 or later and its
+  confirmation decode can run.
+- **rMQR symbols are scored by probes that read rMQR** — the score cells
+  and placement-envelope probes of a Rectangular Micro QR (rMQR) symbol
+  decode in a pass restricted to rMQR, and that pass ran no reader
+  (rxing 0.9.1's multi-use dispatcher has no rMQR arm), so from 0.9.0 on
+  a clean rMQR scored 0 on every axis. The pass now runs the zxing-cpp
+  port reader for rMQR alone.
+- **Decoder panics caught inside score stress cells and
+  placement-envelope probes are counted** in `trace.engine_panics`; how
+  a cell is judged does not change.
+- **After a contained internal fault of the score computation, the
+  placement envelope is not computed** — it is reported absent, like any
+  envelope that was not computed, so the fault does not read as a budget
+  cut: `qrscan --score-only` exits 2 for it, not 3, unless the budget had
+  already cut part of that judgment.
+- **The Python and WASM bindings publish every `f32` report field as the
+  decimal the JSON report prints** (`alpha.coverage` 0.612, not
+  0.6119999885559082) — the core serializes those fields as the `f64`
+  nearest to their shortest decimal. The JSON text keeps its digits; a
+  value between 1e-6 and 1e-5, or from 1e13, is now spelled in exponent
+  form (the same number).
+
+### Upgrade notes
+
+- TypeScript: exhaustive `Charset` switches gain three values. Dart: the
+  new values shift `Charset.index` (`unknown` 3 → 5), and implementers
+  need the new getters; the Flutter `scan` / `scanFrame` facade still
+  runs at the profile's default budget in 0.10.0, so read
+  `trace.budget_exhausted` there. Python: test `charset == 'unknown'`.
+  Rust 0.9.x cannot read reports that carry the new values. Validate a
+  report with the schema of the release tag its `versions.scanner`
+  names. Pin `qrcode-ai-scanner~=0.10.0` and `cargo install
+  qrcode-ai-scanner-cli --locked --version 0.10.0`. That `--locked`
+  install builds rxing 0.9.1, the version the lockfile pins, with the
+  `overflow-checks` guard declared in the packaged CLI root (see Fixed).
+  Projects that gate on the score should re-measure their
+  thresholds before upgrading.
 
 ### CI
 
-- **The release tooling pins exact** — the v0.9.0 npm-publish legs died
-  mid-train because the unpinned napi CLI caret (`^3.7.1`) resolved to
-  3.7.3, which hard-errors `--use-napi-cross` on mac/windows hosts and on
-  musl targets. The flag is now a per-row matrix field (Linux-gnu rows
-  only), musl rides zig (`-x` + setup-zig + cargo-zigbuild, the official
-  napi-rs template recipe), and `@napi-rs/cli` pins `3.7.3` exact.
+- **Flutter builds consume one portable candidate** — the staging tool packs
+  the current core once, validates its normalized manifest and sources, and
+  vendors it inside the pub package. Host, Android, iOS and publishing jobs
+  consume the same hashed archive outside the repository. The committed
+  binding lockfile is preserved, and a core-content digest invalidates
+  cargokit's cache when only the bundled core changes.
+- **Warp boundary tests kill eight recorded mutation debts** — exact pixels
+  cover the half-pixel edges and outside fill without changing production
+  code. A focused before/after run establishes the eight kills from its raw
+  artifacts; its failed collector was repaired separately. This focused
+  evidence does not replace the complete deep gate.
+- **The release tooling pins its napi CLI exactly** — the v0.9.0 npm
+  publishing jobs failed partway because the unpinned napi CLI range
+  (`^3.7.1`) resolved to 3.7.3, which rejects `--use-napi-cross` on macOS
+  and Windows hosts and on musl targets. The flag is now set per build
+  target (Linux gnu only), musl targets build through Zig and
+  cargo-zigbuild (`-x`, the napi-rs template's recipe), and
+  `@napi-rs/cli` is pinned at `3.7.3`.
+- **npm publishing hands `npm publish` absolute tarball paths** — npm
+  reads a relative `dir/file.tgz` as a GitHub repository (the wasm
+  operand `npm-wasm/<file>.tgz` names `github.com/npm-wasm/…`), so both
+  publishing jobs spell every operand as an absolute path, the same in
+  the in-job record. An `operand-proof` job, which both need, parses
+  every operand with the publishers' npm before any token exists, and
+  after each upload the registry's integrity must match the inspected
+  tarball.
+- **No build cache is restored on a tag in the jobs whose archives are
+  published** — the musl build installs Zig 0.14.1 from ziglang.org
+  against its published sha256, with an empty global cache, rather than
+  through `mlugg/setup-zig`, which restores the compiler from the
+  Actions cache on a tag too, where a cache hit skips its signature
+  check. `check-publish-guards.py` refuses a cache-capable step on tag
+  runs in every job whose artifacts a publishing job downloads.
+- **RELEASING.md names what older tags can still publish** — the tags
+  v0.5.0 to v0.9.0 can still publish to PyPI through OIDC on a dispatch
+  (the owner's option: required reviewers on the `release` environment),
+  and three wheel build images are pulled by a mutable tag (an accepted
+  residual; maturin-action takes a digest through its `container`
+  input).
+- **New: `xtask oracle`, a correctness oracle that judges contents, not
+  texts** (its report says `qrscan-oracle/v2`) — a `corpus.toml` entry
+  may carry its bytes and declarations (`raw_hex`, `eci`, `fnc1`; 31
+  entries do, each checked against an independent reader). Such a truth
+  is met by content identity: equal text over other bytes is another
+  content, and a detection whose charset is `unknown`, or whose ECI was
+  signalled but not located, meets it as `unread` — a rate of its own,
+  never exact and never blocking. Units meet detections through a best
+  matching, and the report states the rule of each truth kind. The tree
+  state it records leaves out the files the run writes, and a corpus root
+  it cannot walk is named as such, not by its absolute path.
+- **New: `xtask bench`, a benchmark harness** (`bench/README.md`; its
+  report says `qrscan-bench/v5`) — it compares the published 0.9.0 with
+  this tree on latency, memory, allocations, throughput and WASM cost.
+  Work is each side's share of its own reference walk, and an erroring
+  reference walk counts as an error; a gated pair whose sides are not the
+  declared base and candidate is refused; stopping or suspending the
+  harness stops its workers, and a call that spans a stop is repeated,
+  never counted; the host gate fails closed on its probes, its lock and
+  its run directory. Its records name every run-time input it read
+  (driver scripts, the priming fixture, every vendored image), alpha
+  images, the budget flag and pairs cut at the same point, and a dry run
+  pre-screens the share of A/B disagreements. The library worker records
+  the candidate's `trace.budget_exhausted`; the driver scripts and the
+  fixture run from copies under the run's `artifacts/`, and every image
+  is hashed again after each segment, a change failing the run; a build
+  stamp refuses a build outside its `--source`, and a run refuses a Node
+  or WASM base whose stamp lacks that record; a cut knee bisection is a
+  stated known limit; the report names its method by that label alone.
+- **`corpus-report --external` and `scripts/zxing-blackbox.py` print
+  ZXing's own 0° thresholds as their reference** — 157, where two
+  outdated values gave 153. No verdict changes.
+- **Two 0.9.x gates no longer hide failures** — the cargo-deny scan of
+  the binding trees the workspace excludes (Python, UniFFI, Flutter)
+  turned every failure into a warning, and under cargo-deny 0.20 even the
+  usage error of its retired `check --config` form, so those dependency
+  graphs went unchecked while the step stayed green. It now runs the
+  pinned cargo-deny 0.20.2 in its current form, and a tool or usage error
+  fails the step; findings stay report-only, per tree, in the job
+  summary. The weekly mutation shards ran under `continue-on-error`,
+  which read shards exiting with missed or timed-out mutants as a green
+  run; each shard now records cargo-mutants' exit code, and the verdict
+  job of the next entry judges them.
+- **The weekly mutation suite runs in 85 shards, judged against a
+  committed dispositions file** — 16 shards no longer finished within the
+  job's time limit; the shard count comes from measured per-mutant costs.
+  The shards are dealt round-robin: slice shards put survivor-dense code
+  on a few shards (the slowest of 85 took 79.2 min of an 85-min limit,
+  and the last one received no mutant). The weekly verdict fails on a
+  baseline failure, an unfinished shard, or a missed or timed-out mutant
+  that `.cargo/mutants-dispositions.toml` does not list as equivalent, as
+  a structural timeout or as test debt. It accepts a shard cargo-mutants
+  gave no mutant, and lists an equivalent that `.cargo/mutants.toml` also
+  excludes as excluded and documented instead of stale. The fuzzing
+  bridge's operator mutants are excluded like its replaced functions
+  (nine of them had reached the verdict), no mutant is generated in the
+  rqrr-only stub of `Binarized::black`, which an all-features build never
+  compiles, and the two wall-clock exclusions follow their conversions to
+  their current lines.
+- **Twenty mutation-debt entries are killed and one bench test no longer
+  races its shell** — unit tests pin the score-check names, the input
+  limits at their exact values, the widest bit read, the GS1
+  element-string truncation and Digital Link qualifiers, the
+  stream-length check and when raw RGBA flattens; two GS1 separator
+  survivors are argued equivalent, while two allocation mutants remain
+  resource-behavior test debt
+  (`.cargo/mutants-dispositions.toml`: 33 equivalent · 9
+  timeout-structural · 21 debt); and the orphaned-worker test releases
+  its shell only once the worker has taken its parent.
 
 ## 0.9.0 — 2026-07-20
 
@@ -542,8 +921,7 @@ v3, GS1 awareness, ISO-informed grading, hardened bindings. Supersedes the
 
 ### Measured accuracy (reproduce: `scripts/zxing-blackbox.py` · `scripts/batch-scan.py`)
 
-- zxing blackbox qrcode-1…6: 170/179 exact-text match @ 0° — beats the zxing
-  reference thresholds on all six suites.
+- zxing blackbox qrcode-1…6: 170/179 exact-text match @ 0°.
 - qrcode-ai.com production templates: 15/15 decoded.
 
 ## 0.2.2 — 2026-06-10

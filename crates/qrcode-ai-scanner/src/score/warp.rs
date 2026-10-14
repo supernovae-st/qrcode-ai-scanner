@@ -218,6 +218,58 @@ mod tests {
     }
 
     #[test]
+    fn zero_angle_rotation_preserves_rectangular_pixels_exactly() {
+        // Mixed parity dimensions exercise both integer and half-pixel centres;
+        // distinct pixels expose translation even when the canvas size is right.
+        let img = LumaImage::new(
+            vec![
+                0, 255, 17, 90, 33, 201, 64, 7, 128, 240, 52, 180, 99, 221, 11, 155, 42, 80,
+            ],
+            6,
+            3,
+        );
+        let out = rotate(&img, 0.0);
+        assert_eq!((out.width(), out.height()), (6, 3));
+        assert_eq!(out.data(), img.data());
+    }
+
+    #[test]
+    fn warp_into_paints_white_beyond_each_half_pixel_boundary() {
+        let img = LumaImage::new(vec![0; 4 * 3], 4, 3);
+        for (source_x, source_y) in [(3.75, 1.0), (1.0, 2.75), (-0.75, 1.0), (1.0, -0.75)] {
+            let forward = Homography([1.0, 0.0, -source_x, 0.0, 1.0, -source_y, 0.0, 0.0, 1.0]);
+            let out = warp_into(&img, &forward, 1, 1);
+            assert_eq!((out.width(), out.height()), (1, 1));
+            assert_eq!(out.data(), &[255], "source ({source_x}, {source_y})");
+        }
+    }
+
+    #[test]
+    fn warp_into_antialiases_each_half_pixel_boundary_with_truncation() {
+        let img = LumaImage::new(vec![0; 4 * 3], 4, 3);
+        for (source_x, source_y, expected) in [
+            (3.5, 1.0, 127),
+            (1.0, 2.5, 127),
+            (-0.5, 1.0, 127),
+            (1.0, -0.5, 127),
+            (3.25, 1.0, 63),
+            (1.0, 2.25, 63),
+            (-0.25, 1.0, 63),
+            (1.0, -0.25, 63),
+            (3.0, 1.0, 0),
+            (1.0, 2.0, 0),
+            (0.0, 1.0, 0),
+            (1.0, 0.0, 0),
+            (1.5, 1.0, 0),
+        ] {
+            let forward = Homography([1.0, 0.0, -source_x, 0.0, 1.0, -source_y, 0.0, 0.0, 1.0]);
+            let out = warp_into(&img, &forward, 1, 1);
+            assert_eq!((out.width(), out.height()), (1, 1));
+            assert_eq!(out.data(), &[expected], "source ({source_x}, {source_y})");
+        }
+    }
+
+    #[test]
     fn rotation_90_maps_top_left_to_top_right_region() {
         let mut data = vec![255u8; 9 * 9];
         data[0] = 0; // black px at (0,0)

@@ -24,7 +24,7 @@ artifacts off one Rust core.
     The 5-stage deterministic ladder, S1 pyramid → S5 erasure rescue
   </Card>
   <Card title="Scoring" icon="gauge-high" href="/concepts/scoring">
-    Score v3, the synthetic UEC margin, the ISO 15415-informed grade card
+    Score contract v5, the synthetic UEC margin, the ISO 15415-informed grade card
   </Card>
   <Card title="Report reference" icon="file-code" href="/api/report">
     Every field of the ScanReport, with the JSON Schema
@@ -34,14 +34,20 @@ artifacts off one Rust core.
 ## What makes it different
 
 1. **A deterministic multi-engine decode ladder** — rxing (ZXing lineage)
-   + rqrr (quirc lineage) + curated preprocessing rungs. No RNG anywhere:
-   same input, same result, always.
-2. **Score contract v3** — survival ramps across six stress axes with
-   structural caps. The 0-100 value is a real *margin* measure, not
-   "did it decode".
+   + rqrr (quirc lineage) + curated preprocessing rungs. No RNG in the
+   scanner: on a given platform, the same input, configuration and build
+   give the same report — unbounded, or whenever the report says the
+   budget cut nothing (`trace.budget_exhausted: false`). The one exception
+   is rxing's PDF417 decoder, which breaks ties in randomized order.
+2. **Score contract v5** — survival ramps across six stress axes with
+   structural caps and the error-correction margin cap. The 0-100 value is
+   a real *margin* measure, not "did it decode" — and a whole judgment or
+   none: a budget never ships a partial score.
 3. **Synthetic UEC** — the ISO 15415 Unused Error Correction margin from
-   RS syndromes (exact corrected-error counts). It catches real
-   Reed-Solomon *miscorrections* and flags them.
+   RS syndromes (exact corrected-error counts; ISO's misdecode reserve is
+   not subtracted, so on version 1, v2-L and v3-L a block with errors reads
+   above ISO's value). Its `low_correction_margin` hint signals distrust;
+   it does not prove a miscorrection or detect every wrong decode.
 4. **An ISO 15415-informed grade card** — Symbol Contrast, Modulation,
    Axial Nonuniformity, Fixed Pattern Damage, UEC; honest by construction
    (hardware-only parameters reported absent, never faked).
@@ -49,6 +55,21 @@ artifacts off one Rust core.
    re-decodes the bitstream itself with errors-and-erasures Reed-Solomon.
    Measured: center-logo occlusion tolerance grows from 20% to **30%
    radius** (2.2× the area).
+6. **Exact content** — for the QR family, `content.raw` is the payload's
+   original bytes and its ECI and FNC1 declarations are read once; other
+   symbologies carry their decoding engine's reading re-encoded (ISO/IEC
+   8859-1 when every character fits, else UTF-8). `charset: "unknown"` is
+   the only lossy reading. Detections are the distinct contents the scanner
+   can tell apart, never keyed on text. A malformed stream is refused, and
+   so is a QR Code content whose every measured correction went past the
+   standard's misdecode reserve (an `rqrr` decode of a grid the scanner
+   cannot error-correct counts as one, at any version). Reads the scanner
+   cannot measure (Micro QR, rMQR, other QR Code reads no parse measured)
+   are published as read, and a correction inside the reserve can still
+   be wrong: when the score measures the stream, a block whose errors
+   spent all its parity raises `low_correction_margin` — which no
+   errors-only correction inside the reserve does on version 1, v2-L and
+   v3-L.
 
 And it reads **every mainstream symbology**, not just QR: Micro QR · rMQR
 · Data Matrix · Aztec · PDF417 · MaxiCode · EAN-13/8 · UPC-A/E ·
@@ -81,7 +102,7 @@ in CI.
 
 | Corpus | Result |
 |---|---|
-| zxing blackbox (179 images, ground truth) | **170/179** exact-text @ 0° — beats the zxing reference thresholds on all six suites |
+| zxing blackbox (179 images, ground truth) | **169/179** exact-text @ 0° — at or above ZXing's own 0° pass thresholds on every suite: above on four, equal on the two whose thresholds are every image |
 | qrcode-ai.com production templates | **15/15** decoded (incl. the blob-pixel class) |
 | Center-logo occlusion (v5-H) | engines die >20% radius · **rescue decodes through 30%** |
 

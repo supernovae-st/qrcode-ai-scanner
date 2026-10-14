@@ -17,26 +17,43 @@ test_tool = "nextest"
 # assertion-gap signal.
 # (matched against the full mutant line, which starts with the file path —
 # never anchor.) Both bridge layers: lib.rs `fuzzing::` re-exports and the
-# rescue-internal `fuzz_api::` it forwards to.
+# rescue-internal `fuzz_api::` it forwards to. Both mutant shapes, by their
+# function context: a bridge function replaced (`replace fuzz_api::
+# parse_bitstream with ()`) and an operator inside one (`replace + with * in
+# fuzz_api::parse_bitstream`) — the second shape slipped past a
+# `replace fuzz_api::` pattern and nine of them reached the gate in run
+# 38105646991.
 #
-# Below the bridge class: the 14 PROVEN-EQUIVALENT mutants from the
-# 2026-07-05 full-file proof runs (each argued in commits 63d5895 + this
-# one; re-derive before touching). Anchored line:col ON PURPOSE — a
-# fn-scoped operator pattern would swallow killable siblings (e.g. 9
-# CAUGHT `< with <=` live in reserved_cell next to the 2 equivalents).
-# Line drift makes an entry stale in the SAFE direction: the known
-# equivalent resurfaces in the weekly report and gets re-anchored; a
-# killable mutant is never hidden.
+# Same class: the `#[cfg(not(feature = "engine-rxing"))]` stub of
+# `Binarized::black` (engine/locate.rs 308-312, body `None`) is compiled
+# only without engine-rxing — an rqrr-only build — so this all-features run
+# never compiles it and every mutant of it is a structural MISSED. Its
+# pattern covers the stub's lines: its three function-value mutants (`with
+# None`, `with Some(true)`, `with Some(false)`) sit at its body's 310:9,
+# while the compiled engine-rxing `Binarized::black` just above (289-306)
+# shares its name and stays generated. Line drift stays safe: the stub's
+# mutants resurface as MISSED in the weekly report and get re-anchored.
+#
+# Below the bridge class: the PROVEN-EQUIVALENT mutants — the 14 of the
+# 2026-07-05 full-file proof runs (argued in commit 63d5895) and the ones
+# argued with their own entries below; re-derive before touching. Anchored
+# line:col ON PURPOSE — a fn-scoped operator pattern would swallow killable
+# siblings (e.g. 9 CAUGHT `< with <=` live in reserved_cell next to the 2
+# equivalents). Line drift makes an entry stale in the SAFE direction: the
+# known equivalent resurfaces in the weekly report and gets re-anchored; a
+# killable mutant is never hidden. Every anchor below is re-anchored
+# together with .cargo/mutants-dispositions.toml, whose equivalent entries
+# carry the same line:col.
 #
 # transform.rs
-#   235:87 / 238:96  downscale `.max(y0+1)`/`.max(x0+1)` `+`→`*`: h ≥ new_h
+#   376:87 / 379:96  downscale `.max(y0+1)`/`.max(x0+1)` `+`→`*`: h ≥ new_h
 #     always in a downscale, the guard never binds (upscale-only defense).
-#   347:45  `-`→`+`/`/` in `.min(n - 1)`: the clamp only fires when the
+#   488:45  `-`→`+`/`/` in `.min(n - 1)`: the clamp only fires when the
 #     catch-up loop is empty either way (prev_hi ≥ hi at that point).
-#   348:31  `prev_hi + 1`→`* 1`: re-push of the back index; `dominates` is
+#   489:31  `prev_hi + 1`→`* 1`: re-push of the back index; `dominates` is
 #     non-strict, so the equal-value copy pops its original — deque
 #     bit-identical.
-#   367:24  `(k | 1)`→`^`: for m = k.max(3), (m|1)/2 == (m^1)/2 for all m
+#   508:24  `(k | 1)`→`^`: for m = k.max(3), (m|1)/2 == (m^1)/2 for all m
 #     (integer-division identity, odd and even).
 # score/structural.rs
 #   98:33 / 100:30  `modules - 1 / offset` mirror: offsets {-2,-1} swap
@@ -51,74 +68,84 @@ test_tool = "nextest"
 #   66:23 / 67:37  `%`→`+` inside is_multiple_of(2): +2 preserves parity
 #     and %2 preserves value mod 2 — same predicate.
 # lib.rs
-#   87:9  `Scanner::builder`→`Default::default()`: the fn body already IS
+#   102:9  `Scanner::builder`→`Default::default()`: the fn body already IS
 #     `ScannerBuilder::default()`, and the `-> ScannerBuilder` return type
 #     pins `Default::default()` to `<ScannerBuilder as Default>::default()`
 #     — the byte-identical call. No test can distinguish them. The killable
-#     builder siblings DISCARD state and ARE caught: `limits` (178:9) and
-#     `profile` (171:9) drop the argument, `build` (185:9) recurses forever
-#     via `Scanner::default` (timeout). This one alone is a true equivalent.
+#     builder siblings DISCARD state and ARE caught: `limits` (282:9) and
+#     `profile` (275:9) drop the argument, `build` (289:9) recurses through
+#     `Scanner::default` until the stack overflows. This one alone is a true
+#     equivalent.
 #
 # ladder.rs — the wall-clock-SHRINK pair (NOT strict equivalents; untestable).
 #   Both replace `* 1_000.0` with `/ 1_000.0` in a stage-scope seconds→ms
 #   conversion (`started.elapsed().as_secs_f64() * 1_000.0`). They shrink the
 #   reported `ms` by 1e6 to a smaller-but-still-positive value.
-#   511:49  Run::rescue_stage `ms`  ·  587:49  Run::stage `ms`
+#   1025:49  Run::rescue_stage `ms`  ·  1205:49  Run::stage `ms`
 #   The three KILLABLE siblings are caught (ladder_mutant_kills): the `+ 1000`
 #   inflations blow past the `stage.ms <= total_ms` sub-interval invariant
-#   (587 `+`, and the rescue unit's `rescue.ms < 100`), and the TOTAL-scope
-#   `/ 1000` (806:55) drops total below a real stage's ms. A STAGE-scope `/`
-#   has no machine-independent distinguisher: `ms` is a documented wall-clock
-#   field, explicitly excluded from the determinism contract (lib.rs
-#   §Deterministic + the determinism tests skip it), and catching a shrunk-
-#   but-positive elapsed needs a machine-speed LOWER bound ("this stage took
-#   ≥ N ms") — a flaky timing assumption the crate's own doctrine forbids.
-#   Line drift stays SAFE: the mutant resurfaces in the weekly report and gets
-#   re-anchored; no killable sibling is ever hidden (the operator/count is
-#   pinned to the `*`→`/` variant only, never the `*`→`+` twin).
+#   (1205 `+`, and the rescue unit's `rescue.ms < 100`), and the TOTAL-scope
+#   `/ 1000` (1463:59, in Run::finish) drops total below a real stage's ms.
+#   A STAGE-scope `/` has no machine-independent distinguisher: `ms` is a
+#   documented wall-clock field, explicitly excluded from the determinism
+#   contract (lib.rs §Deterministic + the determinism tests skip it), and
+#   catching a shrunk-but-positive elapsed needs a machine-speed LOWER bound
+#   ("this stage took ≥ N ms") — a flaky timing assumption the crate's own
+#   doctrine forbids. Line drift stays SAFE: the mutant resurfaces in the
+#   weekly report and gets re-anchored; no killable sibling is ever hidden
+#   (the operator/count is pinned to the `*`→`/` variant only, never the
+#   `*`→`+` twin).
 # gs1.rs
 #   227:15  `cut > 0`→`>=` in split_head's char-boundary down-walk: cut is
 #     usize so `cut >= 0` is vacuously true and the guard collapses to
 #     `!s.is_char_boundary(cut)` — but is_char_boundary(0) is always true
 #     (string start), so both guards stop at the same index for every &str.
 #     Survived per-mutation isolation while its `-=`→`+=` sibling died.
-# rescue/bitstream.rs
-#   144:53  `|`→`^` in the ECI assembly `(v / 0xC0) << 8 | (v % 0xC0)`: the
-#     operands are bit-disjoint — v % 0xC0 < 0xC0 occupies bits 0-7 only,
-#     (v / 0xC0) << 8 has all low 8 bits zero — so |, ^ and + are numerically
-#     identical for every input. Unkillable by construction.
-# score/uec.rs — census-proven equivalents (125,536-syndrome differential:
-#   exhaustive npar=2 + 60k LCG npar=3..=8, hash-identical on each mutation).
-#   Algebra: the truncated tail writes are gf_mul(coef, prev[k]) with
-#   prev[k] = 0 wherever the written index could later be read — first-flip
-#   prev is pristine [1,0,..], and afterwards the degree bound
-#   ceil((r+1)/2) < len-1 forbids a discrepancy read of locator[len-1..].
-#   The KILLABLE sibling at 52:30 (`+`→`-`, usize underflow at shift = len)
-#   is caught by late_spike_syndrome_runs_the_fold_at_maximum_shift.
-#   52:30  `len + 1 - shift`→`len * 1 - shift` in the flip-branch fold bound
-#   61:30  both `+`→`-` and `+`→`*` in the else-branch fold bound (shift
-#     there never exceeds len-1: it resets to 1 at every flip and the else
-#     branch requires round < 2·degree — no underflow, same zero-tail).
+# rescue/bitstream.rs — bit-disjoint `|`, so |, ^ and + are numerically
+#   identical for every input. Unkillable by construction.
+#   342:42  `|`→`^` in double_byte's pair assembly `(v / split) << 8 |
+#     (v % split)` (the Kanji split 0xC0, the Hanzi split 0x60; it was
+#     parse's 0xC0 assembly): v % split < 0xC0 occupies bits 0-7 only,
+#     (v / split) << 8 has all low 8 bits zero.
+#   65:30  `|`→`^` in Bits::take's `(out << 1) | u32::from(bit)`: out << 1
+#     has bit 0 clear and bit is 0 or 1.
+# score/uec.rs — the Berlekamp-Massey fold bounds (berlekamp_massey, which
+#   corrected_errors' Chien check also reads). Census at their first anchors
+#   (125,536-syndrome differential: exhaustive npar=2 + 60k LCG npar=3..=8,
+#   hash-identical error counts on each mutation). Algebra: `len + 1 -
+#   shift`→`len * 1 - shift` drops only the last write, to locator[len].
+#   The locator's degree never exceeds L, so that coefficient is non-zero
+#   only when L = len — reachable only by a flip on the last round — and
+#   corrected_errors refuses 2L > npar before it reads the locator.
+#   78:30  the flip-branch fold bound
+#   87:30  the else-branch fold bound (L does not change there and stays
+#     below len: locator[len] is zero before and after the skipped write)
+#   The KILLABLE flip-branch sibling at 78:30 (`+`→`-`, usize underflow at
+#   shift = len) is caught by
+#   late_spike_syndrome_runs_the_fold_at_maximum_shift. The else-branch
+#   `+`→`-` at 87:30 also drops the write to locator[len - 1], non-zero
+#   when npar = 2: no longer equivalent, killed by the two-parity row of
+#   only_a_correctable_block_counts_its_errors.
 #
-# Known caught-by-timeout pair (deliberately NOT excluded — a timeout here IS
-# the catch, unlike the equivalents above; cost ≈ 2×120 s in shard 0 weekly):
-#   lib.rs 185:9  `build -> Scanner` with Default::default(): Scanner's own
-#     Default impl calls builder().build(), so the mutant forms a mutual
-#     recursion that LLVM tail-calls into a flat infinite loop — no stack
-#     overflow, no assertion, just the suite timeout. Diverges in every
-#     config-carrying test, given time.
+# Known caught-by-timeout mutant (deliberately NOT excluded — a timeout here
+# IS the catch, unlike the equivalents above):
 #   gs1.rs 228:13  `-=` → `/=` in split_head: `cut /= 1` freezes the
 #     char-boundary down-walk into a spin; multi-byte inputs hang the test.
-# Excluding them would hide a real behavioral catch. Line drift stays safe,
-# same direction as the equivalents: they resurface in the weekly report.
+# (Its former twin, lib.rs `build -> Scanner` with Default::default(), now
+# fails outright: the mutual recursion through Scanner's Default overflows
+# the stack — in run 38027683008 the test
+# builder_threads_custom_limits_into_the_scan aborts.) Excluding it would
+# hide a real behavioral catch. Line drift stays safe, same direction as the
+# equivalents: it resurfaces in the weekly report.
 exclude_re = [
-    "replace fuzzing::",
-    "replace fuzz_api::",
-    "transform\\.rs:235:87: replace \\+ with \\* in downscale_to",
-    "transform\\.rs:238:96: replace \\+ with \\* in downscale_to",
-    "transform\\.rs:347:45: replace - with . in windowed_extremum_strided",
-    "transform\\.rs:348:31: replace \\+ with \\* in windowed_extremum_strided",
-    "transform\\.rs:367:24: replace \\| with \\^ in morph_filter",
+    "replace (fuzzing|fuzz_api)::",
+    " in (fuzzing|fuzz_api)::",
+    "locate\\.rs:3(0[89]|1[0-2]):\\d+: .*Binarized<'a>::black",
+    "transform\\.rs:376:87: replace \\+ with \\* in downscale_to",
+    "transform\\.rs:379:96: replace \\+ with \\* in downscale_to",
+    "transform\\.rs:488:45: replace - with . in windowed_extremum_strided",
+    "transform\\.rs:489:31: replace \\+ with \\* in windowed_extremum_strided",
+    "transform\\.rs:508:24: replace \\| with \\^ in morph_filter",
     "structural\\.rs:98:33: replace - with / in quiet_zone_ok",
     "structural\\.rs:100:30: replace - with / in quiet_zone_ok",
     "structural\\.rs:111:11: replace > with >= in quiet_zone_ok",
@@ -126,12 +153,12 @@ exclude_re = [
     "zigzag\\.rs:33:75: replace < with <= in reserved_cell",
     "zigzag\\.rs:66:23: replace % with \\+ in mask_bit",
     "zigzag\\.rs:67:37: replace % with \\+ in mask_bit",
-    "lib\\.rs:87:9: replace Scanner::builder -> ScannerBuilder with Default::default\\(\\)",
-    "ladder\\.rs:511:49: replace \\* with / in Run",
-    "ladder\\.rs:587:49: replace \\* with / in Run",
+    "lib\\.rs:102:9: replace Scanner::builder -> ScannerBuilder with Default::default\\(\\)",
+    "ladder\\.rs:1025:49: replace \\* with / in Run",
+    "ladder\\.rs:1205:49: replace \\* with / in Run",
     "gs1\\.rs:227:15: replace > with >= in split_head",
-    "bitstream\\.rs:144:53: replace \\| with \\^ in parse",
-    "uec\\.rs:52:30: replace \\+ with \\* in error_count",
-    "uec\\.rs:61:30: replace \\+ with - in error_count",
-    "uec\\.rs:61:30: replace \\+ with \\* in error_count",
+    "bitstream\\.rs:342:42: replace \\| with \\^ in double_byte",
+    "bitstream\\.rs:65:30: replace \\| with \\^ in Bits",
+    "uec\\.rs:78:30: replace \\+ with \\* in berlekamp_massey",
+    "uec\\.rs:87:30: replace \\+ with \\* in berlekamp_massey",
 ]

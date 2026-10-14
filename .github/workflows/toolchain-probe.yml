@@ -12,23 +12,300 @@ name: toolchain-probe
 on:
   workflow_dispatch:
     inputs:
+      probe:
+        description: "bounded diagnostic to run"
+        type: choice
+        options: [build, warp-mutations, oracle-artifact, debt-baseline, debt-paired, release-prepare]
+        default: build
+      baseline_sha:
+        description: "40-hex qualified baseline (required for warp/debt probes)"
+        default: ""
       toolchain:
-        description: "rust toolchain to probe"
-        default: "stable"
+        description: "rust toolchain to probe (empty: the pinned RUST_TOOLCHAIN)"
+        default: ""
+      version:
+        description: "Exact next version for release-prepare; no commit, tag or upload"
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  # The toolchain CI tests (ci.yml RUST_TOOLCHAIN; RELEASING.md § toolchain).
+  RUST_TOOLCHAIN: "1.97.0"
 
 jobs:
+  release-prepare:
+    if: inputs.probe == 'release-prepare'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: "2"
+      RAYON_NUM_THREADS: "1"
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, resolved 2026-10-12
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: prepare versions, preserved dependency graphs and actual CLI goldens
+        run: python3 scripts/prepare-release.py --version "$RELEASE_VERSION" --output "$RUNNER_TEMP/release-preparation"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-preparation-${{ inputs.version }}
+          path: ${{ runner.temp }}/release-preparation/
+          if-no-files-found: error
+
   build-no-cache:
-    runs-on: ubuntu-latest
+    if: inputs.probe == 'build'
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ inputs.toolchain }}
+          toolchain: ${{ inputs.toolchain || env.RUST_TOOLCHAIN }}
       - name: serialized uncached release build under the OOM guard
         run: |
           rustc --version --verbose
           df -h / && free -m
           ulimit -v 12582912
-          RUST_BACKTRACE=full cargo build --release -p xtask -j 1
+          RUST_BACKTRACE=full cargo build --release --locked -p xtask -j 1
           echo "BUILD OK — cache poisoning confirmed by elimination"
+
+  # Diagnostic runtime only: build the exact oracle on a matching host, then
+  # run it against local hash-verified corpora without uploading private data.
+  oracle-artifact:
+    if: inputs.probe == 'oracle-artifact'
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: "1"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
+      CARGO_TARGET_DIR: "target/oracle-diagnostic-v1"
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, resolved 2026-10-12
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2, resolved 2026-10-12
+        with:
+          key: oracle-aarch64-apple-darwin-diagnostic-nolto-cgu8-v1
+          workspaces: ". -> target/oracle-diagnostic-v1"
+      # Unit/contract coverage belongs to the three-OS PR CI. This diagnostic
+      # builds only the runtime: its profile is not a shipped artifact or a
+      # performance baseline. Keep rxing's package overflow checks intact.
+      - name: verify native source identity
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: bounded diagnostic native build
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          python3 - <<'PYBUILD'
+          import datetime, json, os, pathlib, signal, subprocess, sys, time
+          command = ["cargo", "build", "--release", "--locked", "-p", "xtask"]
+          wall_limit_seconds = 1140
+          rss_limit_bytes = 4 * 1024**3
+          started_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+          print(f"diagnostic build start: {started_utc} command={command}", flush=True)
+          started, peak = time.monotonic(), 0
+          child = None
+          reason, exit_code = "exception", 1
+          interrupted_signal = 0
+          def interrupted(signum, _frame):
+              global interrupted_signal
+              interrupted_signal = signum
+          signal.signal(signal.SIGTERM, interrupted)
+          signal.signal(signal.SIGINT, interrupted)
+          try:
+              child = subprocess.Popen(command, start_new_session=True)
+              if interrupted_signal:
+                  raise SystemExit(128 + interrupted_signal)
+              while child.poll() is None:
+                  if interrupted_signal:
+                      raise SystemExit(128 + interrupted_signal)
+                  rows = subprocess.check_output(["ps", "-axo", "pgid=,rss="], text=True)
+                  rss = sum(int(row.split()[1]) * 1024 for row in rows.splitlines()
+                            if len(row.split()) == 2 and int(row.split()[0]) == child.pid)
+                  peak = max(peak, rss)
+                  if rss > rss_limit_bytes or time.monotonic() - started > wall_limit_seconds:
+                      reason, exit_code = "sampled-rss-or-wall-limit", 124
+                      break
+                  time.sleep(0.5)
+              else:
+                  if interrupted_signal:
+                      raise SystemExit(128 + interrupted_signal)
+                  reason, exit_code = "build-exit", child.returncode
+          except SystemExit as error:
+              reason, exit_code = "interrupted", error.code
+          finally:
+              # Cleanup the owned group, including descendants after leader exit.
+              signal.signal(signal.SIGTERM, signal.SIG_IGN)
+              signal.signal(signal.SIGINT, signal.SIG_IGN)
+              if child is not None:
+                  try:
+                      os.killpg(child.pid, signal.SIGTERM)
+                  except ProcessLookupError:
+                      pass
+                  deadline = time.monotonic() + 3
+                  while time.monotonic() < deadline:
+                      child.poll()
+                      try:
+                          os.killpg(child.pid, 0)
+                      except ProcessLookupError:
+                          break
+                      time.sleep(0.1)
+                  try:
+                      os.killpg(child.pid, signal.SIGKILL)
+                  except ProcessLookupError:
+                      pass
+                  child.wait()
+              result = {
+                  "command": command, "started_utc": started_utc,
+                  "finished_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                  "elapsed_seconds": time.monotonic() - started,
+                  "wall_limit_seconds": wall_limit_seconds, "rss_limit_bytes": rss_limit_bytes,
+                  "sampled_group_peak_rss_bytes": peak, "reason": reason, "exit_code": exit_code,
+              }
+              pathlib.Path("diagnostic-build.json").write_text(json.dumps(result, indent=2) + "\n")
+              print(json.dumps(result), flush=True)
+          sys.exit(exit_code)
+          PYBUILD
+      - name: record immutable diagnostic identity
+        shell: bash
+        run: |
+          git diff --exit-code
+          mkdir -p oracle-runtime
+          cp "$CARGO_TARGET_DIR/release/xtask" oracle-runtime/xtask
+          file oracle-runtime/xtask
+          otool -L oracle-runtime/xtask
+          python3 - <<'PYMETA'
+          import hashlib, json, os, pathlib, subprocess, tomllib
+          binary = pathlib.Path("oracle-runtime/xtask")
+          version = subprocess.check_output(["rustc", "--version", "--verbose"], text=True)
+          if "host: aarch64-apple-darwin" not in version:
+              raise SystemExit("oracle artifact requires aarch64-apple-darwin")
+          metadata = {
+              "schema": "qrscan.oracle-runtime.v1",
+              "source_sha": os.environ["GITHUB_SHA"],
+              "source_tree": subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip(),
+              "target": "aarch64-apple-darwin",
+              "build": {
+                  "purpose": "diagnostic-accuracy-only",
+                  "profile": "release",
+                  "lto": os.environ["CARGO_PROFILE_RELEASE_LTO"],
+                  "codegen_units": os.environ["CARGO_PROFILE_RELEASE_CODEGEN_UNITS"],
+                  "cargo_jobs": os.environ["CARGO_BUILD_JOBS"],
+                  "target_directory": os.environ["CARGO_TARGET_DIR"],
+                  "rxing_overflow_checks": tomllib.loads(pathlib.Path("Cargo.toml").read_text())["profile"]["release"]["package"]["rxing"]["overflow-checks"],
+                  "rustflags": os.environ.get("RUSTFLAGS", ""),
+                  "guard": json.loads(pathlib.Path("diagnostic-build.json").read_text()),
+              },
+              "rustc": version,
+              "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+              "bytes": binary.stat().st_size,
+          }
+          pathlib.Path("oracle-runtime/identity.json").write_text(json.dumps(metadata, indent=2) + "\n")
+          PYMETA
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        with:
+          name: oracle-aarch64-apple-darwin-${{ github.sha }}
+          path: oracle-runtime/
+          if-no-files-found: error
+          retention-days: 3
+
+  warp-mutations:
+    if: inputs.probe == 'warp-mutations'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        revision: [before, after]
+    env:
+      BASELINE_SHA: ${{ inputs.baseline_sha }}
+      CARGO_BUILD_JOBS: "4"
+      NEXTEST_TEST_THREADS: "2"
+    steps:
+      - name: isolate Cargo home and target on each runner
+        run: |
+          echo "CARGO_HOME=$RUNNER_TEMP/cargo-home-${{ matrix.revision }}" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/cargo-target-${{ matrix.revision }}" >> "$GITHUB_ENV"
+      - name: require an immutable baseline
+        run: |
+          if [[ ! "$BASELINE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::baseline_sha must be a full immutable commit SHA"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.revision == 'before' && inputs.baseline_sha || github.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, resolved 2026-10-12
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+        with:
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.116
+      - name: fixed warp cohort, with baseline enabled
+        working-directory: candidate
+        run: |
+          ulimit -v 6291456
+          python3 ../harness/scripts/mutation-focus.py run --out "$RUNNER_TEMP/warp-${{ matrix.revision }}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: warp-${{ matrix.revision }}
+          path: ${{ runner.temp }}/warp-${{ matrix.revision }}
+          if-no-files-found: error
+
+  warp-verdict:
+    needs: warp-mutations
+    if: inputs.probe == 'warp-mutations' && !cancelled()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: warp-*
+          path: warp-receipts
+      - run: python3 scripts/mutation-focus.py selftest
+      - name: actual misses before, actual test kills after
+        shell: bash
+        env:
+          EXPECTED_BEFORE: ${{ inputs.baseline_sha }}
+          EXPECTED_AFTER: ${{ github.sha }}
+        run: python3 scripts/mutation-focus.py judge --before warp-receipts/warp-before --after warp-receipts/warp-after --expected-before "$EXPECTED_BEFORE" --expected-after "$EXPECTED_AFTER" | tee warp-verdict.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: warp-verdict
+          path: warp-verdict.json
+
+
+  # The existing dispatch entry can call a new branch-local workflow before
+  # that workflow reaches the default branch. The fixed warp cohort is unchanged.
+  debt-mutations:
+    if: inputs.probe == 'debt-baseline' || inputs.probe == 'debt-paired'
+    uses: ./.github/workflows/debt-mutations.yml
+    with:
+      baseline_sha: ${{ inputs.baseline_sha }}
+      mode: ${{ inputs.probe == 'debt-baseline' && 'baseline' || 'paired' }}

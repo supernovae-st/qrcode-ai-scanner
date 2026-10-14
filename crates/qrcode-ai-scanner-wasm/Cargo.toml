@@ -27,7 +27,7 @@ serde.workspace = true
 
 # rxing is pulled transitively; on wasm32 its chrono needs wasmbind
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-rxing = { version = "0.9.1", default-features = false, features = [
+rxing = { version = "=0.9.1", default-features = false, features = [
   "decoders",
   "multi_barcode_readers",
   "full_barcode_format_support",

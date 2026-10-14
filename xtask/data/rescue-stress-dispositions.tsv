@@ -1,0 +1,38 @@
+# rescue-stress dispositions: the wrong outputs the gate tolerates, and its pins.
+#
+# Compiled into `cargo run -p xtask -- rescue-stress`. Every published
+# detection of a grid cell is one output; an output that is not the cell's
+# truth needs a row here, or the run fails (open). A row holds only while its
+# exact output occurs (pass, cell, label, kind, path, symbology, content_sha256,
+# text_sha256, text_len and engines); a row whose output no longer occurs
+# fails the run too (stale). Delete a row in the same change that clears its output. Every
+# row carries a public reason. A release qualifies only with no rows left.
+#
+# Pins, one of each per pass (uncapped, capped, dual), before the column
+# header: `floor` is the exact strict_correct (cells that publish exactly
+# their ASCII truth bytes/text as qr_code, with a known non-lossy charset and no
+# ECI/FNC1 declarations); `engine_panics` is the exact sum of
+# report.trace.engine_panics; `caught_panics` is the exact count the process
+# panic hook sees, which also covers the score-probe panics that
+# report.trace.engine_panics drops. Every pin fails in either direction (a
+# strict_correct above its floor too) and moves only together with its cause.
+#
+# Columns are tab-separated. kind: qr_wrong (a wrong QR, no truth output in
+# the cell), qr_extra (a wrong QR beside the truth), rescue_qr (a wrong QR
+# from the S5 rescue), non_qr (any other symbology). path: rescue when the
+# engines include the rescue, else engine. Only the dual pass may hold a
+# rescue-path row: the uncapped and capped passes fail on any rescue-path
+# wrong output. content_sha256 identifies the complete published content
+# using the versioned encoding in rescue_stress.rs: raw bytes, exact charset,
+# ordered ECI declarations (including starts/duplicates and None versus []),
+# FNC1 and text. text_sha256/text_len separately identify its UTF-8 text.
+floor	uncapped	632
+floor	capped	638
+floor	dual	348
+engine_panics	uncapped	0
+engine_panics	capped	0
+engine_panics	dual	0
+caught_panics	uncapped	0
+caught_panics	capped	0
+caught_panics	dual	0
+pass	cell	label	kind	path	symbology	content_sha256	text_sha256	text_len	engines	reason

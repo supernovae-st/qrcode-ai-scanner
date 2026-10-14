@@ -3,13 +3,13 @@
     {
       "symbology": "qr_code",
       "content": {
-        "text": "MECARD:N:Melen,Thibaut;TEL:+33600000000;URL:https://qrcode-ai.com;;",
-        "raw": "TUVDQVJEOk46TWVsZW4sVGhpYmF1dDtURUw6KzMzNjAwMDAwMDAwO1VSTDpodHRwczovL3FyY29kZS1haS5jb207Ow==",
+        "text": "MECARD:N:Doe,Jane;TEL:+33600000000;URL:https://qrcode-ai.com;;",
+        "raw": "TUVDQVJEOk46RG9lLEphbmU7VEVMOiszMzYwMDAwMDAwMDtVUkw6aHR0cHM6Ly9xcmNvZGUtYWkuY29tOzs=",
         "charset": "utf8"
       },
       "payload": {
         "kind": "me_card",
-        "name": "Melen,Thibaut",
+        "name": "Doe,Jane",
         "tel": "+33600000000",
         "email": null,
         "url": "https://qrcode-ai.com"
@@ -20,23 +20,23 @@
           "y": 24.0
         },
         {
-          "x": 276.0,
+          "x": 252.0,
           "y": 24.0
         },
         {
-          "x": 276.0,
-          "y": 276.0
+          "x": 252.0,
+          "y": 252.0
         },
         {
           "x": 24.0,
-          "y": 276.0
+          "y": 252.0
         }
       ],
       "meta": {
-        "version": 6,
+        "version": 5,
         "ec_level": "q",
-        "mask": 3,
-        "modules": 41,
+        "mask": 5,
+        "modules": 37,
         "inverted": false
       },
       "engines": [
@@ -46,7 +46,8 @@
     }
   ],
   "score": {
-    "value": 92,
+    "value": 100,
+    "weights_run": 100,
     "grade": "excellent",
     "axes": [
       {
@@ -75,9 +76,9 @@
       },
       {
         "axis": "rotation",
-        "passed": 1,
+        "passed": 5,
         "total": 5,
-        "failed_at": "30°"
+        "failed_at": null
       },
       {
         "axis": "lighting",
@@ -98,7 +99,7 @@
       "margin": 1.0,
       "grade": "a",
       "worst_block_errors": 0,
-      "worst_block_capacity": 24
+      "worst_block_capacity": 18
     },
     "iso15415": {
       "symbol_contrast": {
@@ -130,16 +131,17 @@
       {
         "stage": "direct",
         "transforms_tried": 1,
-        "ms": 3.000791,
+        "ms": 6.707627,
         "detections_found": 2
       }
     ],
     "engine_panics": 0,
-    "total_ms": 3.025458
+    "total_ms": 6.723386,
+    "budget_exhausted": false
   },
   "versions": {
-    "scanner": "0.3.0",
-    "pipeline": 2,
-    "score_contract": 4
+    "scanner": "0.10.0",
+    "pipeline": 3,
+    "score_contract": 5
   }
 }

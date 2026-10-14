@@ -1,0 +1,140 @@
+name: debt-mutations
+
+on:
+  workflow_call:
+    inputs:
+      baseline_sha:
+        description: "immutable qualified source before new tests (40-hex)"
+        required: true
+        type: string
+      mode:
+        description: "baseline or paired"
+        type: string
+        default: baseline
+  workflow_dispatch:
+    inputs:
+      baseline_sha:
+        description: "immutable qualified source before new tests (40-hex)"
+        required: true
+        type: string
+      mode:
+        description: "measure current debts or compare a composed test candidate"
+        type: choice
+        options: [baseline, paired]
+        default: baseline
+
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: "1.97.0"
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: immutable input and fixed cohort matrix
+        id: plan
+        env:
+          BASELINE_SHA: ${{ inputs.baseline_sha }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          assert re.fullmatch(r"[0-9a-f]{40}", os.environ["BASELINE_SHA"]), "invalid baseline SHA"
+          assert os.environ["MODE"] in ("baseline", "paired"), "invalid mode"
+          revisions = ["before"] if os.environ["MODE"] == "baseline" else ["before", "after"]
+          matrix = {"include": [{"cohort": c, "revision": r} for c in
+                    ("geometry-scoring", "engine-rescue", "rgba-allocation") for r in revisions]}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps(matrix) + "\n")
+          PY
+
+  cohort:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      BASELINE_SHA: ${{ inputs.baseline_sha }}
+      TESTED_SHA: ${{ matrix.revision == 'before' && inputs.baseline_sha || github.sha }}
+      COHORT: ${{ matrix.cohort }}
+      REVISION: ${{ matrix.revision }}
+      CARGO_BUILD_JOBS: "2"
+      NEXTEST_TEST_THREADS: "2"
+    steps:
+      - name: independent Cargo home and target
+        run: |
+          echo "CARGO_HOME=$RUNNER_TEMP/cargo-home-$COHORT-$REVISION" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/cargo-target-$COHORT-$REVISION" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TESTED_SHA }}
+          path: candidate
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # resolved 2026-10-12
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2, resolved 2026-10-12
+        with:
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.116
+      - name: exact current anchors, passing baseline and actual mutants
+        timeout-minutes: 50
+        working-directory: candidate
+        run: |
+          ulimit -v 6291456
+          python3 ../harness/scripts/debt-mutation-focus.py run --cohort "$COHORT" --expected-sha "$TESTED_SHA" --out "$RUNNER_TEMP/debt-$COHORT-$REVISION"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        if: always()
+        with:
+          name: debt-${{ matrix.cohort }}-${{ matrix.revision }}
+          path: ${{ runner.temp }}/debt-${{ matrix.cohort }}-${{ matrix.revision }}
+          if-no-files-found: error
+          retention-days: 7
+
+  verdict:
+    needs: cohort
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      BASELINE_SHA: ${{ inputs.baseline_sha }}
+      CANDIDATE_SHA: ${{ github.sha }}
+      MODE: ${{ inputs.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8, resolved 2026-10-12
+        with:
+          pattern: debt-*
+          path: debt-receipts
+      - run: python3 scripts/debt-mutation-focus.py selftest
+      - name: measured baseline or complete before/after judgment
+        shell: bash
+        env:
+          COHORT_RESULT: ${{ needs.cohort.result }}
+        run: |
+          set -euo pipefail
+          test "$COHORT_RESULT" = success
+          if [[ "$MODE" = baseline ]]; then
+            python3 scripts/debt-mutation-focus.py observe --baseline-sha "$BASELINE_SHA" --harness-sha "$CANDIDATE_SHA" --receipts debt-receipts | tee debt-verdict.json
+          else
+            python3 scripts/debt-mutation-focus.py judge --baseline-sha "$BASELINE_SHA" --candidate-sha "$CANDIDATE_SHA" --receipts debt-receipts | tee debt-verdict.json
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        if: always()
+        with:
+          name: debt-verdict
+          path: debt-verdict.json
+          if-no-files-found: error

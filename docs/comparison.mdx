@@ -37,12 +37,12 @@ wasm decoder) inside a hand-tuned retry loop. Field by field:
 | Output | `result.text` — one string | typed `ScanReport`: symbology, payload classification, geometry, score, ISO grade card, hints, trace |
 | Blob/dot template styles (a generator OUTPUT class) | **0/3 filter levels decoded** | decoded (morphological close rungs — probe-calibrated on the template corpus) |
 | Logo-occluded codes | fails past the RS error wall | erasure rescue decodes through **30% center occlusion** (vs 20%) |
-| Wrong-decode protection | none — a miscorrection reads as success | UEC margin catches it (`low_correction_margin` distrust signal — proven on the public zxing corpus) |
+| Correction-margin feedback | decoded text alone | `low_correction_margin` distrust signal; it does not prove a decode wrong or guarantee that every wrong decode is flagged |
 | Barcodes / other symbologies | QR only | **19 symbologies**, labeled |
-| Determinism | not guaranteed (CNN) | bit-for-bit reproducible (no RNG) |
+| Determinism | not guaranteed (CNN) | bit-for-bit reproducible on a given platform when the scan is unbounded or uncut (no RNG; PDF417 tie order excepted) |
 | Feedback to the generator | none | machine-actionable hints (`fix_finder_pattern`, `raise_error_correction`, …) |
 | Import an existing code | impossible | drop / browse / **paste** → decode locally → editor prefilled with the detected type |
-| Verifiable claims | — | measured: zxing ground-truth **170/179** (beats the reference thresholds on all 6 suites) · production templates **15/15** |
+| Verifiable claims | — | measured: zxing ground-truth **169/179** (at or above ZXing's own pass thresholds on all 6 suites, above on 4) · production templates **15/15** |
 
 Bundle honesty: ~778 KB gz all-symbologies (the incumbent was ~1 MB;
 a QR-only build drops ~180 KB — documented escape hatch).

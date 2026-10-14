@@ -183,11 +183,12 @@ expression: full_report()
       }
     ],
     "engine_panics": 0,
-    "total_ms": 12.5
+    "total_ms": 12.5,
+    "budget_exhausted": false
   },
   "versions": {
     "scanner": "[crate-version]",
-    "pipeline": 2,
-    "score_contract": 4
+    "pipeline": 3,
+    "score_contract": 5
   }
 }

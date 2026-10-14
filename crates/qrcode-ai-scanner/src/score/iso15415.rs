@@ -140,7 +140,10 @@ fn fixed_pattern_damage(structural: &StructuralReport) -> IsoParameter {
 }
 
 /// Build the grade card. `None` when the sampler can't be constructed or the
-/// symbol is degenerate (sub-16 module sample).
+/// symbol is degenerate (sub-16 module sample). `uec` is the MEASURED
+/// margin: its grade always counts in `overall`, and a caller that skips the
+/// `uec` check withholds only the `unused_error_correction` parameter
+/// afterwards — skipping a check never moves the published `overall`.
 pub(crate) fn compute(
     img: &LumaImage,
     corners: [Point; 4],
@@ -169,7 +172,8 @@ pub(crate) fn compute(
     });
 
     // ISO rule: overall = the LOWEST individual parameter grade
-    // (IsoGrade Ord: A < B < … < F, so "lowest grade" = max in Ord terms)
+    // (IsoGrade Ord: A < B < … < F, so "lowest grade" = max in Ord terms) —
+    // over every MEASURED parameter, a withheld one included
     let overall = [
         symbol_contrast.grade,
         modulation.grade,

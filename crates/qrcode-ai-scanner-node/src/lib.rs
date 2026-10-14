@@ -68,9 +68,10 @@ fn profile_from(
             })
             .collect::<Result<_>>()?,
     };
-    // scoreSkipChecks: report SECTIONS excluded at the source (`uec` /
-    // `iso15415`) — never computed, wire carries null, UEC-driven hints
-    // silent, composite untouched. Same loud-typo posture as the axes.
+    // scoreSkipChecks: report SECTIONS withheld (`uec` / `iso15415` /
+    // `alpha_envelope`) — wire carries null, section-driven hints silent; the
+    // UEC margin is still measured and caps the composite, which never moves.
+    // Same loud-typo posture as the axes.
     let checks: Vec<ScoreCheck> = match &score_skip_checks {
         None => Vec::new(),
         Some(names) => names
@@ -136,8 +137,10 @@ fn profile_from(
         Some(preset) => preset.skips(),
         None => skip,
     };
-    // budgetMs overrides the preset's wall-clock budget (0 = unbounded) —
-    // server embedders bound tail latency without giving up the deep ladder.
+    // budgetMs overrides the preset's wall-clock budget (0 = unbounded, the
+    // reproducible mode; unset keeps the profile default) — server embedders
+    // bound tail latency without giving up the deep ladder, and a cut report
+    // says so (`trace.budget_exhausted`).
     if budget_ms.is_none()
         && skip.is_empty()
         && checks.is_empty()

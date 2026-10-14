@@ -3,9 +3,8 @@ title: "Flutter — qrcode_ai_scanner"
 description: "flutter_rust_bridge binding — a fully typed ScanReport, scans on the Rust worker pool."
 ---
 
-```yaml
-dependencies:
-  qrcode_ai_scanner: ^0.4.0
+```bash
+flutter pub add qrcode_ai_scanner
 ```
 
 <Warning>
@@ -31,12 +30,24 @@ final frame = await QrcodeAiScanner.scanFrame(rgba, w, h); // profile: 'frame'
 ```
 
 Scans run on flutter_rust_bridge's Rust worker pool, so `await` never blocks the
-UI isolate. Profiles: `'full'` · `'fast'` · `'frame'`.
+UI isolate. Profiles: `'full'` · `'fast'` · `'frame'`, each under its default
+wall-clock budget (4000 · 800 · 80 ms — this release cannot override it),
+which starts once the image is decoded and normalized. A
+report the budget cut says so: `report.trace.budgetExhausted == true`; a null
+`score` beside a detection then means "not judged", never 0. A null
+`budgetExhausted` is an older report: unknown, never final.
 
 Unlike the Kotlin/Swift bindings (which return a JSON string), Flutter ships a
 **typed** [`ScanReport`](/api/report) — sealed `Payload`/`Hint`, `Score` with the
 ISO 15415 / UEC grade cards. Unknown enum values and payload kinds decode to
-`unknown` / catch-all variants, never a throw (additively forward-compatible).
+`unknown` / catch-all variants, never a throw (additively forward-compatible) —
+except `Charset` and `Fnc1Position`, whose newer wire values decode to
+`unrecognized`. `Charset.unrecognized` is still a complete reading:
+`Charset.unknown` is the wire's own lossy value, so test
+`d.content.charset.isLossy` (then use `d.content.raw`, the payload's bytes).
+`d.content.eci` and `d.content.fnc1` are null when none was observed or the
+symbology does not report it — not proof that the symbol declares none;
+compare contents by symbology, `raw`, `fnc1` and `eci`, never by text.
 
 ```dart
 if (report.detections.isEmpty) {

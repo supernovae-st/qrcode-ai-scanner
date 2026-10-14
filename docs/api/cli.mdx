@@ -10,25 +10,48 @@ cargo install qrcode-ai-scanner-cli
 ## Usage
 
 ```bash
-qrscan <image> [--profile full|fast|frame] [--score-preset design|capture]
+qrscan <image> [--profile full|fast|frame] [--budget-ms <ms>]
+               [--score-preset design|capture | --score-skip-axes <axis,...>]
+               [--score-skip-checks <check,...>]
                [--alpha-background auto|white|black|none|"#rrggbb"]
+               [--alpha-palette <color,...>]
                [--pretty|-p] [--score-only|-s]
 ```
+
+`--budget-ms` overrides the profile's wall-clock budget (`full` 4000 ·
+`fast` 800 · `frame` 80 ms); `--budget-ms 0` is unbounded — the
+reproducible mode, the one for CI gates. The clock starts once the image
+is decoded and normalized: decoding is bounded by the input limits, not by
+the budget. A report the budget cut says so:
+`trace.budget_exhausted` is `true`, `--pretty` names what was cut, and
+`--score-only` exits 3 when the budget left a decoded symbol unjudged.
+
+`--score-skip-axes` excludes stress axes from scoring (comma-separated:
+`resolution`, `blur`, `contrast`, `perspective`, `rotation`, `lighting`);
+skipped axes never run and the composite renormalizes over the others.
+`--score-preset` is the named form (`design` skips `perspective` and
+`rotation`); pass one or the other. `--score-skip-checks` withholds report
+sections (`uec`, `iso15415`, `alpha_envelope`): the wire carries `null` and
+their hints stay silent, while the value does not move.
 
 `--alpha-background` picks the background flattened under transparent
 pixels (`auto` default — opaque images are untouched); `--pretty` then
 renders the flatten verdict plus the placement-envelope strip
 (`placement LightOnly · safe luma 32-255 · probes ✕0 ✓32 ✓64 …`).
+`--alpha-palette` probes your own colors in the same scan (comma-separated
+`white`, `black` or `#rrggbb`, at most 32): per-color verdicts land in
+`alpha.envelope.palette`.
 
 | Mode | Output |
 |---|---|
 | default | the full `ScanReport` JSON, pretty-printed, on stdout |
-| `--pretty` | human summary: content, payload, symbol, score + axes, UEC, ISO grade card, hints |
-| `--score-only` | the bare composite value (`87`) — for shell gates |
+| `--pretty` | human summary: content, payload, symbol, score + axes, UEC, ISO grade card, hints — or why the score is missing (`not computed`, `not judged`, `unavailable`) |
+| `--score-only` | the bare composite value (`87`) — for shell gates; a complete judgment, never a deflated one |
 
 ## Example (`--pretty`)
 
-Real output for a clean QR — `qrscan fixtures/clean/OK_68ms_100_4e875a2c.png --pretty`:
+Real output for a clean QR —
+`qrscan fixtures/clean/OK_68ms_100_4e875a2c.png --pretty --budget-ms 0`:
 
 ```text
 content   https://qrc-ai.com/76xMa
@@ -36,21 +59,27 @@ symbology QrCode
 payload   Url { url: "https://qrc-ai.com/76xMa" }
 symbol    v2 · 25x25 modules
 engines   rxing+rqrr
-score     89/100 (Excellent)
+score     100/100 (Excellent)
   resolution   5/5
   blur         5/5
   contrast     5/5
   perspective  5/5
-  rotation     1/5          ← the one weak axis: a steeply rotated scan
-  lighting     4/5
+  rotation     5/5
+  lighting     5/5
   uec margin 1.00 (grade A · worst block 0/16 ec)
 iso15415  overall A (informed, not certified)
   contrast 1.00/A · modulation 1.00/A · axial 0.001/A · fixed-pattern 1.00/A
-took      6ms
+took      10ms
 ```
 
-The decode is perfect, yet the score is 89 — `rotation` is the only soft axis.
-That single line is the actionable truth a plain "decoded" never gives you. See
+A pristine render survives every stress cell, keeps its whole
+error-correction budget (`uec margin 1.00`) and grades A. On a styled or
+damaged code the weak axes show up line by line, each one the actionable
+truth a plain "decoded" never gives you. A symbol that declares more than
+plain text adds a `charset` line (`charset   eci · ECI 4@0`, or `unknown ·
+no verified text (raw: in the JSON report, run without --pretty)`) and, for
+GS1 or AIM data, an `fnc1` line;
+controls and spoofing characters print as `\u{…}`. See
 [How it works](/tutorial) for the field-by-field walkthrough and
 [Scoring](/concepts/scoring) for what each axis means.
 
@@ -58,15 +87,20 @@ That single line is the actionable truth a plain "decoded" never gives you. See
 
 | Exit | Meaning |
 |---|---|
-| `0` | ≥1 QR decoded |
-| `1` | scan ran clean, no QR found (all modes) |
-| `2` | invalid input/usage — message on stderr with `[QRS-xxx]` |
+| `0` | ≥1 symbol decoded, of any symbology (with `--score-only`: its complete score on stdout) |
+| `1` | no symbol found (all modes) — final only when the scan was not cut (`trace.budget_exhausted: false`) |
+| `2` | invalid input/usage — message on stderr with `[QRS-xxx]` · `--score-only` with a configuration that computes no score (`frame`, every axis skipped) or after a contained fault |
+| `3` | `--score-only` only: a symbol decoded, but the budget ran out before its score was judged — nothing on stdout; retry with a larger `--budget-ms` (`0` never yields 3) |
+
+Branch on the code, never on the message text. An EAN-13 or any other
+symbology exits exactly like a QR code.
 
 ## Recipes
 
 ```bash
-# CI quality gate: fail the build under score 70
-score=$(qrscan render.png -s) && [ "$score" -ge 70 ] || exit 1
+# CI quality gate: fail the build under score 70 — unbounded, so the gate
+# never depends on how loaded the runner is (and never exits 3)
+score=$(qrscan render.png -s --budget-ms 0) && [ "$score" -ge 70 ] || exit 1
 
 # extract just the decoded text
 qrscan in.png | jq -r '.detections[0].content.text'

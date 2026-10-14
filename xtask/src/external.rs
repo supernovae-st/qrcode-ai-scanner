@@ -15,6 +15,27 @@
 //! frontier). A missing `corpus-external/` (CI checkout) skips gracefully
 //! but noisily: it prints exactly how many manifested files went unchecked.
 //!
+//! The pins are a capability tripwire, not a correctness verdict: `match`
+//! is any-based (SOME detection's text equals the truth — extra detections
+//! and the symbology go unchecked) and `decode` proves detection only.
+//! Counts built on them are exploratory; `xtask oracle` (`oracle.rs`)
+//! judges the complete detection list against the expected
+//! (symbology, text) set.
+//!
+//! The corpus root is `<repo>/corpus-external` unless overridden — see
+//! [`corpus_root`] (a worktree or CI cache rarely holds the corpus itself).
+//! Only that default may be absent quietly: a configured root that does
+//! not exist fails with exit 2 and names the override.
+//!
+//! Exit codes (the family `oracle.rs` shares): 0 pass — and, for the gate
+//! only, the loud CI skip when nothing is configured and the default
+//! corpus is absent (the oracle reports that case as 3, skipped) · 1 gate
+//! failure — regression, capability gained, integrity problem, an
+//! unwalkable corpus · 2 usage or configuration error — an unreadable or
+//! malformed committed manifest, a relative or absent configured corpus
+//! root, an instrument (`gen-external-manifest`, `rotation-sweep`) that
+//! cannot read its corpus.
+//!
 //! The files themselves are machine-bound (untracked) and CAN vanish or rot —
 //! 2026-07-08: ten gallery files were found deleted on disk and the gate went
 //! red exactly as designed. Restore procedure, proven that day: every gallery
@@ -34,25 +55,33 @@
 //! score contract is pinned by the vendored corpus and the test suite.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 use qrcode_ai_scanner::{ImageInput, ScanProfile, Scanner, ScoreDepth};
 use rayon::prelude::*;
 use sha2::{Digest as _, Sha256};
 
+use crate::truth_amendments::{self, Truth};
+
 /// Committed manifest, at the repo root next to `corpus.toml`.
-const MANIFEST: &str = "corpus-external.tsv";
+pub(crate) const MANIFEST: &str = "corpus-external.tsv";
 /// Gitignored corpus root, at the repo root.
 const CORPUS_DIR: &str = "corpus-external";
+/// Absolute-path override for the corpus root. A variable, not a symlink:
+/// the ignore rule matches the `corpus-external/` directory form only, so a
+/// symlink at the repo root would show up as an untracked file.
+const CORPUS_ENV: &str = "QRSCAN_EXTERNAL_CORPUS";
 
-/// zxing's own `mustPassCount` at rotation 0° (`QRCodeBlackBoxNTestCase`) —
-/// printed as context next to our per-suite match counts.
+/// zxing's own `mustPassCount` at rotation 0° — the first `addTest` of each
+/// `QRCodeBlackBoxNTestCase` (zxing master; 157 in all) — printed as
+/// exploratory context next to our any-based per-suite match counts.
 const ZXING_REF: [(&str, u32); 6] = [
     ("zxing-blackbox/qrcode-1", 17),
-    ("zxing-blackbox/qrcode-2", 31),
+    ("zxing-blackbox/qrcode-2", 32),
     ("zxing-blackbox/qrcode-3", 38),
     ("zxing-blackbox/qrcode-4", 36),
-    ("zxing-blackbox/qrcode-5", 16),
+    ("zxing-blackbox/qrcode-5", 19),
     ("zxing-blackbox/qrcode-6", 15),
 ];
 
@@ -66,12 +95,15 @@ const IMG_EXT: [&str; 6] = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 /// miscorrection class) and "stayed blind" are different truths whose
 /// transitions mean different things.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Status {
-    /// Decoded and the text equals the sibling `.txt` ground truth.
+pub(crate) enum Status {
+    /// Decoded and SOME detection's text equals the sibling `.txt` ground
+    /// truth — any-based: extra detections and the symbology are not
+    /// checked, so this is exploratory, never "exact" (`oracle.rs` owns the
+    /// strict verdict).
     Match,
     /// Decoded; no ground truth exists to compare against (gallery images).
     Decode,
-    /// Decoded but the text differs from the ground truth.
+    /// Decoded but NO detection's text equals the ground truth.
     Wrong,
     /// No decode.
     Blind,
@@ -80,7 +112,7 @@ enum Status {
 }
 
 impl Status {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Match => "match",
             Self::Decode => "decode",
@@ -104,56 +136,203 @@ impl Status {
 
 /// One manifest line.
 #[derive(Debug, Clone)]
-struct Row {
-    status: Status,
-    sha256: String,
+pub(crate) struct Row {
+    pub(crate) status: Status,
+    pub(crate) sha256: String,
     /// Forward-slash path relative to `corpus-external/`.
-    path: String,
+    pub(crate) path: String,
 }
 
 // ------------------------------------------------------------------ shared
 
-fn is_image(rel: &str) -> bool {
+/// What chose the external corpus root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RootSource {
+    /// `oracle --corpus-root`.
+    Explicit,
+    /// `QRSCAN_EXTERNAL_CORPUS`.
+    Env,
+    /// `<repo>/corpus-external` — nothing was configured.
+    Default,
+}
+
+impl RootSource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "--corpus-root",
+            Self::Env => CORPUS_ENV,
+            Self::Default => "default",
+        }
+    }
+}
+
+/// A resolved external corpus root, and what every gate must do with it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CorpusRoot {
+    /// The directory exists — measure it.
+    Present(PathBuf),
+    /// Nothing configured and `<repo>/corpus-external` is absent: the loud
+    /// skip CI relies on (the corpus is not vendored).
+    DefaultAbsent(PathBuf),
+    /// A configured root does not exist: a misconfiguration, never a skip —
+    /// a mistyped override must not let a gate pass green.
+    OverrideAbsent { dir: PathBuf, source: RootSource },
+}
+
+/// The external corpus directory, or exit 2 with the reason — for the
+/// instruments (`gen-external-manifest`, `rotation-sweep`) that cannot skip.
+pub(crate) fn corpus_dir(explicit: Option<&Path>) -> PathBuf {
+    corpus_root(explicit).require()
+}
+
+impl CorpusRoot {
+    /// The directory, or exit 2 with the reason.
+    fn require(self) -> PathBuf {
+        match self {
+            Self::Present(dir) => dir,
+            Self::DefaultAbsent(dir) => {
+                eprintln!(
+                    "no external corpus at {} — fetch the corpora first \
+                     (README « Reproducing the headline numbers »).",
+                    dir.display()
+                );
+                std::process::exit(2);
+            }
+            Self::OverrideAbsent { dir, source } => {
+                eprintln!("{}", override_absent(&dir, source));
+                std::process::exit(2);
+            }
+        }
+    }
+}
+
+/// The error for a configured root that does not exist — names the
+/// variable or flag that pointed there.
+pub(crate) fn override_absent(dir: &Path, source: RootSource) -> String {
+    let named = match source {
+        RootSource::Env => format!("{CORPUS_ENV}={}", dir.display()),
+        RootSource::Explicit | RootSource::Default => {
+            format!("{} {}", source.as_str(), dir.display())
+        }
+    };
+    format!(
+        "{named} is not a directory — a configured corpus root never skips; \
+         fix the path, or drop the override to take the default"
+    )
+}
+
+/// The external corpus root, in priority order: `explicit` (`oracle
+/// --corpus-root`), the absolute path in `QRSCAN_EXTERNAL_CORPUS`, then
+/// `<repo>/corpus-external`. The root used is printed — a gate whose input
+/// location is implicit cannot be audited. A relative override exits 2:
+/// resolving it against cargo's cwd would make the measured corpus depend
+/// on the caller's shell.
+pub(crate) fn corpus_root(explicit: Option<&Path>) -> CorpusRoot {
+    let env = std::env::var_os(CORPUS_ENV);
+    match resolve_corpus_dir(explicit, env.as_deref(), &crate::repo_root()) {
+        Ok((dir, source)) => {
+            println!(
+                "external corpus root: {} ({})",
+                dir.display(),
+                source.as_str()
+            );
+            classify_root(dir, source, Path::is_dir)
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// [`corpus_root`]'s pure half: the root plus what chose it.
+fn resolve_corpus_dir(
+    explicit: Option<&Path>,
+    env: Option<&OsStr>,
+    repo: &Path,
+) -> Result<(PathBuf, RootSource), String> {
+    let (dir, source) = match (explicit, env) {
+        (Some(dir), _) => (dir, RootSource::Explicit),
+        (None, Some(value)) => (Path::new(value), RootSource::Env),
+        (None, None) => return Ok((repo.join(CORPUS_DIR), RootSource::Default)),
+    };
+    if dir.is_absolute() {
+        Ok((dir.to_path_buf(), source))
+    } else {
+        Err(format!(
+            "{} must be an absolute path, got \"{}\"",
+            source.as_str(),
+            dir.display()
+        ))
+    }
+}
+
+/// Presence decides the gate's path; only the default may be absent
+/// quietly. `is_dir` is injected so the rule is testable without a corpus.
+fn classify_root(dir: PathBuf, source: RootSource, is_dir: impl Fn(&Path) -> bool) -> CorpusRoot {
+    if is_dir(&dir) {
+        CorpusRoot::Present(dir)
+    } else if source == RootSource::Default {
+        CorpusRoot::DefaultAbsent(dir)
+    } else {
+        CorpusRoot::OverrideAbsent { dir, source }
+    }
+}
+
+pub(crate) fn is_image(rel: &str) -> bool {
     Path::new(rel)
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| IMG_EXT.contains(&e.to_ascii_lowercase().as_str()))
 }
 
+/// Suite / gallery subdir of a manifest path (`zxing-blackbox/qrcode-2`),
+/// or its first component when there is no subdir.
+pub(crate) fn group_of(path: &str) -> String {
+    let mut parts = path.split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(a), Some(b), Some(_)) => format!("{a}/{b}"),
+        (Some(a), _, _) => a.to_owned(),
+        _ => String::new(),
+    }
+}
+
 /// All files under `dir`, as sorted forward-slash paths relative to `dir`.
 /// Dotfiles (`.DS_Store` and friends) are ignored — they are OS noise, not
-/// corpus content.
-fn walk_sorted(dir: &Path) -> Vec<String> {
-    fn recurse(dir: &Path, base: &Path, out: &mut Vec<String>) {
-        for entry in std::fs::read_dir(dir).expect("read corpus dir") {
-            let entry = entry.expect("dir entry");
+/// corpus content. An unreadable directory or a non-UTF-8 name is an error
+/// naming the path, for the caller to report — never a panic.
+pub(crate) fn walk_sorted(dir: &Path) -> Result<Vec<String>, String> {
+    fn recurse(dir: &Path, base: &Path, out: &mut Vec<String>) -> Result<(), String> {
+        let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
             let name = entry.file_name();
             if name.to_string_lossy().starts_with('.') {
                 continue;
             }
             let path = entry.path();
             if path.is_dir() {
-                recurse(&path, base, out);
+                recurse(&path, base, out)?;
             } else {
                 let rel = path
                     .strip_prefix(base)
-                    .expect("under base")
+                    .map_err(|e| format!("{}: {e}", path.display()))?
                     .to_str()
-                    .expect("utf-8 corpus path")
-                    .replace('\\', "/");
-                out.push(rel);
+                    .ok_or_else(|| format!("non-UTF-8 corpus path: {}", path.display()))?;
+                out.push(rel.replace('\\', "/"));
             }
         }
+        Ok(())
     }
     let mut out = Vec::new();
-    recurse(dir, dir, &mut out);
+    recurse(dir, dir, &mut out)?;
     out.sort();
-    out
+    Ok(out)
 }
 
-fn sha256_hex(path: &Path) -> String {
-    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let digest = Sha256::digest(&bytes);
+/// Lowercase hex sha256 — the manifest's hash format.
+pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
     let mut hex = String::with_capacity(64);
     for b in digest {
         use std::fmt::Write as _;
@@ -162,20 +341,45 @@ fn sha256_hex(path: &Path) -> String {
     hex
 }
 
-/// Ground truth for a zxing image: the sibling `.txt`, decoded exactly the
-/// way the blackbox harness reads it (UTF-8, then ISO-8859-1) — no trimming.
-fn ground_truth(img_abs: &Path) -> Option<String> {
-    let txt = img_abs.with_extension("txt");
-    let raw = std::fs::read(txt).ok()?;
-    Some(match String::from_utf8(raw) {
+/// Read the sibling truth without trimming, then resolve its amendment
+/// against the original encoded image bytes, before any transforms or scan.
+pub(crate) fn ground_truth(
+    corpus: &Path,
+    image_path: &str,
+    encoded: &[u8],
+) -> Result<Option<Truth>, String> {
+    let txt = corpus.join(image_path).with_extension("txt");
+    let original = match std::fs::read(&txt) {
+        Ok(original) => original,
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                && image_path != truth_amendments::Q13.image_path =>
+        {
+            return Ok(None);
+        }
+        Err(_) => return Err(format!("unreadable original truth for {image_path}")),
+    };
+    truth_amendments::resolve(
+        image_path,
+        &sha256_bytes(encoded),
+        &sha256_bytes(&original),
+        &original,
+    )
+    .map(Some)
+}
+
+/// Truth-file bytes → text: UTF-8, else ISO-8859-1 (the blackbox harness
+/// rule). Never trimmed — trailing newlines are part of the payload.
+pub(crate) fn decode_truth(raw: Vec<u8>) -> String {
+    match String::from_utf8(raw) {
         Ok(s) => s,
         // ISO-8859-1: every byte maps to the same code point.
         Err(e) => e.into_bytes().iter().map(|&b| b as char).collect(),
-    })
+    }
 }
 
 /// The budget-free, score-free scanner every external run uses.
-fn scanner() -> Scanner {
+pub(crate) fn scanner() -> Scanner {
     let mut config = ScanProfile::Full.config();
     config.budget_ms = None;
     config.score_depth = ScoreDepth::Off;
@@ -189,11 +393,17 @@ fn scanner() -> Scanner {
 /// gate — a caught panic is already the honest accounting the engine wrapper
 /// records in `report.trace.engine_panics`; the anonymous stderr line from
 /// the panic hook names no file, this does).
-fn scan_status(scanner: &Scanner, abs: &Path) -> (Status, u8) {
-    let bytes = std::fs::read(abs).unwrap_or_else(|e| panic!("{}: {e}", abs.display()));
+fn scan_status(
+    scanner: &Scanner,
+    corpus: &Path,
+    image_path: &str,
+    bytes: &[u8],
+) -> Result<(Status, u8), String> {
+    // Truth errors must survive a blind scan: validate before the early return.
+    let truth = ground_truth(corpus, image_path, bytes)?;
     let report = scanner
-        .scan(ImageInput::encoded(&bytes))
-        .unwrap_or_else(|e| panic!("scan {}: {e}", abs.display()));
+        .scan(ImageInput::encoded(bytes))
+        .map_err(|e| format!("scan {image_path}: {e}"))?;
     let engine_panics = report.trace.engine_panics;
     let texts: Vec<&str> = report
         .detections
@@ -201,11 +411,12 @@ fn scan_status(scanner: &Scanner, abs: &Path) -> (Status, u8) {
         .map(|d| d.content.text.as_str())
         .collect();
     if texts.is_empty() {
-        return (Status::Blind, engine_panics);
+        return Ok((Status::Blind, engine_panics));
     }
-    let status = match ground_truth(abs) {
+    // any() on purpose: the pin is a tripwire; oracle.rs judges the full set.
+    let status = match truth {
         Some(truth) => {
-            if texts.iter().any(|t| *t == truth) {
+            if texts.iter().any(|t| *t == truth.text) {
                 Status::Match
             } else {
                 Status::Wrong
@@ -213,10 +424,10 @@ fn scan_status(scanner: &Scanner, abs: &Path) -> (Status, u8) {
         }
         None => Status::Decode,
     };
-    (status, engine_panics)
+    Ok((status, engine_panics))
 }
 
-fn parse_manifest(text: &str) -> Result<Vec<Row>, String> {
+pub(crate) fn parse_manifest(text: &str) -> Result<Vec<Row>, String> {
     let mut rows = Vec::new();
     for (idx, line) in text.lines().enumerate() {
         let n = idx + 1;
@@ -257,16 +468,6 @@ fn print_summary(rows: &[Row]) {
         decoded: u32,
         wrong: u32,
         blind: u32,
-    }
-
-    /// Group by suite / gallery subdir when there is one.
-    fn group_of(path: &str) -> String {
-        let mut parts = path.split('/');
-        match (parts.next(), parts.next(), parts.next()) {
-            (Some(a), Some(b), Some(_)) => format!("{a}/{b}"),
-            (Some(a), _, _) => a.to_owned(),
-            _ => String::new(),
-        }
     }
 
     let mut groups: std::collections::BTreeMap<String, Counts> = std::collections::BTreeMap::new();
@@ -316,9 +517,10 @@ fn print_summary(rows: &[Row]) {
     }
     let zx_ref: u32 = ZXING_REF.iter().map(|&(_, n)| n).sum();
     println!(
-        "zxing-blackbox exact-text match @ 0°: {zx_match}/{zx_total} (zxing reference: {zx_ref})"
+        "zxing-blackbox any-text match @ 0° (exploratory — strict verdicts: xtask oracle): \
+         {zx_match}/{zx_total} (zxing reference: {zx_ref})"
     );
-    println!("qrcode-ai gallery decoded: {ga_decode}/{ga_total}");
+    println!("qrcode-ai gallery decoded (detection only — no truth): {ga_decode}/{ga_total}");
 }
 
 // --------------------------------------------------------------- generate
@@ -328,43 +530,45 @@ fn print_summary(rows: &[Row]) {
 /// re-running this and committing the diff.
 pub(crate) fn generate() {
     let root = crate::repo_root();
-    let dir = root.join(CORPUS_DIR);
-    if !dir.is_dir() {
-        eprintln!(
-            "{CORPUS_DIR}/ not present at the repo root — nothing to pin.\n\
-             Fetch the corpora first (README « Reproducing the headline numbers »)."
-        );
+    let dir = corpus_dir(None);
+    print_truth_amendment();
+    let rels = walk_sorted(&dir).unwrap_or_else(|e| {
+        eprintln!("gen-external-manifest: cannot read the corpus: {e}");
         std::process::exit(2);
-    }
-    let rels = walk_sorted(&dir);
+    });
     let scanner = scanner();
-    let rows: Vec<Row> = rels
+    let rows: Result<Vec<Row>, String> = rels
         .par_iter()
         .map(|rel| {
             let abs = dir.join(rel);
+            let bytes = std::fs::read(&abs).map_err(|e| format!("read {rel}: {e}"))?;
             let status = if is_image(rel) {
                 // Pins hold decode truth only — panic counts move with engine
                 // versions and would churn the manifest for zero pin value.
-                scan_status(&scanner, &abs).0
+                scan_status(&scanner, &dir, rel, &bytes)?.0
             } else {
                 Status::Aux
             };
-            Row {
+            Ok(Row {
                 status,
-                sha256: sha256_hex(&abs),
+                sha256: sha256_bytes(&bytes),
                 path: rel.clone(),
-            }
+            })
         })
         .collect();
+    let rows = rows.unwrap_or_else(|e| {
+        eprintln!("gen-external-manifest: {e}");
+        std::process::exit(1);
+    });
 
     let mut out = String::from(
         "# corpus-external.tsv — pinned truth for the NOT-vendored external corpora.\n\
          # Generated by `cargo run --release -p xtask -- gen-external-manifest` from a\n\
          # real budget-free run — never hand-edited. Columns: status<TAB>sha256<TAB>path\n\
          # (path relative to corpus-external/). Status vocabulary:\n\
-         #   match  — decoded, text equals the sibling .txt ground truth\n\
+         #   match  — decoded, text equals the effective truth (see spec/corpus-truth-amendments.md)\n\
          #   decode — decoded, no ground truth exists (gallery images)\n\
-         #   wrong  — decoded, text differs from ground truth (miscorrection class)\n\
+         #   wrong  — decoded, text differs from effective truth\n\
          #   blind  — no decode (the documented-blind-spot family)\n\
          #   aux    — not an image (ground truth / metadata), hash-pinned only\n\
          # `corpus-report --external` re-measures and fails on ANY divergence:\n\
@@ -447,6 +651,41 @@ fn classify(
 /// when the pin was scannable (hash matches, image row).
 type Measured<'a> = (&'a Row, String, Option<(Status, u8)>);
 
+fn measure<'a>(scanner: &Scanner, dir: &Path, row: &'a Row) -> Result<Measured<'a>, String> {
+    let bytes =
+        std::fs::read(dir.join(&row.path)).map_err(|e| format!("read {}: {e}", row.path))?;
+    let sha = sha256_bytes(&bytes);
+    // A hash-drifted file's pin is void — report the drift, skip the scan.
+    let status = (sha == row.sha256 && row.status != Status::Aux)
+        .then(|| scan_status(scanner, dir, &row.path, &bytes))
+        .transpose()?;
+    Ok((row, sha, status))
+}
+
+fn print_truth_amendment() {
+    let amendment = &truth_amendments::Q13;
+    println!(
+        "truth amendment {}: original {} -> effective {} (spec/corpus-truth-amendments.md; provenance {})",
+        amendment.id,
+        amendment.original_truth_sha256,
+        amendment.effective_text_sha256,
+        truth_amendments::fingerprint()
+    );
+}
+
+fn print_engine_panics(carriers: &[String]) {
+    if carriers.is_empty() {
+        return;
+    }
+    println!(
+        "\nengine panics caught + counted (report.trace.engine_panics · non-gating): {}",
+        carriers.len()
+    );
+    for carrier in carriers {
+        println!("  {carrier}");
+    }
+}
+
 pub(crate) fn verify() {
     let root = crate::repo_root();
     let manifest_text = std::fs::read_to_string(root.join(MANIFEST)).unwrap_or_else(|e| {
@@ -457,25 +696,38 @@ pub(crate) fn verify() {
         eprintln!("{MANIFEST}: {e}");
         std::process::exit(2);
     });
+    print_truth_amendment();
 
-    let dir = root.join(CORPUS_DIR);
-    if !dir.is_dir() {
-        // Graceful for CI checkouts (the corpus is not vendored) but LOUD:
-        // the exact count of unverified pins is printed, never silently 0.
-        let images = pinned.iter().filter(|r| r.status != Status::Aux).count();
-        println!("corpus-external/ not present — external corpus gate SKIPPED");
-        println!(
-            "  {} manifested files NOT verified ({images} images unscanned · {} aux)",
-            pinned.len(),
-            pinned.len() - images
-        );
-        println!(
-            "  fetch the corpora to run this gate — README « Reproducing the headline numbers »"
-        );
-        return;
-    }
+    let dir = match corpus_root(None) {
+        CorpusRoot::Present(dir) => dir,
+        CorpusRoot::DefaultAbsent(_) => {
+            // Graceful for CI checkouts (the corpus is not vendored) but LOUD:
+            // the exact count of unverified pins is printed, never silently 0.
+            let images = pinned.iter().filter(|r| r.status != Status::Aux).count();
+            println!("corpus-external/ not present — external corpus gate SKIPPED");
+            println!(
+                "  {} manifested files NOT verified ({images} images unscanned · {} aux)",
+                pinned.len(),
+                pinned.len() - images
+            );
+            println!(
+                "  fetch the corpora to run this gate — README « Reproducing the headline numbers »"
+            );
+            return;
+        }
+        // Someone pointed the gate at a corpus: its absence is a mistake to
+        // surface (exit 2, configuration error), never a green skip.
+        CorpusRoot::OverrideAbsent { dir, source } => {
+            eprintln!("external gate: {}", override_absent(&dir, source));
+            std::process::exit(2);
+        }
+    };
 
-    let on_disk = walk_sorted(&dir);
+    let on_disk = walk_sorted(&dir).unwrap_or_else(|e| {
+        // an unwalkable corpus cannot be verified: a gate failure
+        eprintln!("problem: corpus walk failed: {e}");
+        std::process::exit(1);
+    });
     let disk_set: BTreeSet<&str> = on_disk.iter().map(String::as_str).collect();
     let pinned_set: BTreeSet<&str> = pinned.iter().map(|r| r.path.as_str()).collect();
 
@@ -490,16 +742,19 @@ pub(crate) fn verify() {
     }
 
     let scanner = scanner();
-    let measured: Vec<Measured<'_>> = pinned
+    let measured: Vec<Result<Measured<'_>, String>> = pinned
         .par_iter()
         .filter(|row| disk_set.contains(row.path.as_str()))
-        .map(|row| {
-            let abs = dir.join(&row.path);
-            let sha = sha256_hex(&abs);
-            // A hash-drifted file's pin is void — report the drift, skip the scan.
-            let status = (sha == row.sha256 && row.status != Status::Aux)
-                .then(|| scan_status(&scanner, &abs));
-            (row, sha, status)
+        .map(|row| measure(&scanner, &dir, row))
+        .collect();
+    let measured: Vec<Measured<'_>> = measured
+        .into_iter()
+        .filter_map(|result| match result {
+            Ok(measurement) => Some(measurement),
+            Err(error) => {
+                problems.push(error);
+                None
+            }
         })
         .collect();
 
@@ -520,15 +775,7 @@ pub(crate) fn verify() {
 
     print_summary(&live_rows);
 
-    if !panic_carriers.is_empty() {
-        println!(
-            "\nengine panics caught + counted (report.trace.engine_panics · non-gating): {}",
-            panic_carriers.len()
-        );
-        for c in &panic_carriers {
-            println!("  {c}");
-        }
-    }
+    print_engine_panics(&panic_carriers);
 
     for p in &problems {
         eprintln!("problem: {p}");
@@ -556,6 +803,45 @@ pub(crate) fn verify() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn amended_truth_errors_survive_missing_files_and_a_blind_input() {
+        let root =
+            std::env::temp_dir().join(format!("qrscan-truth-before-scan-{}", std::process::id()));
+        let pin = &truth_amendments::Q13;
+        let txt = root.join(pin.image_path).with_extension("txt");
+        std::fs::create_dir_all(txt.parent().expect("suite")).expect("directory");
+        let blank = image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(
+            32,
+            32,
+            image::Luma([255]),
+        ));
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        blank
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .expect("PNG");
+        assert_eq!(
+            scan_status(&scanner(), &root, pin.image_path, encoded.get_ref()),
+            Err(String::from(
+                "unreadable original truth for zxing-blackbox/qrcode-2/13.png"
+            ))
+        );
+        std::fs::write(
+            &txt,
+            b"The 2005 USGS aerial photograph of the Washington Monument is censored.",
+        )
+        .expect("original truth");
+        assert_eq!(
+            scan_status(&scanner(), &root, pin.image_path, encoded.get_ref()),
+            Err(String::from("q13 truth amendment: image sha256 mismatch")),
+            "a blank scan must not hide a changed amended input"
+        );
+        assert_eq!(
+            ground_truth(&root, "qrcode-ai/unlabelled.png", encoded.get_ref()),
+            Ok(None)
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
 
     /// The committed manifest itself is a fixture: parseable, sorted,
     /// duplicate-free, and shaped like the corpus it pins. Runs everywhere —
@@ -596,6 +882,30 @@ mod tests {
         }
     }
 
+    /// The printed reference is what the constant claims: zxing's own 0°
+    /// thresholds, the first `addTest` of each `QRCodeBlackBoxNTestCase`,
+    /// suites 1 to 6 in order — the figures and the sum the README states.
+    #[test]
+    fn the_zxing_reference_is_zxings_own_0_degree_thresholds() {
+        let suites: Vec<&str> = ZXING_REF.iter().map(|&(suite, _)| suite).collect();
+        let expected: Vec<String> = (1..=6)
+            .map(|n| format!("zxing-blackbox/qrcode-{n}"))
+            .collect();
+        assert_eq!(suites, expected);
+        let thresholds: Vec<String> = ZXING_REF.iter().map(|&(_, n)| n.to_string()).collect();
+        assert_eq!(thresholds.join(" · "), "17 · 32 · 38 · 36 · 19 · 15");
+        let sum: u32 = ZXING_REF.iter().map(|&(_, n)| n).sum();
+        assert_eq!(sum, 157);
+        let readme = std::fs::read_to_string(crate::repo_root().join("README.md")).expect("README");
+        assert!(
+            readme.contains(&format!(
+                "thresholds {} (`QRCodeBlackBox1…6TestCase`, {sum} in all)",
+                thresholds.join(" · ")
+            )),
+            "the README states the thresholds and their sum as the gate prints them"
+        );
+    }
+
     #[test]
     fn manifest_parser_rejects_malformed_lines() {
         assert!(
@@ -609,5 +919,109 @@ mod tests {
             parse_manifest(&format!("maybe\t{}\tx.png", "a".repeat(64))).is_err(),
             "unknown status"
         );
+    }
+
+    /// Explicit root > env > `<repo>/corpus-external`; overrides must be
+    /// absolute.
+    #[test]
+    fn corpus_root_resolution_order() {
+        // repo_root() is absolute on every platform (CARGO_MANIFEST_DIR).
+        let repo = crate::repo_root();
+        let (env_dir, explicit_dir) = (repo.join("env-corpus"), repo.join("explicit-corpus"));
+        assert_eq!(
+            resolve_corpus_dir(None, None, &repo),
+            Ok((repo.join(CORPUS_DIR), RootSource::Default))
+        );
+        assert_eq!(
+            resolve_corpus_dir(None, Some(env_dir.as_os_str()), &repo),
+            Ok((env_dir.clone(), RootSource::Env))
+        );
+        assert_eq!(
+            resolve_corpus_dir(Some(&explicit_dir), Some(env_dir.as_os_str()), &repo),
+            Ok((explicit_dir, RootSource::Explicit))
+        );
+        for relative in ["corpus-external", ""] {
+            assert!(
+                resolve_corpus_dir(None, Some(OsStr::new(relative)), &repo).is_err(),
+                "env {relative:?} must be refused, never resolved against the cwd"
+            );
+            assert!(
+                resolve_corpus_dir(Some(Path::new(relative)), None, &repo).is_err(),
+                "--corpus-root {relative:?} must be refused"
+            );
+        }
+    }
+
+    /// An unwalkable corpus is a reported error naming the path — never a
+    /// panic (exit 101).
+    #[test]
+    fn walking_a_missing_corpus_is_an_error_naming_it() {
+        let dir = std::env::temp_dir().join(format!("qrscan-walk-missing-{}", std::process::id()));
+        let err = walk_sorted(&dir).expect_err("nothing to walk");
+        assert!(err.contains("qrscan-walk-missing"), "{err}");
+    }
+
+    #[test]
+    fn walking_lists_sorted_relative_paths_without_dotfiles() {
+        let dir = std::env::temp_dir().join(format!("qrscan-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for rel in ["b/2.png", "a/1.txt", ".DS_Store", "a/.hidden", ".git/HEAD"] {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+            std::fs::write(&path, b"x").expect("write");
+        }
+        let walked = walk_sorted(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            walked,
+            Ok(vec![String::from("a/1.txt"), String::from("b/2.png")])
+        );
+    }
+
+    /// The CI path: nothing configured and no `<repo>/corpus-external` is
+    /// the quiet case `verify` turns into its loud skip (exit 0). `is_dir`
+    /// is a stub — no filesystem, no corpus.
+    #[test]
+    fn absent_default_root_is_the_skip_case() {
+        let dir = crate::repo_root().join(CORPUS_DIR);
+        assert_eq!(
+            classify_root(dir.clone(), RootSource::Default, |_| false),
+            CorpusRoot::DefaultAbsent(dir.clone())
+        );
+        assert_eq!(
+            classify_root(dir.clone(), RootSource::Default, |_| true),
+            CorpusRoot::Present(dir)
+        );
+    }
+
+    /// A configured root that does not exist is a misconfiguration, never
+    /// a skip, and the error names the variable or flag that pointed there.
+    #[test]
+    fn absent_configured_root_is_an_error_naming_its_source() {
+        let dir = crate::repo_root().join("mistyped-corpus");
+        for (source, named) in [
+            (RootSource::Env, format!("{CORPUS_ENV}={}", dir.display())),
+            (
+                RootSource::Explicit,
+                format!("--corpus-root {}", dir.display()),
+            ),
+        ] {
+            let root = classify_root(dir.clone(), source, |_| false);
+            assert_eq!(
+                root,
+                CorpusRoot::OverrideAbsent {
+                    dir: dir.clone(),
+                    source
+                }
+            );
+            let message = override_absent(&dir, source);
+            assert!(message.starts_with(&named), "{message}");
+            assert!(message.contains("never skips"), "{message}");
+            assert_eq!(
+                classify_root(dir.clone(), source, |_| true),
+                CorpusRoot::Present(dir.clone()),
+                "a configured root that exists is measured"
+            );
+        }
     }
 }

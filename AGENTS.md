@@ -56,15 +56,50 @@ node crates/qrcode-ai-scanner-node/test.mjs   # node smoke (build first: npm run
 node crates/qrcode-ai-scanner-wasm/test.mjs   # wasm smoke (build first)
 ```
 
-Deep checks (weekly CI + judge-bump moments): `xtask corpus-report
---external` (533-line external truth) · cargo-mutants · fuzz ×4 ·
-rescue-stress (`rescue_wrong == 0` is a hard gate).
+Deep checks (weekly `deep-checks.yml`): cargo-mutants in 85 shards, judged
+by the `mutants-summary` job — red on a baseline failure or on any missed /
+timed-out mutant absent from `.cargo/mutants-dispositions.toml` (after an
+edit there: `python3 scripts/check-mutants-outcome.py --self-test`) · fuzz
+×4 · rescue-stress (every emitted engine/rescue/extra QR and non-QR output is
+judged against the single-symbol truth, exact output dispositions and pinned
+recall/panic floors; rescue-path wrong output is forbidden in both the uncapped
+and capped passes) · advisories. Judge-bump moments add the external
+truth, `xtask corpus-report --external` (the `corpus-external.tsv` pins):
+it runs locally with the corpus present — CI has no corpus, parses the
+manifest only and reports the gate as NOT VERIFIED, never as a pass.
 
 ## Hard invariants (breaking these fails CI or review)
 
 - **Zero `unwrap`/`expect`/`panic!` in `src/`** (tests are exempt). Clippy
   denies it.
-- **No RNG anywhere** — the pipeline is deterministic by contract.
+- **No RNG anywhere** — the pipeline is deterministic by contract (known
+  dependency exception: rxing's PDF417 decoder breaks confidence ties in
+  randomized `HashMap` order — spec/04 § Determinism; the threaded
+  determinism pin excludes the PDF417 fixtures).
+- **A budget cut is flagged, never partial**: `trace.budget_exhausted` is
+  `true` exactly when the deadline prevented a planned unit (spec/02 §
+  Budget semantics); a judgment it interrupts is `score: null`. Bounded
+  checks with no budget (grid re-derivations, the re-read, the end-of-walk
+  pass, the confirmation decodes) never set it. A test that asserts a score
+  runs unbounded, or asserts "absent with the flag set, or the unbounded
+  value".
+- **Exact content, keyed by identity**: a QR-family `content.raw` is the
+  original payload (the scanner's own parse decides it wherever it can
+  error-correct the grid); `unknown` is the only lossy `charset`, forever;
+  reads become detections by content identity (symbology, `raw`, FNC1
+  position, compatible `eci`), never by `text` (spec/01 § Content,
+  07-pipeline property 6). `tests/exact_content.rs` pins the rows.
+- **Refuse what the evidence contradicts**: a malformed stream is refused
+  whichever decoder reads it; a QR Code content whose every measured
+  correction margin is negative (past the Annex B reserve, or an rqrr
+  decode of a grid the scanner cannot error-correct, at any version), and
+  an invention-prone read no independent read confirmed, are not
+  published (07-pipeline § Acceptance). The margin rule covers measured
+  reads only: Micro QR, rMQR and other QR Code reads no parse measured are
+  published as read, and a correction inside the reserve can still be
+  wrong — never
+  document the rule as infallible. Prefer absent to wrong; a recall
+  trade-off is named in the CHANGELOG, not hidden.
 - **Additive wire evolution only**: never rename/remove a JSON field or
   enum value. New variants are fine — consumers parse leniently.
 - **Every contract change cascades** through ALL of: the Rust types →
@@ -96,7 +131,13 @@ rescue-stress (`rescue_wrong == 0` is a hard gate).
 - The score probes decode ONLY the scored symbology
   (`engine::FormatFilter::Only`) — calling `decode_all` in a stress cell
   reintroduces a ~5× cost regression AND false cross-symbology survivals.
-- rqrr rejects FNC1 symbols (mode 0x5/0x9) — rxing is the GS1 engine.
+- rqrr rejects FNC1 symbols (mode 0x5/0x9) — rxing is the GS1 engine; the
+  scanner re-derives the grid rqrr detected to read its declarations.
+- The goldens (`spec/examples/`) carry this build's `versions`, and
+  `spec_golden` pins them: a marker or version bump regenerates the whole
+  set from its committed fixtures (`qrscan <fixture> --profile full
+  --budget-ms 0`, the table in `spec/README.md` § Examples); review every
+  diff.
 - `cargo test --workspace --lib` style commands: prefer
   `cargo nextest run`; doc tests via `cargo test --doc`.
 

@@ -25,44 +25,49 @@
     }
   ],
   "score": {
-    "value": 43,
+    "value": 54,
+    "weights_run": 100,
     "grade": "fair",
     "axes": [
       {
         "axis": "resolution",
         "passed": 1,
         "total": 5,
-        "failed_at": "128px"
+        "failed_at": "256px",
+        "refined_failed_at": "256px"
       },
       {
         "axis": "blur",
         "passed": 4,
         "total": 5,
-        "failed_at": "blur 2.0"
+        "failed_at": "blur 2.5",
+        "refined_failed_at": "blur 2.5"
       },
       {
         "axis": "contrast",
         "passed": 1,
         "total": 5,
-        "failed_at": "contrast 30%"
+        "failed_at": "contrast 55%",
+        "refined_failed_at": "contrast 62%"
       },
       {
         "axis": "perspective",
         "passed": 2,
         "total": 5,
-        "failed_at": "26°"
+        "failed_at": "26°",
+        "refined_failed_at": "26°"
       },
       {
         "axis": "rotation",
-        "passed": 1,
+        "passed": 5,
         "total": 5,
-        "failed_at": "30°"
+        "failed_at": null
       },
       {
         "axis": "lighting",
-        "passed": 4,
+        "passed": 5,
         "total": 5,
-        "failed_at": "hard shadow"
+        "failed_at": null
       }
     ],
     "structural": null,
@@ -82,34 +87,35 @@
       {
         "stage": "pyramid",
         "transforms_tried": 1,
-        "ms": 45.325583,
+        "ms": 35.762066000000004,
         "detections_found": 0
       },
       {
         "stage": "direct",
         "transforms_tried": 1,
-        "ms": 102.704291,
+        "ms": 84.085884,
         "detections_found": 0
       },
       {
         "stage": "enhance",
         "transforms_tried": 6,
-        "ms": 676.433625,
+        "ms": 486.541194,
         "detections_found": 0
       },
       {
         "stage": "deep",
         "transforms_tried": 25,
-        "ms": 473.4535,
+        "ms": 330.774076,
         "detections_found": 2
       }
     ],
     "engine_panics": 0,
-    "total_ms": 1298.114875
+    "total_ms": 937.611626,
+    "budget_exhausted": false
   },
   "versions": {
-    "scanner": "0.3.0",
-    "pipeline": 2,
-    "score_contract": 4
+    "scanner": "0.10.0",
+    "pipeline": 3,
+    "score_contract": 5
   }
 }

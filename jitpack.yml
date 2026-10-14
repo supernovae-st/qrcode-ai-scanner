@@ -65,11 +65,11 @@ install:
     cargo ndk
     -t arm64-v8a -t armeabi-v7a -t x86_64 -t x86
     -o bindings/kotlin/qrcodeaiscanner/src/main/jniLibs
-    build --release --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml
+    build --release --locked --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml
   # 2. Build the host cdylib + generate the UniFFI Kotlin into the module (§3.1).
-  - cargo build --release --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml
+  - cargo build --release --locked --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml
   - >
-    cargo run --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml --bin uniffi-bindgen --
+    cargo run --locked --manifest-path crates/qrcode-ai-scanner-uniffi/Cargo.toml --bin uniffi-bindgen --
     generate
     --library crates/qrcode-ai-scanner-uniffi/target/release/libqrcode_ai_scanner_uniffi.so
     --language kotlin

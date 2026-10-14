@@ -11,26 +11,69 @@ workflows, CI bots) consuming the scanner.
 | Artifact | Use |
 |---|---|
 | [`spec/scan-report.schema.json`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/scan-report.schema.json) | validate any report you receive or mock |
-| [`spec/examples/*.json`](https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/spec/examples) | real binary outputs covering: clean URL, rescued occlusion, artistic blob, GS1 Digital Link, no-detection |
+| [`spec/examples/*.json`](https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/spec/examples) | real binary outputs, each from a committed fixture (`spec/README.md` § Examples): clean URL, artistic, rescued occlusion, wifi / MECARD / SMS / crypto / GS1 Digital Link payloads, ECI 4 and ECI 899, Hanzi, GS1 under FNC1, transparent designs, other symbologies, no-detection |
 | `report-types.d.ts` (in both npm packages) | typed access in JS/TS tools |
 | [`spec/`](https://github.com/supernovae-st/qrcode-ai-scanner/tree/main/spec) markdown | the normative semantics (≈15 min read) |
 
 ## Invariants you can rely on
 
 1. **Empty `detections` is success-with-nothing** — exit 1 on the CLI,
-   resolved Promise elsewhere. Only `QRS-\d{3}` faults are errors.
+   resolved Promise elsewhere. Only `QRS-\d{3}` faults are errors. It is
+   final only when `trace.budget_exhausted` is `false`.
 2. The JSON shape is identical on every surface and evolves additively —
    tolerate unknown fields/kinds/hints.
-3. `content.raw` (base64) is the byte truth; `text`+`charset` are one
-   consistent resolution of it.
-4. Determinism: unbounded budget ⇒ same input → same report (per
-   platform/build). Safe to cache by input hash + `versions`.
-5. `meta`/`corners` are measured or `null` — never fabricated.
+3. For the QR family, `content.raw` (base64) is the byte truth: the
+   payload's original bytes. Other symbologies carry their decoding
+   engine's reading re-encoded (ISO/IEC 8859-1 when every character fits,
+   else UTF-8) and report no ECI. `text` is the one reading of `raw` and
+   `charset` says how. `charset === "unknown"` is the ONLY lossy value,
+   now and in every later version: then `text` is not a complete decoding
+   — never act on it; use `raw` (with `content.eci`). Any other value,
+   even one newer than your types, is a complete decoding the scanner
+   checked byte for byte.
+4. A content's identity is (`symbology`, `raw`, `fnc1`, compatible
+   `eci`), never `text`. To check a QR-family symbol you generated,
+   compare `raw` (and `eci`, `fnc1`) with what you encoded; for other
+   symbologies compare `text`, or `raw` only when you encoded no ECI.
+   `eci` is present only when an ECI was observed (`[]` when it could not
+   be located); `fnc1` only for GS1 (`first`) or AIM-application
+   (`second`) data. An absent key means none was observed, or the
+   symbology does not report it — not that the symbol declares none.
+5. **`trace.budget_exhausted` says whether a report is final.** `false`:
+   every planned unit ran, and the report equals the unbounded report for
+   the same input, configuration and scanner build on the same platform
+   (wall clock aside; PDF417 excepted — its decoder breaks ties in
+   randomized order, spec/04 § Determinism). `true`: the wall-clock budget
+   cut planned work. Then **re-scan unbounded first** (`--budget-ms 0`,
+   `budgetMs: 0`, `budget_ms=0`); never regenerate, accept or reject on
+   that report. Absent (older reports): unknown, never final.
+6. Cache only reports whose flag is `false`, keyed on the input + the WHOLE
+   configuration (profile, budget, skipped axes and checks, alpha options)
+   + `versions`, on the same build.
+7. **`score: null` is never `0`.** With detections it means the
+   configuration computes no score (`frame`, every axis skipped), the
+   budget interrupted the judgment (`trace.budget_exhausted: true` — not
+   judged, re-scan), or a contained fault. A present score is always a
+   complete judgment.
+8. `meta`/`corners` are measured or `null` — never fabricated.
+9. Some reads are refused rather than published: a malformed QR stream, a
+   QR Code content whose every measured correction went past ISO/IEC
+   18004's misdecode reserve (an `rqrr` decode of a grid the scanner
+   cannot error-correct counts as one, at any version), and a UPC-E,
+   DataBar or low-EC PDF417 read no independent read confirmed. This
+   narrows wrong reads without ruling them out: reads with no measured
+   margin (Micro QR, rMQR, other QR Code reads no parse measured) are
+   published as read, and a correction inside the reserve can still be
+   wrong — treat `low_correction_margin` as failure, and its absence as no
+   proof: on version 1, v2-L and v3-L an errors-only correction at the
+   reserve's limit reads a UEC margin above 0 and raises no hint (spec/04
+   § Synthetic UEC).
 
 ## The regenerate loop
 
 ```text
 generate(params) → scan(full) →
+  ├─ trace.budget_exhausted  → re-scan unbounded first (never act on it)
   ├─ no detection            → adjust per trace (which stage died) + retry
   ├─ hints non-empty         → apply the mapped fixes:
   │    fix_finder_pattern{corner} → clear art at that corner
@@ -53,15 +96,24 @@ agent can drive generation parameters from the report alone.
 | web display | decoded + score ≥ 60 |
 | print / packaging | score ≥ 80 AND uec.grade ∈ `{a, b}` AND no hints |
 | retail GS1 | the above AND `payload.conformant === true` |
-| ANY content you act on | reject if `low_correction_margin` present |
+| ANY content you act on | reject if `low_correction_margin` present (its absence is no proof on v1, v2-L and v3-L — invariant 9) |
 
 ## CLI patterns for tool use
 
 ```bash
-qrscan in.png | jq '{text: .detections[0].content.text,
-                     kind: .detections[0].payload.kind,
-                     score: .score.value,
-                     hints: [.hints[].hint]}'
+qrscan in.png --budget-ms 0 | jq '{text: .detections[0].content.text,
+                                   charset: .detections[0].content.charset,
+                                   kind: .detections[0].payload.kind,
+                                   score: .score.value,
+                                   final: (.trace.budget_exhausted == false),
+                                   hints: [.hints[].hint]}'
 ```
 
-Exit codes are the branch signal: `0` decoded · `1` nothing · `2` fault.
+Gate on `charset` before acting on `text`: `"unknown"` means the scanner
+could not read every byte. `--budget-ms 0` makes the report final and
+reproducible; under a budget, read `final` first.
+
+Exit codes are the branch signal: `0` decoded · `1` nothing · `2` fault
+(or, with `--score-only`, a configuration that computes no score) · `3`
+(`--score-only` only) decoded, but not judged within the budget — re-scan
+with `--budget-ms 0`.

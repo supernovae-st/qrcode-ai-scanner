@@ -16,10 +16,10 @@ import subprocess
 # zxing reference: mustPassCount at rotation 0° per QRCodeBlackBoxNTestCase.
 ZXING_REF = {
     "qrcode-1": 17,
-    "qrcode-2": 31,
+    "qrcode-2": 32,
     "qrcode-3": 38,
     "qrcode-4": 36,
-    "qrcode-5": 16,
+    "qrcode-5": 19,
     "qrcode-6": 15,
 }
 IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".bmp"}

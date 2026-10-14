@@ -9,9 +9,8 @@ Swift bindings (one serde wire contract).
 
 ## Install
 
-```yaml
-dependencies:
-  qrcode_ai_scanner: ^0.4.0
+```bash
+flutter pub add qrcode_ai_scanner
 ```
 
 > **Toolchain prerequisite.** This package compiles the Rust core at *your* app's
@@ -49,6 +48,64 @@ The return type [`ScanReport`](lib/report.dart) is fully typed (detections, a
 typed `Payload` sealed class, `Score` with ISO 15415 / UEC grade cards, hints,
 trace, versions). Unknown enum values and payload kinds decode to `unknown` /
 catch-all variants — never a throw (the contract is additively forward-compatible).
+`Charset` and `Fnc1Position` are the exceptions: a newer wire value decodes to
+`unrecognized`. `Charset.unrecognized` is a complete reading, while
+`Charset.unknown` is the wire's lossy value — test `content.charset.isLossy`
+and then use `content.raw`, the payload's bytes.
+`content.eci` and `content.fnc1` are null when none was observed or the
+symbology does not report it — not proof that the symbol declares none.
+
+## Packaging from a candidate checkout
+
+The development binding uses the workspace core by relative path. A pub.dev
+package instead bundles the **same candidate's sources**, from Cargo's normalized
+package archive, under `rust/vendor/qrcode-ai-scanner`. No published registry
+version is substituted. From a clean, committed checkout, with Python 3.11+:
+
+```bash
+set -o pipefail
+python3 scripts/stage-flutter-package.py --output /tmp/scanner-flutter-validation/bindings/flutter \
+  --archive /tmp/scanner-flutter.tar.gz --receipt /tmp/scanner-flutter.json
+git archive HEAD spec/examples | tar -x -C /tmp/scanner-flutter-validation
+cd /tmp/scanner-flutter-validation/bindings/flutter
+cargo check --locked --manifest-path rust/Cargo.toml --lib
+flutter pub get
+flutter analyze
+test -f ../../spec/examples/clean-url.json
+flutter test
+```
+
+Run the inspector from the candidate checkout, pointing it at that same root:
+
+```bash
+python3 scripts/package-inspect.py flutter --package-root /tmp/scanner-flutter-validation/bindings/flutter \
+  --strict --release-set --record /tmp/scanner-flutter-inspected.sha256
+```
+
+The output directory must not exist. The staging command runs
+`cargo package --locked --no-verify` (packing only); `--core-archive FILE`
+accepts an already packed candidate and `--cargo-wrapper PATH` supports isolated
+Cargo runners. It verifies the revision, source bytes, versions and LICENSE,
+rejects archive links and escaping paths, and preserves the binding lockfile.
+Only the staged binding manifest's core path and bundle metadata change.
+The metadata includes a deterministic core content digest: cargokit hashes the
+binding manifest but does not recursively hash path dependency sources, so a
+core-only change must update that manifest. A staged `.pubignore` preserves the
+core's Cargo provenance file in pub's published file set.
+
+CI creates one staged archive, then uses it outside the checkout for the host
+checks, Android/iOS example builds and the guarded publishing job. Host contract
+tests receive the candidate's canonical JSON goldens outside the package, at
+their expected `../../spec/examples` path; no adjacent Rust checkout is copied.
+Without these fixtures, seven golden tests skip rather than qualify the contract.
+The fixtures do not change the staged archive or pub's file set. The inspector
+requires pub's parsed file tree and completed validation, checks the bundled
+sources recursively, and records the published files' hashes for a final
+same-byte check. Validation warnings remain visible; validation errors and an
+unparsed listing fail. A missing Flutter/Dart SDK is **UNAVAILABLE**, not a pass.
+Portable source inspection alone does not establish pub.dev readiness: the
+real validator and native consumer builds must also pass, and the first upload
+and trusted-publisher setup remain operator steps in `RELEASING.md`.
 
 ## License
 

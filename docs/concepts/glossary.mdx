@@ -20,20 +20,23 @@ A `qr_code` symbology might carry a `url`, a `wifi`, or plain `text`.
 
 | Term | In one sentence |
 |---|---|
-| **Detection** | One decoded symbol found in the image — its text, symbology, payload, geometry and which engines confirmed it. |
-| **Engine** | A decoder: `rxing` (ZXing lineage) or `rqrr` (quirc lineage); their results are merged by decoded text. |
+| **Detection** | One distinct content found in the image — its bytes and their reading, symbology, payload, geometry and which engines read it. |
+| **Content** | `content.raw` is the payload's bytes (QR family: the original bytes; other symbologies: the decoding engine's reading); `text` reads them as `charset` says. `unknown` — the only lossy charset — means there is no verified reading: use `raw`. |
+| **Content identity** | Same symbology, bytes, FNC1 position and ECI declarations: how reads become detections, and how to deduplicate — never by `text`. |
+| **Engine** | A decoder: `rxing` (ZXing lineage) or `rqrr` (quirc lineage); every read is reconciled by content identity, never by decoded text. |
 | **Rescue** | The last-resort stage (`engines: ["rescue"]`) that recovers symbols *both* engines fail on, using errors-and-erasures Reed-Solomon. |
 | **Profile** | The speed-vs-thoroughness setting: `full` (deep, ~4 s), `fast` (~800 ms), `frame` (decode-only, ~80 ms, no score). |
+| **Budget** | The wall-clock bound of a scan once its image is decoded (the profile's default, or `budget_ms`; `0` = unbounded). A report it cut says so — `trace.budget_exhausted: true` — and is partial, not final. |
 | **Inverted** | Light-on-dark polarity — measured, never assumed (`meta.inverted`). |
 
 ## Scannability
 
 | Term | In one sentence |
 |---|---|
-| **Score** | A 0–100 **margin** — how much room the code has before it stops scanning in the real world (not "did it decode"). |
+| **Score** | A 0–100 **margin** — how much room the code has before it stops scanning in the real world (not "did it decode"). Whole or absent: `null` means not judged (no score in this configuration, or the budget ran out), never 0. |
 | **Grade** | The score's band: `excellent` ≥80 · `good` 70–79 · `acceptable` 60–69 · `fair` 40–59 · `poor` &lt;40. |
 | **Axis** | One of six stress dimensions — `resolution`, `blur`, `contrast`, `perspective`, `rotation`, `lighting` — each tested as a survival ramp. |
-| **UEC margin** | *Unused Error Correction*: how much of the Reed-Solomon repair budget was left over (1.0 = none used; **0 = at the limit → distrust the decode**). |
+| **UEC margin** | *Unused Error Correction*: how much of the Reed-Solomon repair budget was left over (1.0 = none used; **0 = at the limit → distrust the decode**). Below 0.5 it caps the score (0 → 40). |
 | **Finder pattern** | The three corner squares a scanner uses to locate and orient a QR; damage here caps the score at 40. |
 | **Quiet zone** | The blank margin around a symbol; a violation caps the score at 60 (it breaks locating in the wild). |
 | **ISO 15415 card** | A verifier-style grade card (Symbol Contrast, Modulation, …) — *informed* by the standard, **not** hardware-certified. |

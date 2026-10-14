@@ -30,6 +30,13 @@ export 'src/rust/frb_generated.dart' show RustLib;
 /// and `'frame'` (default for [scanFrame]). "No QR found" is a normal result
 /// (empty [ScanReport.detections]), not an error; errors carry the `[QRS-xxx]`
 /// wire code in the thrown message.
+///
+/// Budget: [scan] and [scanFrame] run under the profile's default wall-clock
+/// budget (`full` 4000 ms · `fast` 800 ms · `frame` 80 ms); this release cannot
+/// override it. A report the budget cut says so: `trace.budgetExhausted ==
+/// true`. Then empty detections are not a final "no QR", and a null
+/// [ScanReport.score] beside detections means "not judged" — never a zero.
+/// Read `budgetExhausted == false` as final; null (an older report) is unknown.
 class QrcodeAiScanner {
   QrcodeAiScanner._();
 

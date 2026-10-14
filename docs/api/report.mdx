@@ -17,15 +17,23 @@ Machine-readable mirrors — load these directly in tools and agents:
 ## Top level
 
 <ResponseField name="detections" type="Detection[]" required>
-  Decoded symbols. **Empty = no QR found** — a valid result, not an
-  error. Max 16; merged by decoded text across engines/attempts.
+  The distinct contents the scanner can tell apart. **Empty = no QR
+  found** — a valid result, not an error. Every read of every attempt is
+  reconciled: one content is one detection, identified by symbology, raw
+  bytes, FNC1 position and compatible ECI declarations — never by text.
+  Max 16.
 </ResponseField>
 
 <ResponseField name="score" type="Score | null" required>
-  Scannability of the PRIMARY (first) detection. `null` in the `frame`
-  profile or when nothing decoded. Carries `weights_run` (how much of the
-  six-axis contract ran — the honesty integer behind partial scores) and
-  per-axis `refined_failed_at` (the bisected knee: "blur 2.25"). See
+  Scannability of the PRIMARY detection, `detections[0]` (QR family
+  first, then the earliest read). `null` exactly when no
+  judgment was published: nothing decoded · a configuration that computes
+  no score (the `frame` profile, every axis skipped) · a judgment the
+  budget interrupted (`trace.budget_exhausted: true` — not judged, re-scan
+  with a larger budget or `0`) · a contained fault. Never partial, never
+  `0`. Carries `weights_run` (how much of the six-axis contract ran — the
+  honesty integer behind a score on skipped axes) and per-axis
+  `refined_failed_at` (the bisected knee: "blur 2.25"). See
   [Scoring](/concepts/scoring).
 </ResponseField>
 
@@ -51,13 +59,27 @@ Machine-readable mirrors — load these directly in tools and agents:
 <ResponseField name="trace" type="PipelineTrace" required>
   Per-stage execution trace (`pyramid`·`direct`·`enhance`·`deep`·`rescue`)
   — why the scan succeeded or came back empty. `detections_found` counts
-  RAW pre-merge engine hits.
+  the reads the engines delivered, before reconciliation; it includes hits
+  the scanner later refuses or holds for confirmation, but not a decode an
+  engine adapter refuses itself (a grid that parses malformed, a read a
+  read check refuses) nor a confirmation decode's reads — read
+  `detections`, not the counter. `total_ms` is the wall clock of the ladder
+  walk(s) only.
+  `budget_exhausted` (score_contract ≥ 5) says whether the report is
+  final: `false` = every planned unit ran, the report is the unbounded
+  one (wall clock aside); `true` = the wall-clock budget cut planned work
+  (a stage or attempt, a rescue candidate, a score cell, a knee
+  bisection, an envelope probe) — partial. Absent on older reports:
+  unknown, never final.
 </ResponseField>
 
 <ResponseField name="versions" type="Versions" required>
-  Contract markers: `scanner` (semver), `pipeline` (2: transparent
-  inputs flatten before decode), `score_contract` (4: alpha inputs
-  score their flattened image).
+  Contract markers: `scanner` (semver), `pipeline` (3: exact content —
+  the original bytes, declarations read once, reads reconciled by content
+  identity; since 2, transparent inputs flatten before decode),
+  `score_contract` (5: the correction-margin cap on the verified
+  orientation's stream, interrupted judgments absent, probes matched by
+  content identity).
 </ResponseField>
 
 ## Detection
@@ -72,9 +94,20 @@ Machine-readable mirrors — load these directly in tools and agents:
 </ResponseField>
 
 <ResponseField name="content" type="object" required>
-  `text` (decoded string) · `raw` (base64 — the ORIGINAL bytes, the
-  truth) · `charset` (`utf8` | `shift_jis` | `latin1`). The text/charset
-  pair is resolved once over `raw`.
+  One exact reading of the symbol's data. `raw` (base64 — QR family: the
+  ORIGINAL payload bytes; other symbologies: the decoding engine's reading,
+  ISO/IEC 8859-1 when every character fits, else UTF-8) · `text` (`raw`
+  decoded once) · `charset`, how `text`
+  relates to `raw`: `utf8` · `shift_jis` · `latin1` · `gb18030` (exactly
+  that decoder over all of `raw`), `eci` (decoded under the listed
+  designators), `unknown` — the ONLY lossy value, now and later: `text` is
+  not a complete decoding, use `raw`. Optional keys: `eci` — the ECI
+  designators observed, `[{ "designator", "start" }]` in symbol order
+  (`[]`: an ECI is signalled but could not be located; only the QR family
+  reports one); `fnc1` — `first` (GS1) or `second` (AIM application). An
+  absent key means none was observed. Compare contents by identity
+  (symbology, `raw`, `fnc1`, compatible `eci`), never by `text`. Rules:
+  [`spec/01-report.md` § Content](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/01-report.md).
 </ResponseField>
 
 <ResponseField name="payload" type="Payload" required>
@@ -85,14 +118,17 @@ Machine-readable mirrors — load these directly in tools and agents:
 </ResponseField>
 
 <ResponseField name="corners" type="[Point ×4] | null" required>
-  Clockwise from top-left, ORIGINAL-image pixels (sub-pixel). `null` on
-  the rxing-only path (no geometry measured).
+  Clockwise from top-left, ORIGINAL-image pixels (sub-pixel). From rqrr —
+  its decode, or a grid it detected that the scanner error-corrected
+  itself (`engines` may then list `rxing` alone) — or the rescue stage.
+  `null` when only rxing read the symbol (no geometry measured).
 </ResponseField>
 
 <ResponseField name="meta" type="QrMeta" required>
   `version` (1-40) · `ec_level` · `mask` · `modules` (= version×4+17) ·
-  `inverted` (light-on-dark, MEASURED). All `null` when no geometry —
-  never fabricated.
+  `inverted` (light-on-dark, MEASURED). `null` when no geometry was
+  measured — never fabricated — except `ec_level`: a symbol only rxing
+  read carries the level its decoder states.
 </ResponseField>
 
 <ResponseField name="engines" type="EngineKind[]" required>
@@ -110,24 +146,37 @@ Machine-readable mirrors — load these directly in tools and agents:
     "symbology": "qr_code",
     "content": { "text": "https://qrcode-ai.com/rescue-pin", "raw": "aHR0cHM…", "charset": "utf8" },
     "payload": { "kind": "url", "url": "https://qrcode-ai.com/rescue-pin" },
-    "corners": [{ "x": 32.0, "y": 32.0 }, { "x": 327.0, "y": 32.0 },
-                 { "x": 327.0, "y": 327.0 }, { "x": 32.0, "y": 327.0 }],
+    "corners": [{ "x": 32.0, "y": 32.0 }, { "x": 336.0, "y": 32.0 },
+                 { "x": 336.0, "y": 336.0 }, { "x": 32.0, "y": 336.0 }],
     "meta": { "version": 5, "ec_level": "h", "mask": 3, "modules": 37, "inverted": false },
     "engines": ["rescue"]
   }],
-  "score": { "value": 40, "grade": "fair", "axes": ["…"], "structural": null,
-             "uec": { "margin": 0.0, "grade": "f", "worst_block_errors": 13, "worst_block_capacity": 22 },
-             "iso15415": null },
-  "hints": [{ "hint": "low_correction_margin", "errors": 13, "capacity": 22 }],
+  "score": { "value": 0, "grade": "poor", "weights_run": 100, "axes": ["…"],
+             "structural": { "finder_integrity": [1.0, 1.0, 1.0], "quiet_zone_ok": true },
+             "uec": { "margin": 0.0, "grade": "f", "worst_block_errors": 11, "worst_block_capacity": 22 },
+             "iso15415": { "…": "…", "overall": "f" } },
+  "hints": [{ "hint": "increase_contrast" }, { "hint": "enlarge_modules" },
+            { "hint": "reduce_art_texture" },
+            { "hint": "low_correction_margin", "errors": 11, "capacity": 22 }],
   "trace": { "stages": [
-    { "stage": "direct", "transforms_tried": 1, "ms": 8.4, "detections_found": 0 },
-    { "stage": "enhance", "transforms_tried": 3, "ms": 18.7, "detections_found": 0 },
-    { "stage": "deep", "transforms_tried": 17, "ms": 127.7, "detections_found": 0 },
-    { "stage": "rescue", "transforms_tried": 1, "ms": 9.1, "detections_found": 1 }
-  ], "engine_panics": 0, "total_ms": 164.2 },
-  "versions": { "scanner": "0.6.0", "pipeline": 1, "score_contract": 3 }
+    { "stage": "direct", "transforms_tried": 1, "ms": 19.5, "detections_found": 0 },
+    { "stage": "enhance", "transforms_tried": 3, "ms": 58.8, "detections_found": 0 },
+    { "stage": "deep", "transforms_tried": 17, "ms": 75.4, "detections_found": 0 },
+    { "stage": "rescue", "transforms_tried": 1, "ms": 0.1, "detections_found": 1 }
+  ], "engine_panics": 0, "total_ms": 153.8, "budget_exhausted": false },
+  "versions": { "scanner": "0.9.0", "pipeline": 3, "score_contract": 5 }
 }
 ```
+
+Trimmed from the golden
+[`spec/examples/rescued-occluded.json`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/examples/rescued-occluded.json),
+scanned unbounded (`--budget-ms 0`), so the report is final. Its `uec` is
+not a count of corrected errors: with `rescue` among the engines,
+`worst_block_errors: 11` is the errors-only count of the stream the rescue
+corrected with erasures — 11 of 22, margin 0 — a distrust marker, which
+its `low_correction_margin` hint repeats
+([`spec/04-score.md`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/04-score.md)
+§ Synthetic UEC).
 
 The full field-by-field normative reference is
 [`spec/01-report.md`](https://github.com/supernovae-st/qrcode-ai-scanner/blob/main/spec/01-report.md).

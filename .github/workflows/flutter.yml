@@ -5,8 +5,10 @@ name: flutter
 # runs on every push/PR; the native build jobs + pub.dev publish are tag-gated.
 #
 # pub.dev publish uses OIDC automated publishing (no token) — configure it on the
-# package admin page first (bind this repo + tag pattern `v{{version}}`). Unlike
-# npm/PyPI there is NO skip-existing: bump the pubspec version before tagging.
+# package admin page first (bind this repo + tag pattern `v{{version}}` + the
+# `pub` environment). Unlike npm/PyPI there is NO skip-existing: bump the
+# pubspec version before tagging. Publishing is tag-push-only; every other run
+# stops at the builds.
 #
 # This workflow takes no untrusted event input into any run: step (github.ref /
 # github.event_name are used only in if: conditions), so it is injection-safe.
@@ -23,46 +25,116 @@ permissions:
 
 defaults:
   run:
-    working-directory: bindings/flutter
+    working-directory: /tmp/flutter-validation/bindings/flutter
 
 env:
   CARGO_TERM_COLOR: always
+  # The toolchain CI tests (ci.yml RUST_TOOLCHAIN; RELEASING.md § toolchain),
+  # for every plain cargo call here. The one exception is cargokit: `flutter
+  # build` compiles the crate through `rustup run <channel> cargo`, and
+  # cargokit only knows the stable / beta / nightly channels
+  # (cargokit/build_tool/lib/src/options.dart), so the device builds below
+  # use the moving stable — as does every consuming app's build. pub.dev
+  # ships the sources, not those binaries.
+  RUST_TOOLCHAIN: "1.97.0"
 
 jobs:
+  stage:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-10
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: staging and inspection self-tests
+        run: |
+          python3 scripts/stage-flutter-package.py --self-test
+          python3 scripts/package-inspect.py selftest
+          python3 scripts/check-publish-guards.py --self-test
+      - name: pack the candidate once without compiling
+        run: |
+          mkdir flutter-artifact
+          python3 scripts/stage-flutter-package.py --output /tmp/flutter-validation/bindings/flutter --archive flutter-artifact/flutter-stage.tar.gz --receipt flutter-artifact/flutter-stage.json
+          cd flutter-artifact
+          sha256sum flutter-stage.tar.gz > flutter-stage.sha256
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: flutter-stage
+          path: flutter-artifact/
+          if-no-files-found: error
+
   # Host gate: analyze + the report.dart contract tests, plus a FRB regen-drift
   # check so a change to rust/src/api/*.rs without re-running `generate` fails CI.
   test:
-    runs-on: ubuntu-latest
+    needs: stage
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: isolate the portable Cargo target
+        working-directory: .
+        run: printf 'CARGO_TARGET_DIR=%s/flutter-target\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      # flutter_rust_bridge_codegen formats the file it generates with rustfmt,
+      # and the pinned toolchain installs with the minimal profile: without the
+      # component the drift check below compares unformatted output and fails
+      # on layout alone (the runner's preinstalled stable carried it).
+      - run: rustup component add rustfmt --toolchain "$RUST_TOOLCHAIN"
+        working-directory: .
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bindings/flutter/rust
       - uses: subosito/flutter-action@e938fdf56512cc96ef2f93601a5a40bde3801046 # v2.19.0
         with:
           channel: stable
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: flutter-stage
+          path: flutter-artifact
+      - name: unpack the portable candidate outside the checkout
+        working-directory: .
+        run: |
+          (cd flutter-artifact && sha256sum -c flutter-stage.sha256)
+          python3 scripts/stage-flutter-package.py --extract flutter-artifact/flutter-stage.tar.gz --output /tmp/flutter-validation/bindings/flutter
+      - name: portable Rust library with the committed binding lockfile
+        run: cargo check --locked --manifest-path rust/Cargo.toml --lib
       - run: flutter pub get
+      - name: inspect the pub.dev package
+        working-directory: .
+        run: python3 scripts/package-inspect.py flutter --package-root /tmp/flutter-validation/bindings/flutter --strict --release-set
       - run: flutter analyze
+      - name: supply the candidate goldens outside the pub package
+        working-directory: .
+        shell: bash
+        run: git archive HEAD spec/examples | tar -x -C /tmp/flutter-validation
       - name: report.dart contract tests (host)
-        run: flutter test
+        run: |
+          test -f ../../spec/examples/clean-url.json
+          flutter test
       - name: FRB bindings are in sync with rust/src/api (no drift)
         run: |
           cargo install flutter_rust_bridge_codegen --version 2.12.0 --locked
+          cp -R lib/src/rust "$RUNNER_TEMP/frb-dart-before"
+          cp rust/src/frb_generated.rs "$RUNNER_TEMP/frb-rust-before.rs"
           flutter_rust_bridge_codegen generate
-          if ! git diff --quiet -- lib/src/rust rust/src/frb_generated.rs; then
-            echo "::error::generated FRB bindings are stale — run flutter_rust_bridge_codegen generate and commit"
-            git --no-pager diff --stat -- lib/src/rust rust/src/frb_generated.rs
-            exit 1
-          fi
+          diff -ru "$RUNNER_TEMP/frb-dart-before" lib/src/rust
+          diff -u "$RUNNER_TEMP/frb-rust-before.rs" rust/src/frb_generated.rs
 
   build-android:
+    needs: stage
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
       - uses: Swatinem/rust-cache@v2
         with:
@@ -75,19 +147,31 @@ jobs:
         with:
           channel: stable
       - run: cargo install cargo-ndk --version 4.1.2 --locked
+        working-directory: .
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: flutter-stage
+          path: flutter-artifact
+      - name: unpack the portable candidate outside the checkout
+        working-directory: .
+        run: |
+          (cd flutter-artifact && sha256sum -c flutter-stage.sha256)
+          python3 scripts/stage-flutter-package.py --extract flutter-artifact/flutter-stage.tar.gz --output /tmp/flutter-validation/bindings/flutter
       # `flutter build apk` drives cargokit, which cross-compiles the Rust crate
       # per ABI and bundles the .so — the real end-to-end Android build.
       - name: build the example APK (exercises cargokit android path)
-        working-directory: bindings/flutter/example
+        working-directory: /tmp/flutter-validation/bindings/flutter/example
         run: flutter build apk --debug
 
   build-ios:
+    needs: stage
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: macos-15 # Xcode 16, Apple silicon
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
       - uses: Swatinem/rust-cache@v2
         with:
@@ -95,26 +179,64 @@ jobs:
       - uses: subosito/flutter-action@e938fdf56512cc96ef2f93601a5a40bde3801046 # v2.19.0
         with:
           channel: stable
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: flutter-stage
+          path: flutter-artifact
+      - name: unpack the portable candidate outside the checkout
+        working-directory: .
+        run: |
+          (cd flutter-artifact && shasum -a 256 -c flutter-stage.sha256)
+          python3 scripts/stage-flutter-package.py --extract flutter-artifact/flutter-stage.tar.gz --output /tmp/flutter-validation/bindings/flutter
       # `flutter build ios` drives cargokit's podspec script_phase (builds the
       # static lib, force-loads it) — the real end-to-end iOS build.
       - name: build the example iOS app (exercises cargokit ios path)
-        working-directory: bindings/flutter/example
+        working-directory: /tmp/flutter-validation/bindings/flutter/example
         run: flutter build ios --debug --no-codesign
 
   publish:
     name: publish to pub.dev
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: [test, build-android, build-ios]
-    runs-on: ubuntu-latest
+    # A pushed v* tag only. pub.dev accepts automated publishing solely from
+    # the push of a tag matching the configured pattern, so a dispatch could
+    # not publish anyway — and must not try.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [stage, test, build-android, build-ios]
+    runs-on: ubuntu-24.04
     # v0.5.0 post-mortem: without the token exchange below, `pub publish` falls
     # back to INTERACTIVE auth and hangs on stdin forever (the job sat 2 h and
     # was hand-cancelled). Cap the whole job well under the 6 h runner default.
     timeout-minutes: 15
-    environment: pub.dev
+    environment: pub
+    concurrency:
+      group: publish-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: false
+    # The one privileged job on floating tools: the Flutter and Dart SDKs come
+    # from the stable channel, and `flutter pub get` resolves without a
+    # lockfile. A named exception in scripts/check-publish-guards.py, keyed to
+    # exactly those three steps, while the job is dormant (pub.dev's first
+    # upload is manual); it ends before the pub.dev trusted publisher is configured
+    # (RELEASING.md § Publishing).
     permissions:
+      contents: read
       id-token: write # OIDC — pub.dev automated publishing, no token
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The tag must name the version being published, and the CHANGELOG
+      # must carry its dated section.
+      - name: the tag names the version being published
+        working-directory: .
+        run: python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: flutter-stage
+          path: flutter-artifact
+      - name: unpack the same portable candidate the builds consumed
+        working-directory: .
+        run: |
+          (cd flutter-artifact && sha256sum -c flutter-stage.sha256)
+          python3 scripts/stage-flutter-package.py --extract flutter-artifact/flutter-stage.tar.gz --output /tmp/flutter-validation/bindings/flutter
       # The OIDC→pub.dev temporary-credential exchange. subosito/flutter-action
       # does NOT perform it; dart-lang/setup-dart does (its documented
       # publishing support). Order matters: exchange first, then the Flutter
@@ -125,12 +247,17 @@ jobs:
       # publishing — a setting that exists only once the package exists. The
       # first `flutter pub publish` is a manual operator act (Google account),
       # then enable automated publishing (repo supernovae-st/qrcode-ai-scanner,
-      # tag pattern v{{version}}, environment pub.dev) and every later tag
-      # publishes hands-free.
-      - uses: dart-lang/setup-dart@e51d8e571e22473a2ddebf0ef8a2123f0ab2c02c # v1.7.1
+      # tag pattern v{{version}}, required environment `pub`) and every later
+      # tag publishes hands-free.
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
       - uses: subosito/flutter-action@e938fdf56512cc96ef2f93601a5a40bde3801046 # v2.19.0
         with:
           channel: stable
       - run: flutter pub get
+      - name: inspect the pub.dev package about to be uploaded
+        working-directory: .
+        run: python3 scripts/package-inspect.py flutter --package-root /tmp/flutter-validation/bindings/flutter --strict --quiet --release-set --record "$RUNNER_TEMP/flutter-inspected.sha256"
+      - name: the published files are still the inspected bytes
+        run: sha256sum -c "$RUNNER_TEMP/flutter-inspected.sha256"
       - name: publish (OIDC)
         run: flutter pub publish --force

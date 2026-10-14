@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/supernovae-st/qrcode-ai-scanner/spec/scan-report.schema.json",
   "title": "ScanReport",
-  "description": "qrcode-ai-scanner wire contract (versions.pipeline=2, score_contract=4). Additive evolution: consumers must tolerate unknown fields and unknown enum/tag values.",
+  "description": "qrcode-ai-scanner wire contract (versions.pipeline=3, score_contract=5). Additive evolution: consumers must tolerate unknown fields and unknown enum/tag values.",
   "type": "object",
   "required": [
     "detections",
@@ -27,7 +27,8 @@
         {
           "type": "null"
         }
-      ]
+      ],
+      "description": "Judgment of detections[0]. null when no judgment was published: no detection; a configuration that computes no score (frame profile, every stress axis skipped); a judgment the wall-clock budget interrupted (trace.budget_exhausted true); a contained internal fault. Never partial: a present score is complete and its value does not depend on the budget. Never read null as 0."
     },
     "hints": {
       "type": "array",
@@ -78,10 +79,14 @@
       ]
     },
     "Charset": {
+      "description": "How content.text relates to content.raw. utf8 | shift_jis | latin1 | gb18030 (latin1 = WHATWG windows-1252, gb18030 = WHATWG gb18030): text is exactly raw decoded with that decoder. eci: text is raw decoded under the designators listed in content.eci. unknown: text is not a complete decoding; each U+FFFD stands for one byte or one maximal ill-formed sequence the scanner could not read; use raw. unknown is the only lossy value in every version: treat any other value, including one you do not know, as a complete decoding of raw that the scanner checked. A value states the encoder's declared interpretation only when content.eci lists it. Never infer content.eci from charset.",
       "enum": [
         "utf8",
         "shift_jis",
-        "latin1"
+        "latin1",
+        "gb18030",
+        "eci",
+        "unknown"
       ]
     },
     "Grade": {
@@ -443,16 +448,117 @@
       ],
       "properties": {
         "text": {
-          "type": "string"
+          "type": "string",
+          "description": "raw decoded as charset states; empty if and only if raw is empty."
         },
         "raw": {
           "type": "string",
-          "contentEncoding": "base64"
+          "contentEncoding": "base64",
+          "description": "Payload bytes, base64. QR family: the original payload bytes on every decode path, ECI designators excluded. Other symbologies: the decoding engine's text re-encoded - its ISO/IEC 8859-1 encoding when every character is at most U+00FF (the symbol's own bytes on the engine's paths without ECI), else its UTF-8 encoding; no ECI is observed for them (spec/01 § raw)."
         },
         "charset": {
           "$ref": "#/$defs/Charset"
+        },
+        "eci": {
+          "description": "ECI designators observed, in symbol order. ABSENT when none was observed; [] when the symbol signals ECI use (AIM ]Q2/]Q4/]Q6) but the scanner could not locate its designators.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EciSegment"
+          }
+        },
+        "fnc1": {
+          "description": "FNC1 position. ABSENT when none was observed or the symbology does not report it.",
+          "$ref": "#/$defs/Fnc1Position"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "charset"
+            ],
+            "properties": {
+              "charset": {
+                "const": "eci"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "eci"
+            ],
+            "properties": {
+              "eci": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "eci",
+              "raw"
+            ],
+            "properties": {
+              "eci": {
+                "maxItems": 0
+              },
+              "raw": {
+                "minLength": 1
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "charset": {
+                "const": "unknown"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "raw"
+            ],
+            "properties": {
+              "raw": {
+                "maxLength": 0
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "text": {
+                "maxLength": 0
+              },
+              "charset": {
+                "const": "utf8"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "text"
+            ],
+            "properties": {
+              "text": {
+                "maxLength": 0
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "raw": {
+                "maxLength": 0
+              }
+            }
+          }
+        }
+      ]
     },
     "QrMeta": {
       "type": "object",
@@ -921,6 +1027,10 @@
         "total_ms": {
           "type": "number",
           "minimum": 0
+        },
+        "budget_exhausted": {
+          "type": "boolean",
+          "description": "Emitted by every report from score_contract 5 on. true: the wall-clock budget prevented planned work (a ladder attempt or stage, the opposite-background walk, a rescue candidate, a score calibration step or stress cell, a knee bisection, an envelope probe) - the report is partial. false: every planned unit ran - the report is final. Absent: a report older than score_contract 5 - unknown, never false."
         }
       }
     },
@@ -937,11 +1047,11 @@
         },
         "pipeline": {
           "type": "integer",
-          "const": 2
+          "const": 3
         },
         "score_contract": {
           "type": "integer",
-          "const": 4
+          "const": 5
         }
       }
     },
@@ -1103,6 +1213,34 @@
           "type": "boolean"
         }
       }
+    },
+    "EciSegment": {
+      "description": "One ECI designator observed in the symbol data (ISO/IEC 18004 7.4.2), with the byte offset in raw where it takes effect.",
+      "type": "object",
+      "required": [
+        "designator",
+        "start"
+      ],
+      "properties": {
+        "designator": {
+          "description": "ECI assignment number as encoded, 0-999999.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999999
+        },
+        "start": {
+          "description": "Byte offset into raw; the designator governs raw from start up to the next entry's start, or the end. A designator whose span is empty governs no byte.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "Fnc1Position": {
+      "description": "FNC1 position (ISO/IEC 18004 7.4.8; AIM identifiers ]Q3-]Q6, ]d2/]d3/]d5/]d6, ]C1/]C2). first: GS1 mode, raw holds GS1 element-string data (QR and Data Matrix transmit 0x1D between fields; GS1-128 read by the current engine does not). second: AIM application mode, raw starts with the application indicator.",
+      "enum": [
+        "first",
+        "second"
+      ]
     }
   }
 }

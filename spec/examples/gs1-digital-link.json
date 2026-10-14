@@ -34,23 +34,23 @@
           "y": 24.0
         },
         {
-          "x": 252.0,
+          "x": 228.0,
           "y": 24.0
         },
         {
-          "x": 252.0,
-          "y": 252.0
+          "x": 228.0,
+          "y": 228.0
         },
         {
           "x": 24.0,
-          "y": 252.0
+          "y": 228.0
         }
       ],
       "meta": {
-        "version": 5,
+        "version": 4,
         "ec_level": "q",
-        "mask": 4,
-        "modules": 37,
+        "mask": 3,
+        "modules": 33,
         "inverted": false
       },
       "engines": [
@@ -60,7 +60,8 @@
     }
   ],
   "score": {
-    "value": 92,
+    "value": 100,
+    "weights_run": 100,
     "grade": "excellent",
     "axes": [
       {
@@ -89,9 +90,9 @@
       },
       {
         "axis": "rotation",
-        "passed": 1,
+        "passed": 5,
         "total": 5,
-        "failed_at": "30°"
+        "failed_at": null
       },
       {
         "axis": "lighting",
@@ -112,7 +113,7 @@
       "margin": 1.0,
       "grade": "a",
       "worst_block_errors": 0,
-      "worst_block_capacity": 18
+      "worst_block_capacity": 26
     },
     "iso15415": {
       "symbol_contrast": {
@@ -144,16 +145,17 @@
       {
         "stage": "direct",
         "transforms_tried": 1,
-        "ms": 5.3159160000000005,
+        "ms": 6.072491,
         "detections_found": 2
       }
     ],
     "engine_panics": 0,
-    "total_ms": 5.3335
+    "total_ms": 6.085926000000001,
+    "budget_exhausted": false
   },
   "versions": {
-    "scanner": "0.3.0",
-    "pipeline": 2,
-    "score_contract": 4
+    "scanner": "0.10.0",
+    "pipeline": 3,
+    "score_contract": 5
   }
 }

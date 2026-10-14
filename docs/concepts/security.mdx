@@ -17,7 +17,7 @@ and fuzzed.
 | pixel cap (`max_pixels`) | 64 MP — *lower it server-side (16 MP)* |
 | decoder allocation cap | `max_pixels × 8` bytes (decompression-bomb guard) |
 | engine input cap | 2 048 px longest side — one engine call is never unbounded |
-| whole-scan wall clock | profile budget / `budgetMs` |
+| scan wall clock, from the decoded image on (the caps above bound the decode) | profile budget / `budgetMs` |
 | detection cap | 16 per report |
 | engine panics | caught + isolated (`trace.engine_panics`) |
 
@@ -28,32 +28,47 @@ and fuzzed.
 - The CLI `--pretty` path strips terminal escapes AND Unicode bidi/
   zero-width spoofing characters before echoing content. JSON output is
   serde-escaped by construction.
-- `low_correction_margin` is the **content-distrust signal**: the decode
-  sat at the Reed-Solomon limit and may be a miscorrection — verify
-  out-of-band before acting on it.
+- `low_correction_margin` is the **content-distrust signal**: the worst
+  block's errors spent all its Reed-Solomon parity (or a rescued read's
+  errors-only count reached it), so the decode may be a miscorrection —
+  verify out-of-band before acting on it. Its absence is no proof on
+  version 1, v2-L and v3-L, where an errors-only decode at the acceptance
+  limit does not raise it.
 
 ## Determinism
 
-Same bytes + same config + same crate version ⇒ the same attempt
-sequence and the same report, **bit for bit on a given platform**, because
-there is no RNG anywhere in the pipeline. Two bounded caveats:
+Same bytes + same config + same scanner build ⇒ the same attempt sequence
+and the same report, **bit for bit on a given platform** (wall clock
+aside), because there is no RNG anywhere in the pipeline. Three bounded
+caveats:
 
-1. a wall-clock budget makes the *cut point* machine-dependent — use an
-   unbounded budget for strictly reproducible reports;
+1. a wall-clock budget makes the *cut point* machine-dependent — and every
+   report says whether it was cut: `trace.budget_exhausted: false` is the
+   unbounded report, `true` is partial (a judgment it interrupts is
+   `score: null`, never a deflated value). Use an unbounded budget for
+   strictly reproducible reports, and cache only reports whose flag is
+   `false`;
 2. across platforms, libm transcendentals (warp kernels, gaussian blur)
    can differ in the last ulp — a stress cell sitting exactly on a knee
-   can flip.
+   can flip;
+3. a known dependency exception: rxing's PDF417 decoder breaks codeword
+   confidence ties in randomized order, so a PDF417 symbol near a decode
+   threshold can score (and a marginal one decode) differently between
+   runs. QR-family symbols and every other symbology are unaffected.
 
 ## Verification surface
 
 300+ Rust tests · property tests (proptest) on the RS math and parsers ·
 four fuzz targets (encoded images · full-profile ladder · adversarial
-rescue bitstreams · decoded text) running weekly · mutation testing at a
-**zero-missed baseline** — every surviving mutant in the crate is either
-killed by a named test or individually proven equivalent in the committed
-policy, enforced weekly across sharded CI · a 2,304-scan deterministic
-occlusion bench gating the rescue path's zero-miscorrection guarantee ·
-a 522-file external corpus pinned by sha256 with a bidirectional drift
-gate (regressions AND silent capability gains both fail) · golden spec
+rescue bitstreams · decoded text) running weekly · weekly mutation testing
+across sharded CI, gated against a committed dispositions file: a
+surviving mutant must be listed there — argued equivalent, a timeout that
+only a hang can show, or test debt still to kill — or the weekly job
+fails; the file records survivors, it does not claim there are none · a
+deterministic 2,304-cell occlusion sweep of the rescue path, gated on zero
+wrong outputs in each of its passes — a measured result, not a guarantee:
+the rescue still accepts a wrong correction in a block about once in
+65 536 · a 522-file external corpus pinned by sha256 with a bidirectional
+drift gate (regressions AND silent capability gains both fail) · golden spec
 examples validated in CI against both the serde types and the published
 JSON Schema.

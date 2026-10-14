@@ -16,7 +16,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 rust-version = "1.88"
 license = "AGPL-3.0-or-later"
@@ -31,7 +31,9 @@ authors = [
 # `client_support` (chrono-tz/fancy-regex/uriparse payload parsing) is OFF — we own
 # payload classification; `image`/`imageproc` are OFF — we feed raw luma buffers.
 # wasm builds must add rxing `wasm_support` (chrono is an unconditional rxing dep).
-rxing = { version = "0.9.1", default-features = false, features = [
+# Pin the qualified engine: 0.9.3 changes the luminance-source constructor
+# incompatibly. Library consumers resolve afresh and do not inherit our lock.
+rxing = { version = "=0.9.1", default-features = false, features = [
   "decoders",
   "multi_barcode_readers",
   "full_barcode_format_support",

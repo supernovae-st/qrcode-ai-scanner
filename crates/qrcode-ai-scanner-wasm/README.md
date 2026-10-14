@@ -13,7 +13,11 @@ await init(); // loads the wasm module once
 // canvas/upload verification (the generator quality-gate path)
 const report = scan_image(pngBytes, "fast");
 const ok = report.detections.length > 0;
-const score = report.score?.value ?? 0;
+// null = no judgment, never a zero: with trace.budget_exhausted the budget
+// cut it (argument #5, budget_ms: 0 = unbounded, scans without a cut; the
+// clock starts once the image is decoded)
+const score = report.score?.value ?? null;
+const judged = report.score !== null || !report.trace.budget_exhausted;
 
 // live camera (ImageData — no PNG roundtrip)
 const frame = ctx.getImageData(0, 0, w, h);

@@ -5,9 +5,8 @@ description: "Decode and grade your first QR on every surface."
 
 <Tabs>
   <Tab title="Rust">
-    ```toml Cargo.toml
-    [dependencies]
-    qrcode-ai-scanner = "0.3"
+    ```bash
+    cargo add qrcode-ai-scanner
     ```
 
     ```rust
@@ -51,6 +50,7 @@ description: "Decode and grade your first QR on every surface."
 
     if (report.detections.length) {
       const d = report.detections[0];
+      // score null + trace.budget_exhausted = not judged within the budget
       console.log(d.content.text, d.payload.kind, report.score?.value);
     }
     ```
@@ -78,7 +78,9 @@ description: "Decode and grade your first QR on every surface."
     <Warning>
     The scan runs synchronously **on the calling thread**. In UI contexts,
     always pass a `budget_ms` (1500 ms is the verify-flow default) or run
-    it in a Worker.
+    it in a Worker. A report the budget cut says so —
+    `trace.budget_exhausted === true` — and a `null` score beside a
+    detection then means "not judged", never 0.
     </Warning>
 
     Vite/Nuxt: exclude the package from pre-bundling —
@@ -92,7 +94,8 @@ description: "Decode and grade your first QR on every surface."
     qrscan image.png            # full ScanReport JSON on stdout
     qrscan image.png --pretty   # human summary (incl. the ISO grade card)
     qrscan image.png -s         # bare score value for scripts
-    # exit codes: 0 found · 1 none · 2 invalid input/usage
+    qrscan image.png -s --budget-ms 0   # unbounded: reproducible, never cut
+    # exit codes: 0 found · 1 none · 2 invalid input/usage · 3 (-s) not judged within the budget
     ```
   </Tab>
 
@@ -125,6 +128,11 @@ Mobile (Kotlin/Android · Swift/iOS) and Flutter ship the same report — see th
 | `full` | 4 s (override with budget) | generator quality gate, verify flows — **the only profile that decodes the blob/dot template class** |
 | `fast` | 800 ms | upload tools where latency beats recall |
 | `frame` | 80 ms | per-frame camera loops (no scoring) |
+
+Every budget is a default you can override (`budget_ms` / `budgetMs` /
+`--budget-ms`); `0` is unbounded and the only strictly reproducible mode.
+`trace.budget_exhausted` tells a final report (`false`) from one the budget
+cut (`true`).
 
 <Tip>
 The report's `trace.stages` tells you exactly which stage decoded (or how

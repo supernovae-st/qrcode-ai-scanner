@@ -33,20 +33,23 @@
     }
   ],
   "score": {
-    "value": 68,
-    "grade": "acceptable",
+    "value": 70,
+    "weights_run": 100,
+    "grade": "good",
     "axes": [
       {
         "axis": "resolution",
         "passed": 2,
         "total": 5,
-        "failed_at": "128px"
+        "failed_at": "179px",
+        "refined_failed_at": "217px"
       },
       {
         "axis": "blur",
         "passed": 3,
         "total": 5,
-        "failed_at": "blur 2.0"
+        "failed_at": "blur 2.0",
+        "refined_failed_at": "blur 1.75"
       },
       {
         "axis": "contrast",
@@ -62,9 +65,10 @@
       },
       {
         "axis": "rotation",
-        "passed": 1,
+        "passed": 2,
         "total": 5,
-        "failed_at": "30°"
+        "failed_at": "30°",
+        "refined_failed_at": "30°"
       },
       {
         "axis": "lighting",
@@ -87,16 +91,17 @@
       {
         "stage": "direct",
         "transforms_tried": 1,
-        "ms": 1.0984580000000002,
+        "ms": 1.663786,
         "detections_found": 1
       }
     ],
     "engine_panics": 0,
-    "total_ms": 1.102667
+    "total_ms": 1.674977,
+    "budget_exhausted": false
   },
   "versions": {
-    "scanner": "0.3.0",
-    "pipeline": 2,
-    "score_contract": 4
+    "scanner": "0.10.0",
+    "pipeline": 3,
+    "score_contract": 5
   }
 }

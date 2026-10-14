@@ -3,9 +3,8 @@ title: "Rust — qrcode-ai-scanner"
 description: "The core crate: Scanner, profiles, cancellation, batching."
 ---
 
-```toml
-[dependencies]
-qrcode-ai-scanner = "0.3"
+```bash
+cargo add qrcode-ai-scanner
 ```
 
 Features: `engine-rxing` + `engine-rqrr` (default — at least one
@@ -54,6 +53,9 @@ let reports = scanner.scan_batch(&inputs);
 
 ```rust
 let mut config: ScanConfig = ScanProfile::Full.config(); // preset → adjust
+// None = unbounded, the reproducible mode; with a budget, a cut report
+// says so (`report.trace.budget_exhausted == Some(true)`) and a judgment
+// it interrupts is `score: None`, never partial
 config.budget_ms = Some(1_500);
 // background under transparent pixels — AlphaBackground::from_name parses
 // "auto" | "white" | "black" | "none" | "#rrggbb" (opaque inputs untouched)
@@ -62,6 +64,28 @@ let scanner = Scanner::builder()
     .profile(ScanProfile::Custom(config))
     .build();
 ```
+
+`config.computes_score()` says whether a configuration plans a judgment at
+all (`false` for the `Frame` profile or every stress axis skipped).
+
+### Reading content
+
+```rust
+for d in &report.detections {
+    let bytes: &[u8] = &d.content.raw;   // the payload's bytes (QR family: the original)
+    if d.content.charset.is_lossy() {
+        // `Charset::Unknown`, the only lossy value: no verified reading — use `raw`
+    } else {
+        println!("{}", d.content.text);  // `raw` read as `charset` says
+    }
+    // d.content.eci:  Option<Vec<EciSegment>> — located designators;
+    //                 Some(vec![]) = an ECI signalled but not located
+    // d.content.fnc1: Option<Fnc1Position>    — First (GS1) | Second
+}
+```
+
+Two detections denote the same content when symbology, `raw`, `fnc1` and
+`eci` agree (spec/01 § Comparing contents) — never key on `text`.
 
 ### Errors
 
@@ -72,10 +96,11 @@ enum is `#[non_exhaustive]`.
 ## Type surface
 
 Everything the report contains is re-exported at the crate root:
-`ScanReport` · `Detection` · `Payload` · `Gs1Element` · `Score` ·
-`UecReport`/`UecGrade` · `Iso15415Report`/`IsoGrade`/`IsoParameter` ·
+`ScanReport` · `Detection` · `DecodedContent` · `Payload` · `Gs1Element` ·
+`Score` · `UecReport`/`UecGrade` · `Iso15415Report`/`IsoGrade`/`IsoParameter` ·
 `Hint` · `StructuralReport` · `PipelineTrace` · `EngineKind` · `QrMeta` ·
-`Grade` · `StressAxis` · `Charset` · `EcLevel` · `Point` · `Versions`.
+`Grade` · `StressAxis` · `Charset` · `EciSegment` · `Fnc1Position` ·
+`EcLevel` · `Point` · `Versions`.
 All public enums/structs are `#[non_exhaustive]` — match with `_` arms.
 
 <Note>

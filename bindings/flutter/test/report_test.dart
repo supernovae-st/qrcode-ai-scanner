@@ -30,7 +30,7 @@ void main() {
       expect(files, isNotEmpty);
       for (final f in files) {
         final r = ScanReport.parse(f.readAsStringSync());
-        expect(r.versions.scoreContract, 4, reason: f.path);
+        expect(r.versions.scoreContract, 5, reason: f.path);
         expect(r.detections, isA<List<Detection>>(), reason: f.path);
       }
     }, skip: skipReason);
@@ -106,7 +106,9 @@ void main() {
       final r = ScanReport.parse(json);
       final d = r.detections.single;
       expect(d.symbology, Symbology.unknown);
-      expect(d.content.charset, Charset.unknown);
+      // a newer label is a complete, checked decoding — never `unknown`
+      expect(d.content.charset, Charset.unrecognized);
+      expect(d.content.charset.isLossy, isFalse);
       expect(d.payload, isA<PayloadUnknown>());
       expect((d.payload as PayloadUnknown).kind, 'future_kind');
       expect(d.engines.single, EngineKind.unknown);
@@ -121,6 +123,82 @@ void main() {
       expect(d.content.raw, [0x68, 0x69]); // "hi"
       expect(d.payload, isA<PayloadText>());
       expect(d.meta.ecLevel, EcLevel.m);
+      // no designator observed, no FNC1: both keys absent → null
+      expect(d.content.eci, isNull);
+      expect(d.content.fnc1, isNull);
+    });
+  });
+
+  group('budget flag (spec/02 § Budget semantics)', () {
+    ScanReport withTrace(String trace) => ScanReport.parse(
+        '{"detections":[],"score":null,"hints":[],"trace":$trace,'
+        '"versions":{"scanner":"0.9.0","pipeline":3,"score_contract":5}}');
+
+    test('an older report without the flag reads as unknown, never final', () {
+      final r = withTrace('{"stages":[],"engine_panics":0,"total_ms":0}');
+      expect(r.trace.budgetExhausted, isNull);
+    });
+
+    test('a cut and a final report keep their flag', () {
+      final cut = withTrace(
+          '{"stages":[],"engine_panics":0,"total_ms":0,"budget_exhausted":true}');
+      expect(cut.trace.budgetExhausted, isTrue);
+      final whole = withTrace(
+          '{"stages":[],"engine_panics":0,"total_ms":0,"budget_exhausted":false}');
+      expect(whole.trace.budgetExhausted, isFalse);
+    });
+  });
+
+  group('content contract (spec/01 § Content)', () {
+    test('every charset label decodes; unknown is the only lossy one', () {
+      expect(Charset.from('utf8'), Charset.utf8);
+      expect(Charset.from('shift_jis'), Charset.shiftJis);
+      expect(Charset.from('latin1'), Charset.latin1);
+      expect(Charset.from('gb18030'), Charset.gb18030);
+      expect(Charset.from('eci'), Charset.eci);
+      expect(Charset.from('unknown'), Charset.unknown);
+      expect(Charset.from('future_x'), Charset.unrecognized);
+      for (final c in Charset.values) {
+        expect(c.isLossy, c == Charset.unknown, reason: '$c');
+      }
+    });
+
+    test('fnc1 positions decode; a newer one is unrecognized', () {
+      expect(Fnc1Position.from('first'), Fnc1Position.first);
+      expect(Fnc1Position.from('second'), Fnc1Position.second);
+      expect(Fnc1Position.from('fifth'), Fnc1Position.unrecognized);
+    });
+
+    test('eci entries, an unlocated declaration and fnc1 on the wire', () {
+      DecodedContent content(String json) => ScanReport.parse(
+              '{"detections":[{"symbology":"qr_code","content":$json,'
+              '"payload":{"kind":"text"},"corners":null,'
+              '"meta":{"version":null,"ec_level":null,"mask":null,"modules":null,"inverted":null},'
+              '"engines":["rxing"]}],"score":null,"hints":[],'
+              '"trace":{"stages":[],"engine_panics":0,"total_ms":0},'
+              '"versions":{"scanner":"0.9.0","pipeline":3,"score_contract":5}}')
+          .detections
+          .single
+          .content;
+      final declared = content(
+          '{"text":"Ą€","raw":"oeKCrA==","charset":"eci","eci":[{"designator":4,"start":0},{"designator":26,"start":1}]}');
+      expect(declared.charset, Charset.eci);
+      expect(declared.eci!.map((e) => [e.designator, e.start]).toList(), [
+        [4, 0],
+        [26, 1]
+      ]);
+      final unlocated = content(
+          '{"text":"\\ufffd","raw":"oQ==","charset":"unknown","eci":[],"fnc1":"first"}');
+      expect(unlocated.eci, isEmpty);
+      expect(unlocated.charset.isLossy, isTrue);
+      expect(unlocated.fnc1, Fnc1Position.first);
+      final unmarked =
+          content('{"text":"日本中文","raw":"k/qWe9bQzsQ=","charset":"unknown"}');
+      expect(unmarked.eci, isNull);
+      expect(unmarked.charset, Charset.unknown);
+      final aim = content(
+          '{"text":"37abc","raw":"MzdhYmM=","charset":"utf8","fnc1":"second"}');
+      expect(aim.fnc1, Fnc1Position.second);
     });
   });
 }

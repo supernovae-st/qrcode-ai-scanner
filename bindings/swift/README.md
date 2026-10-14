@@ -18,12 +18,16 @@ Dual-licensed **AGPL-3.0-or-later OR commercial** — see the repo-root
 closed-source and therefore needs the **commercial** license. Contact
 `studio.supernovae@gmail.com`.
 
+The distributed xcframework includes `LICENSE` and `LICENSING.md` inside its
+bundle. The release helper refuses a version that differs from the workspace
+version and uses the committed Cargo lockfile.
+
 ## Install (SwiftPM, on a tagged release)
 
 ```swift
-// Package.swift
+// Package.swift — X.Y.Z: the latest release tag
 dependencies: [
-    .package(url: "https://github.com/supernovae-st/qrcode-ai-scanner", from: "0.4.0"),
+    .package(url: "https://github.com/supernovae-st/qrcode-ai-scanner", from: "X.Y.Z"),
 ],
 // target deps:
 .product(name: "QrcodeAiScanner", package: "qrcode-ai-scanner"),
@@ -44,6 +48,15 @@ import QrcodeAiScanner
 
 let json = try scan(image: imageData, profile: "full")  // empty detections = no QR (not an error)
 ```
+
+Reading the report: `content.charset` is a `String` — test it against
+`"unknown"`, the only lossy value (no verified reading: use `content.raw`,
+the payload's bytes in base64), and read any other value, one your decoder
+does not know included, as a complete reading. `content.eci` and
+`content.fnc1` are optional keys. Compare contents by `symbology`, `raw`,
+`fnc1` and `eci`, never by `text`. A report is final only when
+`trace.budget_exhausted` is `false`; a `null` score beside detections then
+means "not judged", never 0 (spec/01).
 
 ## Build the xcframework locally
 
@@ -85,7 +98,7 @@ one place that produces a matching pair — it builds the xcframework, computes 
 checksum, and pins `Package.swift` from a single local build. Run it on a mac:
 
 ```bash
-bindings/swift/release.sh v0.4.0
+bindings/swift/release.sh vX.Y.Z   # the tag being released
 ```
 
 It mutates only the working tree (rewrites `Package.swift`, fills `build/`) and

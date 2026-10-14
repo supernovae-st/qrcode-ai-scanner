@@ -22,7 +22,16 @@ export type Symbology =
  */
 export type EngineKind = "rxing" | "rqrr" | "rescue";
 export type EcLevel = "l" | "m" | "q" | "h";
-export type Charset = "utf8" | "shift_jis" | "latin1";
+/**
+ * How content.text relates to content.raw (spec/01 § Content). utf8 · shift_jis · latin1 · gb18030 (latin1 = WHATWG
+ * windows-1252, gb18030 = WHATWG gb18030): text is EXACTLY raw decoded with that decoder. eci: raw decoded under
+ * content.eci. unknown: NOT a complete decoding (each U+FFFD = one unread byte or maximal ill-formed sequence; use raw).
+ * "unknown" is the ONLY lossy value, now and later: any other value, even one newer than these types, is a complete
+ * decoding the scanner checked (the declared interpretation only when content.eci lists it). Test === "unknown".
+ */
+export type Charset = "utf8" | "shift_jis" | "latin1" | "gb18030" | "eci" | "unknown";
+/** FNC1 position: first = GS1 mode; second = AIM application mode (raw starts with the application indicator). */
+export type Fnc1Position = "first" | "second";
 export type Grade = "excellent" | "good" | "acceptable" | "fair" | "poor";
 export type UecGrade = "a" | "b" | "c" | "d" | "f";
 export type StressAxis = "resolution" | "blur" | "contrast" | "perspective" | "rotation" | "lighting";
@@ -54,11 +63,28 @@ export type Payload =
   | { kind: "v_event"; raw: string }
   | { kind: "text" };
 
+/** One ECI designator observed in the symbol data (ISO/IEC 18004 §7.4.2). */
+export interface EciSegment {
+  /** ECI assignment number as encoded, 0–999999. */
+  designator: number;
+  /** Byte offset into raw where it takes effect (until the next entry's start, or the end). */
+  start: number;
+}
+
+/** One exact reading of a symbol's data. Compare by identity (symbology, raw, fnc1, compatible eci), never text. */
 export interface DecodedContent {
+  /** raw decoded as charset states; empty if and only if raw is empty. */
   text: string;
-  /** Original payload bytes, base64. */
+  /**
+   * Payload bytes, base64. QR family: the original bytes; other symbologies: the bytes of the engine's reading
+   * (under an ECI it can omit a segment the engine could not decode).
+   */
   raw: string;
   charset: Charset;
+  /** ECI designators in symbol order. ABSENT: none observed; []: ECI use signalled but not located. */
+  eci?: EciSegment[];
+  /** FNC1 position; absent when none was observed or the symbology does not report it. */
+  fnc1?: Fnc1Position;
 }
 
 export interface QrMeta {
@@ -76,6 +102,7 @@ export interface QrMeta {
 export interface Detection {
   /** The symbology this detection was read as. */
   symbology: Symbology;
+  /** One reading of the symbol's data; detections are the distinct contents the scanner can tell apart. */
   content: DecodedContent;
   payload: Payload;
   corners: [Point, Point, Point, Point] | null;
@@ -92,14 +119,29 @@ export interface AxisScore {
   /**
    * The knee bisected once (Full depth, ordered ramps): the tightest
    * TESTED failing intensity ("blur 2.25"…). ABSENT when no refinement
-   * ran. Informational — the composite never reads it.
+   * ran — a budget cut included (the score stands; trace.budget_exhausted
+   * is then true). Informational — the composite never reads it.
    */
   refined_failed_at?: string;
 }
 export interface StructuralReport { finder_integrity: [number, number, number]; quiet_zone_ok: boolean }
+/**
+ * Synthetic ISO 15415 unused-error-correction margin (1 − 2t/d, worst RS
+ * block), measured on the stream of the orientation the decode verified,
+ * only when every block error-corrects errors-only under the detection's
+ * version, EC level and mask (an S5 rescue stream keeps its own count).
+ * ISO measures against d − p: the Annex B reserve p of v1, v2-L and v3-L is
+ * not subtracted, so there a block with errors reads above ISO's margin
+ * (spec/04-score.md § Synthetic UEC).
+ */
 export interface UecReport {
   margin: number;
   grade: UecGrade;
+  /**
+   * Errors the worst RS block corrected — or, for a detection whose engines
+   * include "rescue", the errors-only count of its stream: a distrust
+   * marker (typically margin 0), not errors corrected.
+   */
   worst_block_errors: number;
   worst_block_capacity: number;
 }
@@ -124,25 +166,34 @@ export interface Iso15415Report {
   axial_nonuniformity: IsoParameter;
   /** Worst finder integrity; quiet-zone violation caps at D. */
   fixed_pattern_damage: IsoParameter;
-  /** Synthetic UEC margin in ISO bands — null without a bitstream. */
+  /**
+   * Synthetic UEC margin in ISO bands — null without a measured margin, or
+   * withheld when the uec check is skipped (its grade still counts in overall).
+   */
   unused_error_correction: IsoParameter | null;
-  /** The ISO rule: lowest measured parameter. */
+  /** The ISO rule: lowest MEASURED parameter — a withheld one counts too, so a skip never moves it. */
   overall: IsoGrade;
 }
 
+/** A complete judgment: its calibration and every planned stress cell ran, so no budget moves it. */
 export interface Score {
+  /** Composite 0-100: weighted survival, then the structural caps and the UEC margin cap. */
   value: number;
   grade: Grade;
   /**
    * Σ contract weights of the axes that RAN (100 = the full six-axis
    * contract · 70 with perspective+rotation skipped). The honesty
    * integer: two 85s with different weights_run are different promises.
-   * Absent on pre-0.9 reports.
+   * Only skipped axes lower it, never the budget. Absent on pre-0.9 reports.
    */
   weights_run: number;
   axes: AxisScore[];
   structural: StructuralReport | null;
-  /** Synthetic ISO 15415 unused-error-correction margin. */
+  /**
+   * Synthetic ISO 15415 unused-error-correction margin — null when no stream
+   * error-corrects errors-only, or when the uec check is skipped (the
+   * measured margin still caps value).
+   */
   uec: UecReport | null;
   /** ISO 15415-informed grade card — null when no geometry was measured. */
   iso15415: Iso15415Report | null;
@@ -156,9 +207,12 @@ export type Hint =
   | { hint: "restore_quiet_zone" }
   | { hint: "reduce_art_texture" }
   /**
-   * The decode consumed the worst RS block's ENTIRE correction budget
-   * (UEC margin 0) — the classic miscorrection signature. Treat the
-   * decoded content as unverified.
+   * The published UEC margin is 0: the worst RS block's errors spent all its
+   * parity — the classic miscorrection signature — or, with "rescue" among
+   * the engines, its errors-only count reached it (a distrust marker, not
+   * errors corrected). Treat the decoded content as unverified. Never raised
+   * by an errors-only decode at the acceptance limit of v1, v2-L or v3-L
+   * (spec/04-score.md § Synthetic UEC).
    */
   | { hint: "low_correction_margin"; errors: number; capacity: number }
   /**
@@ -183,7 +237,7 @@ export type AlphaPlacement = "any" | "light_only" | "dark_only" | "mixed" | "non
 export interface AlphaProbe {
   /** Neutral background luma composited under the content (0-255). */
   background_luma: number;
-  /** The composite still decoded to the primary symbol's text. */
+  /** One of the composite's reads denotes the same content as the primary. */
   decoded: boolean;
 }
 
@@ -193,6 +247,7 @@ export interface AlphaPaletteProbe {
   background: string;
   /** Its BT.601 luma (the sweep is luma-space by construction). */
   background_luma: number;
+  /** One of the composite's reads denotes the same content as the primary. */
   decoded: boolean;
 }
 
@@ -227,18 +282,29 @@ export interface AlphaReport {
   background: string;
   /** The declared flatten found nothing; the opposite background rescued the scan (auto only). */
   fallback_used: boolean;
-  /** Full profile only; null when skipped, budget-exhausted, or nothing decoded. */
+  /** Full profile only; null when skipped, budget-exhausted, nothing decoded, or after a contained fault of the score computation. */
   envelope: AlphaEnvelope | null;
 }
 
 export interface StageTrace { stage: string; transforms_tried: number; ms: number; detections_found: number }
-export interface PipelineTrace { stages: StageTrace[]; engine_panics: number; total_ms: number }
+export interface PipelineTrace {
+  stages: StageTrace[];
+  engine_panics: number;
+  /** Wall-clock milliseconds of the ladder walk(s) only. */
+  total_ms: number;
+  /** true: the budget cut planned work (partial). false: final. Absent before score_contract 5 (unknown); test === false. */
+  budget_exhausted?: boolean;
+}
 export interface Versions { scanner: string; pipeline: number; score_contract: number }
 
 export interface ScanReport {
-  /** Empty = no QR found (a valid outcome, not an error). */
+  /** Empty = no QR found (a valid outcome, not an error) — final only when trace.budget_exhausted === false. */
   detections: Detection[];
-  /** null in the frame profile. */
+  /**
+   * Judgment of detections[0]. null when no judgment was published: no detection; a configuration that computes
+   * no score (frame, every axis skipped); a judgment the budget interrupted (trace.budget_exhausted === true: retry
+   * with a larger or no budget); a contained fault (native; wasm throws). Never partial; never read null as 0.
+   */
   score: Score | null;
   hints: Hint[];
   /** ABSENT (not null) for opaque inputs and under alphaBackground "none". */

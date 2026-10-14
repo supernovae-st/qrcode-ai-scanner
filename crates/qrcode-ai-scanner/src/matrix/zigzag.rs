@@ -219,4 +219,17 @@ mod tests {
         // (1%3 + 2%2)=(1+0)=1 odd → clear; mutant ((1+3)+0)=4 even → set.
         assert!(!mask_bit(7, 1, 1), "1%3 + 2%2 = 1 odd → clear");
     }
+
+    /// The declared bit length must cover all eight bits of every codeword:
+    /// one bit short is refused even when the buffer holds every byte, and
+    /// so is a buffer one byte short of a full declared length.
+    #[test]
+    fn a_stream_one_bit_short_of_the_capacity_is_refused() {
+        let total = VERSIONS[1].total;
+        let masked = vec![0u8; total];
+        assert_eq!(unmask_to_codewords(&masked, total * 8 - 1, 1, 0), None);
+        assert_eq!(unmask_to_codewords(&masked[1..], total * 8, 1, 0), None);
+        let full = unmask_to_codewords(&masked, total * 8, 1, 0);
+        assert_eq!(full.as_ref().map(Vec::len), Some(total));
+    }
 }

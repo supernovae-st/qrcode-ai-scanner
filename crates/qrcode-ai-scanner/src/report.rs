@@ -24,13 +24,77 @@ mod raw_b64 {
     }
 }
 
+/// The wire spelling of the report's `f32` fields: the `f64` nearest to
+/// the shortest decimal that reads back as the `f32` — the number the JSON
+/// text shows for it. Bindings that convert a report through serde's data
+/// model instead of JSON text (a `serde_json::Value` turned into Python
+/// objects, a serializer straight to JavaScript values) would otherwise
+/// widen the `f32` itself — 0.612 arriving as 0.6119999885559082 — while
+/// the JSON says 0.612; with this every serializer sees the decimal the JSON
+/// shows. The JSON text keeps its digits (`serde_json` writes the same
+/// shortest decimal for both types); between 1e-6 and 1e-5, and from 1e13,
+/// it spells them in exponent form as it does for any `f64`. Reading a
+/// report back is unchanged.
+#[cfg(feature = "serde")]
+mod decimal {
+    use serde::Serializer;
+    use serde::ser::SerializeTuple as _;
+
+    /// The `f64` nearest to `value`'s shortest round-trip decimal, as
+    /// `serde_json` spells it: when two decimals of that length read back as
+    /// `value` and lie equally close to it, the one with the even last
+    /// digit (2015.65625 is 2015.6562, where `Display` writes 2015.6563). A
+    /// non-finite value and zero keep their kind.
+    pub(super) fn of(value: f32) -> f64 {
+        let shortest = value.to_string();
+        let digits: String = shortest.chars().filter(char::is_ascii_digit).collect();
+        let significant = digits.trim_start_matches('0').trim_end_matches('0').len();
+        if !value.is_finite() || significant == 0 {
+            return f64::from(value);
+        }
+        // the decimal of that many digits nearest to `value`, an exact tie
+        // rounded to even: the spelling when it reads back as `value`
+        let precision = significant - 1;
+        let even = format!("{value:.precision$e}");
+        let reads_back = even
+            .parse::<f32>()
+            .is_ok_and(|parsed| parsed.to_bits() == value.to_bits());
+        let spelled = if reads_back { even } else { shortest };
+        spelled.parse().unwrap_or(f64::from(value))
+    }
+
+    /// One `f32` field.
+    #[allow(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde's serialize_with passes the field by reference"
+    )]
+    pub(super) fn serialize<S: Serializer>(value: &f32, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_f64(of(*value))
+    }
+
+    /// An array of `f32` fields, element by element, in serde's own array
+    /// shape (a tuple).
+    pub(super) fn serialize_array<S: Serializer, const N: usize>(
+        values: &[f32; N],
+        ser: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut tuple = ser.serialize_tuple(N)?;
+        for value in values {
+            tuple.serialize_element(&of(*value))?;
+        }
+        tuple.end()
+    }
+}
+
 /// A 2D point in image pixel coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Point {
     /// X coordinate (pixels, sub-pixel precision).
+    #[cfg_attr(feature = "serde", serde(serialize_with = "decimal::serialize"))]
     pub x: f32,
     /// Y coordinate (pixels, sub-pixel precision).
+    #[cfg_attr(feature = "serde", serde(serialize_with = "decimal::serialize"))]
     pub y: f32,
 }
 
@@ -133,32 +197,122 @@ pub enum EcLevel {
     H,
 }
 
-/// Character set resolved for the decoded bytes.
+/// How [`DecodedContent::text`] relates to [`DecodedContent::raw`] (spec/01
+/// § Content). Every value except [`Charset::Unknown`] states that `text` is
+/// a complete decoding of `raw` that the scanner checked byte for byte; it
+/// states the encoder's declared interpretation only when
+/// [`DecodedContent::eci`] lists it. `Unknown` is the only lossy value, now
+/// and in every later version: test with [`Charset::is_lossy`]. Outside the
+/// QR family `raw` is the engine's reading, which under an ECI can omit a
+/// segment the engine could not decode; the label describes `raw` as
+/// published and is not downgraded for it (spec/01 § raw).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[non_exhaustive]
 pub enum Charset {
-    /// Valid UTF-8 (or ASCII).
+    /// Exactly the strict UTF-8 decoding of `raw` (ASCII included).
     Utf8,
-    /// Shift-JIS (kanji-mode or sniffed byte-mode).
+    /// Exactly the WHATWG `Shift_JIS` decoding of `raw`.
     ShiftJis,
-    /// Windows-1252 / Latin-1 fallback.
+    /// Exactly the WHATWG windows-1252 decoding of `raw` (historical name;
+    /// not strict ISO/IEC 8859-1).
     Latin1,
+    /// Exactly the WHATWG gb18030 decoding of `raw` (GB 2312 and GBK read
+    /// unchanged): Hanzi-mode data without a designator, or designators 29,
+    /// 31, 32.
+    Gb18030,
+    /// `raw` decoded under [`DecodedContent::eci`] (bytes before the first
+    /// designator as ISO/IEC 8859-1), when no label above states the same
+    /// reading.
+    Eci,
+    /// Not a complete decoding: each U+FFFD stands for one byte or one
+    /// maximal ill-formed sequence the scanner could not read; positions
+    /// cannot be recovered from `text` — use `raw` (and `eci`).
+    Unknown,
+    /// Reader side only: a label written by a newer scanner, still a
+    /// complete, checked decoding (show `text`, never re-decode `raw` from
+    /// it). Never produced by this crate; serializing it is an error
+    /// (forward the original JSON). Must stay the last variant.
+    #[cfg_attr(feature = "serde", serde(other, skip_serializing))]
+    Unrecognized,
 }
 
-/// Decoded content — both the resolved text and the raw bytes truth.
+impl Charset {
+    /// `true` only for [`Charset::Unknown`], forever.
+    #[must_use]
+    pub const fn is_lossy(self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+}
+
+/// One ECI designator observed in the symbol's data (ISO/IEC 18004 §7.4.2).
+/// It governs `raw[start..]` up to the next entry's `start`, or the end; an
+/// empty span governs no byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
+pub struct EciSegment {
+    /// ECI assignment number as encoded, 0-999999.
+    pub designator: u32,
+    /// Byte offset into [`DecodedContent::raw`]; non-decreasing along the
+    /// list, at most `raw.len()`.
+    pub start: u32,
+}
+
+/// FNC1 position (ISO/IEC 18004 §7.4.8; AIM `]Q3`–`]Q6`,
+/// `]d2`/`]d3`/`]d5`/`]d6`, `]C1`/`]C2`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
+pub enum Fnc1Position {
+    /// GS1 mode: `raw` holds GS1 element-string data (QR and Data Matrix
+    /// transmit 0x1D between fields; GS1-128 read by the current engine
+    /// does not).
+    First,
+    /// AIM application mode: `raw` starts with the application indicator.
+    Second,
+    /// Reader side only, as [`Charset::Unrecognized`].
+    #[cfg_attr(feature = "serde", serde(other, skip_serializing))]
+    Unrecognized,
+}
+
+/// The exact bytes, the declarations observed and the scanner's ONE reading
+/// of them (spec/01 § Content). Compare contents by identity (spec/01
+/// § Comparing contents), never by `text`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct DecodedContent {
-    /// Text under the resolved charset.
+    /// `raw` decoded as `charset` states; empty if and only if `raw` is
+    /// empty.
     pub text: String,
-    /// Raw decoded bytes (charset-independent truth). Base64 on the wire.
+    /// Payload bytes, base64 on the wire. QR family: the ORIGINAL bytes on
+    /// every decode path (designators excluded), never an engine's text.
+    /// Other symbologies: the ISO/IEC 8859-1 encoding of the engine's text
+    /// when every character is ≤ U+00FF (exact on its non-ECI paths), else
+    /// its UTF-8; under an ECI the engine's text can omit a segment it could
+    /// not decode (spec/01 § raw).
     #[cfg_attr(feature = "serde", serde(with = "raw_b64"))]
     pub raw: Vec<u8>,
-    /// Charset used to produce `text`.
+    /// How `text` relates to `raw`.
     pub charset: Charset,
+    /// `None` (key absent): no designator observed. `Some(vec![])`: ECI use
+    /// signalled (`]Q2`/`]Q4`/`]Q6`) but the designators could not be
+    /// located.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub eci: Option<Vec<EciSegment>>,
+    /// `None` (key absent): no FNC1 observed, or not observable for this
+    /// symbology.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub fnc1: Option<Fnc1Position>,
 }
 
 /// QR symbol metadata.
@@ -168,7 +322,8 @@ pub struct DecodedContent {
 pub struct QrMeta {
     /// Symbol version, 1-40, when an engine measured it (rqrr path).
     pub version: Option<u8>,
-    /// Error-correction level when measured.
+    /// Error-correction level when measured — or, for a symbol only rxing
+    /// read, the level its decoder states (the one field such a read fills).
     pub ec_level: Option<EcLevel>,
     /// Mask pattern 0-7 when measured.
     pub mask: Option<u8>,
@@ -181,26 +336,32 @@ pub struct QrMeta {
     pub inverted: Option<bool>,
 }
 
-/// One decoded QR symbol.
+/// One decoded symbol content.
 ///
-/// Detections merge across engines and attempts BY DECODED TEXT: two
-/// physical symbols carrying the identical payload in one image collapse
-/// into one detection (corners from the first geometry source). Distinct
-/// payloads always stay distinct.
+/// Detections are the distinct contents the scanner can tell apart
+/// (spec/01 § Detection): every read of every attempt is reconciled before
+/// publication, and reads with the same symbology, `raw` and FNC1 position
+/// and compatible ECI evidence become one detection. Identical copies of a
+/// symbol are one detection; a different `raw`, FNC1 position or
+/// contradicting declarations always stay separate, even with equal text.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct Detection {
     /// The barcode symbology this detection was read as.
     pub symbology: Symbology,
-    /// Decoded content (text + raw bytes + charset).
+    /// The content: raw bytes, declarations and the one reading of them.
     pub content: DecodedContent,
     /// Typed payload classification of the text.
     pub payload: Payload,
-    /// Symbol corners in image coordinates, clockwise from top-left,
-    /// when the engine provides them.
+    /// Symbol corners in image coordinates, clockwise from top-left: from
+    /// rqrr (its decode, or a grid it detected that the scanner
+    /// error-corrected itself — `engines` may then list rxing alone) or the
+    /// S5 rescue candidate.
     pub corners: Option<[Point; 4]>,
-    /// Symbol metadata.
+    /// Symbol metadata, from the same source as `corners`; a symbol only
+    /// rxing read carries the EC level its decoder states and nothing else
+    /// (spec/01 § Detection).
     pub meta: QrMeta,
     /// Engines that confirmed this payload (consensus surface for scoring).
     pub engines: Vec<EngineKind>,
@@ -297,7 +458,8 @@ pub struct AxisScore {
     /// TIGHTEST TESTED failing intensity — the midpoint label when the
     /// midpoint probe failed, the knee cell's label when it held. Key
     /// ABSENT when no refinement ran (Reduced depth · no knee · lighting ·
-    /// budget cut). Informational: the composite never reads it.
+    /// budget cut — the score stands, and `trace.budget_exhausted` says the
+    /// budget cut it). Informational: the composite never reads it.
     #[cfg_attr(
         feature = "serde",
         serde(default, skip_serializing_if = "Option::is_none")
@@ -343,15 +505,20 @@ impl UecGrade {
 
 /// Synthetic Unused Error Correction — the real robustness margin
 /// (`1 − 2t/d`, worst RS block). Validation-grade, not ISO verification.
+/// Measured on the stream of the orientation the decode verified, only
+/// when every block error-corrects errors-only under the detection's
+/// version, EC level and mask; a stream the S5 rescue recovered keeps its
+/// errors-only count.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct UecReport {
     /// Remaining correction margin, 0.0-1.0 (1.0 = pristine).
+    #[cfg_attr(feature = "serde", serde(serialize_with = "decimal::serialize"))]
     pub margin: f32,
     /// ISO band for `margin`.
     pub grade: UecGrade,
-    /// Errors corrected in the worst RS block.
+    /// Errors the worst block corrected, or a rescued read's errors-only count.
     pub worst_block_errors: u8,
     /// EC codewords (capacity `d`) of that block.
     pub worst_block_capacity: u8,
@@ -364,6 +531,7 @@ pub struct UecReport {
 pub struct StructuralReport {
     /// Per-finder 1:1:3:1:1 integrity, 0.0-1.0 — [top-left, top-right,
     /// bottom-left]. The #1 documented AI-art failure mode.
+    #[cfg_attr(feature = "serde", serde(serialize_with = "decimal::serialize_array"))]
     pub finder_integrity: [f32; 3],
     /// Clear border present — probed on a 2-module outer ring (ISO/IEC
     /// 18004 recommends 4 modules; the lenient probe targets what breaks
@@ -395,6 +563,7 @@ pub enum IsoGrade {
 #[non_exhaustive]
 pub struct IsoParameter {
     /// Parameter value in its ISO unit (see each field's doc).
+    #[cfg_attr(feature = "serde", serde(serialize_with = "decimal::serialize"))]
     pub value: f32,
     /// ISO band for `value`.
     pub grade: IsoGrade,
@@ -429,25 +598,33 @@ pub struct Iso15415Report {
     /// the grade at D. (No clock-track subtest.)
     pub fixed_pattern_damage: IsoParameter,
     /// Unused Error Correction — the synthetic UEC margin, ISO bands
-    /// (A ≥0.62 · B ≥0.50 · C ≥0.37 · D ≥0.25). `None` without a bitstream.
+    /// (A ≥0.62 · B ≥0.50 · C ≥0.37 · D ≥0.25). `None` without a measured
+    /// margin, or withheld when the `uec` check is skipped (its grade still
+    /// counts in `overall`).
     pub unused_error_correction: Option<IsoParameter>,
-    /// Overall = LOWEST measured parameter (the ISO rule), Decode = A
-    /// implicit (only decoded symbols are graded).
+    /// Overall = LOWEST measured parameter (the ISO rule) — a parameter
+    /// withheld by `score_skip_checks` (`uec`) still counts, so a skip never
+    /// moves it. Decode = A implicit (only decoded symbols are graded).
     pub overall: IsoGrade,
 }
 
-/// Scannability score — contract v3: survival ramps + structural caps.
-/// Validation, NOT ISO verification (no calibrated optics).
+/// Scannability score — survival ramps, structural caps and the UEC margin
+/// cap (spec/04-score.md). Validation, NOT ISO verification (no calibrated
+/// optics). A present score is a COMPLETE judgment: its calibration and
+/// every planned stress cell ran, so no budget moves it — only a knee
+/// bisection (`AxisScore::refined_failed_at`) may be missing.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct Score {
-    /// Composite 0-100 (weighted axis survival, structurally capped).
+    /// Composite 0-100 (weighted axis survival, then the structural caps and
+    /// the UEC margin cap).
     pub value: u8,
     /// Σ contract weights of the axes that RAN (100 = the full six-axis
     /// contract · 70 with perspective+rotation skipped). The honesty
-    /// integer: a partial score SAYS how much contract stands behind it —
-    /// two 85s with different `weights_run` are different promises.
+    /// integer: a score on skipped axes SAYS how much contract stands
+    /// behind it — two 85s with different `weights_run` are different
+    /// promises. Only skipped axes lower it, never the budget.
     /// Lenient default 0 when parsing pre-0.9 reports.
     #[cfg_attr(feature = "serde", serde(default))]
     pub weights_run: u8,
@@ -457,7 +634,10 @@ pub struct Score {
     pub axes: Vec<AxisScore>,
     /// Structural checks — `None` when no geometry was measured.
     pub structural: Option<StructuralReport>,
-    /// Synthetic UEC margin — `None` when the raw stream was unavailable.
+    /// Synthetic UEC margin — `None` when no stream error-corrects
+    /// errors-only under the detection's format (then no margin cap and no
+    /// margin hint either), or when the `uec` check is skipped (the measured
+    /// margin still caps `value`).
     pub uec: Option<UecReport>,
     /// ISO 15415-informed grade card — `None` when no geometry was measured.
     pub iso15415: Option<Iso15415Report>,
@@ -504,7 +684,8 @@ pub enum AlphaPlacement {
 pub struct AlphaProbe {
     /// Neutral background luma composited under the content.
     pub background_luma: u8,
-    /// The composite still decoded to the primary symbol's text.
+    /// One of the composite's reads denotes the same content as the
+    /// primary detection (spec/07 property 7).
     pub decoded: bool,
 }
 
@@ -518,7 +699,8 @@ pub struct AlphaPaletteProbe {
     pub background: String,
     /// Its BT.601 luma (the sweep is luma-space by construction).
     pub background_luma: u8,
-    /// The composite still decoded to the primary symbol's text.
+    /// One of the composite's reads denotes the same content as the
+    /// primary detection (spec/07 property 7).
     pub decoded: bool,
 }
 
@@ -554,6 +736,7 @@ pub struct AlphaEnvelope {
 #[non_exhaustive]
 pub struct AlphaReport {
     /// Fraction of pixels with alpha < 255, rounded to 3 decimals.
+    #[cfg_attr(feature = "serde", serde(serialize_with = "decimal::serialize"))]
     pub coverage: f32,
     /// Alpha-weighted mean BT.601 luma of the visible content — what the
     /// `auto` decision reads (< 128 → white, else black).
@@ -567,8 +750,9 @@ pub struct AlphaReport {
     /// produced the detections (`auto` only).
     pub fallback_used: bool,
     /// The placement envelope — Full profile only; `None` when skipped
-    /// (`score_skip_checks: ["alpha_envelope"]`), budget-exhausted, or
-    /// nothing decoded.
+    /// (`score_skip_checks: ["alpha_envelope"]`), cut by the budget
+    /// (`trace.budget_exhausted`), when no probe class reads the design, or
+    /// after a contained fault of the score computation.
     pub envelope: Option<AlphaEnvelope>,
 }
 
@@ -596,12 +780,12 @@ pub enum Hint {
     RestoreQuietZone,
     /// Artistic texture overwhelms module structure.
     ReduceArtTexture,
-    /// The decode sits AT the Reed-Solomon correction limit (UEC margin 0):
-    /// one more error would have been an undetectable miscorrection — and
-    /// the decode itself may already BE one. Treat the content as
+    /// The published UEC margin is 0: the worst RS block's errors spent all
+    /// its parity (on a rescued read, its errors-only count reached it), so
+    /// the decode may already BE a miscorrection. Treat the content as
     /// unverified; confirm out-of-band before acting on it.
     LowCorrectionMargin {
-        /// Errors corrected in the worst RS block.
+        /// Errors the worst block corrected, or a rescued read's errors-only count.
         errors: u8,
         /// EC codeword capacity of that block.
         capacity: u8,
@@ -641,20 +825,24 @@ pub enum PlateColor {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct StageTrace {
-    /// Stage name (stable identifiers: `pyramid` · `direct` · `enhance` · `deep`).
+    /// Stage name (stable identifiers: `pyramid` · `direct` · `enhance` ·
+    /// `deep` · `rescue`).
     pub stage: String,
     /// Number of transform attempts executed in this stage.
     pub transforms_tried: u32,
     /// Wall-clock milliseconds spent in this stage.
     pub ms: f64,
-    /// RAW engine hits in this stage, PRE-merge — both engines decoding
-    /// the same symbol counts twice here (the merged symbol count is
-    /// `detections.len()` on the report).
+    /// Reads this stage's engine adapters delivered — raw hits before
+    /// folding, the re-read, vetoes and reconciliation (an rxing + rqrr
+    /// double read counts 2); a decode an adapter refuses (an rqrr grid that
+    /// parses malformed, an rxing read a read check refuses) is not delivered;
+    /// candidate re-derivations, re-reads and confirmation decodes never count.
+    /// It includes hits the scanner later refuses or holds: read `detections`.
     pub detections_found: u32,
 }
 
 /// Pipeline execution trace — why a scan succeeded or came back empty.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct PipelineTrace {
@@ -662,8 +850,32 @@ pub struct PipelineTrace {
     pub stages: Vec<StageTrace>,
     /// Engine panics caught and isolated during this scan.
     pub engine_panics: u8,
-    /// Total wall-clock milliseconds.
+    /// Wall-clock milliseconds of the ladder walk(s) only.
     pub total_ms: f64,
+    /// `Some(true)`: the wall-clock budget prevented planned work — a
+    /// ladder attempt or stage, the opposite-background walk, a rescue
+    /// candidate, a score calibration step or stress cell, a knee bisection,
+    /// an envelope probe — and the report is PARTIAL. `Some(false)`: every
+    /// planned unit ran and the report is final, equal to the unbounded one
+    /// (wall clock aside). `None`: unknown, a report older than this field;
+    /// this crate always writes `Some`, and an unbounded scan `Some(false)`.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub budget_exhausted: Option<bool>,
+}
+
+impl Default for PipelineTrace {
+    /// An empty walk that skipped nothing: the trace of a final report.
+    fn default() -> Self {
+        Self {
+            stages: Vec::new(),
+            engine_panics: 0,
+            total_ms: 0.0,
+            budget_exhausted: Some(false),
+        }
+    }
 }
 
 /// Contract version markers carried by every report.
@@ -694,10 +906,13 @@ impl Versions {
     pub fn current() -> Self {
         Self {
             scanner: env!("CARGO_PKG_VERSION").to_owned(),
-            // pipeline 2: transparent inputs flatten before decode (0.9.0)
-            pipeline: 2,
-            // score contract 4: alpha inputs score their flattened image
-            score_contract: 4,
+            // pipeline 3: exact content — every read is collected, then
+            // reconciled by content identity (spec/01 § Content)
+            pipeline: 3,
+            // score contract 5: the correction-margin cap on the verified
+            // orientation's stream, interrupted judgments absent, probes
+            // matched by content identity
+            score_contract: 5,
         }
     }
 }
@@ -710,12 +925,18 @@ impl Versions {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct ScanReport {
-    /// Decoded symbols (empty = nothing found; multi-QR future-proof).
+    /// Decoded symbols (empty = nothing found — final only when
+    /// `trace.budget_exhausted` is `Some(false)`; multi-QR future-proof).
     pub detections: Vec<Detection>,
-    /// Scannability score of the PRIMARY detection (the first-discovered
-    /// symbol — for single-QR inputs, THE symbol). `None` in the `Frame`
-    /// profile. Per-detection scoring for multi-QR scenes is a future
-    /// additive extension.
+    /// Scannability score of the PRIMARY detection (`detections[0]` — for
+    /// single-QR inputs, THE symbol). `None` exactly when no judgment was
+    /// published: no detection; a configuration that computes no score
+    /// ([`crate::ScanConfig::computes_score`]: the `Frame` profile, every
+    /// axis skipped); a judgment the budget interrupted
+    /// (`trace.budget_exhausted` is then `Some(true)`); a contained internal
+    /// fault in the score computation. Never partial, never a zero.
+    /// Per-detection scoring for multi-QR scenes is a future additive
+    /// extension.
     pub score: Option<Score>,
     /// Machine-actionable improvement hints.
     pub hints: Vec<Hint>,
@@ -853,6 +1074,8 @@ mod tests {
                     text: "https://qrcode-ai.com".into(),
                     raw: b"https://qrcode-ai.com".to_vec(),
                     charset: Charset::Utf8,
+                    eci: None,
+                    fnc1: None,
                 },
                 payload: Payload::Text,
                 corners: Some([
@@ -897,6 +1120,7 @@ mod tests {
                 }],
                 engine_panics: 0,
                 total_ms: 12.5,
+                budget_exhausted: Some(false),
             },
             versions: Versions::current(),
         }
@@ -935,17 +1159,94 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "serde")]
+    #[test]
+    fn content_wire_names_pinned() {
+        for (charset, wire) in [
+            (Charset::Utf8, "utf8"),
+            (Charset::ShiftJis, "shift_jis"),
+            (Charset::Latin1, "latin1"),
+            (Charset::Gb18030, "gb18030"),
+            (Charset::Eci, "eci"),
+            (Charset::Unknown, "unknown"),
+        ] {
+            assert_eq!(serde_json::to_value(charset).unwrap(), wire);
+            let back: Charset = serde_json::from_value(wire.into()).unwrap();
+            assert_eq!(back, charset);
+            assert_eq!(charset.is_lossy(), charset == Charset::Unknown, "{wire}");
+        }
+        // a newer scanner's label reads as a complete decoding, and is never
+        // written back
+        let future: Charset = serde_json::from_str("\"future_x\"").unwrap();
+        assert_eq!(future, Charset::Unrecognized);
+        assert!(!future.is_lossy());
+        assert!(serde_json::to_string(&Charset::Unrecognized).is_err());
+        for (position, wire) in [
+            (Fnc1Position::First, "first"),
+            (Fnc1Position::Second, "second"),
+        ] {
+            assert_eq!(serde_json::to_value(position).unwrap(), wire);
+        }
+        let fifth: Fnc1Position = serde_json::from_str("\"fifth\"").unwrap();
+        assert_eq!(fifth, Fnc1Position::Unrecognized);
+        assert!(serde_json::to_string(&Fnc1Position::Unrecognized).is_err());
+        assert_eq!(
+            serde_json::to_value(EciSegment {
+                designator: 4,
+                start: 0
+            })
+            .unwrap(),
+            serde_json::json!({"designator": 4, "start": 0})
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn content_optional_keys_are_absent_or_present() {
+        let content = |eci, fnc1| DecodedContent {
+            text: "hi".into(),
+            raw: b"hi".to_vec(),
+            charset: Charset::Utf8,
+            eci,
+            fnc1,
+        };
+        assert_eq!(
+            serde_json::to_value(content(None, None)).unwrap(),
+            serde_json::json!({"text": "hi", "raw": "aGk=", "charset": "utf8"})
+        );
+        assert_eq!(
+            serde_json::to_value(content(Some(Vec::new()), Some(Fnc1Position::First))).unwrap(),
+            serde_json::json!({
+                "text": "hi", "raw": "aGk=", "charset": "utf8", "eci": [], "fnc1": "first"
+            })
+        );
+        // reports without the keys read with both absent
+        let old: DecodedContent =
+            serde_json::from_str(r#"{"text":"hi","raw":"aGk=","charset":"utf8"}"#).unwrap();
+        assert_eq!(old, content(None, None));
+        let unknown: DecodedContent =
+            serde_json::from_str(r#"{"text":"日本中文","raw":"k/qWe9bQzsQ=","charset":"unknown"}"#)
+                .unwrap();
+        assert_eq!((unknown.charset, unknown.eci), (Charset::Unknown, None));
+        assert_eq!(
+            unknown.raw,
+            [0x93, 0xFA, 0x96, 0x7B, 0xD6, 0xD0, 0xCE, 0xC4]
+        );
+    }
+
     #[test]
     fn versions_pin_the_contract() {
         let v = Versions::current();
         assert_eq!(v.scanner, env!("CARGO_PKG_VERSION"));
         assert_eq!(
-            v.pipeline, 2,
-            "pipeline v2 = alpha flatten before decode; a bump must be deliberate"
+            v.pipeline, 3,
+            "pipeline v3 = collect-then-reconcile reads and exact content; \
+             a bump must be deliberate"
         );
         assert_eq!(
-            v.score_contract, 4,
-            "score contract v4 = alpha inputs score their flattened image"
+            v.score_contract, 5,
+            "score contract v5 = the margin cap on the verified stream, interrupted \
+             judgments absent, probes matched by content identity"
         );
     }
 
@@ -956,6 +1257,34 @@ mod tests {
         assert!(report.score.is_none());
         assert!(report.hints.is_empty());
         assert_eq!(report.versions, Versions::current());
+    }
+
+    /// Every report this crate writes says whether the budget cut planned
+    /// work; a report without the key predates it, and reads as unknown —
+    /// never as "final".
+    #[cfg(feature = "serde")]
+    #[test]
+    fn the_budget_flag_is_written_always_and_read_absent_as_unknown() {
+        let old: PipelineTrace =
+            serde_json::from_str(r#"{"stages":[],"engine_panics":0,"total_ms":0.0}"#).unwrap();
+        assert_eq!(old.budget_exhausted, None, "absent reads as unknown");
+        assert_eq!(
+            serde_json::to_value(&old).unwrap(),
+            serde_json::json!({"stages": [], "engine_panics": 0, "total_ms": 0.0}),
+            "an unknown flag is re-written absent, never as false"
+        );
+        let cut: PipelineTrace = serde_json::from_str(
+            r#"{"stages":[],"engine_panics":0,"total_ms":0.0,"budget_exhausted":true}"#,
+        )
+        .unwrap();
+        assert_eq!(cut.budget_exhausted, Some(true));
+        assert_eq!(
+            serde_json::to_value(&cut).unwrap()["budget_exhausted"],
+            true
+        );
+        assert_eq!(PipelineTrace::default().budget_exhausted, Some(false));
+        let empty = serde_json::to_value(ScanReport::empty()).unwrap();
+        assert_eq!(empty["trace"]["budget_exhausted"], false, "{empty}");
     }
 
     #[test]
@@ -1031,6 +1360,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stress_axes_parse_from_their_wire_names_only() {
+        // the bindings' string-config seam: every axis from the name the
+        // report writes for it, and nothing from any other spelling
+        for (name, axis) in [
+            ("resolution", StressAxis::Resolution),
+            ("blur", StressAxis::Blur),
+            ("contrast", StressAxis::Contrast),
+            ("perspective", StressAxis::Perspective),
+            ("rotation", StressAxis::Rotation),
+            ("lighting", StressAxis::Lighting),
+        ] {
+            assert_eq!(StressAxis::from_name(name), Some(axis), "{name}");
+            #[cfg(feature = "serde")]
+            assert_eq!(serde_json::to_string(&axis).unwrap(), format!("\"{name}\""));
+        }
+        for name in ["", "Blur", "BLUR", "exposure", "tilt"] {
+            assert_eq!(StressAxis::from_name(name), None, "{name}");
+        }
+    }
+
     #[cfg(feature = "serde")]
     #[test]
     fn schema_snapshot_full() {
@@ -1045,6 +1395,88 @@ mod tests {
         insta::assert_json_snapshot!("scan_report_empty", ScanReport::empty(), {
             ".versions.scanner" => "[crate-version]"
         });
+    }
+
+    /// Bindings that convert through serde's data model — pythonize over a
+    /// `serde_json::Value`, serde-wasm-bindgen — receive what the JSON text
+    /// shows: an `f32` field arrives as the decimal `serde_json` prints for
+    /// it, never as the `f32` itself widened (0.612 as 0.6119999885559082).
+    #[cfg(feature = "serde")]
+    #[test]
+    fn float_fields_reach_serde_as_the_decimals_the_json_shows() {
+        let sum = 0.1_f32 + 0.2_f32; // f32 arithmetic: 0.3
+        let third = 1.0_f32 / 3.0; // 0.33333334
+        let point = Point { x: 0.612, y: third };
+        let value = serde_json::to_value(point).unwrap();
+        assert_eq!(
+            (value["x"].as_f64(), value["y"].as_f64()),
+            (Some(0.612), Some(0.333_333_34))
+        );
+        let uec = UecReport {
+            margin: sum,
+            grade: UecGrade::A,
+            worst_block_errors: 0,
+            worst_block_capacity: 26,
+        };
+        assert_eq!(
+            serde_json::to_value(uec).unwrap()["margin"].as_f64(),
+            Some(0.3)
+        );
+        let structural = StructuralReport {
+            finder_integrity: [0.612, third, sum],
+            quiet_zone_ok: true,
+        };
+        assert_eq!(
+            serde_json::to_value(structural).unwrap()["finder_integrity"],
+            serde_json::json!([0.612, 0.333_333_34, 0.3])
+        );
+        let parameter = IsoParameter {
+            value: 0.612,
+            grade: IsoGrade::A,
+        };
+        assert_eq!(
+            serde_json::to_value(parameter).unwrap()["value"].as_f64(),
+            Some(0.612)
+        );
+        assert_eq!(
+            serde_json::to_value(full_alpha()).unwrap()["coverage"].as_f64(),
+            Some(0.612)
+        );
+        // the JSON text is the f32's own shortest decimal, as it always was
+        assert_eq!(
+            serde_json::to_string(&point).unwrap(),
+            r#"{"x":0.612,"y":0.33333334}"#
+        );
+    }
+
+    /// The decimal spelling never moves a number, and moves no JSON byte
+    /// where the report's values live: every finite `f32` of a sweep over
+    /// the whole bit range reads back as the same number, and from 1e-5 to
+    /// 1e13 (and zero) as the same text.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn the_decimal_spelling_keeps_the_json_text() {
+        let mut same_text = 0;
+        for bits in (0..=u32::MAX).step_by(65_521) {
+            let value = f32::from_bits(bits);
+            if !value.is_finite() {
+                continue;
+            }
+            let widened = serde_json::to_string(&value).unwrap();
+            let decimal = serde_json::to_string(&decimal::of(value)).unwrap();
+            assert_eq!(
+                widened.parse::<f64>().unwrap().to_bits(),
+                decimal.parse::<f64>().unwrap().to_bits(),
+                "{value:e}: {widened} vs {decimal}"
+            );
+            // ±0: every bit below the sign is clear
+            let zero = bits.trailing_zeros() >= 31;
+            if zero || (1e-5..1e13).contains(&value.abs()) {
+                assert_eq!(widened, decimal, "{value:e}");
+                same_text += 1;
+            }
+        }
+        assert!(same_text > 10_000, "{same_text}");
     }
 
     #[cfg(feature = "serde")]

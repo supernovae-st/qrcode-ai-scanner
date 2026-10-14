@@ -7,8 +7,10 @@
 //
 // Additive tolerance is MANDATORY (the Rust enums are `#[non_exhaustive]`, the
 // schema says consumers MUST accept unknown values): every enum has an
-// `unknown` fallback and `Payload`/`Hint` have catch-all variants that keep the
-// raw map. `fromJson` NEVER throws on an unknown enum/kind.
+// `unknown` fallback — `Charset` and `Fnc1Position` call theirs
+// `unrecognized`, because `unknown` is a real charset wire value — and
+// `Payload`/`Hint` have catch-all variants that keep the raw map. `fromJson`
+// NEVER throws on an unknown enum/kind.
 //
 // R2: `scripts/sync-report-types` could emit this from the same SSOT; for now
 // it is hand-maintained, pinned by the round-trip test in test/report_test.dart.
@@ -94,17 +96,52 @@ enum EcLevel {
       };
 }
 
+/// How [DecodedContent.text] relates to [DecodedContent.raw] (spec/01 §
+/// Content). [unknown] is the only lossy value, forever; every other value,
+/// [unrecognized] included, is a complete decoding the scanner checked (the
+/// declared interpretation only when [DecodedContent.eci] lists it).
 enum Charset {
   utf8,
   shiftJis,
   latin1,
-  unknown;
+
+  /// WHATWG gb18030 decoding of raw.
+  gb18030,
+
+  /// raw decoded under [DecodedContent.eci].
+  eci,
+
+  /// Not a complete decoding (U+FFFD = unread bytes): use raw.
+  unknown,
+
+  /// A newer wire value: still a complete, checked decoding.
+  unrecognized;
+
+  /// True only for [unknown], forever.
+  bool get isLossy => this == Charset.unknown;
 
   static Charset from(Object? v) => switch (v) {
         'utf8' => utf8,
         'shift_jis' => shiftJis,
         'latin1' => latin1,
-        _ => unknown,
+        'gb18030' => gb18030,
+        'eci' => eci,
+        'unknown' => unknown,
+        _ => unrecognized,
+      };
+}
+
+/// FNC1 position: [first] GS1 mode; [second] AIM application mode (raw
+/// starts with the application indicator).
+enum Fnc1Position {
+  first,
+  second,
+  unrecognized;
+
+  static Fnc1Position from(Object? v) => switch (v) {
+        'first' => first,
+        'second' => second,
+        _ => unrecognized,
       };
 }
 
@@ -195,13 +232,34 @@ class Gs1Element {
       Gs1Element(_str(j['ai']), _str(j['value']));
 }
 
+/// One ECI designator (ISO/IEC 18004 §7.4.2): number 0–999999 and byte
+/// offset into raw (-1 if missing).
+class EciSegment {
+  final int designator;
+  final int start;
+  const EciSegment(this.designator, this.start);
+  factory EciSegment.fromJson(Map<String, dynamic> j) =>
+      EciSegment(_int(j['designator']) ?? -1, _int(j['start']) ?? -1);
+}
+
+/// One exact reading of a symbol's data — compare contents by identity
+/// (symbology, raw, fnc1, compatible eci), never by text.
 class DecodedContent {
   final String text;
 
-  /// Original payload bytes (base64-decoded from the wire `raw` string).
+  /// QR family: the original bytes; other symbologies: the bytes of the
+  /// engine's reading, which under an ECI can omit a segment the engine
+  /// could not decode (base64-decoded from the wire `raw` string).
   final Uint8List raw;
   final Charset charset;
-  const DecodedContent(this.text, this.raw, this.charset);
+
+  /// null = none observed (key absent); empty = ECI signalled but not located.
+  final List<EciSegment>? eci;
+
+  /// null = none observed or not reported by the symbology.
+  final Fnc1Position? fnc1;
+  const DecodedContent(this.text, this.raw, this.charset,
+      [this.eci, this.fnc1]);
 
   factory DecodedContent.fromJson(Map<String, dynamic> j) {
     Uint8List raw;
@@ -210,7 +268,14 @@ class DecodedContent {
     } catch (_) {
       raw = Uint8List(0);
     }
-    return DecodedContent(_str(j['text']), raw, Charset.from(j['charset']));
+    final eci = j['eci'];
+    final fnc1 = j['fnc1'];
+    return DecodedContent(
+        _str(j['text']),
+        raw,
+        Charset.from(j['charset']),
+        eci is List ? _objList(eci).map(EciSegment.fromJson).toList() : null,
+        fnc1 == null ? null : Fnc1Position.from(fnc1));
   }
 }
 
@@ -484,6 +549,9 @@ class UecReport {
   // 0.0-1.0 (1.0 = pristine) — int truncation read every real margin as 0.
   final double margin;
   final LetterGrade grade;
+  // Errors the worst RS block corrected, of its capacity (parity codewords);
+  // for a detection whose engines include rescue, the errors-only count of
+  // its stream: a distrust marker (typically margin 0), not errors corrected.
   final int worstBlockErrors, worstBlockCapacity;
   const UecReport(
       this.margin, this.grade, this.worstBlockErrors, this.worstBlockCapacity);
@@ -508,7 +576,14 @@ class Iso15415Report {
   final IsoParameter modulation;
   final IsoParameter axialNonuniformity;
   final IsoParameter fixedPatternDamage;
+
+  /// The synthetic UEC margin in ISO bands — null without a measured margin,
+  /// or withheld when the `uec` check is skipped (its grade still counts in
+  /// [overall]).
   final IsoParameter? unusedErrorCorrection;
+
+  /// The ISO rule: the lowest MEASURED parameter — a withheld one counts
+  /// too, so a skipped check never moves it.
   final LetterGrade overall;
   const Iso15415Report(
       this.symbolContrast,
@@ -539,6 +614,10 @@ class Score {
   final int weightsRun;
   final List<AxisScore> axes;
   final StructuralReport? structural;
+
+  /// The synthetic UEC margin of the verified orientation's stream — null
+  /// when no stream error-corrects errors-only, or when the `uec` check is
+  /// skipped (the measured margin still caps [value]).
   final UecReport? uec;
   final Iso15415Report? iso15415;
   const Score(this.value, this.grade, this.weightsRun, this.axes,
@@ -602,7 +681,7 @@ class AlphaProbe {
   /// Neutral background luma composited under the content (0-255).
   final int backgroundLuma;
 
-  /// The composite still decoded to the primary symbol's text.
+  /// One of the composite's reads denotes the same content as the primary.
   final bool decoded;
   const AlphaProbe(this.backgroundLuma, this.decoded);
   factory AlphaProbe.fromJson(Map<String, dynamic> j) => AlphaProbe(
@@ -664,7 +743,9 @@ class AlphaReport {
   /// The opposite background rescued a zero-detection scan (auto only).
   final bool fallbackUsed;
 
-  /// Full profile only; null when skipped or budget-exhausted.
+  /// Full profile only; null when skipped, cut by the budget
+  /// (`trace.budgetExhausted == true`), or when no probe class reads the
+  /// design.
   final AlphaEnvelope? envelope;
   const AlphaReport(this.coverage, this.contentLuma, this.mode,
       this.background, this.fallbackUsed, this.envelope);
@@ -790,12 +871,20 @@ class StageTrace {
 class PipelineTrace {
   final List<StageTrace> stages;
   final int enginePanics;
+
+  /// Wall-clock milliseconds of the ladder walk(s) only.
   final double totalMs;
-  const PipelineTrace(this.stages, this.enginePanics, this.totalMs);
+
+  /// true: partial (the budget cut planned work); false: final; null: a
+  /// report older than score_contract 5 (unknown, never false).
+  final bool? budgetExhausted;
+  const PipelineTrace(this.stages, this.enginePanics, this.totalMs,
+      [this.budgetExhausted]);
   factory PipelineTrace.fromJson(Map<String, dynamic> j) => PipelineTrace(
         _objList(j['stages']).map(StageTrace.fromJson).toList(),
         _int(j['engine_panics']) ?? 0,
         _double(j['total_ms']),
+        j['budget_exhausted'] as bool?,
       );
 }
 
@@ -813,10 +902,15 @@ class Versions {
 // ─────────────────────────── ScanReport ───────────────────────────
 
 class ScanReport {
-  /// Empty = no QR found (a valid outcome, not an error).
+  /// Empty = no QR found (a valid outcome, not an error) — final only when
+  /// `trace.budgetExhausted == false`.
   final List<Detection> detections;
 
-  /// null in the `frame` profile.
+  /// The judgment of `detections[0]`; null when no judgment was published: no
+  /// detection · a configuration that computes no score (the `frame`
+  /// profile, every axis skipped) · a judgment the budget interrupted
+  /// (`trace.budgetExhausted == true`: not judged, retry with a larger or no
+  /// budget) · a contained fault. Never partial; never read null as 0.
   final Score? score;
   final List<Hint> hints;
 

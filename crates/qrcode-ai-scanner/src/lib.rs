@@ -7,13 +7,21 @@
 //!
 //! - **No QR found is `Ok`** with empty detections — `Err` is reserved for real
 //!   faults (corrupt image, invalid buffer, cancellation).
-//! - **Deterministic**: same bytes + same config + same versions ⇒ the same
-//!   attempt sequence, bit for bit on a given platform/build — no RNG
-//!   anywhere. Two caveats, both bounded: a wall-clock budget makes the CUT
-//!   point machine-dependent (set `budget_ms: None` for strictly identical
-//!   reports), and CROSS-platform the libm transcendentals (warp kernels,
-//!   gaussian blur) may differ in the last ulp — a stress cell sitting
-//!   exactly on a knee can flip between platforms.
+//! - **Deterministic**: same bytes + same config + same scanner build ⇒ the
+//!   same report, bit for bit on a given platform (wall clock aside) — no
+//!   RNG anywhere. Three caveats, all bounded:
+//!   - a wall-clock budget makes the CUT point machine-dependent. A cut
+//!     report says so (`trace.budget_exhausted: true`), one that does not
+//!     is the unbounded report, and a judgment the budget cannot complete
+//!     is absent, never partial. Set `budget_ms: None` for strictly
+//!     identical reports; a cancelled scan stays `QRS-005`;
+//!   - CROSS-platform the libm transcendentals (warp kernels, gaussian
+//!     blur) may differ in the last ulp — a stress cell sitting exactly on
+//!     a knee can flip between platforms;
+//!   - rxing's PDF417 decoder (0.9.1–0.9.3) breaks codeword-confidence ties
+//!     in randomized `HashMap` order, so a PDF417 symbol near a decode
+//!     threshold can score, and a marginal one decode, differently between
+//!     runs.
 //! - **Sync by design**: async belongs to the bindings (napi/wasm), never here.
 //! - **Engine-isolated**: third-party decoder panics are caught at the engine
 //!   boundary and recorded in the trace; the ladder continues.
@@ -45,9 +53,10 @@ pub use ladder::{
 pub use payload::Payload;
 pub use report::{
     AlphaEnvelope, AlphaMode, AlphaPaletteProbe, AlphaPlacement, AlphaProbe, AlphaReport,
-    AxisScore, Charset, DecodedContent, Detection, EcLevel, EngineKind, Grade, Hint,
-    Iso15415Report, IsoGrade, IsoParameter, PipelineTrace, PlateColor, Point, QrMeta, ScanReport,
-    Score, StageTrace, StressAxis, StructuralReport, Symbology, UecGrade, UecReport, Versions,
+    AxisScore, Charset, DecodedContent, Detection, EcLevel, EciSegment, EngineKind, Fnc1Position,
+    Grade, Hint, Iso15415Report, IsoGrade, IsoParameter, PipelineTrace, PlateColor, Point, QrMeta,
+    ScanReport, Score, StageTrace, StressAxis, StructuralReport, Symbology, UecGrade, UecReport,
+    Versions,
 };
 
 /// Fuzz-only entry points — cargo-fuzz builds the whole graph with
@@ -55,18 +64,20 @@ pub use report::{
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub mod fuzzing {
-    /// Drive both text classifiers (plain + FNC1) — they parse
-    /// attacker-controlled decoded QR content and must never panic.
+    /// Drive every text classifier (plain, FNC1 first, FNC1 second) —
+    /// they parse attacker-controlled decoded content and must never panic.
     pub fn classify_text(text: &str) {
         let _ = crate::payload::classify(text);
         let _ = crate::payload::classify_fnc1(text);
+        let _ = crate::classify_aim_application(text);
     }
 
-    /// Drive the S5 rescue bitstream parser over attacker-controlled data
-    /// codewords. A rescued stream never reaches the engines, so this parser
-    /// owns the decode and must never panic (refusal is the correct answer).
+    /// Drive the shared segment parser over attacker-controlled data
+    /// codewords, then the content interpretation over what it parsed. A
+    /// rescued stream never reaches the engines, so these own the decode
+    /// and must never panic (refusal is the correct answer).
     pub fn parse_bitstream(data: &[u8], version: u8) {
-        let _ = crate::rescue::fuzz_api::parse_bitstream(data, version);
+        crate::rescue::fuzz_api::parse_bitstream(data, version);
     }
 
     /// Drive the errors-and-erasures RS corrector over an adversarial block,
@@ -126,80 +137,113 @@ impl Scanner {
         // OPPOSITE background and walks the ladder once more (within the
         // same budget) — a mis-called content mean must never turn a
         // decodable design into a false "no detection". Both walks stay in
-        // the trace; `fallback_used` marks a RESCUE, not an attempt.
+        // the trace; `fallback_used` marks a RESCUE, not an attempt. A
+        // stream the first walk refused stays refused in the second: it
+        // starts from the first walk's refusals and parsed contents.
         let mut fallback_used = false;
         if outcome.merged.is_empty()
             && let Some(context) = &mut alpha_context
             && let Some((alt_planes, alt_background)) = context.opposite_planes()
         {
-            let alt_outcome = ladder::run(&alt_planes, &self.config, cancel, deadline)?;
-            let rescued = !alt_outcome.merged.is_empty();
-            outcome.trace.stages.extend(alt_outcome.trace.stages);
-            outcome.trace.engine_panics = outcome
-                .trace
-                .engine_panics
-                .saturating_add(alt_outcome.trace.engine_panics);
-            outcome.trace.total_ms += alt_outcome.trace.total_ms;
-            if rescued {
-                outcome.merged = alt_outcome.merged;
+            // the fold carries the second walk's cut into the trace
+            let alt_outcome =
+                ladder::run_seeded(&alt_planes, &self.config, cancel, deadline, outcome.seed())?;
+            if outcome.fold_fallback(alt_outcome) {
                 planes = alt_planes;
                 context.adopt_background(alt_background);
                 fallback_used = true;
             }
         }
-        // Score the primary (first) detection when the profile asks for it.
+        // Score the primary (first) detection when the profile asks for it;
+        // its stress cells and envelope probes match its content (aligned
+        // with it in `contents`), never its text. Each stage runs under its
+        // own bound on the scan's deadline, which also tallies the decoder
+        // panics its decodes caught (`trace.engine_panics`).
         // The scoring stage shares the engine panic posture: a panic in the
         // math path degrades to "no score", never a crash (native unwind;
-        // on wasm panics trap regardless — documented limitation).
-        let scored = match (outcome.merged.first(), self.config.score_depth) {
-            (Some(detection), depth @ (ScoreDepth::Reduced | ScoreDepth::Full)) => {
+        // on wasm panics trap regardless — documented limitation). A
+        // contained panic is a fault, not a cut: the judgment is absent
+        // whatever the budget, and no envelope is planned after it.
+        let primary = outcome
+            .merged
+            .first()
+            .zip(outcome.contents.first().map(|(key, _)| key));
+        // Every planned unit the deadline prevents after the walks — the
+        // judgment's, the envelope's — leaves the report partial
+        // (`trace.budget_exhausted`); the walks' own cuts are in the trace.
+        let mut cut = false;
+        let mut probe_panics = 0u8;
+        let mut faulted = false;
+        let scored = match (primary, self.config.score_depth) {
+            (Some((detection, key)), depth @ (ScoreDepth::Reduced | ScoreDepth::Full)) => {
+                let mut bound = score::Bound::new(cancel, deadline);
                 let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     score::evaluate(
                         &planes.luma,
                         detection,
+                        key,
                         depth,
                         &self.config.score_skip_axes,
                         &self.config.score_skip_checks,
-                        cancel,
-                        deadline,
+                        &mut bound,
                     )
                 }));
-                match attempt {
-                    Ok(result) => result?,
-                    Err(_) => None,
+                probe_panics = probe_panics.saturating_add(bound.panics());
+                cut |= bound.cut();
+                if let Ok(result) = attempt {
+                    result?
+                } else {
+                    faulted = true;
+                    None
                 }
             }
             _ => None,
         };
         // The placement envelope — Full depth only (the sweep is a quality-
         // gate diagnostic), skippable through the same seam as every other
-        // report section. Same panic posture as scoring: the sweep shares
-        // the score module's math path, so a panic there degrades to "no
-        // envelope", never a crash out of the public API.
-        let envelope = match (&alpha_context, outcome.merged.first()) {
-            (Some(context), Some(primary))
-                if self.config.score_depth == ScoreDepth::Full
+        // report section, and not planned after a contained fault of the
+        // judgment: reported absent like any envelope not computed, it can
+        // never make that fault read as a cut. Same panic posture as
+        // scoring: the sweep shares the score module's math path, so a panic
+        // there degrades to "no envelope", never a crash out of the public
+        // API.
+        let envelope = match (&alpha_context, primary) {
+            (Some(context), Some((detection, key)))
+                if !faulted
+                    && self.config.score_depth == ScoreDepth::Full
                     && !self
                         .config
                         .score_skip_checks
                         .contains(&ScoreCheck::AlphaEnvelope) =>
             {
+                let mut bound = score::Bound::new(cancel, deadline);
                 let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     context.envelope(
-                        &primary.text,
-                        primary.symbology,
+                        key,
+                        detection.symbology,
                         &self.config.alpha_palette,
-                        cancel,
-                        deadline,
+                        &mut bound,
                     )
                 }));
+                probe_panics = probe_panics.saturating_add(bound.panics());
                 match attempt {
-                    Ok(result) => result?,
+                    Ok(result) => match result? {
+                        alpha::Envelope::Measured(envelope) => Some(envelope),
+                        alpha::Envelope::Undecodable => None,
+                        alpha::Envelope::Cut => {
+                            cut = true;
+                            None
+                        }
+                    },
                     Err(_) => None,
                 }
             }
             _ => None,
         };
+        outcome.trace.engine_panics = outcome.trace.engine_panics.saturating_add(probe_panics);
+        if cut {
+            outcome.trace.budget_exhausted = Some(true);
+        }
         let alpha_report =
             alpha_context.map(|context| context.into_report(fallback_used, envelope));
         Ok(build_report(outcome, scored, alpha_report))
@@ -260,9 +304,64 @@ impl ScannerBuilder {
     }
 }
 
-/// Assemble the public report from ladder output. Text + charset always come
-/// from our own resolution over raw bytes (consistent pair; exotic ECIs are a
-/// documented limit — `raw` preserves the truth for consumers).
+/// The text classifier for FNC1-in-second-position data (spec/05): an
+/// AIM-assigned application's data, never GS1 — the plain classifier
+/// without its no-FNC1 GS1 sniff (the only route to `Gs1` it has).
+fn classify_aim_application(text: &str) -> Payload {
+    match payload::classify(text) {
+        Payload::Gs1 { .. } => Payload::Text,
+        payload => payload,
+    }
+}
+
+/// FNC1-in-first-position data without a verified text reading: the
+/// element string is not parsed (spec/05).
+fn gs1_not_parsed() -> Payload {
+    Payload::Gs1 {
+        elements: Vec::new(),
+        gtin: None,
+        conformant: false,
+        issues: vec![
+            "content has no verified text reading (charset unknown): element string not parsed"
+                .to_owned(),
+        ],
+    }
+}
+
+/// What a content publishes of its account: the located designators,
+/// `[]` for a declaration that was signalled but not located, no key
+/// otherwise; and the FNC1 position when one was observed.
+fn wire_account(
+    key: &engine::content::ContentKey,
+) -> (Option<Vec<EciSegment>>, Option<Fnc1Position>) {
+    use engine::content::{EciEvidence, Fnc1};
+    let eci = match &key.eci {
+        EciEvidence::Located(marks) => Some(
+            marks
+                .iter()
+                .map(|mark| EciSegment {
+                    designator: mark.value,
+                    start: u32::try_from(mark.start).unwrap_or(u32::MAX),
+                })
+                .collect(),
+        ),
+        EciEvidence::Signalled => Some(Vec::new()),
+        EciEvidence::NoEci | EciEvidence::Unobserved => None,
+    };
+    let fnc1 = match key.fnc1 {
+        Fnc1::First => Some(Fnc1Position::First),
+        Fnc1::Second => Some(Fnc1Position::Second),
+        Fnc1::None | Fnc1::Unobserved => None,
+    };
+    (eci, fnc1)
+}
+
+/// Assemble the public report from ladder output. Each detection's content
+/// is the scanner's one reading of the reconciled content
+/// (`engine::content::read`): `raw` the original payload, `eci` and `fnc1`
+/// its observed account, `text` and `charset` per spec/01 rules 1-3. The
+/// payload is routed by FNC1 position, symbology and charset (spec/05): no
+/// structured reading is ever built from text the scanner could not read.
 fn build_report(
     outcome: ladder::LadderOutcome,
     scored: Option<(Score, Vec<Hint>)>,
@@ -295,15 +394,24 @@ fn build_report(
     let detections = outcome
         .merged
         .into_iter()
-        .map(|m| {
-            // payload routing is symbology-aware: FNC1-led carriers (QR
-            // ]Q3/]Q4 · DataMatrix ]d2 · GS1-128 ]C1) are element strings;
-            // retail 1D symbols ARE a GTIN (AI 01 semantics); everything
-            // else goes through the text classifier
-            let payload = if m.fnc1 {
+        .zip(outcome.contents)
+        .map(|(m, (key, _))| {
+            let (eci, fnc1) = wire_account(&key);
+            // payload routing (spec/05): FNC1-first carriers are element
+            // strings; retail 1D symbols ARE a GTIN (AI 01 semantics); text
+            // the scanner could not read is text; FNC1-second data belongs
+            // to an AIM application; everything else goes through the text
+            // classifier
+            let payload = if m.fnc1 && m.charset.is_lossy() {
+                gs1_not_parsed()
+            } else if m.fnc1 {
                 payload::classify_fnc1(&m.text)
             } else if m.symbology.is_retail_gtin() {
                 payload::classify_retail_gtin(&m.text, m.symbology)
+            } else if m.charset.is_lossy() {
+                Payload::Text
+            } else if fnc1 == Some(Fnc1Position::Second) {
+                classify_aim_application(&m.text)
             } else {
                 payload::classify(&m.text)
             };
@@ -313,6 +421,8 @@ fn build_report(
                     text: m.text,
                     raw: m.raw,
                     charset: m.charset,
+                    eci,
+                    fnc1,
                 },
                 payload,
                 corners: m.corners,
@@ -385,5 +495,147 @@ mod tests {
             .scan(ImageInput::luma8(&data, 64, 64))
             .expect("default 10_000px / 64MP limits accept a 64px plane");
         assert!(report.detections.is_empty(), "a blank plane carries no QR");
+    }
+
+    /// A transparent v3-M symbol as RGBA: dark modules opaque black, every
+    /// other pixel fully transparent (6 px modules, 4-module margin) — the
+    /// `auto` flatten reads it over white, the Full profile scores it and
+    /// measures its placement envelope. Returns the buffer and its side.
+    fn transparent_symbol() -> (Vec<u8>, u32) {
+        let code = qrcode::QrCode::with_version(
+            b"https://qrc-ai.com/probe",
+            qrcode::Version::Normal(3),
+            qrcode::EcLevel::M,
+        )
+        .unwrap();
+        let width = code.width();
+        let side = (width + 8) * 6;
+        let mut rgba = vec![0u8; side * side * 4];
+        for (i, color) in code.to_colors().iter().enumerate() {
+            if *color == qrcode::Color::Dark {
+                let (mx, my) = (i % width + 4, i / width + 4);
+                for dy in 0..6 {
+                    for dx in 0..6 {
+                        let at = ((my * 6 + dy) * side + mx * 6 + dx) * 4;
+                        rgba[at + 3] = 255;
+                    }
+                }
+            }
+        }
+        (rgba, u32::try_from(side).unwrap())
+    }
+
+    #[cfg(feature = "engine-rxing")]
+    #[test]
+    fn decoder_panics_in_score_cells_and_envelope_probes_reach_the_trace() {
+        use crate::engine::PROBE_PANICS;
+        // the walk reads the symbol with no injected fault; the judgment's
+        // cells and the envelope's probes decode it alone, and each of their
+        // rxing passes panics — caught and tallied at the engine boundary.
+        // The cells are judged as before (rqrr still reads them): only the
+        // count is new
+        let (rgba, side) = transparent_symbol();
+        let mut config = super::ScanConfig::full();
+        config.budget_ms = None;
+        let scanner = Scanner::builder()
+            .profile(super::ScanProfile::Custom(config))
+            .build();
+        let clean = scanner.scan(ImageInput::rgba8(&rgba, side, side)).unwrap();
+        assert_eq!(clean.trace.engine_panics, 0, "no real decoder panic");
+        PROBE_PANICS.with(|injected| injected.set(Some(0)));
+        let report = scanner.scan(ImageInput::rgba8(&rgba, side, side));
+        let injected = PROBE_PANICS
+            .with(|injected| injected.replace(None))
+            .unwrap();
+        let report = report.unwrap();
+        assert!(injected > 0, "the probes decoded");
+        assert_eq!(
+            u32::from(report.trace.engine_panics),
+            injected.min(u32::from(u8::MAX)),
+            "every caught probe panic is counted once"
+        );
+        assert_eq!(
+            report.detections, clean.detections,
+            "the walk reads as without the fault: only single-symbology passes panic"
+        );
+        assert!(report.score.is_some(), "the judgment completes");
+        assert!(
+            report
+                .alpha
+                .as_ref()
+                .is_some_and(|alpha| alpha.envelope.is_some()),
+            "the envelope completes: {:?}",
+            report.alpha
+        );
+    }
+
+    #[test]
+    fn a_contained_judgment_fault_plans_no_envelope_and_cuts_nothing() {
+        use crate::score::JUDGMENT_FAULT;
+        // a judgment that faults is absent whatever the budget: no envelope
+        // is planned after it, so no unit the deadline prevents can make the
+        // report read as cut — an absent score with detections and a final
+        // trace stays a fault
+        let (rgba, side) = transparent_symbol();
+        let mut config = super::ScanConfig::full();
+        config.budget_ms = None;
+        let scanner = Scanner::builder()
+            .profile(super::ScanProfile::Custom(config))
+            .build();
+        let whole = scanner.scan(ImageInput::rgba8(&rgba, side, side)).unwrap();
+        assert!(
+            whole.score.is_some()
+                && whole
+                    .alpha
+                    .as_ref()
+                    .is_some_and(|alpha| alpha.envelope.is_some()),
+            "precondition: judged, envelope measured"
+        );
+        JUDGMENT_FAULT.with(|fault| fault.set(true));
+        let faulted = scanner.scan(ImageInput::rgba8(&rgba, side, side));
+        JUDGMENT_FAULT.with(|fault| fault.set(false));
+        let faulted = faulted.unwrap();
+        assert_eq!(faulted.detections, whole.detections);
+        assert!(faulted.score.is_none(), "the fault is contained");
+        let alpha = faulted.alpha.as_ref().expect("the alpha block stays");
+        assert!(alpha.envelope.is_none(), "no envelope after the fault");
+        assert!(faulted.hints.is_empty(), "{:?}", faulted.hints);
+        assert_eq!(faulted.trace.budget_exhausted, Some(false));
+    }
+
+    #[test]
+    fn a_background_plate_is_black_from_content_luma_128() {
+        // the plate contrasts with the content: white behind content darker
+        // than mid-grey (luma below 128), black from 128 up — the symbol's
+        // modules here are opaque grey 128
+        let (mut rgba, side) = transparent_symbol();
+        for px in rgba.chunks_exact_mut(4) {
+            if px[3] == 255 {
+                px[..3].fill(128);
+            }
+        }
+        let mut config = super::ScanConfig::full();
+        config.budget_ms = None;
+        let scanner = Scanner::builder()
+            .profile(super::ScanProfile::Custom(config))
+            .build();
+        let report = scanner.scan(ImageInput::rgba8(&rgba, side, side)).unwrap();
+        let alpha = report.alpha.as_ref().expect("a transparent input");
+        assert_eq!(alpha.content_luma, 128);
+        let plates: Vec<_> = report
+            .hints
+            .iter()
+            .filter_map(|hint| match hint {
+                super::Hint::AddBackgroundPlate { color } => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            plates,
+            [super::report::PlateColor::Black],
+            "{:?} {:?}",
+            report.hints,
+            alpha.envelope
+        );
     }
 }

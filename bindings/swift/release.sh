@@ -20,7 +20,10 @@ LIB="libqrcode_ai_scanner_uniffi"
 MP="crates/qrcode-ai-scanner-uniffi/Cargo.toml"
 T="crates/qrcode-ai-scanner-uniffi/target"
 
-die() { echo "error: $*" >&2; exit 1; }
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
 
 [ $# -eq 1 ] || die "usage: $0 vX.Y.Z"
 # Normalize to a leading-v tag (mobile.yml triggers on tags: ['v*']).
@@ -32,29 +35,29 @@ case "$VER" in
 esac
 
 command -v xcodebuild >/dev/null || die "xcodebuild not found — run this on a mac with Xcode"
-command -v swift      >/dev/null || die "swift not found"
+command -v swift >/dev/null || die "swift not found"
 
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
 # Keep the tag honest: it should match the workspace version SSOT.
 WS_VER="$(grep -m1 -E '^version' Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
-[ "$VER" = "$WS_VER" ] || echo "warning: tag $TAG != workspace version $WS_VER (bump Cargo.toml + the bindings first?)" >&2
+[ "$VER" = "$WS_VER" ] || die "tag $TAG != workspace version $WS_VER (bump Cargo.toml + the bindings first)"
 
 echo "==> building the iOS xcframework for $TAG (device + simulator)"
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios >/dev/null
-cargo build --release --manifest-path "$MP" --target aarch64-apple-ios
-cargo build --release --manifest-path "$MP" --target aarch64-apple-ios-sim
-cargo build --release --manifest-path "$MP" --target x86_64-apple-ios
+cargo build --release --locked --manifest-path "$MP" --target aarch64-apple-ios
+cargo build --release --locked --manifest-path "$MP" --target aarch64-apple-ios-sim
+cargo build --release --locked --manifest-path "$MP" --target x86_64-apple-ios
 
 rm -rf bindings/swift/Sources/QrcodeAiScanner build/swift build/sim build/QrcodeAiScannerFFI.xcframework
 mkdir -p bindings/swift/Sources/QrcodeAiScanner build/swift/Modules build/sim
 
 echo "==> generating Swift sources + headers + modulemap"
-cargo run --manifest-path "$MP" --bin uniffi-bindgen-swift -- \
+cargo run --locked --manifest-path "$MP" --bin uniffi-bindgen-swift -- \
   "$T/aarch64-apple-ios/release/$LIB.a" \
   bindings/swift/Sources/QrcodeAiScanner --swift-sources
-cargo run --manifest-path "$MP" --bin uniffi-bindgen-swift -- \
+cargo run --locked --manifest-path "$MP" --bin uniffi-bindgen-swift -- \
   "$T/aarch64-apple-ios/release/$LIB.a" \
   build/swift/Modules --headers --xcframework --modulemap --modulemap-filename module.modulemap
 
@@ -69,10 +72,11 @@ xcodebuild -create-xcframework \
   -output build/QrcodeAiScannerFFI.xcframework
 
 echo "==> zipping + computing the SwiftPM checksum"
-( cd build && rm -f QrcodeAiScannerFFI.xcframework.zip \
-  && zip -qry QrcodeAiScannerFFI.xcframework.zip QrcodeAiScannerFFI.xcframework )
+cp LICENSE LICENSING.md build/QrcodeAiScannerFFI.xcframework/
+(cd build && rm -f QrcodeAiScannerFFI.xcframework.zip \
+  && zip -qry QrcodeAiScannerFFI.xcframework.zip QrcodeAiScannerFFI.xcframework)
 CHECKSUM="$(swift package compute-checksum build/QrcodeAiScannerFFI.xcframework.zip)"
-echo "$CHECKSUM" > build/checksum.txt
+echo "$CHECKSUM" >build/checksum.txt
 URL="https://github.com/${REPO_SLUG}/releases/download/${TAG}/QrcodeAiScannerFFI.xcframework.zip"
 
 echo "==> pinning Package.swift to url+checksum"

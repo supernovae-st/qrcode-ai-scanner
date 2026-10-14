@@ -16,9 +16,14 @@ name = "qrscan"
 path = "src/main.rs"
 
 [dependencies]
-qrcode-ai-scanner = { version = "0.9.0", path = "../qrcode-ai-scanner", features = ["serde"] }
+qrcode-ai-scanner = { version = "0.10.0", path = "../qrcode-ai-scanner", features = ["serde"] }
 clap = { workspace = true }
 serde_json.workspace = true
+
+# Cargo installs this packaged crate as the build root; workspace profiles do
+# not travel with dependencies. Keep the decoder's arithmetic guard there too.
+[profile.release.package.rxing]
+overflow-checks = true
 
 [lints]
 workspace = true
@@ -26,4 +31,5 @@ workspace = true
 [dev-dependencies]
 image.workspace = true
 jsonschema.workspace = true
+qrcode.workspace = true
 serde_json.workspace = true

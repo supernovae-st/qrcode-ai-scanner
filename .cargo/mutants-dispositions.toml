@@ -1,0 +1,542 @@
+# cargo-mutants dispositions — the ratchet behind the weekly mutation verdict.
+#
+# deep-checks.yml's mutants-summary job runs
+#   python3 scripts/check-mutants-outcome.py \
+#     --dispositions .cargo/mutants-dispositions.toml <one dir per shard>
+# and FAILS on a baseline failure, a shard that did not finish, or any MISSED
+# or TIMEOUT mutant without an entry here whose category covers it. Caught
+# and unviable mutants never need one. `--self-test` replays every entry
+# below against its own category, plus one injected miss: run it after an
+# edit.
+#
+# Identity = file + line + column + mutation, exactly as cargo-mutants prints
+# `file:line:col: mutation` (mutation strings stay verbatim on one line, so a
+# run log greps straight back to its entry). Anchored ON PURPOSE, like the
+# exclusions in .cargo/mutants.toml: a function-scoped match would accept a
+# killable sibling. Drift is safe: the moved mutant resurfaces
+# undispositioned, the report names the stale entry it probably was, and a
+# human re-anchors it after re-checking the argument. Entries that match
+# nothing are listed as stale, never failed — prune them when re-anchoring.
+#
+#   category            covers            meaning
+#   equivalent          MISSED            no deterministic test can tell it
+#                                         apart (argued in .cargo/mutants.toml)
+#   timeout-structural  TIMEOUT           it can only show up as a hang; the
+#                                         suite timeout IS the catch
+#   debt                MISSED, TIMEOUT   a test should kill it — recorded,
+#                                         NOT excused; kill it, delete the entry
+#
+# Seed (2026-10-09): every line:col was an anchor in commit 1c38d7c, the
+# tree weekly run 37262272113 measured on 2026-10-05 — 2097 mutants, 1879
+# caught, 77 missed, 5 timeouts, 136 unviable, and a green workflow over 12
+# of 16 shards exiting 2 or 3.
+#   21 equivalent: the set argued in .cargo/mutants.toml. Nine resurfaced as
+#      MISSED at drifted lines (transform.rs, lib.rs and ladder.rs grew after
+#      its anchors were set) and are anchored where they surfaced; the other
+#      twelve still match their exclusion there.
+#    5 timeout-structural: the two caught-by-timeout mutants documented in
+#      .cargo/mutants.toml, plus three hangs first seen in that run.
+#   69 debt: the other 68 MISSED of that run, plus one TIMEOUT that is a
+#      resource blow-up rather than a hang (warp.rs rotate) — surviving
+#      mutants recorded at 1c38d7c, to be killed by tests (debt, not
+#      equivalence).
+# Re-anchored (2026-10-10) on the tree of the commit that carries this
+# paragraph, together with .cargo/mutants.toml (each equivalent has the same
+# line:col in both files). Every entry was looked up in the list of every
+# mutant, exclusions off, by file, function, mutation and source line, and
+# moved to where it now stands; a statement that moved verbatim into another
+# function took its entry along, and each equivalent was re-argued at its new
+# line. Pruned, each with its reason in the commit: the entries deep-checks
+# run 38027683008 (tree 25e049b) reported caught, at their anchor or at the
+# line they had moved to, and those whose code is gone or changed into new
+# mutants. Bits::take's `|`→`^` moved from debt to equivalent (bit-disjoint
+# operands). Now 21 equivalent · 3 timeout-structural · 54 debt.
+# Extended and re-anchored (2026-10-11) on the tree of the commit that carries
+# this paragraph, against deep-checks run 38105646991 (tree 960b9c3). Of the
+# survivors that run reported in the content, re-read, reconciliation and
+# engine code, tests on rendered symbols or constructed reads now kill every
+# one they can tell apart; the rest are argued here — bit-disjoint `|`
+# (format and version words, ECI designators), bounds no walk reaches, loops
+# only a hang shows — and two debt entries name the crafted grids that would
+# kill them. Pruned: the debt
+# the new tests kill, whose code had moved (alpha.rs content_stats and
+# envelope, ladder.rs fold_fallback, lib.rs build_report, report.rs
+# StressAxis::from_name), and count_bits, which that run reports caught; the
+# two wall-clock equivalents and three score debt entries moved with their
+# code. Mutants of code the all-features run never compiles (the cfg(fuzzing)
+# bridge, the Binarized::black of builds without rxing) are no disposition's:
+# they belong to the exclusions of .cargo/mutants.toml. Now 31 equivalent · 9
+# timeout-structural · 43 debt.
+# Pruned (2026-10-12): the twenty debt entries unit tests now kill, each
+# reported missed on 024698c and caught on the sources of the commit that
+# carries this paragraph by one targeted cargo-mutants selection, run on both —
+# ScoreCheck::from_name and its arms, validate_dims at its limits, Bits::take
+# at its widest read, the GS1 element-string truncation and Digital Link
+# qualifiers, unmask_to_codewords's length check, flatten_or_drop's routing.
+# Two more, missed on both, move to equivalent with their arguments: two
+# separators the GS1 loop strips anyway. The two flatten reservation mutants
+# remain debt: equal output bytes do not establish equal allocation behavior.
+# Now 33 equivalent · 9 timeout-structural · 21 debt.
+# Pruned (2026-10-12, warp boundaries): focused run 38283583505 reports
+# all eight selected warp_into mutants missed on b09919e and caught on
+# 653ab1f, with passing build/test baselines and unchanged production source.
+# Its collector failed on an archive path; verified raw receipts establish
+# these eight kills, not a fresh full deep verdict. Now 33 equivalent · 9
+# timeout-structural · 13 debt.
+
+# Pruned (2026-10-13, fixed thirteen debts): paired run 38394518452
+# measures f73555e before and 5b5cffc after, with passing cohort baselines,
+# complete exact anchors/tool/test/raw outcomes and unchanged production.
+# Before: 12 MISSED and 1 TIMEOUT; after: all 13 CAUGHT at regression
+# assertions after successful builds. The rotation timeout becomes an
+# assertion failure; it is not a MISSED-to-CAUGHT transition. Permanent
+# measured Lighting/Blur/Resolution pins and first-scheduled rotation
+# geometry complete this focused coverage. No exclusions were added.
+# This is fixed-cohort qualification, not a fresh full-deep verdict.
+# Now 33 equivalent · 9 timeout-structural · 0 debt.
+
+# ── equivalent ──────────────────────────────────────────────────────────────
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 305
+column = 41
+mutation = "replace < with <= in Binarized<'a>::black"
+category = "equivalent"
+reason = """\
+  `y <= height` differs only at y = height, where rxing 0.9.1's BitMatrix::get returns false: \
+  for x < width the offset height · row_size + x / word lies at or past the end of its bits — \
+  the false the original's short-circuit gives"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 465
+column = 34
+mutation = "replace | with ^ in Grid<'a>::format_words"
+category = "equivalent"
+reason = """\
+  `(first << 1) | u16::from(dark)`: first << 1 has bit 0 clear and the module is 0 or 1, so |, ^ \
+  and + agree for every input (as in Bits::take)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 469
+column = 36
+mutation = "replace | with ^ in Grid<'a>::format_words"
+category = "equivalent"
+reason = """\
+  `(second << 1) | u16::from(dark)`: second << 1 has bit 0 clear and the module is 0 or 1, so |, \
+  ^ and + agree for every input (as in Bits::take)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 472
+column = 36
+mutation = "replace | with ^ in Grid<'a>::format_words"
+category = "equivalent"
+reason = """\
+  `(second << 1) | u16::from(dark)`: second << 1 has bit 0 clear and the module is 0 or 1, so |, \
+  ^ and + agree for every input (as in Bits::take)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 539
+column = 37
+mutation = "replace | with ^ in decode_format"
+category = "equivalent"
+reason = """\
+  `(data << 10) | bch_remainder(data << 10, 0x537)`: the remainder of the degree-10 generator is \
+  below 2^10 and data << 10 holds bits 10-14 only — bit-disjoint, so |, ^ and + agree"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 557
+column = 40
+mutation = "replace | with ^ in decode_version"
+category = "equivalent"
+reason = """\
+  `(version << 12) | bch_remainder(version << 12, 0x1F25)`: the remainder of the degree-12 \
+  generator is below 2^12 and version << 12 holds bits 12-17 only — bit-disjoint"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/reconcile.rs"
+line = 220
+column = 43
+mutation = "replace < with <= in Read::fold"
+category = "equivalent"
+reason = """\
+  `<=` differs from `<` only when the two reads of a fold share a rank, and no walk collects two: \
+  every read is ranked (attempt, source, index) — the attempt from next_attempt() for each \
+  collected attempt, the rescue stage and the end-of-walk pass, the index distinct per read. \
+  Only a hand-built tie, which the fold leaves unspecified, could tell them apart"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/rxing_engine.rs"
+line = 383
+column = 14
+mutation = "replace match guard n >= 4 with true in location"
+category = "equivalent"
+reason = """\
+  with the guard always true, 0-2 points reach the four-corner arm, whose `at(i)?` returns None \
+  at the first point missing — what `_ => None` returns; three points keep their own arm"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/gs1.rs"
+line = 227
+column = 15
+mutation = "replace > with >= in split_head"
+category = "equivalent"
+reason = """\
+  cut is usize, so the guard collapses to !is_char_boundary(cut), and is_char_boundary(0) is \
+  always true: both stop at the same index for every &str — .cargo/mutants.toml gs1.rs 227:15"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/gs1.rs"
+line = 266
+column = 43
+mutation = "replace + with * in parse_element_string"
+category = "equivalent"
+reason = """\
+  the unknown-AI resync `rest = &rest[i * 1..]` keeps the GS that `i + 1` skips; the loop's next \
+  pass strips it (`strip_prefix(GS)`: a stray separator is legal noise) with no issue and no \
+  element, so the pass after starts from the original's state, for every input (recorded as debt \
+  at 1c38d7c)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/gs1.rs"
+line = 298
+column = 36
+mutation = "replace + with * in parse_element_string"
+category = "equivalent"
+reason = """\
+  after a GS-terminated value, `rest = &rest[i * 1..]` keeps the GS that `i + 1` skips; nothing \
+  reads rest before the loop's next pass, which strips it (`strip_prefix(GS)`) with no issue and \
+  no element, so the pass after starts from the original's state, for every input (recorded as \
+  debt at 1c38d7c)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/ladder.rs"
+line = 1025
+column = 49
+mutation = "replace * with / in Run<'_>::rescue_stage"
+category = "equivalent"
+reason = """\
+  stage-scope seconds -> ms `* 1_000.0` -> `/`: a smaller but positive wall-clock `ms`, a field \
+  outside the determinism contract; only a machine-speed lower bound could see it, which the \
+  crate forbids — untestable rather than strictly equivalent, argued in .cargo/mutants.toml \
+  (anchored there at 1003:49 before code above it grew)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/ladder.rs"
+line = 1205
+column = 49
+mutation = "replace * with / in Run<'_>::stage"
+category = "equivalent"
+reason = """\
+  stage-scope seconds -> ms `* 1_000.0` -> `/`: a smaller but positive wall-clock `ms`, a field \
+  outside the determinism contract; only a machine-speed lower bound could see it, which the \
+  crate forbids — untestable rather than strictly equivalent, argued in .cargo/mutants.toml \
+  (anchored there at 1183:49 before code above it grew)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/lib.rs"
+line = 102
+column = 9
+mutation = "replace Scanner::builder -> ScannerBuilder with Default::default()"
+category = "equivalent"
+reason = """\
+  the body already is ScannerBuilder::default() and the return type pins Default::default() to \
+  that same call — .cargo/mutants.toml lib.rs 102:9"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/matrix/zigzag.rs"
+line = 33
+column = 28
+mutation = "replace < with <= in reserved_cell"
+category = "equivalent"
+reason = """\
+  `i < 6` -> `<=` in the version-info arm: i == 6 is the timing pattern, which returns first — \
+  .cargo/mutants.toml zigzag.rs 33:28"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/matrix/zigzag.rs"
+line = 33
+column = 75
+mutation = "replace < with <= in reserved_cell"
+category = "equivalent"
+reason = """\
+  `j < 6` -> `<=` in the version-info arm: j == 6 is the timing pattern, which returns first — \
+  .cargo/mutants.toml zigzag.rs 33:75"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/matrix/zigzag.rs"
+line = 66
+column = 23
+mutation = "replace % with + in mask_bit"
+category = "equivalent"
+reason = """\
+  inside is_multiple_of(2): `+ 2` keeps the parity that `% 2` keeps — the same predicate — \
+  .cargo/mutants.toml zigzag.rs 66:23"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/matrix/zigzag.rs"
+line = 67
+column = 37
+mutation = "replace % with + in mask_bit"
+category = "equivalent"
+reason = """\
+  inside is_multiple_of(2): `+ 2` keeps the parity that `% 2` keeps — the same predicate — \
+  .cargo/mutants.toml zigzag.rs 67:37"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/rescue/bitstream.rs"
+line = 65
+column = 30
+mutation = "replace | with ^ in Bits<'_>::take"
+category = "equivalent"
+reason = """\
+  `(out << 1) | u32::from(bit)`: out << 1 clears bit 0 and bit is 0 or 1, so |, ^ and + agree \
+  for every input (recorded as debt at 1c38d7c; no test can tell them apart) — \
+  .cargo/mutants.toml bitstream.rs 65:30"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/rescue/bitstream.rs"
+line = 342
+column = 42
+mutation = "replace | with ^ in double_byte"
+category = "equivalent"
+reason = """\
+  the Kanji/Hanzi pair assembly `(v / split) << 8 | (v % split)` (moved from parse into \
+  double_byte) has bit-disjoint operands: split is 0xC0 or 0x60, so v % split < 0x100 fills bits \
+  0-7 only while (v / split) << 8 leaves them clear; |, ^ and + agree for every input — \
+  .cargo/mutants.toml bitstream.rs 342:42"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/rescue/bitstream.rs"
+line = 363
+column = 29
+mutation = "replace | with ^ in eci_designator"
+category = "equivalent"
+reason = """\
+  the two-codeword designator `(first & 0x3F) << 8 | bits.take(8)?`: take(8) < 0x100 fills bits \
+  0-7 only, the shifted prefix bits 8-13 — bit-disjoint, so |, ^ and + agree for every input"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/rescue/bitstream.rs"
+line = 365
+column = 30
+mutation = "replace | with ^ in eci_designator"
+category = "equivalent"
+reason = """\
+  the three-codeword designator `(first & 0x1F) << 16 | bits.take(16)?`: take(16) < 0x10000 \
+  fills bits 0-15 only, the shifted prefix bits 16-20 — bit-disjoint, so |, ^ and + agree"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/score/structural.rs"
+line = 98
+column = 33
+mutation = "replace - with / in quiet_zone_ok"
+category = "equivalent"
+reason = """\
+  the mirrored offset swaps the target rows of offsets {-2,-1}; the aggregated light/total count \
+  is order-independent — .cargo/mutants.toml structural.rs 98:33"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/score/structural.rs"
+line = 100
+column = 30
+mutation = "replace - with / in quiet_zone_ok"
+category = "equivalent"
+reason = """\
+  the mirrored offset swaps the target cols of offsets {-2,-1}; the aggregated light/total count \
+  is order-independent — .cargo/mutants.toml structural.rs 100:30"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/score/structural.rs"
+line = 111
+column = 11
+mutation = "replace > with >= in quiet_zone_ok"
+category = "equivalent"
+reason = """\
+  total == 0 needs all 96 ring probes to miss while the interior still samples; a band that thin \
+  cannot surround the interior — .cargo/mutants.toml structural.rs 111:11"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/score/uec.rs"
+line = 78
+column = 30
+mutation = "replace + with * in berlekamp_massey"
+category = "equivalent"
+reason = """\
+  flip-branch fold bound `len + 1 - shift` -> `len * 1 - shift` skips only the write to \
+  locator[len]: the locator degree never exceeds L, so that coefficient is zero unless L = len, \
+  which only the last round can reach and which corrected_errors refuses (2L > npar) before it \
+  reads the locator — .cargo/mutants.toml uec.rs 78:30"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/score/uec.rs"
+line = 87
+column = 30
+mutation = "replace + with * in berlekamp_massey"
+category = "equivalent"
+reason = """\
+  else-branch fold bound `len * 1 - shift`: L does not change in this branch and stays below \
+  len, so locator[len] is zero before and after the skipped write — .cargo/mutants.toml uec.rs \
+  87:30"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/transform.rs"
+line = 376
+column = 87
+mutation = "replace + with * in downscale_to"
+category = "equivalent"
+reason = """\
+  downscale `.max(u64::from(y0) + 1)`: h >= new_h in every downscale, so the guard never binds \
+  (upscale-only defense) — .cargo/mutants.toml transform.rs 376:87"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/transform.rs"
+line = 379
+column = 96
+mutation = "replace + with * in downscale_to"
+category = "equivalent"
+reason = """\
+  downscale `.max(u64::from(x0) + 1)`: w >= new_w in every downscale, so the guard never binds — \
+  .cargo/mutants.toml transform.rs 379:96"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/transform.rs"
+line = 488
+column = 45
+mutation = "replace - with + in windowed_extremum_strided"
+category = "equivalent"
+reason = """\
+  `.min(n - 1)` on prev_hi only clamps when the catch-up loop is empty either way (prev_hi >= hi \
+  there) — .cargo/mutants.toml transform.rs 488:45"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/transform.rs"
+line = 488
+column = 45
+mutation = "replace - with / in windowed_extremum_strided"
+category = "equivalent"
+reason = """\
+  `.min(n - 1)` on prev_hi only clamps when the catch-up loop is empty either way (prev_hi >= hi \
+  there) — .cargo/mutants.toml transform.rs 488:45"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/transform.rs"
+line = 489
+column = 31
+mutation = "replace + with * in windowed_extremum_strided"
+category = "equivalent"
+reason = """\
+  `prev_hi * 1` re-pushes the back index; `dominates` is non-strict, so the equal-value copy \
+  pops its original and the deque stays bit-identical — .cargo/mutants.toml transform.rs 489:31"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/transform.rs"
+line = 508
+column = 24
+mutation = "replace | with ^ in morph_filter"
+category = "equivalent"
+reason = """\
+  for m = k.max(3), (m | 1) / 2 == (m ^ 1) / 2 for every m (odd and even) — .cargo/mutants.toml \
+  transform.rs 508:24"""
+
+# ── timeout-structural ──────────────────────────────────────────────────────
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/content.rs"
+line = 246
+column = 15
+mutation = "replace += with *= in has_pair"
+category = "timeout-structural"
+reason = """\
+  `i *= 1` never moves past a single-byte character, so the walk spins on the first one it \
+  reaches; an input that reaches none returns as before — only a hang tells them apart (TIMEOUT \
+  in run 38105646991)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 529
+column = 15
+mutation = "replace ^= with &= in bch_remainder"
+category = "timeout-structural"
+reason = """\
+  `value &= generator << (top - degree)` keeps bit `top`, set in both operands, so the leading \
+  bit never drops and the loop spins on every value of the generator's degree or more — every \
+  format and version word the decoding computes (TIMEOUT in run 38105646991)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 529
+column = 15
+mutation = "replace ^= with |= in bch_remainder"
+category = "timeout-structural"
+reason = """\
+  `value |= generator << (top - degree)` keeps bit `top` set, so the leading bit never drops and \
+  the loop spins on every value of the generator's degree or more (TIMEOUT in run 38105646991)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 529
+column = 28
+mutation = "replace << with >> in bch_remainder"
+category = "timeout-structural"
+reason = """\
+  `generator >> (top - degree)` puts its leading bit below `top` once top > degree, so bit `top` \
+  never clears: the loop spins on every format word of data 2 or more and every version word \
+  (TIMEOUT in run 38105646991)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/engine/locate.rs"
+line = 529
+column = 36
+mutation = "replace - with / in bch_remainder"
+category = "timeout-structural"
+reason = """\
+  `generator << (top / degree)` shifts by 1 for every top below twice the degree, so the leading \
+  bit XORed sits at degree + 1 and never clears a higher one: format words of data 4 or more \
+  (bit 12 and up) and every version word (bit 14 and up) spin (TIMEOUT in run 38105646991)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/gs1.rs"
+line = 228
+column = 13
+mutation = "replace -= with /= in split_head"
+category = "timeout-structural"
+reason = """\
+  `cut /= 1` freezes the char-boundary down-walk into a spin on multi-byte input — documented \
+  caught-by-timeout in .cargo/mutants.toml; TIMEOUT in run 37262272113"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/ladder.rs"
+line = 887
+column = 19
+mutation = "replace += with *= in Run<'_>::reread"
+category = "timeout-structural"
+reason = """\
+  `i *= 1` keeps the index on a read the re-read skips (no hint, no re-read left, withheld, or \
+  nothing left to learn), so the loop visits it forever — the first such read hangs the walk \
+  (TIMEOUT in run 38105646991)"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/matrix/zigzag.rs"
+line = 105
+column = 32
+mutation = "replace + with * in zigzag_positions"
+category = "timeout-structural"
+reason = """\
+  `yy * 1` freezes the downward walk at row 0 and x only moves at the column ends, so \
+  `while x > 0` never exits — TIMEOUT in run 37262272113"""
+
+[[mutant]]
+file = "crates/qrcode-ai-scanner/src/transform.rs"
+line = 501
+column = 18
+mutation = "replace += with *= in windowed_extremum_strided"
+category = "timeout-structural"
+reason = """\
+  `head *= 1` never advances the deque head, so the left-edge expiry loop spins as soon as the \
+  window slides — TIMEOUT in run 37262272113"""

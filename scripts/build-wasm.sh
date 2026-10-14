@@ -9,11 +9,21 @@ if ! command -v wasm-opt >/dev/null; then
   echo "hint: a local extract works too: PATH=/private/tmp/binaryen-version_130/bin:\$PATH" >&2
   exit 1
 fi
+# The version gates, not just the presence: a binaryen older than 130 cannot
+# read the wasm features Rust >= 1.87 emits by default.
+opt_version=$(wasm-opt --version | sed -nE 's/.*version ([0-9]+).*/\1/p')
+if [ -z "$opt_version" ] || [ "$opt_version" -lt 130 ]; then
+  echo "error: wasm-opt ${opt_version:-of unknown version} is too old — binaryen >= 130 required" >&2
+  exit 1
+fi
 
 cd "$(dirname "$0")/../crates/qrcode-ai-scanner-wasm"
+echo "toolchain: $(rustc --version) · $(wasm-pack --version) · wasm-opt version ${opt_version}"
 
+# `-- --locked`: wasm-pack hands what follows to cargo build, so the build
+# uses the committed Cargo.lock or fails, never a fresh resolution.
 RUSTFLAGS="-C target-feature=+simd128" wasm-pack build \
-  --target web --release --out-name qrcode-ai-scanner
+  --target web --release --out-name qrcode-ai-scanner -- --locked
 
 wasm-opt pkg/qrcode-ai-scanner_bg.wasm \
   -O3 --enable-simd --all-features \
