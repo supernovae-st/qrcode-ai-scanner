@@ -1,0 +1,1246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/supernovae-st/qrcode-ai-scanner/spec/scan-report.schema.json",
+  "title": "ScanReport",
+  "description": "qrcode-ai-scanner wire contract (versions.pipeline=3, score_contract=5). Additive evolution: consumers must tolerate unknown fields and unknown enum/tag values.",
+  "type": "object",
+  "required": [
+    "detections",
+    "score",
+    "hints",
+    "trace",
+    "versions"
+  ],
+  "properties": {
+    "detections": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "$ref": "#/$defs/Detection"
+      }
+    },
+    "score": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Score"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Judgment of detections[0]. null when no judgment was published: no detection; a configuration that computes no score (frame profile, every stress axis skipped); a judgment the wall-clock budget interrupted (trace.budget_exhausted true); a contained internal fault. Never partial: a present score is complete and its value does not depend on the budget. Never read null as 0."
+    },
+    "hints": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Hint"
+      }
+    },
+    "trace": {
+      "$ref": "#/$defs/PipelineTrace"
+    },
+    "versions": {
+      "$ref": "#/$defs/Versions"
+    },
+    "alpha": {
+      "description": "Alpha-transparency handling — ABSENT (not null) for opaque inputs and under alphaBackground:none.",
+      "$ref": "#/$defs/AlphaReport"
+    }
+  },
+  "$defs": {
+    "Point": {
+      "type": "object",
+      "required": [
+        "x",
+        "y"
+      ],
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      }
+    },
+    "EngineKind": {
+      "enum": [
+        "rxing",
+        "rqrr",
+        "rescue"
+      ]
+    },
+    "EcLevel": {
+      "enum": [
+        "l",
+        "m",
+        "q",
+        "h"
+      ]
+    },
+    "Charset": {
+      "description": "How content.text relates to content.raw. utf8 | shift_jis | latin1 | gb18030 (latin1 = WHATWG windows-1252, gb18030 = WHATWG gb18030): text is exactly raw decoded with that decoder. eci: text is raw decoded under the designators listed in content.eci. unknown: text is not a complete decoding; each U+FFFD stands for one byte or one maximal ill-formed sequence the scanner could not read; use raw. unknown is the only lossy value in every version: treat any other value, including one you do not know, as a complete decoding of raw that the scanner checked. A value states the encoder's declared interpretation only when content.eci lists it. Never infer content.eci from charset.",
+      "enum": [
+        "utf8",
+        "shift_jis",
+        "latin1",
+        "gb18030",
+        "eci",
+        "unknown"
+      ]
+    },
+    "Grade": {
+      "enum": [
+        "excellent",
+        "good",
+        "acceptable",
+        "fair",
+        "poor"
+      ]
+    },
+    "IsoGrade": {
+      "enum": [
+        "a",
+        "b",
+        "c",
+        "d",
+        "f"
+      ]
+    },
+    "StressAxis": {
+      "enum": [
+        "resolution",
+        "blur",
+        "contrast",
+        "perspective",
+        "rotation",
+        "lighting"
+      ]
+    },
+    "Gs1Element": {
+      "type": "object",
+      "required": [
+        "ai",
+        "value"
+      ],
+      "properties": {
+        "ai": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      }
+    },
+    "Payload": {
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "url"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "url"
+            ],
+            "properties": {
+              "url": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "wifi"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "ssid",
+              "security",
+              "hidden"
+            ],
+            "properties": {
+              "ssid": {
+                "type": "string"
+              },
+              "security": {
+                "type": "string"
+              },
+              "password": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "hidden": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "gs1",
+                  "gs1_digital_link"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "elements",
+              "gtin",
+              "conformant",
+              "issues"
+            ],
+            "properties": {
+              "url": {
+                "type": "string"
+              },
+              "elements": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Gs1Element"
+                }
+              },
+              "gtin": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "conformant": {
+                "type": "boolean"
+              },
+              "issues": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "geo"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "lat",
+              "lon"
+            ],
+            "properties": {
+              "lat": {
+                "type": "number",
+                "minimum": -90,
+                "maximum": 90
+              },
+              "lon": {
+                "type": "number",
+                "minimum": -180,
+                "maximum": 180
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "crypto"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "scheme",
+              "address"
+            ],
+            "properties": {
+              "scheme": {
+                "type": "string"
+              },
+              "address": {
+                "type": "string"
+              },
+              "amount": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "email"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "to"
+            ],
+            "properties": {
+              "to": {
+                "type": "string"
+              },
+              "subject": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "body": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "sms"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "number"
+            ],
+            "properties": {
+              "number": {
+                "type": "string"
+              },
+              "body": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "tel"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "number"
+            ],
+            "properties": {
+              "number": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "me_card"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "name",
+              "tel",
+              "email",
+              "url"
+            ],
+            "properties": {
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tel": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "email": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "v_card",
+                  "v_event"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "raw"
+            ],
+            "properties": {
+              "raw": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "DecodedContent": {
+      "type": "object",
+      "required": [
+        "text",
+        "raw",
+        "charset"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "description": "raw decoded as charset states; empty if and only if raw is empty."
+        },
+        "raw": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "description": "Payload bytes, base64. QR family: the original payload bytes on every decode path, ECI designators excluded. Other symbologies: the decoding engine's text re-encoded - its ISO/IEC 8859-1 encoding when every character is at most U+00FF (the symbol's own bytes on the engine's paths without ECI), else its UTF-8 encoding; no ECI is observed for them (spec/01 § raw)."
+        },
+        "charset": {
+          "$ref": "#/$defs/Charset"
+        },
+        "eci": {
+          "description": "ECI designators observed, in symbol order. ABSENT when none was observed; [] when the symbol signals ECI use (AIM ]Q2/]Q4/]Q6) but the scanner could not locate its designators.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EciSegment"
+          }
+        },
+        "fnc1": {
+          "description": "FNC1 position. ABSENT when none was observed or the symbology does not report it.",
+          "$ref": "#/$defs/Fnc1Position"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "charset"
+            ],
+            "properties": {
+              "charset": {
+                "const": "eci"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "eci"
+            ],
+            "properties": {
+              "eci": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "eci",
+              "raw"
+            ],
+            "properties": {
+              "eci": {
+                "maxItems": 0
+              },
+              "raw": {
+                "minLength": 1
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "charset": {
+                "const": "unknown"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "raw"
+            ],
+            "properties": {
+              "raw": {
+                "maxLength": 0
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "text": {
+                "maxLength": 0
+              },
+              "charset": {
+                "const": "utf8"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "text"
+            ],
+            "properties": {
+              "text": {
+                "maxLength": 0
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "raw": {
+                "maxLength": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "QrMeta": {
+      "type": "object",
+      "required": [
+        "version",
+        "ec_level",
+        "mask",
+        "modules",
+        "inverted"
+      ],
+      "properties": {
+        "version": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 40
+        },
+        "ec_level": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EcLevel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mask": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 7
+        },
+        "modules": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 21,
+          "maximum": 177
+        },
+        "inverted": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "Detection": {
+      "type": "object",
+      "required": [
+        "symbology",
+        "content",
+        "payload",
+        "corners",
+        "meta",
+        "engines"
+      ],
+      "properties": {
+        "symbology": {
+          "$ref": "#/$defs/Symbology"
+        },
+        "content": {
+          "$ref": "#/$defs/DecodedContent"
+        },
+        "payload": {
+          "$ref": "#/$defs/Payload"
+        },
+        "corners": {
+          "anyOf": [
+            {
+              "type": "array",
+              "minItems": 4,
+              "maxItems": 4,
+              "items": {
+                "$ref": "#/$defs/Point"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "meta": {
+          "$ref": "#/$defs/QrMeta"
+        },
+        "engines": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/EngineKind"
+          }
+        }
+      }
+    },
+    "AxisScore": {
+      "type": "object",
+      "required": [
+        "axis",
+        "passed",
+        "total",
+        "failed_at"
+      ],
+      "properties": {
+        "axis": {
+          "$ref": "#/$defs/StressAxis"
+        },
+        "passed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed_at": {
+          "description": "Wire label of the first failed cell — why this axis lost points (e.g. 'blur 2.5', 'glare', '128px'). Null when every cell passed.",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "refined_failed_at": {
+          "description": "The knee bisected once — the tightest TESTED failing intensity. Key absent when no refinement ran.",
+          "type": "string"
+        }
+      }
+    },
+    "StructuralReport": {
+      "type": "object",
+      "required": [
+        "finder_integrity",
+        "quiet_zone_ok"
+      ],
+      "properties": {
+        "finder_integrity": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "quiet_zone_ok": {
+          "type": "boolean"
+        }
+      }
+    },
+    "UecReport": {
+      "type": "object",
+      "required": [
+        "margin",
+        "grade",
+        "worst_block_errors",
+        "worst_block_capacity"
+      ],
+      "properties": {
+        "margin": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "grade": {
+          "$ref": "#/$defs/IsoGrade"
+        },
+        "worst_block_errors": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "worst_block_capacity": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "IsoParameter": {
+      "type": "object",
+      "required": [
+        "value",
+        "grade"
+      ],
+      "properties": {
+        "value": {
+          "type": "number"
+        },
+        "grade": {
+          "$ref": "#/$defs/IsoGrade"
+        }
+      }
+    },
+    "Iso15415Report": {
+      "type": "object",
+      "required": [
+        "symbol_contrast",
+        "modulation",
+        "axial_nonuniformity",
+        "fixed_pattern_damage",
+        "unused_error_correction",
+        "overall"
+      ],
+      "properties": {
+        "symbol_contrast": {
+          "$ref": "#/$defs/IsoParameter"
+        },
+        "modulation": {
+          "$ref": "#/$defs/IsoParameter"
+        },
+        "axial_nonuniformity": {
+          "$ref": "#/$defs/IsoParameter"
+        },
+        "fixed_pattern_damage": {
+          "$ref": "#/$defs/IsoParameter"
+        },
+        "unused_error_correction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IsoParameter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "overall": {
+          "$ref": "#/$defs/IsoGrade"
+        }
+      }
+    },
+    "Score": {
+      "type": "object",
+      "required": [
+        "value",
+        "grade",
+        "axes",
+        "structural",
+        "uec",
+        "iso15415"
+      ],
+      "properties": {
+        "value": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "grade": {
+          "$ref": "#/$defs/Grade"
+        },
+        "axes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AxisScore"
+          }
+        },
+        "structural": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StructuralReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "uec": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UecReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "iso15415": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Iso15415Report"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "weights_run": {
+          "description": "Σ contract weights of the axes that RAN (100 = full six-axis contract). Absent on pre-0.9 reports.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "Hint": {
+      "type": "object",
+      "required": [
+        "hint"
+      ],
+      "properties": {
+        "hint": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "hint": {
+                "const": "raise_error_correction"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "current"
+            ],
+            "properties": {
+              "current": {
+                "$ref": "#/$defs/EcLevel"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "hint": {
+                "const": "fix_finder_pattern"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "corner"
+            ],
+            "properties": {
+              "corner": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "hint": {
+                "const": "low_correction_margin"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "errors",
+              "capacity"
+            ],
+            "properties": {
+              "errors": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "capacity": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "hint": {
+                "const": "alpha_background_dependent"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "placement"
+            ],
+            "properties": {
+              "placement": {
+                "$ref": "#/$defs/AlphaPlacement"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "hint": {
+                "const": "add_background_plate"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "color"
+            ],
+            "properties": {
+              "color": {
+                "enum": [
+                  "white",
+                  "black"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "StageTrace": {
+      "type": "object",
+      "required": [
+        "stage",
+        "transforms_tried",
+        "ms",
+        "detections_found"
+      ],
+      "properties": {
+        "stage": {
+          "type": "string"
+        },
+        "transforms_tried": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "detections_found": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "PipelineTrace": {
+      "type": "object",
+      "required": [
+        "stages",
+        "engine_panics",
+        "total_ms"
+      ],
+      "properties": {
+        "stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StageTrace"
+          }
+        },
+        "engine_panics": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "budget_exhausted": {
+          "type": "boolean",
+          "description": "Emitted by every report from score_contract 5 on. true: the wall-clock budget prevented planned work (a ladder attempt or stage, the opposite-background walk, a rescue candidate, a score calibration step or stress cell, a knee bisection, an envelope probe) - the report is partial. false: every planned unit ran - the report is final. Absent: a report older than score_contract 5 - unknown, never false."
+        }
+      }
+    },
+    "Versions": {
+      "type": "object",
+      "required": [
+        "scanner",
+        "pipeline",
+        "score_contract"
+      ],
+      "properties": {
+        "scanner": {
+          "type": "string"
+        },
+        "pipeline": {
+          "type": "integer",
+          "const": 3
+        },
+        "score_contract": {
+          "type": "integer",
+          "const": 5
+        }
+      }
+    },
+    "Symbology": {
+      "enum": [
+        "qr_code",
+        "micro_qr_code",
+        "rectangular_micro_qr_code",
+        "data_matrix",
+        "aztec",
+        "pdf417",
+        "maxi_code",
+        "ean13",
+        "ean8",
+        "upc_a",
+        "upc_e",
+        "code128",
+        "code39",
+        "code93",
+        "codabar",
+        "itf",
+        "data_bar",
+        "data_bar_expanded",
+        "telepen"
+      ]
+    },
+    "AlphaMode": {
+      "enum": [
+        "auto",
+        "white",
+        "black",
+        "custom"
+      ]
+    },
+    "AlphaPlacement": {
+      "enum": [
+        "any",
+        "light_only",
+        "dark_only",
+        "mixed",
+        "none"
+      ]
+    },
+    "AlphaProbe": {
+      "type": "object",
+      "required": [
+        "background_luma",
+        "decoded"
+      ],
+      "properties": {
+        "background_luma": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "decoded": {
+          "type": "boolean"
+        }
+      }
+    },
+    "AlphaEnvelope": {
+      "type": "object",
+      "required": [
+        "probes",
+        "safe_luma",
+        "placement",
+        "palette"
+      ],
+      "properties": {
+        "probes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AlphaProbe"
+          }
+        },
+        "safe_luma": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "minItems": 2,
+            "maxItems": 2
+          }
+        },
+        "placement": {
+          "$ref": "#/$defs/AlphaPlacement"
+        },
+        "palette": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AlphaPaletteProbe"
+          }
+        }
+      }
+    },
+    "AlphaReport": {
+      "type": "object",
+      "required": [
+        "coverage",
+        "content_luma",
+        "mode",
+        "background",
+        "fallback_used",
+        "envelope"
+      ],
+      "properties": {
+        "coverage": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "content_luma": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "mode": {
+          "$ref": "#/$defs/AlphaMode"
+        },
+        "background": {
+          "type": "string"
+        },
+        "fallback_used": {
+          "type": "boolean"
+        },
+        "envelope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlphaEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "AlphaPaletteProbe": {
+      "type": "object",
+      "required": [
+        "background",
+        "background_luma",
+        "decoded"
+      ],
+      "properties": {
+        "background": {
+          "type": "string"
+        },
+        "background_luma": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "decoded": {
+          "type": "boolean"
+        }
+      }
+    },
+    "EciSegment": {
+      "description": "One ECI designator observed in the symbol data (ISO/IEC 18004 7.4.2), with the byte offset in raw where it takes effect.",
+      "type": "object",
+      "required": [
+        "designator",
+        "start"
+      ],
+      "properties": {
+        "designator": {
+          "description": "ECI assignment number as encoded, 0-999999.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999999
+        },
+        "start": {
+          "description": "Byte offset into raw; the designator governs raw from start up to the next entry's start, or the end. A designator whose span is empty governs no byte.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "Fnc1Position": {
+      "description": "FNC1 position (ISO/IEC 18004 7.4.8; AIM identifiers ]Q3-]Q6, ]d2/]d3/]d5/]d6, ]C1/]C2). first: GS1 mode, raw holds GS1 element-string data (QR and Data Matrix transmit 0x1D between fields; GS1-128 read by the current engine does not). second: AIM application mode, raw starts with the application indicator.",
+      "enum": [
+        "first",
+        "second"
+      ]
+    }
+  }
+}

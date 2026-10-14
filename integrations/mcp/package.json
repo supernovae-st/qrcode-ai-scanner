@@ -1,0 +1,54 @@
+{
+  "name": "@supernovae-st/qrcode-ai-scanner-mcp",
+  "version": "0.1.0",
+  "description": "Local stdio MCP adapter for exact QR and barcode decoding and scannability reports",
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "bin": {
+    "qrscan-mcp": "src/cli.mjs"
+  },
+  "files": [
+    "src",
+    "scan-report.schema.json",
+    "LICENSE",
+    "README.md",
+    "server.json"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/supernovae-st/qrcode-ai-scanner.git",
+    "directory": "integrations/mcp"
+  },
+  "homepage": "https://qrcode-ai.com",
+  "mcpName": "io.github.supernovae-st/qrcode-ai-scanner",
+  "bugs": {
+    "url": "https://github.com/supernovae-st/qrcode-ai-scanner/issues"
+  },
+  "keywords": [
+    "mcp",
+    "qrcode",
+    "barcode",
+    "scanner",
+    "local",
+    "stdio",
+    "artistic-qr"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.3.1",
+    "@supernovae-st/qrcode-ai-scanner": "0.10.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.3.1",
+    "@modelcontextprotocol/sdk": "1.32.1"
+  },
+  "scripts": {
+    "test": "node test/packed-consumer.mjs"
+  }
+}

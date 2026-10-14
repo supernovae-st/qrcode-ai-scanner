@@ -99,6 +99,11 @@ tokens). Every privileged job must:
                and the ones OPERAND_PROOF parses are spelled absolute
                ("$PWD"/… or /…) and identically, and the job needs
                OPERAND_PROOF
+  OCI          one named exception only: oci-publish.yml > publish needs the
+               complete native inspect matrix, container environment (oci-v*
+               tag deployment rule), contents read/actions read/packages write,
+               the exact OCI tag/BOM gate and in-job frozen artifact reinspection.
+               No old registry job gains this permission or tag exception.
   concurrency  join publish-${{ github.workflow }}-${{ github.ref }}, never
                cancelling, so a re-run on the tag waits instead of racing
 
@@ -175,6 +180,20 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 ENVIRONMENTS = {"crates-io", "npm", "release", "pub"}
 GUARD = "startsWith(github.ref, 'refs/tags/v')"
 CONCURRENCY = "publish-${{ github.workflow }}-${{ github.ref }}"
+OCI_JOB = ("oci-publish.yml", "publish")
+OCI_GUARD = "startsWith(github.ref, 'refs/tags/oci-v')"
+OCI_GATE_RUN = 'python3 distribution/docker/publish.py gate --ref "$GITHUB_REF"'
+OCI_REINSPECT_RUN = '\n'.join((
+    "set -euo pipefail",
+    'python3 distribution/docker/publish.py inspect --artifacts "$PWD/qualified" --architecture amd64',
+    'python3 distribution/docker/publish.py inspect --artifacts "$PWD/qualified" --architecture arm64',
+))
+OCI_INSPECT_RUN = '\n'.join((
+    "set -euo pipefail",
+    'python3 distribution/docker/publish.py inspect --artifacts "$PWD/qualified" --architecture "$ARCHITECTURE" --load --native',
+    'python3 distribution/docker/verify.py qrscan:qualified fixtures/clean/gen_v5_q.png --expected-platform "linux/$ARCHITECTURE" --receipt "inspected/$ARCHITECTURE.json"',
+    'python3 distribution/docker/publish.py record-consumer --architecture "$ARCHITECTURE" --receipt "inspected/$ARCHITECTURE.json"',
+))
 GATE_RUN = 'python3 scripts/package-inspect.py versions --tag "$GITHUB_REF" --strict --quiet'
 SHA = re.compile(r"[0-9a-f]{40}")
 EXACT = re.compile(r"\d+\.\d+\.\d+")
@@ -257,6 +276,7 @@ NOT_ON_TAG = {"!startsWith(github.ref, 'refs/tags/')", "!startsWith(github.ref, 
 # The job each publishing job must need: the one that inspects (for the iOS
 # zip, builds) what it uploads. A publishing job missing here fails.
 INSPECTION = {
+    OCI_JOB: "inspect",
     ("crates-publish.yml", "publish"): "package",
     ("npm-publish.yml", "publish-native"): "pack-native",
     ("npm-publish.yml", "publish-wasm"): "build-wasm",
@@ -316,6 +336,8 @@ PUBLISHING_TOOLS = (
     ("poetry", frozenset({"publish"}), "poetry publish"),
 )
 PUBLISHING_RUN = (
+    (re.compile(r"\bdocker\s+(push|manifest\s+push)\b"), "docker publish"),
+    (re.compile(r"\bpython3\s+distribution/docker/publish\.py\s+publish\b"), "docker publish"),
     (re.compile(r"\bnapi\s+pre-?publish\b"), "napi pre-publish"),
     (re.compile(r"\bpub\s+(publish|lish)\b"), "pub publish"),
     (re.compile(r"\bgh\s+release\s+(create|upload|edit|delete)\b"), "gh release"),
@@ -1137,6 +1159,69 @@ def _block(script) -> str:
     return "\n".join(line.rstrip() for line in str(script or "").strip().splitlines())
 
 
+def _oci_contract_problems(wf: dict, publisher: dict, first_publish: int) -> list:
+    """The single new permission grant never relaxes the older registry jobs."""
+    out = []
+    def fail(message, index=-1):
+        out.append(("oci-contract", message, index))
+    triggers = wf.get("on", {})
+    if triggers.get("push") != {"tags": ["oci-v*"]} or set(triggers) != {"push", "workflow_dispatch"}:
+        fail("OCI workflow may trigger only from oci-v* push or manual dispatch")
+    mode = ((triggers.get("workflow_dispatch") or {}).get("inputs") or {}).get("mode") or {}
+    if mode.get("type") != "choice" or mode.get("default") != "inspect" or mode.get("options") != ["inspect", "publish", "public-pull"]:
+        fail("OCI dispatch exposes only inspect/publish/public-pull modes, default inspect")
+    jobs = wf.get("jobs") or {}
+    inspector = jobs.get("inspect") or {}
+    if inspector.get("permissions") != {"contents": "read", "actions": "read"} or "if" in inspector or inspector.get("continue-on-error"):
+        fail("OCI native inspector must be unconditional and read-only")
+    matrix = ((inspector.get("strategy") or {}).get("matrix") or {}).get("include")
+    if matrix != [{"runner": "ubuntu-24.04", "architecture": "amd64", "artifact_id": "11903554096"},
+                  {"runner": "ubuntu-24.04-arm", "architecture": "arm64", "artifact_id": "11904033809"}]:
+        fail("OCI inspector must execute both frozen artifacts on native runners")
+    if _needs(publisher) != ["inspect"]:
+        fail("OCI publisher must depend on the complete native inspect matrix")
+    before = _steps(publisher)[:first_publish]
+    if not any(set(step) <= {"name", "run"} and _block(step.get("run")) == OCI_REINSPECT_RUN for step in before):
+        fail("OCI publisher must re-inspect both downloaded archives before publishing")
+    authentication = next((i for i, step in enumerate(_steps(publisher)) if "docker login" in str(step.get("run", ""))), None)
+    reinspect = next((i for i, step in enumerate(_steps(publisher)) if _block(step.get("run")) == OCI_REINSPECT_RUN), None)
+    if authentication is None or reinspect is None or reinspect >= authentication:
+        fail("OCI re-inspection must precede registry authentication")
+    if not any(set(step) <= {"name", "run", "env"} and _block(step.get("run")) == OCI_INSPECT_RUN and (step.get("env") or {}) == {"ARCHITECTURE": "${{ matrix.architecture }}"} for step in _steps(inspector)):
+        fail("OCI inspector must reload, require native execution and run the owning consumer assertions")
+    expected_downloads = [
+        {"artifact-ids": "11903554096", "run-id": "38583785567", "repository": "supernovae-st/qrcode-ai-scanner", "digest-mismatch": "error", "github-token": "${{ github.token }}", "path": "qualified/amd64"},
+        {"artifact-ids": "11904033809", "run-id": "38583785567", "repository": "supernovae-st/qrcode-ai-scanner", "digest-mismatch": "error", "github-token": "${{ github.token }}", "path": "qualified/arm64"},
+    ]
+    downloads = [step.get("with") for step in _steps(publisher) if _uses(step)[0] == "actions/download-artifact"]
+    if downloads != expected_downloads:
+        fail("OCI publisher must download exactly the two frozen artifact IDs from the qualified run")
+    inspected_downloads = [step.get("with") for step in _steps(inspector) if _uses(step)[0] == "actions/download-artifact"]
+    if inspected_downloads != [{"artifact-ids": "${{ matrix.artifact_id }}", "run-id": "38583785567", "repository": "supernovae-st/qrcode-ai-scanner", "digest-mismatch": "error", "github-token": "${{ github.token }}", "path": "qualified/${{ matrix.architecture }}"}]:
+        fail("OCI inspector must download its exact frozen platform artifact")
+    for job_id in ("inspect", "publish", "consume-public"):
+        given = jobs.get(job_id) or {}
+        timeout = given.get("timeout-minutes")
+        if not str(timeout).isdigit() or not 1 <= int(timeout) <= 45:
+            fail("OCI jobs must time out within 45 minutes")
+        for index, step in enumerate(_steps(given)):
+            if "continue-on-error" in step:
+                fail("OCI gates and publisher must propagate every step failure")
+            if _cache(step):
+                fail("OCI artifact consumers and publisher must never restore caches")
+            action, ref = _uses(step)
+            if action and not SHA.fullmatch(ref):
+                fail("OCI artifact consumers must use pinned actions")
+            if action == "actions/checkout" and (step.get("with") or {}).get("persist-credentials") != "false":
+                fail("OCI artifact consumers must not persist checkout credentials")
+            if "${{" in str(step.get("run") or ""):
+                fail("OCI artifact consumers must not interpolate expressions into scripts")
+    public = jobs.get("consume-public") or {}
+    if public.get("permissions") != {"contents": "read"} or _needs(public) != ["inspect"]:
+        fail("OCI public consumers must be read-only and need native inspection")
+    return out
+
+
 def check_job(workflow: str, job_id: str, job: dict, wf: dict) -> list:
     steps = _steps(job)
     publishing = publishing_steps(steps)
@@ -1147,8 +1232,10 @@ def check_job(workflow: str, job_id: str, job: dict, wf: dict) -> list:
     def flag(code: str, message: str, step: int = -1) -> None:
         out.append(Finding(workflow, job_id, code, message, step))
 
-    if problem := guarded(job.get("if")):
-        flag("guard", problem)
+    oci = (workflow, job_id) == OCI_JOB
+    condition_check = _conjunct(job.get("if"), {OCI_GUARD}) if oci else guarded(job.get("if"))
+    if condition_check:
+        flag("guard", condition_check)
     needs = job.get("needs")
     needs = [needs] if isinstance(needs, str) else [str(n) for n in needs or []]
     inspection = INSPECTION.get((workflow, job_id))
@@ -1161,13 +1248,17 @@ def check_job(workflow: str, job_id: str, job: dict, wf: dict) -> list:
             flag("needs", f"needs {needs}: must include {consumer!r}, the clean installed-package gate")
     env = job.get("environment")
     env_name = env.get("name") if isinstance(env, dict) else env
-    if env_name not in ENVIRONMENTS:
-        flag("environment", f"environment {env_name!r} is not one of {sorted(ENVIRONMENTS)}")
+    allowed_environments = {"container"} if oci else ENVIRONMENTS
+    if env_name not in allowed_environments:
+        flag("environment", f"environment {env_name!r} is not one of {sorted(allowed_environments)}")
     perms = job.get("permissions")
     releases = any(what == "gh release" for _, what in publishing)
     registry = any(what != "gh release" for _, what in publishing)
     if not isinstance(perms, dict):
         flag("permissions", f"job-level permissions must be an explicit map, got {perms!r}")
+    elif oci:
+        if perms != {"contents": "read", "actions": "read", "packages": "write"}:
+            flag("permissions", "OCI publisher needs exactly contents read, actions read and packages write; no id-token")
     else:
         for scope, level in perms.items():
             level = str(level)
@@ -1236,9 +1327,13 @@ def check_job(workflow: str, job_id: str, job: dict, wf: dict) -> list:
             flag("floating-rust", f"{level} env RUST_TOOLCHAIN {value!r} is not an exact x.y.z")
     checkout = next((i for i, step in enumerate(steps) if _uses(step)[0] == "actions/checkout"), None)
     gate = steps[checkout + 1] if checkout is not None and checkout + 1 < len(steps) else {}
-    if set(gate) - {"run", "name", "working-directory"} or str(gate.get("run", "")).strip() != GATE_RUN:
-        flag("gate", f"the first step after the checkout must be exactly `{GATE_RUN}`, with no other key")
+    required_gate = OCI_GATE_RUN if oci else GATE_RUN
+    if set(gate) - {"run", "name", "working-directory"} or str(gate.get("run", "")).strip() != required_gate:
+        flag("gate", f"the first step after the checkout must be exactly `{required_gate}`, with no other key")
     first_publish = min((i for i, _ in publishing), default=len(steps))
+    if oci:
+        for code, message, index in _oci_contract_problems(wf, job, first_publish):
+            flag(code, message, index)
     if (workflow, job_id) in REINSPECT_JOBS and not any(
             re.search(r"package-inspect\.py\s+archive\b", line) and "--strict" in _words(line)
             for step in steps[:first_publish] for line in _code_lines(step.get("run"))):
@@ -2161,6 +2256,28 @@ MUTATIONS = (
         "name: extra\non:\n  workflow_dispatch:\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: "
         "ubuntu-24.04\n    steps:\n      - uses: dtolnay/rust-toolchain@master\n        with:\n          toolchain: "
         "1.96.0\n")}, 1, "extra.yaml › build (step 1) [leg]"),
+)
+
+
+# The OCI grant is keyed to one job; old registry boundaries are unchanged.
+MUTATIONS += (
+    ("OCI branch-only guard", P, [("oci-publish.yml", OCI_GUARD, "github.ref == 'refs/heads/main'")], {}, 1, "[guard]"),
+    ("OCI guard under OR", P, [("oci-publish.yml", OCI_GUARD, OCI_GUARD + " || github.ref == 'refs/heads/main'")], {}, 1, "[guard]"),
+    ("OCI keeps old v-tag guard", P, [("oci-publish.yml", OCI_GUARD, GUARD)], {}, 1, "[guard]"),
+    ("OCI uses npm environment", P, [("oci-publish.yml", "    environment: container", "    environment: npm")], {}, 1, "[environment]"),
+    ("OCI enables OIDC unnecessarily", P, [("oci-publish.yml", "      packages: write", "      packages: write\n      id-token: write")], {}, 1, "[permissions]"),
+    ("old npm publisher gets package write", P, [("npm-publish.yml", "      id-token: write", "      id-token: write\n      packages: write")], {}, 1, "[permissions]"),
+    ("OCI publisher drops complete native dependency", P, [("oci-publish.yml", "    needs: [inspect]", "    needs: []")], {}, 1, "[needs]"),
+    ("OCI inspector restores cache", P, [("oci-publish.yml", "      - name: re-inspect and reload the exact native image", "      - uses: actions/cache@" + "a" * 40 + "\n        with:\n          path: qualified/\n          key: oci\n      - name: re-inspect and reload the exact native image")], {}, 1, "must never restore caches"),
+    ("OCI first gate uses engine tag validator", P, [("oci-publish.yml", OCI_GATE_RUN, GATE_RUN)], {}, 1, "[gate]"),
+    ("OCI first gate injects arbitrary tag", P, [("oci-publish.yml", OCI_GATE_RUN, OCI_GATE_RUN.replace('"$GITHUB_REF"', "refs/tags/oci-v0.10.1"))], {}, 1, "[gate]"),
+    ("OCI inspector ignores failed native assertions", P, [("oci-publish.yml", "      - name: re-inspect and reload the exact native image\n        env:", "      - name: re-inspect and reload the exact native image\n        continue-on-error: true\n        env:")], {}, 1, "propagate every step failure"),
+    ("OCI inspector skips native assertions", P, [("oci-publish.yml", "      - name: re-inspect and reload the exact native image\n        env:", "      - name: re-inspect and reload the exact native image\n        if: false\n        env:")], {}, 1, "owning consumer assertions"),
+    ("OCI inspector skips native identity", P, [("oci-publish.yml", "--load --native", "--load")], {}, 1, "owning consumer assertions"),
+    ("OCI publisher downloads wrong producer run", P, [("oci-publish.yml", '          run-id: "38583785567"', '          run-id: "1"')], {}, 1, "exact frozen platform artifact"),
+    ("OCI publisher omits in-job reinspection", P, [("oci-publish.yml", "      - name: re-inspect both downloaded images before registry authentication\n        run: |\n          " + OCI_REINSPECT_RUN.replace("\n", "\n          ") + "\n", "")], {}, 1, "re-inspect both downloaded archives"),
+    ("unknown job claims OCI package write", P, [("oci-publish.yml", "  publish:\n", "  surprise:\n")], {}, 1, "no inspection job declared"),
+    ("OCI download ignores official digest", P, [("oci-publish.yml", "          digest-mismatch: error", "          digest-mismatch: ignore")], {}, 1, "exact frozen platform artifact"),
 )
 
 
