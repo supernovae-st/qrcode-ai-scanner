@@ -45,7 +45,8 @@ Consult each binding's README for its implementation and current install path:
 [`bindings/flutter/`](bindings/flutter/).
 
 **🐳 Containers and agents:** the CLI 0.10.0 is public on
-[GHCR](https://github.com/supernovae-st/qrcode-ai-scanner/pkgs/container/qrcode-ai-scanner).
+[GHCR](https://github.com/supernovae-st/qrcode-ai-scanner/pkgs/container/qrcode-ai-scanner)
+and [Docker Hub](https://hub.docker.com/r/thibautmelen/qrcode-ai-scanner).
 The MCP adapter and portable skill 0.1.0 are in the
 [agents release](https://github.com/supernovae-st/qrcode-ai-scanner/releases/tag/agents-v0.1.0),
 and the skill is also on [ClawHub](https://clawhub.ai/thibautmelen/skills/qr-image-scanner).
