@@ -54,6 +54,7 @@ jobs:
             target: x86_64-pc-windows-msvc
     env:
       REGISTRY_TARGET: ${{ matrix.target }}
+      PYTHONUTF8: "1" # Retain Unicode CLI diagnostics on Windows too.
       CARGO_BUILD_JOBS: "2"
       RAYON_NUM_THREADS: "1"
       CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
