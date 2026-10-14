@@ -15,7 +15,7 @@ on:
       probe:
         description: "bounded diagnostic to run"
         type: choice
-        options: [build, warp-mutations, oracle-artifact, debt-baseline, debt-paired, release-prepare, api-compat, registry-consumers]
+        options: [build, warp-mutations, oracle-artifact, debt-baseline, debt-paired, release-prepare, api-compat, registry-consumers, npm-registry-consumers]
         default: build
       baseline_sha:
         description: "40-hex qualified baseline (required for warp/debt probes)"
@@ -38,6 +38,141 @@ env:
   RUST_TOOLCHAIN: "1.97.0"
 
 jobs:
+  npm-registry-native:
+    if: inputs.probe == 'npm-registry-consumers'
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+        platform:
+          - { runner: ubuntu-24.04, suffix: linux-x64-gnu }
+          - { runner: ubuntu-24.04-arm, suffix: linux-arm64-gnu }
+          - { runner: macos-15, suffix: darwin-arm64 }
+          - { runner: macos-15-intel, suffix: darwin-x64 }
+          - { runner: windows-2025, suffix: win32-x64-msvc }
+    env:
+      PYTHONUTF8: "1"
+      RAYON_NUM_THREADS: "1"
+      NODE_LINE: ${{ matrix.node }}
+      NAPI_SUFFIX: ${{ matrix.platform.suffix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 2d3b577582979f0dc603b5cb0d96d1be02b459f5
+          path: qualified-source
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - name: exact published native packages and unchanged owning assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C qualified-source rev-parse HEAD)" = 2d3b577582979f0dc603b5cb0d96d1be02b459f5
+          export REGISTRY_PROOF_DIR="$RUNNER_TEMP/npm-registry-qualified"
+          node harness/scripts/registry-node-consumer.mjs native \
+            qualified-source/fixtures/clean/gen_v5_q.png 0.10.0 "$NAPI_SUFFIX"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        if: always()
+        with:
+          name: registry-node-${{ matrix.node }}-${{ matrix.platform.suffix }}
+          path: ${{ runner.temp }}/npm-registry-qualified/
+          if-no-files-found: error
+          retention-days: 14
+
+  npm-registry-musl:
+    if: inputs.probe == 'npm-registry-consumers'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { node: 22, image: 'node:22-alpine@sha256:2c752226d477b4a886378baa95b9af252be59301b725fdb0b7e15208131505a8' }
+          - { node: 24, image: 'node:24-alpine@sha256:83f1c388c31fb2e51f7cbd4dea949b96260798c98f206e8e4696bc93bd964e3a' }
+    env:
+      CONSUMER_IMAGE: ${{ matrix.image }}
+      NODE_LINE: ${{ matrix.node }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 2d3b577582979f0dc603b5cb0d96d1be02b459f5
+          path: qualified-source
+          persist-credentials: false
+      - name: actual musl registry install in the pinned native container
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C qualified-source rev-parse HEAD)" = 2d3b577582979f0dc603b5cb0d96d1be02b459f5
+          mkdir -p "$RUNNER_TEMP/npm-registry-qualified"
+          docker pull "$CONSUMER_IMAGE"
+          docker run --rm --user "$(id -u):$(id -g)" --cpus 2 --memory 1g --pids-limit 128 \
+            -e REGISTRY_PROOF_DIR=/proof -e RAYON_NUM_THREADS=1 -e NODE_LINE \
+            -e GITHUB_SHA -e GITHUB_RUN_ID \
+            -v "$PWD:/source:ro" -v "$RUNNER_TEMP/npm-registry-qualified:/proof" \
+            "$CONSUMER_IMAGE" node /source/harness/scripts/registry-node-consumer.mjs native \
+            /source/qualified-source/fixtures/clean/gen_v5_q.png 0.10.0 linux-x64-musl
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        if: always()
+        with:
+          name: registry-node-${{ matrix.node }}-linux-x64-musl
+          path: ${{ runner.temp }}/npm-registry-qualified/
+          if-no-files-found: error
+          retention-days: 14
+
+  npm-registry-wasm:
+    if: inputs.probe == 'npm-registry-consumers'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    env:
+      PYTHONUTF8: "1"
+      RAYON_NUM_THREADS: "1"
+      NODE_LINE: ${{ matrix.node }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 2d3b577582979f0dc603b5cb0d96d1be02b459f5
+          path: qualified-source
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - name: published WASM exact install and Node SSR assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C qualified-source rev-parse HEAD)" = 2d3b577582979f0dc603b5cb0d96d1be02b459f5
+          export REGISTRY_PROOF_DIR="$RUNNER_TEMP/npm-registry-qualified"
+          node harness/scripts/registry-node-consumer.mjs wasm \
+            qualified-source/fixtures/clean/gen_v5_q.png 0.10.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        if: always()
+        with:
+          name: registry-wasm-node-${{ matrix.node }}
+          path: ${{ runner.temp }}/npm-registry-qualified/
+          if-no-files-found: error
+          retention-days: 14
+
   registry-consumers:
     if: inputs.probe == 'registry-consumers'
     runs-on: ${{ matrix.os }}
