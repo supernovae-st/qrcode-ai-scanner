@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import struct
 import subprocess
@@ -34,6 +35,9 @@ def main():
     assert image["Config"]["Entrypoint"] == ["/usr/local/bin/qrscan"]
     assert image["Config"]["Labels"]["org.opencontainers.image.version"] == "0.10.0"
     assert image["Config"]["Labels"]["org.opencontainers.image.licenses"] == "AGPL-3.0-or-later"
+    labels = image["Config"]["Labels"]
+    assert labels["org.opencontainers.image.revision"] == "2d3b577582979f0dc603b5cb0d96d1be02b459f5"
+    assert labels["org.opencontainers.image.source"] == "https://github.com/supernovae-st/qrcode-ai-scanner"
     assert image["Architecture"] in ("amd64", "arm64")
     actual_platform = image["Os"] + "/" + image["Architecture"]
     if args.expected_platform:
@@ -59,6 +63,8 @@ def main():
                           "stdout_sha256": hashlib.sha256(result.stdout.encode()).hexdigest(),
                           "stderr": result.stderr})
             assert result.returncode == code, (arguments, result.returncode, result.stderr)
+            if code == 2:
+                assert result.stdout == "" and result.stderr.strip(), (arguments, result.stdout, result.stderr)
             return result.stdout
 
         assert run(["--version"], 0).strip() == "qrscan 0.10.0"
@@ -68,13 +74,20 @@ def main():
         text = "https://qrcode-ai.com/c/v5q"
         assert [d["content"] for d in full["detections"]] == [
             {"text": text, "raw": base64.b64encode(text.encode()).decode(), "charset": "utf8"}]
+        assert [d["symbology"] for d in full["detections"]] == ["qr_code"]
         assert full["score"]["value"] == 100
         assert full["trace"]["budget_exhausted"] is False
         assert "alpha" not in full
         frame = json.loads(run(["/data/input with spaces.png", "--profile", "frame", "--budget-ms", "0"], 0))
-        assert frame["score"] is None and frame["detections"][0]["content"] == full["detections"][0]["content"]
+        assert frame["versions"] == full["versions"]
+        assert frame["score"] is None
+        assert [(d["symbology"], d["content"]) for d in frame["detections"]] == [
+            (d["symbology"], d["content"]) for d in full["detections"]]
+        assert frame["trace"]["budget_exhausted"] is False and "alpha" not in frame
         empty = json.loads(run(["/data/white.png", "--profile", "full", "--budget-ms", "0"], 1))
+        assert empty["versions"] == full["versions"]
         assert empty["detections"] == [] and empty["score"] is None
+        assert empty["trace"]["budget_exhausted"] is False and "alpha" not in empty
         assert run(["/data/input with spaces.png", "--budget-ms", "0", "--score-only"], 0).strip() == "100"
         assert run(["/data/input with spaces.png", "--profile", "frame", "--score-only"], 2) == ""
         assert run(["/data/invalid.bin"], 2) == ""
@@ -84,10 +97,23 @@ def main():
             "-c", "test $(id -u) -eq 65532 && test ! -w /data && test ! -w /usr/local/bin"],
             capture_output=True, text=True, timeout=30)
         assert permission.returncode == 0, permission.stderr
+        source_hashes = subprocess.check_output(prefix[:-1] + ["--entrypoint", "sha256sum", args.image,
+            "/usr/share/doc/qrscan/source/qrcode-ai-scanner-0.10.0.crate",
+            "/usr/share/doc/qrscan/source/qrcode-ai-scanner-cli-0.10.0.crate"], text=True, timeout=30)
+        assert source_hashes.splitlines() == [
+            "6feb3f3c27ac1e50775f9752e5524fca81b6319e07aa4b13f8e4136aa2724329  /usr/share/doc/qrscan/source/qrcode-ai-scanner-0.10.0.crate",
+            "ad253eecca7727805c699f70eb8dbade697fbe4bed71470196d8f85cc321ef7c  /usr/share/doc/qrscan/source/qrcode-ai-scanner-cli-0.10.0.crate"]
+        binary_hash = subprocess.check_output(prefix[:-1] + ["--entrypoint", "sha256sum", args.image,
+            "/usr/local/bin/qrscan"], text=True, timeout=30).split()[0]
+    recipe = Path(__file__).with_name("Dockerfile").read_text()
+    base_images = re.findall(r"^FROM (\S+)", recipe, re.MULTILINE)
+    assert len(base_images) == 2 and all("@sha256:" in base for base in base_images)
     receipt = {"image": args.image, "image_id": image["Id"], "platform": actual_platform,
                "expected_platform": args.expected_platform,
                "host": platform.platform(), "source": image["Config"]["Labels"]["org.opencontainers.image.revision"],
                "packaging_revision": os.environ.get("GITHUB_SHA"), "cases": cases,
+               "base_images": base_images, "source_archive_checksums": source_hashes.splitlines(),
+               "binary_sha256": binary_hash,
                "runtime_permissions": "nonroot/read-only/no-network/no-capabilities", "result": "PASS"}
     if args.receipt:
         args.receipt.parent.mkdir(parents=True, exist_ok=True)
