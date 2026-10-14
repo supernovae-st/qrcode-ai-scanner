@@ -1,0 +1,64 @@
+name: distribution-checks
+
+# Unprivileged build/runtime qualification only. No registry uploads or secrets.
+# Untrusted event fields are never interpolated into shell scripts.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "distribution/docker/**"
+      - ".github/workflows/distribution-checks.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  container:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            architecture: amd64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: build the exact published CLI in pinned base images
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          docker version
+          normalize() {
+            case "$1" in
+              x86_64|amd64) printf '%s' amd64 ;;
+              aarch64|arm64) printf '%s' arm64 ;;
+              *) return 1 ;;
+            esac
+          }
+          test "$(normalize "$(uname -m)")" = "$ARCHITECTURE"
+          test "$(normalize "$(docker info --format '{{.Architecture}}')")" = "$ARCHITECTURE"
+          docker build --no-cache -f distribution/docker/Dockerfile \
+            --platform "linux/$ARCHITECTURE" \
+            --label "io.qrcode-ai.scanner.packaging-revision=$GITHUB_SHA" -t qrscan:qualified .
+      - name: execute mounted inputs and exact reports without network or write access
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: python3 distribution/docker/verify.py qrscan:qualified fixtures/clean/gen_v5_q.png --expected-platform "linux/$ARCHITECTURE" --receipt qualified/consumer.json
+      - name: export the tested image without rebuilding
+        run: |
+          set -euo pipefail
+          docker image inspect qrscan:qualified > qualified/image-inspect.json
+          docker save qrscan:qualified | gzip -n > qualified/image.tar.gz
+          sha256sum qualified/image.tar.gz > qualified/SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: qrscan-oci-${{ matrix.architecture }}
+          path: qualified/
+          if-no-files-found: error
+          retention-days: 14

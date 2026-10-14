@@ -1,0 +1,8 @@
+# The build uses public registry crates, never the checkout or operator files.
+**
+!LICENSE
+!LICENSING.md
+!distribution
+!distribution/docker
+!distribution/docker/Dockerfile
+!distribution/docker/SOURCE.md
