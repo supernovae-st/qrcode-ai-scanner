@@ -86,7 +86,11 @@ async function get(url) {
   return data;
 }
 const base = "@supernovae-st/qrcode-ai-scanner";
-const requested = mode === "wasm" ? [base + "-wasm"] : [base, base + "-" + suffix];
+const nativeSuffixes = ["darwin-arm64", "darwin-x64", "linux-arm64-gnu", "linux-x64-gnu", "linux-x64-musl", "win32-x64-msvc"];
+if (mode === "native") assert.ok(nativeSuffixes.includes(suffix), "qualified native runtime target");
+// npm locks every optional platform even when --omit=optional installs only
+// the explicitly requested runtime platform. Verify both closures separately.
+const requested = mode === "wasm" ? [base + "-wasm"] : [base, ...nativeSuffixes.map((target) => base + "-" + target)];
 for (const requestedName of requested) {
   assert.ok(expected[requestedName], "the runtime row must be in the qualified producer matrix");
   const metadata = JSON.parse(await get(`https://registry.npmjs.org/${encodeURIComponent(requestedName)}/${expectedVersion}`));
@@ -103,8 +107,7 @@ for (const requestedName of requested) {
 }
 if (mode === "native") {
   assert.deepEqual(registry.get(base).optionalDependencies,
-    Object.fromEntries(["darwin-arm64", "darwin-x64", "linux-arm64-gnu", "linux-x64-gnu", "linux-x64-musl", "win32-x64-msvc"]
-      .map((target) => [base + "-" + target, expectedVersion])));
+    Object.fromEntries(nativeSuffixes.map((target) => [base + "-" + target, expectedVersion])));
 }
 const digest = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
 const name = `@supernovae-st/qrcode-ai-scanner${mode === "wasm" ? "-wasm" : ""}`;
@@ -235,14 +238,24 @@ assert.throws(() => scan(Buffer.from("garbage"), "full"), /\[QRS-001\]/);
 const lockPath = join(consumer, "package-lock.json");
 const lock = JSON.parse(readFileSync(lockPath, "utf8"));
 const lockRecords = Object.entries(lock.packages).filter(([path]) => path);
-assert.equal(lockRecords.length, selected.length);
+assert.equal(lockRecords.length, requested.length);
+assert.deepEqual(lockRecords.map(([path]) => path.replace(/^node_modules\//, "")).sort(), [...requested].sort());
 for (const [path, entry] of lockRecords) {
   const packageName = path.replace(/^node_modules\//, "");
   const metadata = registry.get(packageName);
-  assert.ok(metadata, "no unexpected installed package or source fallback");
+  assert.ok(metadata, "no unexpected locked package or source fallback");
   assert.equal(entry.version, expectedVersion);
   assert.equal(entry.resolved, metadata.dist.tarball);
   assert.equal(entry.integrity, metadata.dist.integrity);
+}
+const installedNames = readdirSync(join(consumer, "node_modules", "@supernovae-st"))
+  .map((packageName) => "@supernovae-st/" + packageName).sort();
+const selectedNames = selected.map(({ manifest }) => manifest.name).sort();
+assert.deepEqual(installedNames, selectedNames, "only the selected runtime packages are installed");
+const excludedOptionalNames = requested.filter((packageName) => !selectedNames.includes(packageName));
+for (const packageName of excludedOptionalNames) {
+  assert.equal(existsSync(join(consumer, "node_modules", ...packageName.split("/"))), false,
+    "the five unselected optional platforms must remain absent");
 }
 assert.equal(readFileSync(userConfig, "utf8"), "");
 assert.equal(readFileSync(globalConfig, "utf8"), "");
@@ -258,7 +271,8 @@ const receipt = { verdict: "PASS", installation: "fresh public registry exact-ve
   producer, suffix: suffix ?? null, npm: execFileSync(process.execPath, [npmCli, "--version"], { encoding: "utf8" }).trim(),
   lock_sha256: digest(lockPath), registry_lock: lockRecords.map(([path, entry]) => ({ path, version: entry.version,
     resolved: entry.resolved, integrity: entry.integrity })),
-  registry_artifacts: selected.map(({ path, sha256, manifest }) => ({ path, sha256, name: manifest.name,
+  installed_packages: installedNames, excluded_optional_packages: excludedOptionalNames,
+  registry_artifacts: packages.map(({ path, sha256, manifest }) => ({ path, sha256, name: manifest.name,
     dist_integrity: registry.get(manifest.name).dist.integrity, producer_binary_members: expected[manifest.name].binary_members })),
   platform_version_mismatch_refused: mode === "native" ? true : null,
   loaded: loaded.map((path) => ({ path, sha256: digest(path) })) };
