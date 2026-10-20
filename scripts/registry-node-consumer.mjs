@@ -267,7 +267,7 @@ for (const file of loaded) {
   const publicName = mode === "native" ? selected[1].manifest.name : name;
   const binaryRoot = mode === "native"
     ? join(consumer, "node_modules", ...publicName.split("/")) : packageRoot;
-  const member = "package/" + relative(binaryRoot, file).replaceAll("\\", "/");
+  const member = "package/" + relative(realpathSync(binaryRoot), realpathSync(file)).replaceAll("\\", "/");
   assert.ok(Object.hasOwn(expected[publicName].binary_members, member),
     "the loaded binary must be an explicitly inspected archive member");
   assert.equal(digest(file), expected[publicName].binary_members[member],
