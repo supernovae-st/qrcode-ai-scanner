@@ -182,7 +182,7 @@ outside Linux-gnu (2026-07-20) — a toolchain must never move under a tag.
 
 ## Publishing — tag-only, trusted, one environment per registry
 
-Only a `refs/tags/v*` ref publishes. Every other run — a `workflow_dispatch`
+Engine and language packages publish only from a `refs/tags/v*` ref. Every other run — a `workflow_dispatch`
 from a branch included — stops before the registry: crates-publish,
 npm-publish and python build their artifacts and read them back
 (`scripts/package-inspect.py`), mobile and flutter build theirs. Each
@@ -412,6 +412,79 @@ performs them):
 7. Branch protection: the matrix check `ci / test (ubuntu-latest)` is now
    `test (ubuntu-24.04)`; if it is a required check, update the rule (and
    add `node-smoke`, `wasm-smoke` and `packaging` if they should be).
+
+## Docker publishing — a separate qualified distribution tag
+
+`oci-publish.yml` publishes the already-tested 0.10.0 CLI images to
+`ghcr.io/supernovae-st/qrcode-ai-scanner` without rebuilding them. Its separate
+`oci-v0.10.0` tag does not trigger the engine's `v*` publishers or move the
+immutable engine tag. The public frozen BOM in
+`distribution/docker/release-0.10.0.json` records producer run `38583785567`,
+head `f6b61605c8c204a0f8005fc05181683546cd0479`, actual checked-out PR merge
+`3c8c7b1d796c729b597a02de75b2fc93101c355a`, official artifact IDs/digests,
+archive and sidecar hashes, config IDs and all raw layers. The image contains
+and labels the exact crates.io 0.10.0 source from engine revision
+`2d3b577582979f0dc603b5cb0d96d1be02b459f5`. Producer and engine identities
+remain distinct.
+
+Before enabling publication, the repository owner configures the **container**
+environment for **custom tag deployment rules `oci-v*` only** (no branch rule)
+and a tag ruleset limiting creation/update of `oci-v*` to the same authorized
+maintainers as the engine release tags. The existing `crates-io`, `npm`,
+`release` and `pub` policies remain unchanged. This is a separate channel
+contract; widening the old registry environments or reusing an engine tag is
+not the recovery path.
+
+The unprivileged inspector downloads the two frozen artifacts by ID and runs
+on native Linux AMD64 and ARM64. It verifies archive/config/raw-layer bytes,
+reloads the exact images and executes `verify.py`'s mounted input, Full/Frame,
+score, empty/error exits, non-root and read-only/no-network assertions. The
+publisher needs both native rows, gates the exact OCI tag/workspace/BOM,
+re-inspects both downloaded archives before authentication and grants only
+`contents: read`, `actions: read`, `packages: write` to its ephemeral
+`github.token`. No OIDC, permanent token, rebuild, package installation or
+cache enters this publisher.
+
+GHCR accepts the job token rather than an external trusted-publisher match to
+the environment. These environment/tag policies constrain the reviewed
+workflow; repository writers who can author another workflow with
+`packages: write` retain package authority. Treat repository/workflow write
+access as part of the GHCR publication boundary.
+
+Each architecture tag (`0.10.0-amd64`, `0.10.0-arm64`) is uploaded only if
+absent. A live tag must have the qualified config and all six raw layers,
+verified by downloading and hashing its compressed and decompressed blobs;
+any mismatch stops the run rather than overwriting it. The `0.10.0` OCI
+index has both immutable child manifest digests plus source, license and
+description annotations. An existing different index also stops the run.
+The publisher preflights both architecture aliases before its first upload.
+An already-qualified version index is terminal success and performs no tag
+writes, even when architecture aliases are absent. The publisher saves all
+immutable digests in its `qrscan-oci-published` artifact; on failure the same
+artifact records attempted and verified uploads separately. Uploads already
+accepted by GHCR remain there. Outside writers can race registry reads and
+writes, so publication is not claimed to be atomic or rollback-capable.
+It does not update `latest` or Docker Hub.
+
+A branch dispatch in the default **inspect** mode is read-only and qualifies
+this publisher's consumers. The owner then creates `oci-v0.10.0` on the
+reviewed publisher revision; a pushed OCI tag publishes, or a dispatch on
+that exact tag with `mode=publish` retries the frozen bytes. Failed jobs can
+be re-run without changing image sources or version tags.
+
+GHCR initially creates a private package. Once the owner makes this named
+package public, dispatch the same OCI tag with **mode=public-pull**. This
+separate read-only native matrix uses an empty Docker credential directory,
+checks the anonymous registry index/config/raw layers, pulls by immutable
+index digest and repeats the owning CLI assertions on AMD64 and ARM64.
+Authenticated publisher success and anonymous consumer success are separate
+receipts; claim public distribution only after both pass. A public-pull
+failure does not republish images. Docker Hub needs its own qualified mirror
+and account/namespace access, and is not implied by GHCR success.
+
+References: [GitHub Container registry](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
+(`GITHUB_TOKEN`, initial private visibility and multi-platform annotations),
+[OCI image index](https://github.com/opencontainers/image-spec/blob/main/image-index.md).
 
 ## Toolchain — one compiler, pinned
 
