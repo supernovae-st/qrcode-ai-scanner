@@ -265,8 +265,13 @@ assert.equal(readFileSync(userConfig, "utf8"), "");
 assert.equal(readFileSync(globalConfig, "utf8"), "");
 for (const file of loaded) {
   const publicName = mode === "native" ? selected[1].manifest.name : name;
-  assert.equal(digest(file), Object.values(expected[publicName].binary_members)[0],
-    "the loaded binary must match its exact producer and public registry archive");
+  const binaryRoot = mode === "native"
+    ? join(consumer, "node_modules", ...publicName.split("/")) : packageRoot;
+  const member = "package/" + relative(binaryRoot, file).replaceAll("\\", "/");
+  assert.ok(Object.hasOwn(expected[publicName].binary_members, member),
+    "the loaded binary must be an explicitly inspected archive member");
+  assert.equal(digest(file), expected[publicName].binary_members[member],
+    "the loaded binary must match its exact producer and public registry archive member");
 }
 writeFileSync(join(proof, "package-lock.json"), readFileSync(lockPath));
 const receipt = { verdict: "PASS", installation: "fresh public registry exact-version install", mode, node: process.version, platform: process.platform, arch: process.arch,
