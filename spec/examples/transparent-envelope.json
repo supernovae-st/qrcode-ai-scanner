@@ -180,16 +180,16 @@
       {
         "stage": "pyramid",
         "transforms_tried": 1,
-        "ms": 11.402284,
+        "ms": 5.381458,
         "detections_found": 2
       }
     ],
     "engine_panics": 0,
-    "total_ms": 11.849037999999998,
+    "total_ms": 5.512834000000001,
     "budget_exhausted": false
   },
   "versions": {
-    "scanner": "0.10.0",
+    "scanner": "0.10.1",
     "pipeline": 3,
     "score_contract": 5
   }

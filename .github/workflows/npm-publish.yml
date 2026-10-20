@@ -365,7 +365,7 @@ jobs:
           if-no-files-found: error
 
   publish-wasm:
-    needs: [build-wasm, operand-proof, consume-wasm]
+    needs: [build-wasm, operand-proof, consume-wasm, consume-wasm-browser]
     # refs/tags/v* only: no other ref reaches the registry.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
@@ -597,6 +597,10 @@ jobs:
           name: consumer-wasm-node-${{ matrix.node }}
           path: ${{ steps.consumer.outputs.receipt }}
           if-no-files-found: error
+
+  consume-wasm-browser:
+    needs: build-wasm
+    uses: ./.github/workflows/wasm-browser.yml
 
   # What npm makes of each operand, proved before either publish job runs:
   # npm-package-arg looks for a hosted-git shorthand before a file, so a

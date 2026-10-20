@@ -1,0 +1,49 @@
+name: wasm-browser
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  packed-browser:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-wasm-tarball
+          path: ${{ runner.temp }}/wasm-tarball
+      - name: pinned runtime with a real SIMD disable switch
+        shell: bash
+        run: node scripts/install-no-simd-browser.mjs "$RUNNER_TEMP/qrscan-no-simd"
+      - name: fresh Vite worker, SSR, declarations and browser parity
+        shell: bash
+        env:
+          QRSCAN_INSTALL_BROWSERS: '1'
+          QRSCAN_TEST_FIREFOX: '1'
+        run: |
+          set -euo pipefail
+          archives=("$RUNNER_TEMP"/wasm-tarball/*.tgz)
+          test "${#archives[@]}" -eq 1
+          node scripts/packed-wasm-browser.mjs "${archives[0]}" "$RUNNER_TEMP/packed-browser.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        if: always()
+        with:
+          name: wasm-browser-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/packed-browser.json
+            ${{ runner.temp }}/qrscan-no-simd/browser-receipt.json
+          if-no-files-found: error

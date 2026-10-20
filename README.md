@@ -31,13 +31,13 @@ versioned [`ScanReport`](spec/) contract.
 | 🦀 **Rust lib** | [`qrcode-ai-scanner`](https://crates.io/crates/qrcode-ai-scanner) · [docs.rs](https://docs.rs/qrcode-ai-scanner) | `cargo add qrcode-ai-scanner` | `Scanner::builder().build().scan(input)?` |
 | 💻 **CLI** | [`qrcode-ai-scanner-cli`](https://crates.io/crates/qrcode-ai-scanner-cli) | `cargo install qrcode-ai-scanner-cli` | `qrscan image.png --pretty` |
 | 📦 **Node** (server) | [`@supernovae-st/qrcode-ai-scanner`](https://www.npmjs.com/package/@supernovae-st/qrcode-ai-scanner) | `npm i @supernovae-st/qrcode-ai-scanner` | `await scan(buffer)` |
-| 🌐 **Browser** (WASM, SIMD) | [`@supernovae-st/qrcode-ai-scanner-wasm`](https://www.npmjs.com/package/@supernovae-st/qrcode-ai-scanner-wasm) | `npm i @supernovae-st/qrcode-ai-scanner-wasm` | `await init(); scan_image(bytes, "fast")` |
+| 🌐 **Browser** (WASM, automatic SIMD/compatible) | [`@supernovae-st/qrcode-ai-scanner-wasm`](https://www.npmjs.com/package/@supernovae-st/qrcode-ai-scanner-wasm) | `npm i @supernovae-st/qrcode-ai-scanner-wasm` | `const s = await loadScanner(); s.scan_image(bytes, "fast")` |
 | 🐍 **Python** | [`qrcode-ai-scanner`](https://pypi.org/project/qrcode-ai-scanner/) | `pip install qrcode-ai-scanner` | `import qrcode_ai_scanner as q; q.scan(png_bytes)` |
 
 Per-surface guides in [`docs/`](docs/) · code examples in the Quick start below.
 
 **📱 Mobile + cross-platform:** Kotlin/Android is **live on JitPack**
-(`com.github.supernovae-st:qrcode-ai-scanner:v0.10.0` — use the latest tag).
+(`com.github.supernovae-st:qrcode-ai-scanner:v0.10.1` — use the latest tag).
 Swift/iOS (UniFFI → SwiftPM) and Flutter/Dart (flutter_rust_bridge →
 pub.dev) are built and CI-green, returning the same `ScanReport`.
 Consult each binding's README for the current install path:

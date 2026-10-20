@@ -117,6 +117,9 @@ WASM_FILES = frozenset({
     "LICENSE", "README.md", "package.json",
     "qrcode-ai-scanner.js", "qrcode-ai-scanner.d.ts", "qrcode-ai-scanner_bg.wasm",
     "report-types.d.ts",
+    "auto.js", "auto.d.ts", "compatible/qrcode-ai-scanner.js",
+    "compatible/qrcode-ai-scanner.d.ts", "compatible/qrcode-ai-scanner_bg.wasm",
+    "compatible/report-types.d.ts",
 })
 # The keys wasm-pack 0.13.1 writes and scripts/patch-wasm-pkg.mjs renames or
 # adds; a wasm package.json may carry no other key. A `dependencies` or a
@@ -124,7 +127,7 @@ WASM_FILES = frozenset({
 # redirect on a consumer's install.
 WASM_MANIFEST_KEYS = frozenset({
     "name", "type", "collaborators", "description", "version", "license", "repository",
-    "files", "main", "types", "sideEffects", "keywords", "module",
+    "files", "main", "types", "sideEffects", "keywords", "module", "exports",
 })
 # What `napi create-npm-dirs` (@napi-rs/cli 3.7.3) picks from the main manifest
 # into each platform package.json besides name/version/main/files/cpu/os/libc;
@@ -622,12 +625,17 @@ def inspect_npm(host: Host, path: pathlib.Path, notes=()) -> Artifact:
         check_exact_set(art, files, WASM_FILES, "wasm-pack output + patch allowlist")
         check_wasm_manifest(art, pkg)
         check_equal_file(art, "report-types.d.ts", files.get("report-types.d.ts"), CANON_TYPES)
+        check_equal_file(art, "compatible/report-types.d.ts", files.get("compatible/report-types.d.ts"), CANON_TYPES)
+        for source in ("auto.js", "auto.d.ts"):
+            check_equal_file(art, source, files.get(source), WASM_DIR / source)
         dts = files.get("qrcode-ai-scanner.d.ts", b"").decode()
         retyped = all(
             re.search(rf"export function {fn}\([^)]*\): ScanReport;", dts) for fn in ("scan_image", "scan_frame")
         )
         art.check("qrcode-ai-scanner.d.ts re-exports report-types and returns ScanReport",
                   'export * from "./report-types"' in dts and retyped)
+        art.check("both variants expose identical typed scanner APIs",
+                  files.get("compatible/qrcode-ai-scanner.d.ts") == files.get("qrcode-ai-scanner.d.ts"))
         check_equal_file(art, "README.md", files.get("README.md"), WASM_DIR / "README.md")
     elif name.startswith(NODE_NAME + "-"):
         binaries = sorted(f for f in files if f.endswith(".node"))
@@ -686,6 +694,11 @@ def check_wasm_manifest(art: Artifact, pkg: dict) -> None:
     extra = sorted(set(pkg) - WASM_MANIFEST_KEYS)
     art.check("package.json holds only wasm-pack + patch-wasm-pkg keys (no dependencies or publishConfig)",
               not extra, f"unexpected: {', '.join(extra)}" if extra else "")
+    exports = pkg.get("exports", {})
+    art.check("automatic loader and legacy entry exports are retained",
+              exports.get("./auto") == {"types": "./auto.d.ts", "import": "./auto.js", "default": "./auto.js"}
+              and exports.get(".") == {"types": "./qrcode-ai-scanner.d.ts", "import": "./qrcode-ai-scanner.js", "default": "./qrcode-ai-scanner.js"}
+              and exports.get("./*") == "./*")
 
 
 def check_pins(art: Artifact, optional: dict, pkg: dict) -> None:
@@ -1634,14 +1647,22 @@ def _npm_wasm(version: str) -> dict:
     pkg = {"name": WASM_NAME, "type": "module", "version": version, "license": SPDX, "repository": REPO_URL,
            "files": ["qrcode-ai-scanner_bg.wasm", "qrcode-ai-scanner.js", "qrcode-ai-scanner.d.ts",
                      "report-types.d.ts", "LICENSE"],
-           "main": "qrcode-ai-scanner.js", "types": "qrcode-ai-scanner.d.ts"}
+           "main": "qrcode-ai-scanner.js", "types": "qrcode-ai-scanner.d.ts",
+           "exports": {".": {"types": "./qrcode-ai-scanner.d.ts", "import": "./qrcode-ai-scanner.js", "default": "./qrcode-ai-scanner.js"},
+                       "./auto": {"types": "./auto.d.ts", "import": "./auto.js", "default": "./auto.js"}, "./*": "./*"}}
     dts = ('export * from "./report-types";\n'
            "export function scan_frame(data: Uint8Array, width: number, height: number): ScanReport;\n"
            "export function scan_image(bytes: Uint8Array): ScanReport;\n")
     return {"package.json": json.dumps(pkg, indent=2).encode(), "README.md": (WASM_DIR / "README.md").read_bytes(),
             "LICENSE": LICENSE.read_bytes(), "qrcode-ai-scanner.js": b"export {};\n",
             "qrcode-ai-scanner.d.ts": dts.encode(), "qrcode-ai-scanner_bg.wasm": b"\0asm\1\0\0\0",
-            "report-types.d.ts": CANON_TYPES.read_bytes()}
+            "report-types.d.ts": CANON_TYPES.read_bytes(),
+            "compatible/qrcode-ai-scanner.js": b"export {};\n",
+            "compatible/qrcode-ai-scanner.d.ts": dts.encode(),
+            "compatible/qrcode-ai-scanner_bg.wasm": b"\0asm\1\0\0\0",
+            "compatible/report-types.d.ts": CANON_TYPES.read_bytes(),
+            "auto.js": (WASM_DIR / "auto.js").read_bytes(),
+            "auto.d.ts": (WASM_DIR / "auto.d.ts").read_bytes()}
 
 
 def _with_scripts(files: dict, **scripts: str) -> dict:
@@ -1754,6 +1775,9 @@ def self_test() -> int:
         judge("clean platform package", [npm("platform", _npm_platform(version, "linux-x64-gnu"))], PASS)
         judge("clean main package", [npm("main", _npm_main(version))], PASS)
         judge("clean wasm package", [npm("wasm", _npm_wasm(version))], PASS)
+        for missing in ("auto.js", "auto.d.ts", "compatible/qrcode-ai-scanner_bg.wasm", "compatible/report-types.d.ts"):
+            incomplete = {key: value for key, value in _npm_wasm(version).items() if key != missing}
+            judge(f"wasm package missing {missing}", [npm("wasm-incomplete", incomplete)], FAIL, missing)
 
         for i, planted in enumerate(PLANTED):
             ran += 1

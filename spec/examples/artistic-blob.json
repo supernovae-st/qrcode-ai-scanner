@@ -87,34 +87,34 @@
       {
         "stage": "pyramid",
         "transforms_tried": 1,
-        "ms": 35.762066000000004,
+        "ms": 46.517625,
         "detections_found": 0
       },
       {
         "stage": "direct",
         "transforms_tried": 1,
-        "ms": 84.085884,
+        "ms": 90.915459,
         "detections_found": 0
       },
       {
         "stage": "enhance",
         "transforms_tried": 6,
-        "ms": 486.541194,
+        "ms": 562.7495409999999,
         "detections_found": 0
       },
       {
         "stage": "deep",
         "transforms_tried": 25,
-        "ms": 330.774076,
+        "ms": 317.407417,
         "detections_found": 2
       }
     ],
     "engine_panics": 0,
-    "total_ms": 937.611626,
+    "total_ms": 1017.795875,
     "budget_exhausted": false
   },
   "versions": {
-    "scanner": "0.10.0",
+    "scanner": "0.10.1",
     "pipeline": 3,
     "score_contract": 5
   }

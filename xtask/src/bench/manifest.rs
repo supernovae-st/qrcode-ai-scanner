@@ -1808,10 +1808,16 @@ mod tests {
             (
                 vec![
                     String::from("-O3"),
+                    String::from("--mvp-features"),
+                    String::from("--enable-mutable-globals"),
+                    String::from("--enable-nontrapping-float-to-int"),
+                    String::from("--enable-bulk-memory"),
+                    String::from("--enable-sign-ext"),
+                    String::from("--enable-reference-types"),
+                    String::from("--enable-multivalue"),
                     String::from("--enable-simd"),
-                    String::from("--all-features")
                 ],
-                Some(String::from("-C target-feature=+simd128"))
+                Some(String::from("-C target-feature=+simd128,-relaxed-simd"))
             )
         );
         assert_eq!(
