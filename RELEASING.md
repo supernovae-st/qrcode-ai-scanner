@@ -61,6 +61,23 @@ without the section publishes nowhere.
 
 ## 3 · Pre-tag gates, locally first
 
+Browser-loading changes also require the packed Vite/module-worker consumer:
+`scripts/packed-wasm-browser.mjs ARCHIVE.tgz RECEIPT.json`. It installs the actual
+tarball outside the source tree, checks SSR imports and declarations, builds its
+worker/assets, and compares every non-timing report field across both variants.
+Supply `QRSCAN_NO_SIMD_BROWSER` for a verified runtime retaining V8's real disable
+switch; the test asserts that SIMD is actually unavailable. `QRSCAN_TEST_FIREFOX=1`
+adds Firefox coverage. `QRSCAN_INSTALL_BROWSERS=1` installs the lock-pinned test
+browsers. The reusable `wasm-browser.yml` runs these checks on Windows and Linux
+and is required before WASM publication. This is distinct from the reported
+browser/OS metadata of any customer incident and from physical-device acceptance.
+
+The build validates the compatible binary with SIMD forbidden after optimization.
+Keep both binaries and loaders in the inspected archive; retain their byte hashes,
+sizes, tool versions, feature requirements and representative measured timings.
+Do not replace a published archive at an existing version. Loader-only corrections
+follow the same patch-version, lockfile, golden and publication policy above.
+
 On the pinned compiler (§ Toolchain), against the committed lockfiles:
 
 ```bash

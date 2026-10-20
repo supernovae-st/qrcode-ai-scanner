@@ -1,0 +1,6 @@
+{
+  "name": "qrscan-packed-browser-consumer",
+  "private": true,
+  "type": "module",
+  "devDependencies": { "vite": "6.4.1", "playwright": "1.61.0", "typescript": "5.9.3" }
+}

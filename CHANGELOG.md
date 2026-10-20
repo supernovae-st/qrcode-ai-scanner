@@ -4,6 +4,17 @@ All notable changes to this workspace. Every surface versions together — the R
 crate + CLI, the npm node + wasm packages, the Python wheel, and the
 Kotlin/Android · Swift/iOS · Flutter bindings.
 
+## 0.10.1 — 2026-10-20
+
+### Fixed
+
+- The browser package includes a non-SIMD variant alongside the accelerated
+  build. The additive `/auto` entry detects capabilities in its caller's realm,
+  including workers, before selecting and downloading one binary. Initialization
+  diagnostics remain separate from scan execution errors and valid empty reports.
+  Existing root imports remain available; consumers opt in to automatic loading.
+  Decoding, report and score contracts are unchanged.
+
 ## 0.10.0 — 2026-10-13
 
 ### Fixed

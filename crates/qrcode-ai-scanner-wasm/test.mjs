@@ -6,9 +6,10 @@
 // a score runs unbudgeted (budget_ms 0).
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { initSync, scan_image, scan_frame, version } from "./pkg/qrcode-ai-scanner.js";
+const variant = process.env.WASM_VARIANT === "compatible" ? "compatible/" : "";
+const { initSync, scan_image, scan_frame, version } = await import(`./pkg/${variant}qrcode-ai-scanner.js`);
 
-initSync({ module: readFileSync(new URL("./pkg/qrcode-ai-scanner_bg.wasm", import.meta.url)) });
+initSync({ module: readFileSync(new URL(`./pkg/${variant}qrcode-ai-scanner_bg.wasm`, import.meta.url)) });
 
 const here = (rel) => new URL(rel, import.meta.url);
 const pkg = JSON.parse(readFileSync(here("./pkg/package.json"), "utf8"));

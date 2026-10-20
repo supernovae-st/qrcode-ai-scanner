@@ -39,6 +39,13 @@ text.
 
 ## Consumer guidance
 
+Browser initialization happens before a scan and has a separate additive JS
+loader error contract (`ScannerInitError` from the npm `/auto` entry). Its feature,
+network, asset, validation, compilation and instantiation codes are documented in
+`docs/api/wasm.mdx` and the WASM package README. They are not new Rust `ScanError`
+variants or `QRS` codes. Preserve initialization/worker/scan phases when relaying
+errors. A completed empty report remains successful engine execution.
+
 - Branch on the CODE, never the message text (prose may improve).
 - `QRS-002/003` on a server = your limits working; respond 413/422, don't
   retry.

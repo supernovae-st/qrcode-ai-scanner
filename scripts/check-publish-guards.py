@@ -288,7 +288,7 @@ INSPECTION = {
 # Archive shape and installed runtime are separate release gates.
 CONSUMERS = {
     ("npm-publish.yml", "publish-native"): {"consume-native", "consume-native-musl"},
-    ("npm-publish.yml", "publish-wasm"): {"consume-wasm"},
+    ("npm-publish.yml", "publish-wasm"): {"consume-wasm", "consume-wasm-browser"},
     ("python.yml", "release"): {"consume-wheels", "consume-wheels-musl", "consume-sdist-wheel"},
 }
 
@@ -1763,8 +1763,11 @@ MUTATIONS = (
         "    needs: [pack-native, operand-proof, consume-native, consume-native-musl]",
         "    needs: [pack-native, operand-proof]")], {}, 1, "clean installed-package gate"),
     ("wasm publish bypasses clean consumers", P, [("npm-publish.yml",
-        "    needs: [build-wasm, operand-proof, consume-wasm]",
+        "    needs: [build-wasm, operand-proof, consume-wasm, consume-wasm-browser]",
         "    needs: [build-wasm, operand-proof]")], {}, 1, "clean installed-package gate"),
+    ("wasm publish bypasses browser consumers only", P, [("npm-publish.yml",
+        "    needs: [build-wasm, operand-proof, consume-wasm, consume-wasm-browser]",
+        "    needs: [build-wasm, operand-proof, consume-wasm]")], {}, 1, "clean installed-package gate"),
     ("python publish bypasses clean consumers", P, [("python.yml",
         PY_IF, PY_IF.replace(PY_NEEDS, "[test, inspect]"))], {}, 1, "clean installed-package gate"),
     ("a publishing job with no declared inspection job", P, [("npm-publish.yml", None, OIDC_PNPM)], {}, 1,
@@ -2097,7 +2100,7 @@ MUTATIONS = (
         ("npm-publish.yml", NATIVE_REINSPECT, NATIVE_REINSPECT.replace('"$PWD"/npm-release', '"$PWD"/./npm-release'))],
      {}, 1, "npm-publish.yml › publish-native [npm-operand] the publishing step takes"),
     ("a publishing job that does not need the operand proof", P, [
-        ("npm-publish.yml", "  publish-wasm:\n    needs: [build-wasm, operand-proof, consume-wasm]\n",
+        ("npm-publish.yml", "  publish-wasm:\n    needs: [build-wasm, operand-proof, consume-wasm, consume-wasm-browser]\n",
          "  publish-wasm:\n    needs: build-wasm\n")], {}, 1,
      "npm-publish.yml › publish-wasm [npm-operand] needs ['build-wasm']: must include 'operand-proof'"),
     ("the operand proof under another name", P, [

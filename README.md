@@ -31,7 +31,7 @@ when consuming its [`ScanReport`](spec/) contract.
 | 🦀 **Rust lib** | [`qrcode-ai-scanner`](https://crates.io/crates/qrcode-ai-scanner) · [docs.rs](https://docs.rs/qrcode-ai-scanner) | `cargo add qrcode-ai-scanner` | `Scanner::builder().build().scan(input)?` |
 | 💻 **CLI** | [`qrcode-ai-scanner-cli`](https://crates.io/crates/qrcode-ai-scanner-cli) | `cargo install qrcode-ai-scanner-cli` | `qrscan image.png --pretty` |
 | 📦 **Node** (server) | [`@supernovae-st/qrcode-ai-scanner`](https://www.npmjs.com/package/@supernovae-st/qrcode-ai-scanner) | `npm i @supernovae-st/qrcode-ai-scanner` | `await scan(buffer)` |
-| 🌐 **Browser** (WASM, SIMD) | [`@supernovae-st/qrcode-ai-scanner-wasm`](https://www.npmjs.com/package/@supernovae-st/qrcode-ai-scanner-wasm) | `npm i @supernovae-st/qrcode-ai-scanner-wasm` | `await init(); scan_image(bytes, "fast")` |
+| 🌐 **Browser** (WASM, automatic SIMD/compatible) | [`@supernovae-st/qrcode-ai-scanner-wasm`](https://www.npmjs.com/package/@supernovae-st/qrcode-ai-scanner-wasm) | `npm i @supernovae-st/qrcode-ai-scanner-wasm` | `const s = await loadScanner(); s.scan_image(bytes, "fast")` |
 | 🐍 **Python** | [`qrcode-ai-scanner`](https://pypi.org/project/qrcode-ai-scanner/) | `pip install qrcode-ai-scanner` | `import qrcode_ai_scanner as q; q.scan(png_bytes)` |
 
 Per-surface guides in [`docs/`](docs/) · code examples in the Quick start below.
@@ -297,7 +297,7 @@ Every surface shares the workspace version (`Cargo.toml`).
 | [`qrcode-ai-scanner`](crates/qrcode-ai-scanner) (core lib) | crates.io |
 | [`qrcode-ai-scanner-cli`](crates/qrcode-ai-scanner-cli) (`qrscan`) | crates.io |
 | [`qrcode-ai-scanner-node`](crates/qrcode-ai-scanner-node) (`@supernovae-st/qrcode-ai-scanner`, napi async) | npm |
-| [`qrcode-ai-scanner-wasm`](crates/qrcode-ai-scanner-wasm) (`@supernovae-st/qrcode-ai-scanner-wasm`, SIMD128) | npm |
+| [`qrcode-ai-scanner-wasm`](crates/qrcode-ai-scanner-wasm) (`@supernovae-st/qrcode-ai-scanner-wasm`, SIMD/compatible) | npm |
 | [`qrcode-ai-scanner-py`](crates/qrcode-ai-scanner-py) (`qrcode-ai-scanner` on PyPI, PyO3 abi3) | PyPI |
 
 ## Contributing & security

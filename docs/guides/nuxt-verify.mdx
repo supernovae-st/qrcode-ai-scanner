@@ -15,20 +15,17 @@ version it ships, and the `NOT_JUDGED` status needs reports that carry
 
 ```ts
 import { ScanStatus } from "@/types/scan";
-import initQrScanner, { scan_image } from "@supernovae-st/qrcode-ai-scanner-wasm";
-
-// wasm loads once, lazily — and a FAILED init must not stay cached
-let qrScannerReady: Promise<unknown> | null = null;
+import { loadScanner } from "@supernovae-st/qrcode-ai-scanner-wasm/auto";
 
 const onVerify = async () => {
   const canvas = previewRef.value?.canvas;
   if (!canvas) return;
 
-  qrScannerReady ??= initQrScanner().catch((err) => {
-    qrScannerReady = null; // retry on the next verify
-    throw err;
-  });
-  await qrScannerReady;
+  // The loader selects SIMD or compatible in this execution realm. Handle
+  // ScannerInitError separately from scan errors in the calling UI. Its failed
+  // attempt stays cached; retry only after an explicit user action with a fresh
+  // createScannerLoader(), rather than retrying every verify/render.
+  const { scan_image } = await loadScanner();
 
   // NATIVE resolution — no resize prep: downscaling destroys the blob
   // structure the deep ladder is calibrated for; the scanner caps engine

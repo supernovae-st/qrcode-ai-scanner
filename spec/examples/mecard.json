@@ -131,16 +131,16 @@
       {
         "stage": "direct",
         "transforms_tried": 1,
-        "ms": 6.707627,
+        "ms": 3.39275,
         "detections_found": 2
       }
     ],
     "engine_panics": 0,
-    "total_ms": 6.723386,
+    "total_ms": 3.42325,
     "budget_exhausted": false
   },
   "versions": {
-    "scanner": "0.10.0",
+    "scanner": "0.10.1",
     "pipeline": 3,
     "score_contract": 5
   }
