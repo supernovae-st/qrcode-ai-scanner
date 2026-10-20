@@ -59,9 +59,10 @@ contract. Serialize stable fields explicitly when crossing a worker boundary.
 requirements in a wrong/stale asset. Inspect its native cause and the actual
 failing bytes rather than guessing SIMD or CPU incompatibility.
 
-The compatible build is **not an MVP-only WASM binary**. Both variants require
-mutable globals, bulk memory, sign extension, nontrapping float-to-int,
-multivalue and reference types. The baseline probe tests these together:
+The compatible build is **not an MVP-only WASM binary**. Automatic loading uses
+a conservative supported baseline: mutable globals, bulk memory, sign extension,
+nontrapping float-to-int, multivalue and reference types. The probe tests these
+together; it is not a measurement of the optimized binary's minimum requirements:
 
 ```wat
 (module
@@ -78,6 +79,13 @@ multivalue and reference types. The baseline probe tests these together:
 Builds use the same Cargo features, lockfile and report types. The owning build
 script restricts optimization to that feature profile, adding SIMD only for the
 accelerated variant, then validates the compatible artifact with SIMD forbidden.
+Inspect each actual artifact before attributing a failure to a feature. For the
+qualified 0.10.1 builds, individually omitting features from Binaryen validation
+identifies bulk memory, sign extension and nontrapping float-to-int as required;
+the accelerated binary additionally requires SIMD. Mutable globals, multivalue
+and reference types can each be omitted from that validation profile without
+invalidating these exact binaries. The broader loader baseline remains a declared
+support policy, not evidence that an unknown failing asset uses all six features.
 Compatibility claims require actual browser evidence; this path alone does not
 qualify historical browser floors, real Safari, mobile devices, arbitrary CSP
 rules, or a consumer's deployed binary.

@@ -1,9 +1,10 @@
 // Import-safe on servers. Capability checks run in the caller's realm, including
 // a module Worker. The probe is a small real i8x16.splat / i8x16.popcnt module.
 const SIMD_PROBE = new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,65,0,253,15,253,98,11]);
-// The non-SIMD profile still needs mutable globals, multivalue, bulk memory,
-// sign extension, nontrapping conversions and reference types. See the README
-// for this probe's WAT and the artifact's separately inspected feature profile.
+// Conservative supported baseline: mutable globals, multivalue, bulk memory,
+// sign extension, nontrapping conversions and reference types. This probe is
+// not the artifact's minimum requirement; inspect its bytes separately. The
+// README records the probe's WAT and actual binary feature-omission evidence.
 const BASELINE_PROBE = new Uint8Array([0,97,115,109,1,0,0,0,1,6,1,96,0,2,127,127,3,2,1,0,4,4,1,112,0,1,5,3,1,0,1,6,6,1,127,1,65,0,11,7,5,1,1,103,3,0,10,37,1,35,0,65,0,192,26,68,0,0,0,0,0,0,0,0,252,2,26,65,0,65,0,65,0,252,10,0,0,208,112,26,65,0,65,0,11]);
 
 /** Stable loader failures, separate from scan_image's existing QRS errors. */
